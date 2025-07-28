@@ -12,6 +12,7 @@ import xarray as xr
 
 from .my_paths import CWD, DATA_DIR
 from .pac_man import eval_pkg_cdo
+from .res import get_grid_resolution
 from .tools import CPU_COUNT, log, rm
 
 _TMP_FILES = []
@@ -338,9 +339,6 @@ def xr_interp_data(
         log()
 
 
-from typing import Literal, Union
-
-
 def land_sea_mask(
     obj: Union[xr.DataArray, xr.Dataset],
     *,
@@ -560,10 +558,15 @@ def _tz_apply_func_parallel(
 
     args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
 
-    num_processes = max(1, min(CPU_COUNT, len(args)))
+    processes = max(1, min(CPU_COUNT, len(args)))
     chunksize = max(1, len(args) // CPU_COUNT)
 
-    with Pool(processes=num_processes, maxtasksperchild=1) as pool:
+    if chunksize == 1:
+        maxtasksperchild = 2
+    else:
+        maxtasksperchild = chunksize
+
+    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
         datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
 
     return xr.concat(datasets, dim="lon").sortby("lon")
@@ -578,7 +581,12 @@ def _tz_apply_func_serial(
     for chunk in chunks:
         datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
 
-    return xr.concat(datasets, dim="lon").sortby("lon")
+    if len(datasets) > 1:
+        result = xr.concat(datasets, dim="lon").sortby("lon")
+    else:
+        result = datasets[0]
+
+    return result
 
 
 def tz_apply_func(
@@ -607,13 +615,9 @@ def tz_apply_func(
 
     """
 
-    if "time" not in obj.dims:
+    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
         raise ValueError(
-            "The dataset must have a 'time' dimension to process by time zones."
-        )
-    if "lon" not in obj.dims:
-        raise ValueError(
-            "The dataset must have a 'lon' dimension to process by time zones."
+            "The dataset must have (time, lat, lon) dimensions to apply the function."
         )
 
     if kwargs is None:
@@ -621,7 +625,9 @@ def tz_apply_func(
 
     chunks = split_by_15_deg(obj)
 
-    log(len(chunks), "chunks found.")
+    for _, chunk in chunks.items():
+        info = get_grid_resolution(chunk, x="lon", y="lat", time="time")
+        log(info)
 
     if multiprocess and len(chunks) > 1:
         return _tz_apply_func_parallel(func, chunks, kwargs)
