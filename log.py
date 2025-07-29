@@ -14,7 +14,7 @@ colorama_init()  # initialize colorama for colored output
 def log(
     *msg: Any | None,
     level: Literal["INFO", "ERROR", "WARNING", "DEBUG"] = None,
-    frames=2,
+    frames=5,
     full_traceback: bool = False,
     exception: bool = True,
 ) -> None:
