@@ -87,7 +87,7 @@ def mkdir(arg: Union[str, Path]) -> None:
         )
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
         return None
 
 
@@ -144,7 +144,7 @@ def rm(arg: Union[str, Path, list[Union[str, Path]]]) -> None:
         )
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
         return None
 
 
@@ -178,7 +178,7 @@ def cp(
         )
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
         return None
 
 
@@ -211,7 +211,7 @@ def mv(
         )
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
         return None
 
 
@@ -226,9 +226,6 @@ def close_dask():
         ACTIVE_CLUSTER.close()
         ACTIVE_CLIENT = None
         ACTIVE_CLUSTER = None
-        log("Dask client and cluster closed.")
-    else:
-        log("No active Dask client or cluster to close.")
 
 
 def setup_dask(
@@ -256,39 +253,35 @@ def setup_dask(
     ________
         >>> setup_dask(get_info=True, filter_warnings=False)
     """
-    try:
 
-        global ACTIVE_CLIENT, ACTIVE_CLUSTER
+    global ACTIVE_CLIENT, ACTIVE_CLUSTER
 
-        if ACTIVE_CLIENT and ACTIVE_CLUSTER:
-            return ACTIVE_CLIENT
+    if ACTIVE_CLIENT and ACTIVE_CLUSTER:
+        return ACTIVE_CLIENT
 
-        from dask.distributed import Client, LocalCluster
+    from dask.distributed import Client, LocalCluster
 
-        if filter_warnings:
-            silence_level = logging.ERROR
-        else:
-            silence_level = logging.WARN
+    if filter_warnings:
+        silence_level = logging.ERROR
+    else:
+        silence_level = logging.WARN
 
-        cluster = LocalCluster(
-            n_workers=workers,
-            threads_per_worker=threads_per_worker,
-            memory_limit=0,
-            silence_logs=silence_level,
-            processes=processes,
-        )
-        client = Client(cluster)
+    cluster = LocalCluster(
+        n_workers=workers,
+        threads_per_worker=threads_per_worker,
+        memory_limit=0,
+        silence_logs=silence_level,
+        processes=processes,
+    )
+    client = Client(cluster)
 
-        ACTIVE_CLIENT = client
-        ACTIVE_CLUSTER = cluster
+    ACTIVE_CLIENT = client
+    ACTIVE_CLUSTER = cluster
 
-        def _cleanup():
-            ACTIVE_CLIENT.close()
-            ACTIVE_CLUSTER.close()
+    def _cleanup():
+        ACTIVE_CLIENT.close()
+        ACTIVE_CLUSTER.close()
 
-        atexit.register(_cleanup)
+    atexit.register(_cleanup)
 
-        return client
-
-    except Exception:
-        log()
+    return client

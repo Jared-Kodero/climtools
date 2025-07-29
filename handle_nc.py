@@ -75,7 +75,7 @@ def cdo_mergetime(
         return outfile
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
 
 
 def cdo_unpack_nc(
@@ -121,7 +121,7 @@ def cdo_unpack_nc(
         return None
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
 
 
 def cdo_pack_nc(
@@ -173,7 +173,7 @@ def cdo_pack_nc(
         return outfile
 
     except subprocess.CalledProcessError as e:
-        log(e.stderr, level="ERROR", exception=False)
+        print(e.stderr)
 
 
 def cdo_interp_data(
@@ -211,71 +211,67 @@ def cdo_interp_data(
         This will reduce the file size and improve performance when reading the file.
 
     """
+
+    is_cdo = eval_pkg_cdo()
+    if not is_cdo:
+        return None
+
+    CWD_DIR = CWD()
+
+    FUNC_TMP = CWD_DIR / ".tmp"
+    FUNC_TMP.mkdir(exist_ok=True)
+
+    grdfile = f"{FUNC_TMP}/{uuid.uuid4()}.grid"
+
+    if bbox:
+        lon_min, lat_min, lon_max, lat_max = bbox
+    else:
+        raise ValueError(
+            "Bounding box (bbox) must be provided in the form (lon_min, lat_min, lon_max, lat_max)."
+        )
+
+    xsize = int((lon_max - lon_min) / resolution + 1)
+    ysize = int((lat_max - lat_min) / resolution + 1)
+
+    grid_description = f"""
+    gridtype = lonlat
+    xsize = {xsize}
+    ysize = {ysize}
+    xfirst = {lon_min}
+    xinc = {resolution}
+    yfirst = {lat_min}
+    yinc = {resolution}
+    """
+
+    with open(grdfile, "w") as f:
+        f.write(grid_description.strip())
+
     try:
 
-        is_cdo = eval_pkg_cdo()
-        if not is_cdo:
-            return None
+        subprocess.run(
+            [
+                "cdo",
+                "--no_history",
+                "-s",
+                "-w",
+                "-P",
+                "4",
+                f"{method},{grdfile}",
+                infile,
+                outfile,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-        CWD_DIR = CWD()
+    except subprocess.CalledProcessError as e:
+        print(e.stderr)
+        return None
 
-        FUNC_TMP = CWD_DIR / ".tmp"
-        FUNC_TMP.mkdir(exist_ok=True)
+    _TMP_FILES.extend([outfile, FUNC_TMP])
 
-        grdfile = f"{FUNC_TMP}/{uuid.uuid4()}.grid"
-
-        if bbox:
-            lon_min, lat_min, lon_max, lat_max = bbox
-        else:
-            raise ValueError(
-                "Bounding box (bbox) must be provided in the form (lon_min, lat_min, lon_max, lat_max)."
-            )
-
-        xsize = int((lon_max - lon_min) / resolution + 1)
-        ysize = int((lat_max - lat_min) / resolution + 1)
-
-        grid_description = f"""
-        gridtype = lonlat
-        xsize = {xsize}
-        ysize = {ysize}
-        xfirst = {lon_min}
-        xinc = {resolution}
-        yfirst = {lat_min}
-        yinc = {resolution}
-        """
-
-        with open(grdfile, "w") as f:
-            f.write(grid_description.strip())
-
-        try:
-
-            subprocess.run(
-                [
-                    "cdo",
-                    "--no_history",
-                    "-s",
-                    "-w",
-                    "-P",
-                    "4",
-                    f"{method},{grdfile}",
-                    infile,
-                    outfile,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-        except subprocess.CalledProcessError as e:
-            log(e.stderr, level="ERROR", exception=False)
-            return None
-
-        _TMP_FILES.extend([outfile, FUNC_TMP])
-
-        return outfile
-
-    except Exception:
-        log()
+    return outfile
 
 
 def xr_interp_data(
@@ -392,19 +388,15 @@ def get_local_solar_time(data: xr.Dataset):
     The local solar time is calculated as the UTC time plus the longitude offset.
     """
 
-    try:
+    if "lon" not in data or "lat" not in data:
+        raise ValueError("Dataset must contain 'lon' and 'lat' coordinates.")
 
-        if "lon" not in data or "lat" not in data:
-            raise ValueError("Dataset must contain 'lon' and 'lat' coordinates.")
+    offset = data["lon"] * (24 / 360) * (data["lat"] / data["lat"])
+    offset = offset.round() * pd.Timedelta(hours=1)
 
-        offset = data["lon"] * (24 / 360) * (data["lat"] / data["lat"])
-        offset = offset.round() * pd.Timedelta(hours=1)
+    lst = (data["time"] + offset).transpose("time", "lat", "lon")
 
-        lst = (data["time"] + offset).transpose("time", "lat", "lon")
-
-        return data.assign_coords({"local_solar_time": lst})
-    except Exception:
-        log()
+    return data.assign_coords({"local_solar_time": lst})
 
 
 def get_UTC_offset(
@@ -415,25 +407,21 @@ def get_UTC_offset(
     """
     Computes the hour offset from UTC time based on the longitude coordinate.
     """
-    try:
 
-        if isinstance(obj, (xr.DataArray, xr.Dataset)):
-            data = obj.copy()
-            data[name] = ((data[name] + 180) % 360) - 180
-            offset = data[name] * (24 / 360)
-            offset = offset.round() * pd.Timedelta(hours=1)
+    if isinstance(obj, (xr.DataArray, xr.Dataset)):
+        data = obj.copy()
+        data[name] = ((data[name] + 180) % 360) - 180
+        offset = data[name] * (24 / 360)
+        offset = offset.round() * pd.Timedelta(hours=1)
 
-        else:
-            if isinstance(obj, str):
-                obj = float(obj)
-            obj = ((obj + 180) % 360) - 180
-            offset = obj * (24 / 360)
-            offset = np.round(offset) * pd.Timedelta(hours=1)
+    else:
+        if isinstance(obj, str):
+            obj = float(obj)
+        obj = ((obj + 180) % 360) - 180
+        offset = obj * (24 / 360)
+        offset = np.round(offset) * pd.Timedelta(hours=1)
 
-        return offset
-
-    except Exception:
-        log()
+    return offset
 
 
 def split_data_by_dims(

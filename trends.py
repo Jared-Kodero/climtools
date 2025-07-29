@@ -7,8 +7,6 @@ import pymannkendall as mk
 import xarray as xr
 from scipy import stats
 
-from .tools import log
-
 
 def xr_polyfit(data, data_var, along, scale=1):
     """
@@ -50,57 +48,51 @@ def xr_polyfit(data, data_var, along, scale=1):
 def mk_trend_test(
     array: np.ndarray,
     scale: float = 1,
-    data_type: str = "pd",
+    data_type: str = None,
     debug: bool = False,
     **coords,
 ) -> np.ndarray:
-    try:
 
-        nan_list = [np.nan] * 7
+    nan_list = [np.nan] * 7
 
-        if data_type == "pd":
+    if data_type == "pd":
 
-            nan_data = np.array(list(coords.values()) + nan_list)
-            print(nan_data)
+        nan_data = np.array(list(coords.values()) + nan_list)
 
-        else:
-            nan_data = np.array(nan_list)
+    else:
+        nan_data = np.array(nan_list)
 
-        df = pd.DataFrame({"array": array})
-        df = df.dropna()
-        if df.empty:
-            return nan_data
-
-        result = mk.hamed_rao_modification_test(df["array"])
-        mean_val = df["array"].mean()
-        std_val = df["array"].std()
-
-        trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
-        stats = [
-            result.slope * scale,
-            result.p,
-            trend,
-            mean_val,
-            std_val,
-            result.Tau,
-            result.z,
-        ]
-
-        if data_type == "pd":
-
-            array = np.array(list(coords.values()) + stats)
-
-        else:
-            array = np.array(stats)
-
-        return array
-    except Exception:
-        if debug:
-            log()
+    df = pd.DataFrame({"array": array})
+    df = df.dropna()
+    if df.empty:
         return nan_data
 
+    result = mk.hamed_rao_modification_test(df["array"])
+    mean_val = df["array"].mean()
+    std_val = df["array"].std()
 
-def _multi_data_var_dataset_dispacher(
+    trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
+    stats = [
+        result.slope * scale,
+        result.p,
+        trend,
+        mean_val,
+        std_val,
+        result.Tau,
+        result.z,
+    ]
+
+    if data_type == "pd":
+
+        array = np.array(list(coords.values()) + stats)
+
+    else:
+        array = np.array(stats)
+
+    return array
+
+
+def _dataset_dispacher(
     data,
     along,
     scale,
@@ -131,6 +123,125 @@ def _multi_data_var_dataset_dispacher(
     ).compute()  # compute to ensure all data is loaded and processed
 
 
+def _xr_dispacher(
+    data,
+    along,
+    scale,
+    use_dask,
+    dask_scheduler,
+    debug,
+    out_vars,
+):
+    if not along:
+        raise ValueError(
+            "Argument 'along' is required for xarray input (e.g., 'time')."
+        )
+    if isinstance(data, xr.Dataset):
+
+        if len(list(data.data_vars)) == 1:
+            data = data[list(data.data_vars)[0]]
+        else:
+
+            return _dataset_dispacher(
+                data,
+                along,
+                scale,
+                use_dask,
+                dask_scheduler,
+                debug,
+            )
+
+    dask_gufunc_kwargs = None
+    if data.chunks:
+        data = data.chunk({along: -1})
+        dask_gufunc_kwargs = {"output_sizes": {"stats": 7}}
+
+    result = xr.apply_ufunc(
+        mk_trend_test,
+        data,
+        input_core_dims=[[along]],
+        output_core_dims=[["stats"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[np.float32],
+        dask_gufunc_kwargs=dask_gufunc_kwargs,
+        kwargs={"scale": scale, "data_type": "xr", "debug": debug},
+    )
+
+    trends = xr.Dataset()
+    for i, name in enumerate(out_vars):
+        stat = result.isel(stats=i).to_dataset(name=name)
+        trends[name] = stat[name]
+
+    return trends.compute(scheduler=dask_scheduler)
+
+
+def _pd_dispatcher(
+    data,
+    along,
+    data_var,
+    groupby,
+    scale,
+    use_dask,
+    dask_scheduler,
+    debug,
+    out_vars,
+):
+    if not data_var:
+        raise ValueError("Argument 'data_var' is required for pd.DataFrame input.")
+
+    if groupby:
+
+        if isinstance(groupby, str):
+            groupby = [groupby]
+        elif isinstance(groupby, tuple):
+            groupby = list(groupby)
+
+        if along in groupby:
+            groupby.remove(along)
+
+        names = groupby + out_vars
+
+        dfs = []
+        tasks = []
+        grouped_data = data.groupby(groupby)
+        for key, group in grouped_data:
+
+            if along is not None:
+                group = group.sort_values(by=along).reset_index(drop=True)
+
+            if not isinstance(key, tuple):
+                key = (key,)
+            coords = dict(zip(groupby, key))
+
+            array = group[data_var].values
+
+            if use_dask:
+
+                task = dask.delayed(mk_trend_test)(array, scale, "pd", debug, **coords)
+                tasks.append(task)
+
+            else:
+                res = mk_trend_test(array, scale, "pd", debug, **coords)
+                dfs.append(pd.DataFrame(res.reshape(1, -1), columns=names))
+
+        if use_dask:
+            results = dask.compute(*tasks, scheduler=dask_scheduler)
+            dfs = [pd.DataFrame(res.reshape(1, -1), columns=names) for res in results]
+
+        trends = pd.concat(dfs).reset_index(drop=True)
+
+        return trends
+
+    elif not groupby and data_var:
+
+        if data_var is not None:
+            array = data[data_var].values
+            res = mk_trend_test(array, scale, debug=debug, data_type="np")
+            trends = pd.DataFrame(res.reshape(1, -1), columns=out_vars)
+        return trends
+
+
 def calc_trends(
     data: Union[pd.DataFrame, xr.DataArray, xr.Dataset],
     along: str = None,
@@ -157,127 +268,43 @@ def calc_trends(
     Returns:
         pd.DataFrame | xr.Dataset: DataFrame or Dataset containing the trend test results.
     """
-    try:
 
-        out_vars = [
-            "slope",
-            "p_value",
-            "trend",
-            "mean_val",
-            "std_val",
-            "tau",
-            "z_score",
-        ]
+    out_vars = [
+        "slope",
+        "p_value",
+        "trend",
+        "mean_val",
+        "std_val",
+        "tau",
+        "z_score",
+    ]
 
-        if isinstance(data, (xr.Dataset, xr.DataArray)):
-            if along is None:
-                raise ValueError(
-                    "Argument 'along' is required for xarray input. It should be a string representing the dimension along which to calculate the trend test (e.g., 'time')."
-                )
-
-            if not isinstance(along, str):
-                raise ValueError(f"'along' must be of type str, not {type(along)}.")
-
-            if isinstance(data, xr.Dataset):
-
-                if len(list(data.data_vars)) == 1:
-                    data = data[list(data.data_vars)[0]]
-                else:
-
-                    return _multi_data_var_dataset_dispacher(
-                        data,
-                        along,
-                        scale,
-                        use_dask,
-                        dask_scheduler,
-                        debug,
-                    )
-
-            dask_gufunc_kwargs = None
-            if data.chunks:
-                data = data.chunk({along: -1})
-                dask_gufunc_kwargs = {"output_sizes": {"stats": 7}}
-
-            result = xr.apply_ufunc(
-                mk_trend_test,
-                data,
-                input_core_dims=[[along]],
-                output_core_dims=[["stats"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[np.float32],
-                dask_gufunc_kwargs=dask_gufunc_kwargs,
-                kwargs={"scale": scale, "data_type": "xr", "debug": debug},
-            )
-
-            trends = xr.Dataset()
-            for i, name in enumerate(out_vars):
-                stat = result.isel(stats=i).to_dataset(name=name)
-                trends[name] = stat[name]
-
-            return trends.compute()
-
-        elif groupby and data_var and isinstance(data, pd.DataFrame):
-
-            if not (isinstance(data_var, str) and isinstance(along, str)):
-                raise ValueError(
-                    "Invalid input: 'data_var' and 'along' must be of type str."
-                )
-
-            if isinstance(groupby, str):
-                groupby = [groupby]
-            elif isinstance(groupby, tuple):
-                groupby = list(groupby)
-
-            if along in groupby:
-                groupby.remove(along)
-
-            names = groupby + out_vars
-
-            dfs = []
-            tasks = []
-            for key, group in data.groupby(groupby):
-
-                if along is not None:
-                    group = group.sort_values(by=along).reset_index(drop=True)
-
-                if not isinstance(key, tuple):
-                    key = (key,)
-                coords = dict(zip(groupby, key))
-
-                array = group[data_var].values
-
-                if use_dask:
-
-                    task = dask.delayed(mk_trend_test)(
-                        array, scale, debug=debug, **coords
-                    )
-
-                    tasks.append(task)
-
-                else:
-                    res = mk_trend_test(array, scale, debug=debug, **coords)
-                    dfs.append(pd.DataFrame(res.reshape(1, -1), columns=names))
-
-            if tasks:
-                results = dask.compute(*tasks, scheduler=dask_scheduler)
-                dfs = [
-                    pd.DataFrame(res.reshape(1, -1), columns=names) for res in results
-                ]
-
-            trends = pd.concat(dfs).reset_index(drop=True)
-
-            return trends
-
-        elif not groupby and data_var and isinstance(data, pd.DataFrame):
-
-            if isinstance(data, pd.DataFrame) and data_var is not None:
-                array = data[data_var].values
-                res = mk_trend_test(array, scale, debug=debug, data_type="np")
-                trends = pd.DataFrame(res.reshape(1, -1), columns=out_vars)
-            return trends
-    except Exception:
-        log()
+    if isinstance(data, (xr.Dataset, xr.DataArray)):
+        return _xr_dispacher(
+            data,
+            along,
+            scale,
+            use_dask,
+            dask_scheduler,
+            debug,
+            out_vars,
+        )
+    elif isinstance(data, pd.DataFrame):
+        return _pd_dispatcher(
+            data,
+            along,
+            data_var,
+            groupby,
+            scale,
+            use_dask,
+            dask_scheduler,
+            debug,
+            out_vars,
+        )
+    else:
+        raise TypeError(
+            f"Unsupported data type: {type(data)}. Expected pd.DataFrame, xr.Dataset, or xr.DataArray."
+        )
 
 
 def calc_signicance(
