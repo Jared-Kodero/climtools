@@ -12,8 +12,10 @@ import xarray as xr
 
 from .my_paths import CWD, DATA_DIR
 from .pac_man import eval_pkg_cdo
-from .res import get_grid_resolution
 from .tools import CPU_COUNT, log, rm
+
+# from joblib import Parallel, delayed
+
 
 _TMP_FILES = []
 
@@ -278,6 +280,8 @@ def xr_interp_data(
     obj: Union[xr.DataArray, xr.Dataset],
     resolution: float = 0.25,
     *,
+    x: str = "lon",
+    y: str = "lat",
     method: Literal["linear", "nearest", "cubic"] = "linear",
     bbox: tuple[float, float, float, float] = None,
 ) -> Union[xr.DataArray, xr.Dataset]:
@@ -308,12 +312,7 @@ def xr_interp_data(
     """
     try:
 
-        if "lat" not in obj.dims or "lon" not in obj.dims:
-            raise ValueError(
-                f"lat and lon not found in the dataset dimensions. Dimensions found: {list(obj.dims)}.\nPlease rename appropriate dimensions to 'lat' and 'lon' or provide data with 'lat' and 'lon' dimensions."
-            )
-
-        obj = obj.sortby(["lat", "lon"])
+        obj = obj.sortby([y, x])
 
         if bbox is not None:
             lon_min, lat_min, lon_max, lat_max = bbox
@@ -322,8 +321,8 @@ def xr_interp_data(
 
         else:
 
-            lat_min, lat_max = obj["lat"].min().values, obj["lat"].max().values
-            lon_min, lon_max = obj["lon"].min().values, obj["lon"].max().values
+            lat_min, lat_max = obj[y].min().values, obj[y].max().values
+            lon_min, lon_max = obj[x].min().values, obj[x].max().values
 
         new_lat = np.arange(lat_min, lat_max, resolution)
         new_lon = np.arange(lon_min, lon_max, resolution)
@@ -557,7 +556,15 @@ def _tz_apply_func_parallel(
     with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
         datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
 
-    return xr.concat(datasets, dim="lon").sortby("lon")
+    kwargs = {
+        "dim": "lon",
+        "join": "exact",
+        "compat": "override",
+        "data_vars": "minimal",
+        "coords": "minimal",
+    }
+
+    return xr.concat(datasets, **kwargs).sortby("lon")
 
 
 def _tz_apply_func_serial(
@@ -612,10 +619,6 @@ def tz_apply_func(
         kwargs = {}
 
     chunks = split_by_15_deg(obj)
-
-    for _, chunk in chunks.items():
-        info = get_grid_resolution(chunk, x="lon", y="lat", time="time")
-        log(info)
 
     if multiprocess and len(chunks) > 1:
         return _tz_apply_func_parallel(func, chunks, kwargs)

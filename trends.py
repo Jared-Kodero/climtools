@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Union
+from typing import Literal, Union
 
 import dask
 import numpy as np
@@ -7,49 +7,13 @@ import pymannkendall as mk
 import xarray as xr
 from scipy import stats
 
-
-def xr_polyfit(data, data_var, along, scale=1):
-    """
-    Calculate the linear trend for the given xarray Dataset.
-
-    - data: xr.Dataset
-    - data_var: The variable to calculate the trend test for.
-    - along: dim to calculate the trend test along. also used for sorting the data.
-    - scale: The scale to multiply the slope by i.e convert to per hour, per day, etc.
-
-    Returns: xr.Dataset
-    """
-
-    data.attrs = {}
-    data = data.sortby(along)
-    data[along] = (np.arange(1, len(data[along]) + 1)).astype(np.int32)
-    n = data.dims[along]  #
-
-    res = data[data_var].polyfit(dim=along, deg=1, cov=True)
-    slope = res["polyfit_coefficients"].sel(degree=1)
-    slope_variance = res["polyfit_covariance"].sel(cov_i=0, cov_j=0)
-    stderr = slope_variance**0.5
-    t_stat = slope / stderr
-
-    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2)))
-
-    mean_val = data[data_var].mean(dim=along)
-    std_val = data[data_var].std(dim=along)
-
-    trends = xr.Dataset()
-    trends["slope"] = slope * scale
-    trends["p_value"] = p_values
-    trends["mean_val"] = mean_val
-    trends["std_val"] = std_val
-
-    return trends
+from .log import log
 
 
 def mk_trend_test(
     array: np.ndarray,
     scale: float = 1,
     data_type: str = None,
-    debug: bool = False,
     **coords,
 ) -> np.ndarray:
 
@@ -64,7 +28,8 @@ def mk_trend_test(
 
     df = pd.DataFrame({"array": array})
     df = df.dropna()
-    if df.empty:
+    if df.empty or len(df) < 2:
+        log("Not enough data to calculate trend ! Returning NaN values.")
         return nan_data
 
     result = mk.hamed_rao_modification_test(df["array"])
@@ -98,7 +63,6 @@ def _dataset_dispacher(
     scale,
     use_dask,
     dask_scheduler,
-    debug,
 ) -> xr.Dataset:
 
     trends = []
@@ -110,7 +74,6 @@ def _dataset_dispacher(
             scale=scale,
             use_dask=use_dask,
             dask_scheduler=dask_scheduler,
-            debug=debug,
         )
         # rename the all the trends_ds data_vars to include the data_var name
         trends_ds = trends_ds.rename(
@@ -129,7 +92,6 @@ def _xr_dispacher(
     scale,
     use_dask,
     dask_scheduler,
-    debug,
     out_vars,
 ):
     if not along:
@@ -148,13 +110,13 @@ def _xr_dispacher(
                 scale,
                 use_dask,
                 dask_scheduler,
-                debug,
             )
-
     dask_gufunc_kwargs = None
     if data.chunks:
         data = data.chunk({along: -1})
         dask_gufunc_kwargs = {"output_sizes": {"stats": 7}}
+
+    data = data.squeeze(drop=True)
 
     result = xr.apply_ufunc(
         mk_trend_test,
@@ -165,7 +127,7 @@ def _xr_dispacher(
         dask="parallelized",
         output_dtypes=[np.float32],
         dask_gufunc_kwargs=dask_gufunc_kwargs,
-        kwargs={"scale": scale, "data_type": "xr", "debug": debug},
+        kwargs={"scale": scale, "data_type": "xr"},
     )
 
     trends = xr.Dataset()
@@ -184,7 +146,6 @@ def _pd_dispatcher(
     scale,
     use_dask,
     dask_scheduler,
-    debug,
     out_vars,
 ):
     if not data_var:
@@ -245,13 +206,12 @@ def _pd_dispatcher(
 def calc_trends(
     data: Union[pd.DataFrame, xr.DataArray, xr.Dataset],
     along: str = None,
-    data_var: str = None,
     *,
-    groupby: Optional[Union[str, list[str]]] = None,
-    scale: Optional[float] = 1,
+    data_var: str = None,
+    groupby: Union[str, list[str]] = None,
+    scale: float = 1,
     use_dask: bool = True,
     dask_scheduler: Literal["threads", "processes"] = "threads",
-    debug: bool = False,
 ) -> Union[pd.DataFrame, xr.Dataset]:
     """
     Calculate the Mann-Kendall trend test for a given dataset.
@@ -286,7 +246,6 @@ def calc_trends(
             scale,
             use_dask,
             dask_scheduler,
-            debug,
             out_vars,
         )
     elif isinstance(data, pd.DataFrame):
@@ -298,7 +257,6 @@ def calc_trends(
             scale,
             use_dask,
             dask_scheduler,
-            debug,
             out_vars,
         )
     else:
@@ -386,3 +344,42 @@ def calc_signicance(
     }
 
     return res
+
+
+def xr_polyfit(data, data_var, along, scale=1):
+    """
+    Calculate the linear trend for the given xarray Dataset.
+
+    - data: xr.Dataset
+    - data_var: The variable to calculate the trend test for.
+    - along: dim to calculate the trend test along. also used for sorting the data.
+    - scale: The scale to multiply the slope by i.e convert to per hour, per day, etc.
+
+    Returns: xr.Dataset
+    """
+
+    data.attrs = {}
+    data = data.sortby(along)
+    data[along] = (np.arange(1, len(data[along]) + 1)).astype(np.int32)
+    n = data.dims[along]  #
+
+    res = data[data_var].polyfit(dim=along, deg=1, cov=True)
+    slope = res["polyfit_coefficients"].sel(degree=1)
+    slope_variance = res["polyfit_covariance"].sel(cov_i=0, cov_j=0)
+    stderr = slope_variance**0.5
+    t_stat = slope / stderr
+
+    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2)))
+
+    mean_val = data[data_var].mean(dim=along)
+    std_val = data[data_var].std(dim=along)
+
+    trends = xr.Dataset()
+    trends["slope"] = slope * scale
+    trends["p_value"] = p_values
+    trends["mean_val"] = mean_val
+    trends["std_val"] = std_val
+
+    return trends
+    return trends
+    return trends

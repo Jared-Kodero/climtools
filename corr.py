@@ -7,8 +7,6 @@ import pandas as pd
 import xarray as xr
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
-from .tools import log
-
 
 def corr_test(
     array_x: np.ndarray,
@@ -16,56 +14,50 @@ def corr_test(
     corr_type: str,
     alternative: str = "two-sided",
     data_type: str = None,
-    debug: bool = False,
     **coords,
 ) -> np.ndarray:
-    try:
 
-        nan_list = [np.nan] * 2
+    nan_list = [np.nan] * 2
 
-        if data_type == "pd":
+    if data_type == "pd":
 
-            nan_data = np.array(list(coords.values()) + nan_list)
+        nan_data = np.array(list(coords.values()) + nan_list)
 
-        else:
-            nan_data = np.array(nan_list)
+    else:
+        nan_data = np.array(nan_list)
 
-        df = pd.DataFrame({"x": array_x, "y": array_y})
-        df = df.dropna()
-        if df.empty or len(df) < 2:
-            return nan_data
-
-        corr = np.nan
-        p_value = np.nan
-
-        if corr_type == "pearson":
-            corr, p_value = pearsonr(df["x"], df["y"], alternative=alternative)
-
-        elif corr_type == "spearman":
-            corr, p_value = spearmanr(df["x"], df["y"], alternative=alternative)
-
-        elif corr_type == "kendall":
-            corr, p_value = kendalltau(df["x"], df["y"], alternative=alternative)
-
-        del array_x, array_y, df
-        collect()
-
-        stats = [
-            corr,
-            p_value,
-        ]
-
-        if data_type == "pd":
-            array = np.array(list(coords.values()) + stats)
-
-        else:
-            array = np.array(stats)
-
-        return array
-    except Exception:
-        if debug:
-            log()
+    df = pd.DataFrame({"x": array_x, "y": array_y})
+    df = df.dropna()
+    if df.empty or len(df) < 2:
         return nan_data
+
+    corr = np.nan
+    p_value = np.nan
+
+    if corr_type == "pearson":
+        corr, p_value = pearsonr(df["x"], df["y"], alternative=alternative)
+
+    elif corr_type == "spearman":
+        corr, p_value = spearmanr(df["x"], df["y"], alternative=alternative)
+
+    elif corr_type == "kendall":
+        corr, p_value = kendalltau(df["x"], df["y"], alternative=alternative)
+
+    del array_x, array_y, df
+    collect()
+
+    stats = [
+        corr,
+        p_value,
+    ]
+
+    if data_type == "pd":
+        array = np.array(list(coords.values()) + stats)
+
+    else:
+        array = np.array(stats)
+
+    return array
 
 
 def _xr_dispacher(
@@ -77,9 +69,7 @@ def _xr_dispacher(
     alternative,
     along,
     out_vars,
-    use_dask,
     dask_scheduler,
-    debug,
 ):
     if not along:
         raise ValueError(
@@ -131,8 +121,8 @@ def _xr_dispacher(
     if y.chunks:
         y = y.chunk({along: -1})
 
-    x = x.sortby(along)
-    y = y.sortby(along)
+    x = x.sortby(along).squeeze(drop=True)
+    y = y.sortby(along).squeeze(drop=True)
 
     result = xr.apply_ufunc(
         corr_test,
@@ -148,7 +138,6 @@ def _xr_dispacher(
             "data_type": "xr",
             "corr_type": corr_type,
             "alternative": alternative,
-            "debug": debug,
         },
     )
 
@@ -172,7 +161,6 @@ def _pd_dispatcher(
     out_vars,
     use_dask,
     dask_scheduler,
-    debug,
 ):
 
     if not x_var or not y_var:
@@ -219,7 +207,6 @@ def _pd_dispatcher(
                     corr_type,
                     alternative,
                     "pd",
-                    debug,
                     **coords,
                 )
                 tasks.append(task)
@@ -231,7 +218,6 @@ def _pd_dispatcher(
                     corr_type,
                     alternative,
                     "pd",
-                    debug,
                     **coords,
                 )
                 dfs.append(pd.DataFrame(res.reshape(1, -1), columns=names))
@@ -257,7 +243,6 @@ def _pd_dispatcher(
                 array_y,
                 corr_type,
                 alternative=alternative,
-                debug=debug,
                 data_type="np",
             )
             corrs = pd.DataFrame(res.reshape(1, -1), columns=out_vars)
@@ -277,7 +262,6 @@ def calc_corr(
     groupby: Optional[Union[str, list[str]]] = None,
     use_dask: bool = True,
     dask_scheduler: Literal["threads", "processes"] = "threads",
-    debug: bool = False,
 ) -> Union[pd.DataFrame, xr.Dataset]:
     """
     Calculate the correlation between two datasets.
@@ -295,7 +279,6 @@ def calc_corr(
         groupby (str | list[str], optional): Dimensions to group by for DataFrame.
         use_dask (bool, optional): Use Dask for parallelization. Default is True.
         dask_scheduler (str, optional): Dask scheduler type. Default is "processes".
-        debug (bool, optional): Print debug information. Default is False.
 
     Returns
     --------
@@ -321,9 +304,7 @@ def calc_corr(
             alternative,
             along,
             out_vars,
-            use_dask,
             dask_scheduler,
-            debug,
         )
     elif isinstance(x, (pd.DataFrame)) and isinstance(y, (pd.DataFrame)):
         return _pd_dispatcher(
@@ -338,7 +319,6 @@ def calc_corr(
             out_vars,
             use_dask,
             dask_scheduler,
-            debug,
         )
     else:
         raise TypeError(

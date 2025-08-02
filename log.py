@@ -11,6 +11,13 @@ from colorama import init as colorama_init
 colorama_init()  # initialize colorama for colored output
 
 
+def line_break(char: str = "═", n: int = 120):
+    """
+    Print a line break with a specified character and length.
+    """
+    print(char * n)
+
+
 def log(
     *msg: Any | None,
     level: Literal["INFO", "ERROR", "WARNING", "DEBUG"] = None,
@@ -44,7 +51,7 @@ def log(
     """
 
     if len(msg) == 1 and not isinstance(msg[0], str):
-        pprint.pprint(msg[0], sort_dicts=True, compact=True)
+        pprint.pprint(msg[0], sort_dicts=False, compact=True)
         return
 
     msg_text = " ".join(map(str, msg)) if msg else ""
@@ -93,6 +100,7 @@ def log_on_any(
         level = "INFO" if level is None else level
         output = f"{c_time} - {level:<5} - {module} - {msg}"
     else:
+
         level = "ERROR" if level is None else level
         ft = traceback.extract_tb(exc_traceback)
         ft = [f for f in ft]
@@ -126,7 +134,11 @@ def log_on_any(
         new_ft = "\n".join(new_ft)
         error_type = f"{exc_type.__qualname__}:\n -> {exc_value}"
         output = (
-            f"{c_time} - {level:<5} - {module} - {error_type}\n" f"{new_ft}\n\t{msg}\n"
+            f"{c_time} - "
+            f"{level:<5} - "
+            f"{module} - "
+            f"{error_type}\n"
+            f"{new_ft}\n\t{msg}\n"
         )
 
     print(output, flush=True)
