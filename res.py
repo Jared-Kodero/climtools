@@ -1,5 +1,4 @@
-from collections import namedtuple
-from typing import NamedTuple, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -66,76 +65,55 @@ def infer_time_frequency(
 
 
 # get the total number of grid points
-def get_grid_resolution(
+def get_spatiotemporal_info(
     obj: Union[xr.Dataset, xr.DataArray],
-    x: str = "lon",
-    y: str = "lat",
-    time: str = None,
-) -> NamedTuple:
+) -> dict:
     """
-    Get the resolution of a dataset along specified dimensions.
+    Get the spatiotemporal information of an xarray object.
+    This function extracts the dimensions, resolution, and time frequency of the provided
+    xarray object, along with the bounds of each dimension.
 
     Parameters
     ----------
-    obj : xarray.Dataset or xarray.DataArray
-        The dataset or data array to analyze.
-    x : str
-        The name of the x dimension (e.g., 'lon').
-    y : str
-        The name of the y dimension (e.g., 'lat').
-    time : str, optional
-        The name of the time dimension (e.g., 'time'). If provided, the function
-        will also return the inferred time frequency.
+    obj : Union[xr.Dataset, xr.DataArray]
+        An xarray object (either a Dataset or DataArray) containing spatial and temporal data.
     Returns
     -------
-    namedtuple : A named tuple containing:
-        - n_cells: Total number of grid cells.
-        - resolution: A tuple of (lat_res, lon_res) representing the spatial resolution.
-        - freq: The inferred time frequency (if time is provided).
-        - hours: A tuple of (min_hour, max_hour) representing the range of hours in the time dimension.
-        - months: A tuple of (min_month, max_month) representing the range of months in the time dimension.
-        - years: A tuple of (min_year, max_year) representing the range of years in the time dimension.
-        - bbox: A tuple of (min_lon, min_lat, max_lon, max_lat) representing the bounding box of the dataset.
+    dict
     """
 
-    if not isinstance(obj, (xr.Dataset, xr.DataArray)):
-        raise TypeError("Input must be an xarray Dataset or DataArray.")
+    
+    
 
-    if x not in obj.dims or y not in obj.dims:
-        raise ValueError(f"Dimensions {x}, {y}, not found in the provided dataset.")
-    if time and time not in obj.dims:
-        raise ValueError(f"Dimension {time} not found in the provided dataset.")
+    dims = list(obj.dims)
 
-    time_res = None, None, None, None
-    n_cells = obj.sizes[y] * obj.sizes[x]
-    lon_res = np.abs(np.round(obj[x].diff(x).mean().values, 2))
-    lat_res = np.abs(np.round(obj[y].diff(y).mean().values, 2))
+    resolution = {}
 
-    res = (float(np.round(lat_res, 2)), float(np.round(lon_res, 2)))
+    t_freq, hours_range, months_range, years_range = None, None, None, None
 
-    bbox = (
-        float(np.round(obj[x].min().values, 2)),
-        float(np.round(obj[y].min().values, 2)),
-        float(np.round(obj[x].max().values, 2)),
-        float(np.round(obj[y].max().values, 2)),
-    )
+    for k in dims:
+        if str(obj[k].dtype) == "datetime64[ns]":
+            t_freq, hours_range, months_range, years_range = infer_time_frequency(
+                obj[k]
+            )
+            resolution[k] = t_freq
 
-    if time:
-        time_res = infer_time_frequency(obj[time])
+        else:
+            resolution[k] = float(np.round(obj[k].diff(k).mean().values, 2))
 
-    names = [
-        "n_cells",
-        "resolution",
-    ]
-    data = [
-        float(n_cells),
-        res,
-    ]
-    if time:
-        names.extend(["freq", "hours", "months", "years"])
-        data.extend([*time_res])
+    names = ["resolution", "hours_range", "months_range", "years_range"]
+    data = [resolution, hours_range, months_range, years_range]
 
-    names.append("bbox")
-    data.append(bbox)
+    result = {}
+    for k, v in zip(names, data):
+        if v is not None:
+            result[k] = v
 
-    return namedtuple("info", names)(*data)
+    for k in dims:
+        if k != "time":
+            result[f"{k}_bounds"] = (
+                float(np.round(obj[k].min().values, 2)),
+                float(np.round(obj[k].max().values, 2)),
+            )
+
+    return result

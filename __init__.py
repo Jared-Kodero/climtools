@@ -68,7 +68,7 @@ from .handle_nc import (
     tz_apply_func,
     xr_interp_data,
 )
-from .log import log
+from .log import line_break, log
 from .my_paths import (
     CWD,
     DATA_DIR,
@@ -84,7 +84,7 @@ from .my_paths import (
     USER,
     WORK_DIR,
 )
-from .res import get_grid_resolution, infer_time_frequency
+from .res import get_spatiotemporal_info, infer_time_frequency
 from .tools import (
     CPU_COUNT,
     close_dask,
@@ -123,7 +123,7 @@ __all__ = [
     "close_dask",
     "cp",
     "file_type",
-    "get_grid_resolution",
+    "get_spatiotemporal_info",
     "get_UTC_offset",
     "get_local_solar_time",
     "infer_time_frequency",
@@ -132,6 +132,7 @@ __all__ = [
     "mk_trend_test",
     "mkdir",
     "mv",
+    "line_break",
     "rm",
     "setup_dask",
     "split_by_15_deg",

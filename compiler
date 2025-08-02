@@ -1,0 +1,25 @@
+#!/bin/bash 
+
+in=$1
+out=$2
+
+if [ -z "$in" ] ; then
+    echo "Usage: $0 <input_file> <output_file> , where <input_file> is a Fortran source file and <output_file> is optional."
+    exit 1
+fi
+
+if [ -z "$out" ] ; then
+    # out == 1 without extension
+    out="${in%.*}"
+
+fi
+
+# if out*.so exists, remove it
+if [ -e "${out}*.so" ] ; then
+    rm "${out}*.so"
+fi
+
+
+export FFLAGS="-O3 -march=native -funroll-loops -ffast-math -fopenmp"
+export LDFLAGS="-fopenmp"
+f2py -c -m $out $in

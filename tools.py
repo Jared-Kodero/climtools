@@ -3,22 +3,19 @@ import functools
 import logging
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Union
-
-import xarray
 
 from .log import *
 
 CPU_COUNT = len(os.sched_getaffinity(0))
 
-if "ipykernel" in sys.modules:
+# if "ipykernel" in sys.modules:
 
-    xarray.set_options(
-        display_style="text", display_expand_attrs=False, display_max_rows=100
-    )
+#     xarray.set_options(
+#         display_style="text", display_expand_attrs=False, display_max_rows=100
+#     )
 
 
 ACTIVE_CLUSTER = None
