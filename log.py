@@ -254,3 +254,31 @@ def _obj_print(values, out):
         for v in values:
             pprint.pprint(v, sort_dicts=True, compact=True)
     return
+
+
+# import io
+# import sys
+
+# buffer = io.StringIO()
+# sys.stdout = buffer
+
+
+# import threading
+
+
+# def log_buffer():
+
+#     position = 0
+#     while True:
+#         data = buffer.getvalue()
+#         new_data = data[position:]
+#         if new_data:
+#             sys.__stdout__.write(new_data)
+#             sys.__stdout__.flush()
+#             position = len(data)
+
+
+# # Start function in background thread (non-blocking)
+# event = threading.Event()
+# thread = threading.Thread(target=log_buffer)
+# thread.start()
