@@ -56,4 +56,3 @@ def mk_test(arr: np.ndarray, alpha: float = 0.05, lag: int = None):
     )
 
     return res(slope, pval, trend, mean, std, tau, z)
-    return res(slope, pval, trend, mean, std, tau, z)

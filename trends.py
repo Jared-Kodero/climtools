@@ -179,11 +179,11 @@ def _pd_dispatcher(
 
             if use_dask:
 
-                task = dask.delayed(mk_trend_test)(array, scale, "pd", debug, **coords)
+                task = dask.delayed(mk_trend_test)(array, scale, "pd", **coords)
                 tasks.append(task)
 
             else:
-                res = mk_trend_test(array, scale, "pd", debug, **coords)
+                res = mk_trend_test(array, scale, "pd", **coords)
                 dfs.append(pd.DataFrame(res.reshape(1, -1), columns=names))
 
         if use_dask:
@@ -198,7 +198,7 @@ def _pd_dispatcher(
 
         if data_var is not None:
             array = data[data_var].values
-            res = mk_trend_test(array, scale, debug=debug, data_type="np")
+            res = mk_trend_test(array, scale, data_type="np")
             trends = pd.DataFrame(res.reshape(1, -1), columns=out_vars)
         return trends
 
@@ -380,6 +380,4 @@ def xr_polyfit(data, data_var, along, scale=1):
     trends["mean_val"] = mean_val
     trends["std_val"] = std_val
 
-    return trends
-    return trends
     return trends

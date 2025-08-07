@@ -11,15 +11,8 @@ from .log import *
 
 CPU_COUNT = len(os.sched_getaffinity(0))
 
-# if "ipykernel" in sys.modules:
-
-#     xarray.set_options(
-#         display_style="text", display_expand_attrs=False, display_max_rows=100
-#     )
-
-
-ACTIVE_CLUSTER = None
-ACTIVE_CLIENT = None
+CURRENT_DASK_CLUSTER = None
+CURRENT_DASK_CLIENT = None
 
 
 def timeit(func):
@@ -217,12 +210,12 @@ def close_dask():
     Close the active Dask client and cluster if they exist.
     This is useful for cleaning up resources when done with Dask computations.
     """
-    global ACTIVE_CLIENT, ACTIVE_CLUSTER
-    if ACTIVE_CLIENT and ACTIVE_CLUSTER:
-        ACTIVE_CLIENT.close()
-        ACTIVE_CLUSTER.close()
-        ACTIVE_CLIENT = None
-        ACTIVE_CLUSTER = None
+    global CURRENT_DASK_CLIENT, CURRENT_DASK_CLUSTER
+    if CURRENT_DASK_CLIENT and CURRENT_DASK_CLUSTER:
+        CURRENT_DASK_CLIENT.close()
+        CURRENT_DASK_CLUSTER.close()
+        CURRENT_DASK_CLIENT = None
+        CURRENT_DASK_CLUSTER = None
 
 
 def setup_dask(
@@ -251,10 +244,10 @@ def setup_dask(
         >>> setup_dask(get_info=True, filter_warnings=False)
     """
 
-    global ACTIVE_CLIENT, ACTIVE_CLUSTER
+    global CURRENT_DASK_CLIENT, CURRENT_DASK_CLUSTER
 
-    if ACTIVE_CLIENT and ACTIVE_CLUSTER:
-        return ACTIVE_CLIENT
+    if CURRENT_DASK_CLIENT and CURRENT_DASK_CLUSTER:
+        return CURRENT_DASK_CLIENT
 
     from dask.distributed import Client, LocalCluster
 
@@ -272,12 +265,12 @@ def setup_dask(
     )
     client = Client(cluster)
 
-    ACTIVE_CLIENT = client
-    ACTIVE_CLUSTER = cluster
+    CURRENT_DASK_CLIENT = client
+    CURRENT_DASK_CLUSTER = cluster
 
     def _cleanup():
-        ACTIVE_CLIENT.close()
-        ACTIVE_CLUSTER.close()
+        CURRENT_DASK_CLIENT.close()
+        CURRENT_DASK_CLUSTER.close()
 
     atexit.register(_cleanup)
 
