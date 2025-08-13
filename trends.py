@@ -7,7 +7,7 @@ import pymannkendall as mk
 import xarray as xr
 from scipy import stats
 
-from .log import log
+from .logs import log
 
 
 def mk_trend_test(
