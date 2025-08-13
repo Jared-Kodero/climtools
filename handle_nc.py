@@ -1,4 +1,3 @@
-import atexit
 import subprocess
 import uuid
 from multiprocessing import Pool
@@ -12,19 +11,9 @@ import xarray as xr
 
 from .my_paths import CWD, DATA_DIR
 from .pac_man import eval_pkg_cdo
-from .tools import CPU_COUNT, log, rm
+from .tools import _TMP_FILES, CPU_COUNT, log, rm
 
 # from joblib import Parallel, delayed
-
-
-_TMP_FILES = []
-
-
-def cleanup():
-    rm(_TMP_FILES)
-
-
-atexit.register(cleanup)
 
 
 def cdo_mergetime(
@@ -77,7 +66,7 @@ def cdo_mergetime(
         return outfile
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
 
 
 def cdo_unpack_nc(
@@ -123,7 +112,7 @@ def cdo_unpack_nc(
         return None
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
 
 
 def cdo_pack_nc(
@@ -175,7 +164,7 @@ def cdo_pack_nc(
         return outfile
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
 
 
 def cdo_interp_data(
@@ -268,7 +257,7 @@ def cdo_interp_data(
         )
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
         return None
 
     _TMP_FILES.extend([outfile, FUNC_TMP])

@@ -7,12 +7,20 @@ import time
 from pathlib import Path
 from typing import Union
 
-from .log import *
+from .logs import *
 
 CPU_COUNT = len(os.sched_getaffinity(0))
 
 CURRENT_DASK_CLUSTER = None
 CURRENT_DASK_CLIENT = None
+_TMP_FILES = []
+
+
+def cleanup():
+    rm(_TMP_FILES)
+
+
+atexit.register(cleanup)
 
 
 def timeit(func):
@@ -77,7 +85,7 @@ def mkdir(arg: Union[str, Path]) -> None:
         )
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
         return None
 
 
@@ -117,11 +125,6 @@ def rm(arg: Union[str, Path, list[Union[str, Path]]]) -> None:
 
         arg = [str(i).strip() for i in arg]
 
-        if any(i in {"", ".", ".."} for i in arg):
-            raise ValueError(
-                "Invalid, dangerous or empty path passed to rm -rf command"
-            )
-
         subprocess.run(
             [
                 "rm",
@@ -134,7 +137,7 @@ def rm(arg: Union[str, Path, list[Union[str, Path]]]) -> None:
         )
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
         return None
 
 
@@ -150,10 +153,8 @@ def cp(
 
     try:
 
-        if isinstance(src, Path):
-            src = str(Path(src).resolve())
-        if isinstance(dst, Path):
-            dst = str(Path(dst).resolve())
+        src = str(Path(src).resolve())
+        dst = str(Path(dst).resolve())
 
         subprocess.run(
             [
@@ -168,7 +169,7 @@ def cp(
         )
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
         return None
 
 
@@ -183,10 +184,8 @@ def mv(
 
     try:
 
-        if isinstance(src, Path):
-            src = str(Path(src).resolve())
-        if isinstance(dst, Path):
-            dst = str(Path(dst).resolve())
+        src = str(Path(src).resolve())
+        dst = str(Path(dst).resolve())
 
         subprocess.run(
             [
@@ -201,7 +200,7 @@ def mv(
         )
 
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        print("ERROR:", e.stderr)
         return None
 
 
