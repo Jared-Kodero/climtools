@@ -1,56 +1,83 @@
 """
-Module: climtools
-
-Description:
-    This module provides utility functions and constants for data analysis,
-    processing, and file operations, with support for xarray, Dask, and CDO-based workflows.
+climtools: Utilities for Climate Data Analysis and Visualization
 
 Author:
     Jared M. Kodero
 
-Contents:
+Overview:
+    climtools provides a suite of functions and constants for climate data analysis,
+    including trend detection, correlation, time zone handling, spatial operations,
+    plotting with CartoPy, file management, and integration with xarray, Dask, and CDO.
 
-Data Analysis Functions:
-------------------------
-- calc_trends: Computes trends using vectorized Mann-Kendall (preferred over xr_polyfit).
-- xr_polyfit: Fits a polynomial to xarray data using xarray's polyfit method.
-- calc_corr: Calculates correlation between datasets.
-- calc_signicance: Computes significance of trends in data.
-- mk_trend_test: Creates a trend significance test.
+Main Features
+=============
 
-Time and Spatial Utilities:
----------------------------
-- tz_apply_func: Applies a function across time zones in a dataset.
-- get_UTC_offset: Computes the UTC offset for a given datetime and location.
-- get_local_solar_time: Calculates local solar time based on longitude.
-- land_sea_mask: Applies a land-sea mask to datasets.
-- split_by_15_deg: Splits datasets into 15° longitudinal bands.
-- split_data_by_dims: Splits datasets along specified dimensions.
-- split_data_by_timezones: Splits datasets based on time zone offsets.
-- xr_interp_data: Interpolates xarray datasets.
+Data Analysis:
+--------------
+- calc_trends: Vectorized Mann-Kendall trend estimation (preferred over xr_polyfit).
+- xr_polyfit: Polynomial fitting for xarray DataArrays.
+- calc_corr: Correlation calculation between datasets.
+- calc_signicance: Statistical significance of trends.
+- mk_trend_test: Mann-Kendall trend significance test.
+
+Time & Spatial Utilities:
+-------------------------
+- tz_apply_func: Apply functions across time zones in datasets.
+- get_UTC_offset: Compute UTC offset for datetime/location.
+- get_local_solar_time: Calculate local solar time from longitude.
+- land_sea_mask: Apply land-sea mask to data.
+- split_by_15_deg: Split data into 15° longitude bands.
+- split_data_by_dims: Split data along specified dimensions.
+- split_data_by_timezones: Split data by time zone offsets.
+- xr_interp_data: Interpolate xarray datasets.
+
+Plotting (CartoPy):
+-------------------
+- cartplot: Quick CartoPy map plotting for 2D xarray DataArrays.
+- create_map_figure: Create CartoPy map figures.
+- get_cbar_axes: Utility for colorbar axes.
+- plot_p_values: Plot p-values on maps.
+
+Example:
+    >>> import numpy as np, xarray as xr
+    >>> da = xr.DataArray(
+            np.random.rand(10, 10),
+            dims=["lat", "lon"],
+            coords={"lat": np.linspace(-90, 90, 10), "lon": np.linspace(-180, 180, 10)}
+        )
+    >>> cartplot(
+            data=da,
+            plot_type="default",
+            projection="PlateCarree",
+            global_extent=True,
+            figsize=(12, 6),
+            cmap="balance",
+            cbar_label="Units"
+        )
 
 CDO Operations:
 ---------------
-- cdo_interp_data: Interpolates datasets using Climate Data Operators (CDO).
-- cdo_mergetime: Merges time dimensions in netCDF files using CDO.
-- cdo_pack_nc: Compresses netCDF files using CDO.
+- cdo_interp_data: Interpolate with Climate Data Operators (CDO).
+- cdo_mergetime: Merge time dimensions in NetCDF files.
+- cdo_pack_nc: Compress NetCDF files.
 
 File & System Utilities:
 ------------------------
-- cp: Copies files.
-- mv: Moves files.
-- rm: Removes files.
-- file_type: Determines the type of a file (NetCDF, GRIB, etc.).
-- mkdir: Creates a directory if it does not exist.
-- timeit: Decorator to measure execution time of a function.
-- setup_dask: Configures Dask for parallel computing.
-- close_dask: Closes an active Dask client.
+- cp, mv, rm: File copy, move, and remove.
+- file_type: Detect file type (NetCDF, GRIB, etc.).
+- mkdir: Create directories.
+- timeit: Function timing decorator.
+- setup_dask, close_dask: Dask parallel computing setup/teardown.
 
-Miscellaneous Utilities:
-------------------------
-- log: Logging utility for standard output and debugging.
-- dask_setup: Alias for setup_dask.
-- notebook_auto_reload: Enables autoreloading in Jupyter notebooks (if defined elsewhere).
+Miscellaneous:
+--------------
+- log, line_break: Logging and formatting utilities.
+- Notebook/Jupyter support: notebook_auto_reload (if available).
+
+Notes:
+------
+- All plotting functions require 2D xarray.DataArray with latitude and longitude.
+- Designed for extensibility and integration with scientific Python workflows.
 
 """
 
@@ -84,6 +111,7 @@ from .my_paths import (
     USER,
     WORK_DIR,
 )
+from .plot import cartplot, create_map_figure, get_cbar_axes, plot_p_values
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
 from .res import get_spatiotemporal_info, infer_time_frequency
 from .tools import (
@@ -91,6 +119,7 @@ from .tools import (
     close_dask,
     cp,
     file_type,
+    get_func_signature,
     mkdir,
     mv,
     rm,
@@ -144,4 +173,9 @@ __all__ = [
     "tz_apply_func",
     "xr_interp_data",
     "xr_polyfit",
+    "cartplot",
+    "create_map_figure",
+    "get_cbar_axes",
+    "plot_p_values",
+    "get_func_signature",
 ]
