@@ -1,5 +1,6 @@
 import atexit
 import functools
+import inspect
 import logging
 import os
 import subprocess
@@ -87,6 +88,17 @@ def mkdir(arg: Union[str, Path]) -> None:
     except subprocess.CalledProcessError as e:
         print("ERROR:", e.stderr)
         return None
+
+
+def get_func_signature(func):
+    """
+    Get the signature of a function as a dictionary.
+    """
+    sig = inspect.signature(func)
+    return {
+        k: v.default if v.default is not inspect.Parameter.empty else None
+        for k, v in sig.parameters.items()
+    }
 
 
 def file_type(file_path: Union[str, Path]) -> str:
