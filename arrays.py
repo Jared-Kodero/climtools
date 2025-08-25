@@ -3,14 +3,14 @@ import uuid
 from multiprocessing import Pool
 from os import PathLike
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Union
+from typing import Callable, Literal, Mapping, Union
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from pac_man import which
 
 from .my_paths import CWD, DATA_DIR
-from .pac_man import eval_pkg_cdo
 from .tools import _TMP_FILES, CPU_COUNT, log, rm
 
 # from joblib import Parallel, delayed
@@ -34,9 +34,9 @@ def cdo_mergetime(
     """
 
     try:
-        is_cdo = eval_pkg_cdo()
+        is_cdo = which("cdo")
         if not is_cdo:
-            raise ValueError(
+            raise FileNotFoundError(
                 "CDO is not installed or not available in the system path."
             )
 
@@ -69,113 +69,15 @@ def cdo_mergetime(
         print("ERROR:", e.stderr)
 
 
-def cdo_unpack_nc(
-    infile,
-    outfile,
-):
-    """
-    Unpack a netCDF file using CDO. This function uses the Climate Data Operators (CDO) to unpack
-    a netCDF file. The CDO must be installed and available in the
-    system path. The function will create temporary files in the system
-    temporary directory and delete them after use.
-
-    Parameters
-    ----------
-    infile : str
-        The input netCDF file to be unpacked.
-    outfile : str
-        The output netCDF file after unpacking.
-    """
-
-    try:
-        is_cdo = eval_pkg_cdo()
-        if not is_cdo:
-            return None
-
-        subprocess.run(
-            [
-                "cdo",
-                "--no_history",
-                "-s",
-                "-w",
-                "-P",
-                "4",
-                "-unpack",
-                infile,
-                outfile,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-        return None
-
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-
-
-def cdo_pack_nc(
-    infile,
-    outfile,
-    *,
-    remove_input: bool = True,
-):
-    """
-    Pack a netCDF file using CDO.This function uses the Climate Data Operators (CDO) to pack
-    a netCDF file. The CDO must be installed and available in the
-    system path. The function will create temporary files in the system
-    temporary directory and delete them after use.
-
-    Parameters
-    ----------
-    infile : str
-        The input netCDF file to be packed.
-    outfile : str
-        The output netCDF file after packing.
-    remove_input : bool, optional
-        If True, the input file will be removed after packing. The default is True.
-        If False, the input file will not be removed.
-    """
-
-    try:
-        is_cdo = eval_pkg_cdo()
-        if not is_cdo:
-            return None
-
-        subprocess.run(
-            [
-                "cdo",
-                "--no_history",
-                "-s",
-                "-w",
-                "-P",
-                "4",
-                "-pack",
-                infile,
-                outfile,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if remove_input:
-            rm(infile)
-        return outfile
-
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-
-
 def cdo_interp_data(
-    infile: PathLike[Any],
-    outfile: PathLike[Any],
+    infile: Path | PathLike,
+    outfile: Path | PathLike,
     *,
     resolution: float = 0.25,
     method: Literal["remapdis", "remapcon", "remapbil"] = "remapdis",
     bbox: tuple[float, float, float, float] = None,
     pack: bool = False,
-) -> Union[xr.DataArray, xr.Dataset, str, PathLike[Any]]:
+) -> xr.DataArray | xr.Dataset | str | PathLike:
     """
     Interpolate data to a regular grid using CDO. This function uses the Climate Data Operators (CDO) to interpolate
     data to a regular grid. The CDO must be installed and available in the
@@ -184,9 +86,9 @@ def cdo_interp_data(
 
     Parameters
     ----------
-    infile : PathLike[Any]
+    infile : PathLike
         The input netCDF file to be interpolated.
-    outfile : PathLike[Any]
+    outfile : PathLike
         The output netCDF file after interpolation.
     resolution : float, optional
         The resolution of the output grid in degrees. The default is 0.25.
@@ -203,9 +105,9 @@ def cdo_interp_data(
 
     """
 
-    is_cdo = eval_pkg_cdo()
+    is_cdo = which("cdo")
     if not is_cdo:
-        return None
+        raise ValueError("CDO is not installed or not available in the system path.")
 
     CWD_DIR = CWD()
 
@@ -266,14 +168,14 @@ def cdo_interp_data(
 
 
 def xr_interp_data(
-    obj: Union[xr.DataArray, xr.Dataset],
+    obj: xr.DataArray | xr.Dataset,
     resolution: float = 0.25,
     *,
     x: str = "lon",
     y: str = "lat",
     method: Literal["linear", "nearest", "cubic"] = "linear",
     bbox: tuple[float, float, float, float] = None,
-) -> Union[xr.DataArray, xr.Dataset]:
+) -> xr.DataArray | xr.Dataset:
     """
     Interpolate data to a regular grid using xarray.
     This function uses the xarray library to interpolate
@@ -324,11 +226,11 @@ def xr_interp_data(
 
 
 def land_sea_mask(
-    obj: Union[xr.DataArray, xr.Dataset],
+    obj: xr.DataArray | xr.Dataset,
     *,
     keep: Literal["land", "ocean"] = None,
     mask_file: Literal["cartopy", "era5"] = "era5",
-) -> Union[xr.DataArray, xr.Dataset]:
+) -> xr.DataArray | xr.Dataset:
     """
     Apply a land-sea mask to the dataset. This function uses a netCDF file containing
     land-sea masks to filter out specific features from the dataset.
@@ -388,10 +290,10 @@ def get_local_solar_time(data: xr.Dataset):
 
 
 def get_UTC_offset(
-    obj: Union[int, float, np.ndarray, xr.DataArray, xr.Dataset],
+    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
     *,
     name: Literal["lon", "longitude", "x"] = "lon",
-) -> Union[int, float, np.ndarray, xr.DataArray, xr.Dataset]:
+) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
     """
     Computes the hour offset from UTC time based on the longitude coordinate.
     """
@@ -413,10 +315,10 @@ def get_UTC_offset(
 
 
 def split_data_by_dims(
-    obj: Union[xr.DataArray, xr.Dataset],
+    obj: xr.DataArray | xr.Dataset,
     dim: str,
     N: int,
-) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
+) -> dict[str, xr.DataArray | xr.Dataset]:
     """
     Splits an xarray DataArray or Dataset into N parts along the specified dimension.
 
@@ -485,8 +387,8 @@ def split_by_15_deg(
 
 
 def split_data_by_timezones(
-    obj: Union[xr.DataArray, xr.Dataset],
-) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
+    obj: xr.DataArray | xr.Dataset,
+) -> dict[str, xr.DataArray | xr.Dataset]:
     """
     Split the dataset into chunks based on time zones.
     This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
@@ -575,10 +477,10 @@ def _tz_apply_func_serial(
 
 def tz_apply_func(
     func: Callable,
-    obj: Union[xr.DataArray, xr.Dataset],
+    obj: xr.DataArray | xr.Dataset,
     multiprocess: bool = True,
     kwargs: Mapping | None = None,
-) -> Union[xr.DataArray, xr.Dataset]:
+) -> xr.DataArray | xr.Dataset:
     """
     Process the dataset by time zones using a specified function.
 

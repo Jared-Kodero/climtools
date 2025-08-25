@@ -713,6 +713,9 @@ def cartplot(
     return (fig, ax, p)
 
 
+see_data = cartplot
+
+
 @xr.register_dataarray_accessor("cartopy")
 class CartPlotAccessor:
     def __init__(self, xarray_obj):

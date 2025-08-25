@@ -81,8 +81,7 @@ Notes:
 
 """
 
-from .corr import calc_corr
-from .handle_nc import (
+from .arrays import (
     cdo_interp_data,
     cdo_mergetime,
     cdo_pack_nc,
@@ -95,6 +94,7 @@ from .handle_nc import (
     tz_apply_func,
     xr_interp_data,
 )
+from .corr import calc_corr
 from .logs import line_break, log
 from .my_paths import (
     CWD,
@@ -111,7 +111,7 @@ from .my_paths import (
     USER,
     WORK_DIR,
 )
-from .plot import cartplot, create_map_figure, get_cbar_axes, plot_p_values
+from .plot import cartplot, create_map_figure, get_cbar_axes, plot_p_values, see_data
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
 from .res import get_spatiotemporal_info, infer_time_frequency
 from .tools import (
@@ -178,4 +178,5 @@ __all__ = [
     "get_cbar_axes",
     "plot_p_values",
     "get_func_signature",
+    "see_data",
 ]
