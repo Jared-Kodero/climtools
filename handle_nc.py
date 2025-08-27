@@ -8,8 +8,8 @@ from typing import Callable, Literal, Mapping, Union
 import numpy as np
 import pandas as pd
 import xarray as xr
-from pac_man import which
 
+from .pac_man import which
 from .tools import _TMP_FILES, CPU_COUNT, CWD, SCRIPT_DIR, log, rm
 
 # from joblib import Parallel, delayed

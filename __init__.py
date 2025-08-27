@@ -131,7 +131,6 @@ __all__ = [
     "calc_trends",
     "cdo_interp_data",
     "cdo_mergetime",
-    "cdo_pack_nc",
     "close_dask",
     "cp",
     "file_type",
