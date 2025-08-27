@@ -312,9 +312,6 @@ def plot_p_values(
     return ax
 
 
-# wrap cartplot's signature & docstring
-
-
 def _animate(
     args,
 ):

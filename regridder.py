@@ -8,8 +8,7 @@ import xarray as xr
 import xesmf as xe
 
 from .logs import log
-from .my_paths import CWD
-from .tools import _TMP_FILES, CPU_COUNT
+from .tools import _TMP_FILES, CPU_COUNT, CWD
 
 
 def ESMF_RegridWeightGen(
