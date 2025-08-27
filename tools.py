@@ -1,8 +1,10 @@
 import atexit
 import functools
+import getpass
 import inspect
 import logging
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -10,7 +12,20 @@ from typing import Union
 
 from .logs import *
 
+HOST = socket.gethostname()
+USER = getpass.getuser()
+HOME = Path.home()
+TMPDIR = Path(os.environ.get("TMPDIR", "/tmp"))
+SCRIPT_DIR = Path(__file__).resolve().parent
 CPU_COUNT = len(os.sched_getaffinity(0))
+
+
+def CWD():
+    """
+    Get the current working directory.
+    """
+    return Path.cwd().resolve()
+
 
 CURRENT_DASK_CLUSTER = None
 CURRENT_DASK_CLIENT = None

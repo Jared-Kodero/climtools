@@ -81,12 +81,14 @@ Notes:
 
 """
 
-from .arrays import (
+from .corr import calc_corr
+from .handle_nc import (
     cdo_interp_data,
     cdo_mergetime,
-    cdo_pack_nc,
     get_local_solar_time,
+    get_spatiotemporal_info,
     get_UTC_offset,
+    infer_time_frequency,
     land_sea_mask,
     split_by_15_deg,
     split_data_by_dims,
@@ -94,28 +96,16 @@ from .arrays import (
     tz_apply_func,
     xr_interp_data,
 )
-from .corr import calc_corr
 from .logs import line_break, log
-from .my_paths import (
-    CWD,
-    DATA_DIR,
-    DEEPS_SHARE_DIR,
-    ERA5_DIR,
-    ERA5_RAW_DIR,
-    FIG_DIR,
-    HOME,
-    HOST,
-    SCRATCH_DIR,
-    SCRIPTS_DIR,
-    TMP,
-    USER,
-    WORK_DIR,
-)
 from .plot import cartplot, create_map_figure, get_cbar_axes, plot_p_values, see_data
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
-from .res import get_spatiotemporal_info, infer_time_frequency
 from .tools import (
     CPU_COUNT,
+    CWD,
+    HOME,
+    HOST,
+    TMPDIR,
+    USER,
     close_dask,
     cp,
     file_type,
@@ -131,19 +121,11 @@ from .trends import calc_signicance, calc_trends, mk_trend_test, xr_polyfit
 __all__ = [
     "CPU_COUNT",
     "CWD",
-    "DATA_DIR",
-    "DEEPS_SHARE_DIR",
     "ESMF_RegridWeightGen",
-    "ERA5_DIR",
-    "ERA5_RAW_DIR",
-    "FIG_DIR",
     "HOME",
     "HOST",
-    "SCRATCH_DIR",
-    "SCRIPTS_DIR",
-    "TMP",
+    "TMPDIR",
     "USER",
-    "WORK_DIR",
     "calc_corr",
     "calc_signicance",
     "calc_trends",
