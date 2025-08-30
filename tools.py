@@ -16,8 +16,11 @@ HOST = socket.gethostname()
 USER = getpass.getuser()
 HOME = Path.home()
 TMPDIR = Path(os.environ.get("TMPDIR", "/tmp"))
-SCRIPT_DIR = Path(__file__).resolve().parent
 CPU_COUNT = len(os.sched_getaffinity(0))
+SCRIPT_DIR = Path(__file__).resolve().parent
+CURRENT_DASK_CLUSTER = None
+CURRENT_DASK_CLIENT = None
+_TMP_FILES = []
 
 
 def CWD():
@@ -25,11 +28,6 @@ def CWD():
     Get the current working directory.
     """
     return Path.cwd().resolve()
-
-
-CURRENT_DASK_CLUSTER = None
-CURRENT_DASK_CLIENT = None
-_TMP_FILES = []
 
 
 def cleanup():

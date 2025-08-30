@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from multiprocessing import Pool
 from os import PathLike
 from pathlib import Path
 from typing import Literal, Union
@@ -12,9 +14,10 @@ import cartopy.feature as cfeature
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import xarray as xr
 
-from .tools import get_func_signature
+from .tools import CPU_COUNT, get_func_signature
 
 
 def get_cbar_axes(
@@ -152,7 +155,6 @@ def create_map_figure(
     borders: bool = True,
     facecolor: str = "grey",
     edgecolor: str = "face",
-    bbox: tuple[float, float, float, float] = None,
     coastlines: bool = True,
     ocean: bool = True,
     land: bool = True,
@@ -178,10 +180,6 @@ def create_map_figure(
 
     central_latitude : float, default 0.0
         Central latitude of the projection. Relevant for Orthographic and some regional projections.
-
-    bbox : tuple of float, optional
-        Bounding box for the map extent in the form (min_lon, min_lat, max_lon, max_lat).
-        Ignored if `global_extent=True`.
 
     coastlines : bool, default True
         If True, adds coastlines to the map.
@@ -255,9 +253,6 @@ def create_map_figure(
     if borders:
         ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3)
 
-    if bbox:
-        ax.set_extent([bbox[0], bbox[2], bbox[1], bbox[3]], crs=ccrs.PlateCarree())
-
     return fig, ax
 
 
@@ -312,58 +307,87 @@ def plot_p_values(
     return ax
 
 
-def _animate(
-    args,
-):
+def update_animation_frame(i, data, dim, kwargs, dpi, session_tmp_dir):
+    da = data.isel({dim: i})
+    t = (
+        da[dim].values.item()
+        if dim in da.dims
+        else data[dim].isel({dim: i}).values.item()
+    )
 
-    kwargs = locals().copy()
-    kwargs = kwargs["args"]
-    data = kwargs["data"]  # first positional arg must be the DataArray
+    if dim == "time":
+        if isinstance(t, int):
+            t = np.datetime64(t, "ns")
+            t = pd.to_datetime(t)
+        t = t.strftime("%Y-%m-%d %H:%M")
+    t = f"{dim}: {t}"
+
+    local_kwargs = kwargs.copy()
+    local_kwargs["data"] = da
+
+    fname = session_tmp_dir / f"{i:06d}.png"
+    fig, ax, _ = cartplot(**local_kwargs)
+    ax.set_title(t)
+    plt.savefig(fname, dpi=dpi, bbox_inches="tight")
+    ax.clear()
+    plt.close(fig)
+    return None
+
+
+def animate_data(args):
+    kwargs = args
+    data = kwargs["data"]
     dim = kwargs["animate_dim"]
     indices = kwargs["animate_indices"]
     fps = kwargs["animate_fps"]
     quality = kwargs["animate_quality"]
     out_file = kwargs["animate_out_file"]
-
-    del kwargs["data"]
-    del kwargs["animate_dim"]
-    del kwargs["animate_indices"]
-    del kwargs["animate_fps"]
-    del kwargs["animate_quality"]
-    del kwargs["animate_out_file"]
-    del kwargs["animate"]
+    parallel = kwargs["parallel"]
+    # clean kwargs
+    for k in [
+        "data",
+        "animate_dim",
+        "animate_indices",
+        "animate_fps",
+        "animate_quality",
+        "animate_out_file",
+        "animate",
+        "parallel",
+    ]:
+        del kwargs[k]
 
     if dim not in data.dims:
         raise ValueError(f"{dim} not found in data.dims {data.dims}")
 
     session_tmp_dir = Path(tempfile.mkdtemp())
-
-    if quality == "low":
-        dpi = 300
-    elif quality == "medium":
-        dpi = 600
-    elif quality == "high":
-        dpi = 1200
-
-    def _update(da, i, t=None):
-        kwargs["data"] = da
-
-        fname = session_tmp_dir / f"{i:06d}.png"
-        fig, ax, _ = cartplot(**kwargs)
-        ax.set_title(t)
-        plt.savefig(fname, dpi=dpi, bbox_inches="tight")
-        plt.close(fig)
-        return None
+    dpi_map = {"low": 300, "medium": 600, "high": 1200}
+    dpi = dpi_map.get(quality, 600)
 
     if indices is None:
         indices = range(data.sizes[dim])
+        print(f"Animating all {data.sizes[dim]} values along {dim}.")
 
-    for i in indices:
-        t = data[dim].isel({dim: i}).values.item()  # Extract scalar from 0D array
-        if dim == "time":
-            t = t.strftime("%Y-%m-%d %H:%M")
-        t = f"{dim}: {t}"
-        _update(data.isel({dim: i}), i, t)
+    if parallel:
+        if len(indices) >= CPU_COUNT:
+            processes = CPU_COUNT
+        else:
+            processes = len(indices)
+        tasks = [(i, data.copy(), dim, kwargs, dpi, session_tmp_dir) for i in indices]
+        with Pool(processes=processes) as pool:
+            pool.starmap(update_animation_frame, tasks)
+
+    else:
+
+        _warn_msg = (
+            f"Generating {data.sizes[dim]} frames without parallel processing. "
+            "Set parallel=True for faster animation."
+        )
+
+        if len(indices) > 100:
+            print(_warn_msg)
+
+        for i in list(indices):
+            update_animation_frame(i, data, dim, kwargs, dpi, session_tmp_dir)
 
     # ---- ffmpeg encode (MP4 only) ----
     if not out_file:
@@ -436,8 +460,8 @@ def _animate(
 def cartplot(
     data: xr.DataArray,
     *,
-    x=None,
-    y=None,
+    x: str = None,
+    y: str = None,
     plot_type: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow"
     ] = "default",
@@ -461,142 +485,99 @@ def cartplot(
     vmax: float = None,
     levels: Union[int, list] = None,
     robust: bool = False,
-    gridlines: bool = False,
-    add_colorbar: bool = True,
     orientation: Literal["vertical", "horizontal"] = "vertical",
+    add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    states: bool = True,
-    borders: bool = True,
-    facecolor: str = "#d3d3d3",
-    edgecolor: str = "face",
-    bbox: tuple[float, float, float, float] = None,
+    gridlines: bool = False,
     coastlines: bool = True,
+    borders: bool = True,
+    states: bool = True,
     ocean: bool = True,
     land: bool = True,
+    facecolor: str = "#d3d3d3",
+    edgecolor: str = "face",
     animate: bool = False,
     animate_dim: str = "time",
-    animate_indices: tuple = None,
+    animate_indices: Union[tuple, list, np.ndarray] = None,
     animate_out_file: PathLike = None,
     animate_quality: Literal["low", "medium", "high"] = "medium",
-    animate_fps=10,
+    animate_fps: int = 10,
+    parallel: bool = False,
     **kwargs,
 ):
     """
-    Plot an xarray DataArray on a Cartopy map using the specified projection and plot type.
+    Plot a 2D xarray.DataArray on a Cartopy map with flexible projection and styling options.
 
     Parameters
     ----------
     data : xr.DataArray
-        The 2D data to plot. Should contain spatial dimensions (e.g., lat/lon or x/y).
-    x : str or None, optional
-        Name of the x dimension. If None, uses the first dimension of the DataArray.
-    y : str or None, optional
-        Name of the y dimension. If None, uses the second dimension of the DataArray.
-
-    map_type : {"pcolormesh", "contourf", "contour", "imshow"}, optional
-        The type of plot to generate. If None, defaults to `DataArray.plot()` behavior.
-
-    projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic",
-                  "LambertConformal", "AlbersEqualArea", "Stereographic",
-                  "NorthPolarStereo", "SouthPolarStereo"}, default: "PlateCarree"
-        The Cartopy CRS projection to use for the map.
-
-    central_longitude : float, default: 0.0
-        Central longitude of the projection.
-
-    global_extent : bool, default: False
-        If True, sets extent to show the entire globe. Otherwise, uses `bbox` if given.
-
-    figsize : tuple of float, optional
-        Figure size in inches, as (width, height).
-
-    cmap : str or matplotlib.colors.Colormap, optional
-        Colormap to use for the plot.
-
-    vmin : float, optional
-        Minimum data value for color scaling.
-
-    vmax : float, optional
-        Maximum data value for color scaling.
-
-    levels : int or list of float, optional
-        Number of contour levels (int) or specific contour values (list).
-        Used for contour and contourf plots.
-
-    robust : bool, default: False
-        If True and `vmin`/`vmax` are not specified, uses the 2nd and 98th percentiles
-        for color limits to reduce the impact of outliers.
-
-    gridlines : bool, default: False
-        If True, overlays latitude/longitude gridlines.
-
-    orientation : {"vertical", "horizontal"}, default: "vertical"
-        Orientation of the colorbar.
-
-    draw_cbar_edges : bool, default: True
-        If True, draws edges on the colorbar for better visibility.
-
+        2D array with spatial dimensions (e.g., lat/lon or x/y).
+    x, y : str, optional
+        Names of spatial dimensions. Defaults to first and second dims.
+    plot_type : str, default "default"
+        Plot style: "pcolormesh", "contourf", "contour", "imshow", or "default".
+    projection : str, default "PlateCarree"
+        Cartopy map projection.
+    central_longitude : float, default 0.0
+        Central longitude for projection.
+    global_extent : bool, default False
+        Show full globe if True.
+    figsize : tuple, optional
+        Figure size in inches.
+    cmap : str or Colormap, optional
+        Colormap for data.
+    vmin, vmax : float, optional
+        Color scale limits.
+    levels : int or list, optional
+        Contour levels for "contour" or "contourf".
+    robust : bool, default False
+        Use 2nd-98th percentiles for color scale if vmin/vmax not set.
+    orientation : str, default "vertical"
+        Colorbar orientation.
+    add_colorbar : bool, default True
+        Show colorbar.
+    drawedges : bool, default False
+        Draw edges on colorbar.
     cbar_label : str, optional
-        Label for the colorbar.
-
-    states : bool, default: True
-        If True, overlays U.S. state boundaries (only visible in appropriate extents).
-
-    borders : bool, default: True
-        If True, overlays international borders.
-
-    facecolor : str, default: "grey"
-        Fill color for landmasses or continents.
-
-    edgecolor : str, default: "face"
-        Edge color for coastlines and borders.
-
-    bbox : tuple of float, optional
-        Geographic extent to display in (min_lon, min_lat, max_lon, max_lat) format.
-        Ignored if `global_extent=True`.
-
-    coastlines : bool, default: True
-        If True, adds coastlines to the map.
-
-    ocean : bool, default: True
-        If True, displays ocean features.
-
-    land : bool, default: True
-        If True, displays land features.
-
-    animate_dim : str, default: "time"
-        The dimension along which to create the animation..
-
-    animate_indices : list of int
-        The indices of the values to animate e.g. [0, 1, 2].
-
-    animate_out_file : str, default: None
-        The output file for the animation.
-
-    animate_fps : int, default: 10
-        The frames per second for the animation.
-
-    animate_quality : {"low", "medium", "high"}, default: "medium"
-        The quality of the animation.
+        Label for colorbar.
+    gridlines : bool, default False
+        Show lat/lon gridlines.
+    coastlines, borders, states : bool, default True
+        Show geographic features.
+    ocean, land : bool, default True
+        Show physical features.
+    facecolor : str, default "#d3d3d3"
+        Land fill color.
+    edgecolor : str, default "face"
+        Border edge color.
+    animate : bool, default False
+        Enable animation over a dimension.
+    animate_dim : str, default "time"
+        Dimension to animate.
+    animate_indices : list, optional
+        Indices to animate.
+    animate_out_file : str, optional
+        Output file path for animation.
+    animate_quality : str, default "medium"
+        Animation quality.
+    animate_fps : int, default 10
+        Frames per second.
+    parallel : bool, default False
+        Use parallel processing for animation.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
-        The Matplotlib Figure object.
-
+        The figure object.
     ax : cartopy.mpl.geoaxes.GeoAxesSubplot
-        The Cartopy-aware Axes with the plotted map.
-
-    p : matplotlib.collections.QuadMesh or matplotlib.contour.ContourSet
+        The map axes.
+    p : matplotlib artist
         The plotted data object.
 
     Notes
     -----
-    - This function requires `cartopy` and `matplotlib`.
-    - It is intended for 2D spatial `xarray.DataArray` objects with geographic dimensions.
-    - Some features (e.g., borders and state lines) require Natural Earth shapefiles
-      which `cartopy` can download automatically.
+    Requires `cartopy` and `matplotlib`. Designed for 2D geospatial data.
     """
 
     allargs = locals()
@@ -616,25 +597,11 @@ def cartplot(
         )
 
     if animate:
-        return _animate(allargs)
+        return animate_data(allargs)
 
     map_kwags = get_func_signature(create_map_figure)
     map_kwags = {k: v for k, v in allargs.items() if k in map_kwags}
     plot_kwargs = {k: v for k, v in allargs.items() if k not in map_kwags}
-
-    if bbox:
-        # Normalize possible dim names
-        lat_names = ["lat", "latitude"]
-        lon_names = ["lon", "longitude"]
-        # Find matching dimension names
-        lat_dim = next((name for name in lat_names if name in data.dims), None)
-        lon_dim = next((name for name in lon_names if name in data.dims), None)
-
-        if lat_dim and lon_dim:
-            # Slice only if both lat/lon exist
-            data = data.sel(
-                {lat_dim: slice(bbox[1], bbox[3]), lon_dim: slice(bbox[0], bbox[2])}
-            )
 
     fig, ax = create_map_figure(**map_kwags)
 
@@ -650,7 +617,6 @@ def cartplot(
         raise ValueError(
             f"Invalid plot_type '{plot_type}'. Choose from {list(plot_funcs)}."
         )
-    from .tools import log
 
     plot_kwargs = {}
     for _, sig in plot_funcs.values():
