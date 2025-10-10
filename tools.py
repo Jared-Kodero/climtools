@@ -4,11 +4,17 @@ import getpass
 import inspect
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import time
+from multiprocessing import Pool
 from pathlib import Path
-from typing import Union
+from typing import Callable, Literal, Mapping, Union
+
+import numpy as np
+import pandas as pd
+import xarray as xr
 
 from .logs import *
 
@@ -35,6 +41,50 @@ def cleanup():
 
 
 atexit.register(cleanup)
+
+
+def execute_cmd(cmd: list[str]):
+
+    try:
+        res = subprocess.run(
+            cmd,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return res
+    except subprocess.CalledProcessError as e:
+        print("ERROR :", e.stderr)
+        return None
+
+
+def type_cast(x, use_numpy: bool = False):
+    """
+    Cast input x to int or float (optionally using numpy types).
+    Returns the original input if casting fails.
+    """
+    if x is None or str(x).strip() == "":
+        raise ValueError("Input cannot be None or empty string")
+
+    _int = np.int64 if use_numpy else int
+    _float = np.float64 if use_numpy else float
+
+    try:
+        if "." in str(x):
+            res = _float(x)
+        else:
+            res = _int(x)
+    except (ValueError, TypeError):
+        try:
+            res = _float(x)
+        except (ValueError, TypeError):
+            res = None
+
+    if res is None:
+        print(f"Warning: Cannot cast {x} to int or float, returning type {type(x)}")
+        return x
+
+    return res
 
 
 def timeit(func):
@@ -69,38 +119,24 @@ def timeit(func):
     return wrapper
 
 
-def mkdir(arg: Union[str, Path]) -> None:
+def mkdir(arg: Path | PathLike):
     """
     Create a directory using the mkdir command in unix-like systems.
 
     """
+    if isinstance(arg, Path):
+        arg = str(arg)
+    elif isinstance(arg, list):
+        arg = [str(i) for i in arg]
 
-    try:
+    arg = str(arg).strip()
 
-        if isinstance(arg, Path):
-            arg = str(arg)
-        elif isinstance(arg, list):
-            arg = [str(i) for i in arg]
+    if arg in {"", ".", ".."}:
+        raise ValueError("Invalid or empty path passed to mkdir command")
 
-        arg = str(arg).strip()
+    res = execute_cmd(["mkdir", "-p", arg])
 
-        if arg in {"", ".", ".."}:
-            raise ValueError("Invalid or empty path passed to mkdir command")
-
-        subprocess.run(
-            [
-                "mkdir",
-                "-p",
-                arg,
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-        return None
+    return res
 
 
 def get_func_signature(func):
@@ -114,7 +150,7 @@ def get_func_signature(func):
     }
 
 
-def file_type(file_path: Union[str, Path]) -> str:
+def file_type(file_path: Path | PathLike) -> str:
     """
     Get the file type using the `file` command in unix-like systems.
     """
@@ -122,111 +158,566 @@ def file_type(file_path: Union[str, Path]) -> str:
     if isinstance(file_path, Path):
         file_path = str(file_path)
 
-    result = subprocess.run(
-        ["file", "-b", file_path],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    return result.stdout.strip()
+    res = execute_cmd(["file", "-b", file_path])
+    return res.stdout.strip()
 
 
-def rm(arg: Union[str, Path, list[Union[str, Path]]]) -> None:
+def symlink(
+    src: Path | PathLike,
+    dst: Path | PathLike,
+):
     """
-    Remove files or directories using the rm command in unix-like systems.
-    By default, it uses the -rf flags to remove directories and their contents recursively and forcefully.
+    Create a symbolic link from src to dst.
+    """
+    src = Path(src).resolve()
+    dst = Path(dst).resolve()
+
+    # Create parent directories for the link
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # Remove existing link or file if already exists
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+
+    # Create symbolic link
+    if src.is_dir():
+        dst.symlink_to(src, target_is_directory=True)
+    elif src.is_file():
+        dst.symlink_to(src)
+    else:
+        raise FileNotFoundError(f"Source path does not exist: {src}")
+
+
+def rm(arg: Path | PathLike | list[Path | PathLike]):
+    """
+    Remove files or directories
 
     """
 
-    try:
+    if not isinstance(arg, list):
+        arg = [arg]
 
-        if isinstance(arg, str):
-            arg = [arg]
-        elif isinstance(arg, Path):
-            arg = [str(arg)]
-        elif isinstance(arg, list):
-            arg = [str(i) for i in arg]
-
-        arg = [str(i).strip() for i in arg]
-
-        subprocess.run(
-            [
-                "rm",
-                "-rf",
-                *arg,
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-        return None
+    for f in arg:
+        f = Path(f).resolve()
+        if f.is_file():
+            f.unlink()
+        elif f.is_dir():
+            shutil.rmtree(f, ignore_errors=True)
 
 
 def cp(
-    src: Union[str, Path],
-    dst: Union[str, Path],
-) -> None:
+    src: Path | PathLike,
+    dst: Path | PathLike,
+):
     """
-    Copy files or directories using the cp command.
-    By default, it uses the -rf flags to copy directories and their contents recursively and forcefully.
+    Copy files or directories
 
     """
 
-    try:
+    src = Path(src).resolve()
+    dst = Path(dst).resolve()
 
-        src = str(Path(src).resolve())
-        dst = str(Path(dst).resolve())
+    if src.is_file():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
-        subprocess.run(
-            [
-                "cp",
-                "-rf",
-                src,
-                dst,
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-        return None
+    elif src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
 def mv(
-    src: Union[str, Path],
-    dst: Union[str, Path],
-) -> None:
+    src: Path | PathLike,
+    dst: Path | PathLike,
+):
     """
-    Move files or directories using the mv command.
+    Move files or directories
 
     """
 
-    try:
+    src = Path(src).resolve()
+    dst = Path(dst).resolve()
 
-        src = str(Path(src).resolve())
-        dst = str(Path(dst).resolve())
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(src, dst)
 
-        subprocess.run(
-            [
-                "mv",
-                "-f",
-                src,
-                dst,
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
+
+def land_sea_mask(
+    obj: xr.DataArray | xr.Dataset,
+    *,
+    keep: Literal["land", "ocean"] = None,
+    mask_file: Literal["cartopy", "era5"] = "era5",
+) -> xr.DataArray | xr.Dataset:
+    """
+    Apply a land-sea mask to the dataset. This function uses a netCDF file containing
+    land-sea masks to filter out specific features from the dataset.
+    """
+
+    if "lat" not in obj.dims or "lon" not in obj.dims:
+        raise ValueError(
+            "The dataset must have 'lat' and 'lon' dimensions to apply the land-sea mask."
         )
 
-    except subprocess.CalledProcessError as e:
-        print("ERROR:", e.stderr)
-        return None
+    masks = {
+        "cartopy": "cartopy_0.1.mask",
+        "era5": "era5_0.25_mask",
+    }
+
+    file = SCRIPT_DIR / "data" / masks[mask_file]
+
+    mask = xr.open_dataset(file)
+
+    obj = obj.sortby(["lat", "lon"])
+
+    lat_min, lat_max = obj.lat.min().values, obj.lat.max().values
+    lon_min, lon_max = obj.lon.min().values, obj.lon.max().values
+
+    mask = mask[keep].sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+    mask = mask.interp(lat=obj.lat, lon=obj.lon, method="nearest")
+
+    if isinstance(obj, xr.Dataset):
+
+        log(f"Removing feature(s): {keep} in {list(obj.data_vars)}", level="WARNING")
+        new_obj = xr.Dataset()
+        for data_var in list(obj.data_vars):
+            new_obj[data_var] = obj[data_var].where(mask, other=np.nan)
+
+    elif isinstance(obj, xr.DataArray):
+        log(f"Removing feature(s): {keep} in {obj.name}", level="WARNING")
+        new_obj = obj.where(mask, other=np.nan)
+
+    return new_obj
+
+
+def get_local_solar_time(data: xr.Dataset):
+    """
+    Calculate the local solar time for the dataset based on the longitude coordinate.
+    The local solar time is calculated as the UTC time plus the longitude offset.
+    """
+
+    if "lon" not in data or "lat" not in data:
+        raise ValueError("Dataset must contain 'lon' and 'lat' coordinates.")
+
+    offset = data["lon"] * (24 / 360) * (data["lat"] / data["lat"])
+    offset = offset.round() * pd.Timedelta(hours=1)
+
+    lst = (data["time"] + offset).transpose("time", "lat", "lon")
+
+    return data.assign_coords({"local_solar_time": lst})
+
+
+def get_UTC_offset(
+    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
+    *,
+    name: Literal["lon", "longitude", "x"] = "lon",
+) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
+    """
+    Computes the hour offset from UTC time based on the longitude coordinate.
+    """
+
+    if isinstance(obj, (xr.DataArray, xr.Dataset)):
+        data = obj.copy()
+        data[name] = ((data[name] + 180) % 360) - 180
+        offset = data[name] * (24 / 360)
+        offset = offset.round() * pd.Timedelta(hours=1)
+
+    else:
+        if isinstance(obj, str):
+            obj = float(obj)
+        obj = ((obj + 180) % 360) - 180
+        offset = obj * (24 / 360)
+        offset = np.round(offset) * pd.Timedelta(hours=1)
+
+    return offset
+
+
+def chunk_by_dims(
+    obj: xr.DataArray | xr.Dataset,
+    dim: str,
+    N: int,
+) -> dict[str, xr.DataArray | xr.Dataset]:
+    """
+    Chunk an xarray DataArray or Dataset into N parts along the specified dimension.
+
+    Parameters:
+        obj (xr.DataArray or xr.Dataset): Input data to chunk.
+        dim (str): Dimension along which to chunk.
+        N (int): Number of chunks.
+
+    Returns:
+        dict[str, xr.DataArray or xr.Dataset]: Dictionary with keys '0', ..., '{N-1}'.
+    """
+    if dim not in obj.dims:
+        raise ValueError(f"Dimension '{dim}' not found in the input data.")
+
+    dim_size = obj.sizes[dim]
+    if N < 1 or N > dim_size:
+        raise ValueError(
+            f"Invalid number of chunks N={N} for dimension size {dim_size}."
+        )
+
+    # Compute chunk indices
+    indices = np.linspace(0, dim_size, N + 1, dtype=int)
+
+    chunks = {}
+    for i in range(N):
+        chunk = obj.isel({dim: slice(indices[i], indices[i + 1])})
+        chunks[f"{i}"] = chunk
+
+    return chunks
+
+
+def chunk_longitudes(
+    obj: Union[xr.DataArray, xr.Dataset],
+    *,
+    lon: str = "lon",
+    deg: int = 15,
+) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
+    """
+    Partition a dataset into longitude bins of fixed width.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The input data containing a longitude coordinate.
+    lon : {"lon", "longitude", "x"}, optional
+        Name of the longitude coordinate. Default is "lon".
+    deg : int, optional
+        Bin width in degrees of longitude. Default is 15.
+
+    Returns
+    -------
+    dict[str, xarray.DataArray or xarray.Dataset]
+        A dictionary mapping each longitude bin (e.g., "-180", "-165", ..., "165")
+        to the corresponding subset of the data. The longitude values within each
+        bin are restored to their original values and sorted.
+
+    Notes
+    -----
+    - Longitudes are first normalized to the range [-180, 180).
+    - Each partition is labeled by its central longitude value (rounded to the nearest
+      multiple of `deg`).
+    """
+
+    chunks = {}
+    data = obj.copy()
+    data[lon] = ((data[lon] + 180) % 360) - 180
+
+    original_lons = data[lon]
+    lon_rounded = (original_lons / deg).round() * deg
+
+    idx_df = pd.DataFrame(
+        {
+            "lon_original": original_lons,
+            "lon_rounded": lon_rounded,
+        }
+    )
+
+    data[lon] = idx_df["lon_rounded"].values
+
+    for lon_val in idx_df["lon_rounded"].unique():
+        lon_val_data = data.sel({lon: lon_val})
+
+        lon_val_df = idx_df[idx_df["lon_rounded"] == lon_val]
+        lon_val_data[lon] = lon_val_df["lon_original"].values
+
+        chunks[f"{lon_val}"] = lon_val_data.sortby(lon)
+
+    return chunks
+
+
+def chunk_by_timezones(
+    obj: xr.DataArray | xr.Dataset,
+) -> dict[str, xr.DataArray | xr.Dataset]:
+    """
+    Chunk the dataset into chunks based on time zones.
+    This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
+    based on the hour offset from UTC time for each chunk.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The dataset to be split into time zone chunks.
+
+    Returns
+    -------
+    dict[str, xarray.DataArray or xarray.Dataset]
+        A dictionary where keys are time zone identifiers (e.g., "UTC+0", "UTC+1", etc.)
+        and values are the corresponding xarray objects for each time zone chunk.
+    """
+
+    data = obj.copy()
+    tz_chunks = {}
+    chunks = chunk_longitudes(data)
+    for chunk in chunks:
+        offset = get_UTC_offset(chunk)
+        data = chunks[chunk]
+        data["time"] = data["time"] + offset
+        timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
+        tz_chunks[f"UTC{timezone}"] = data
+
+    return tz_chunks
+
+
+def _process_chunk(func, kwargs, data, chunk):
+    offset = get_UTC_offset(chunk)
+    data["time"] = data["time"] + offset
+    res = func(data, **kwargs)
+    print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
+
+    return res
+
+
+def _tz_apply_func_parallel(
+    func,
+    chunks,
+    kwargs,
+):
+
+    args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
+
+    processes = max(1, min(CPU_COUNT, len(args)))
+    chunksize = max(1, len(args) // CPU_COUNT)
+
+    if chunksize == 1:
+        maxtasksperchild = 2
+    else:
+        maxtasksperchild = chunksize
+
+    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
+        datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
+
+    kwargs = {
+        "dim": "lon",
+        "join": "exact",
+        "compat": "override",
+        "data_vars": "minimal",
+        "coords": "minimal",
+    }
+
+    return xr.concat(datasets, **kwargs).sortby("lon")
+
+
+def _tz_apply_func_serial(
+    func,
+    chunks,
+    kwargs,
+):
+    datasets = []
+    for chunk in chunks:
+        datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
+
+    if len(datasets) > 1:
+        result = xr.concat(datasets, dim="lon").sortby("lon")
+    else:
+        result = datasets[0]
+
+    return result
+
+
+def tz_apply_func(
+    func: Callable,
+    obj: xr.DataArray | xr.Dataset,
+    multiprocess: bool = True,
+    kwargs: Mapping | None = None,
+) -> xr.DataArray | xr.Dataset:
+    """
+    Process the dataset by time zones using a specified function.
+
+    Parameters
+    ----------
+    func : Callable,
+        The function to be applied to each chunk of the dataset.
+    obj : xarray.DataArray or xarray.Dataset
+        The dataset to be processed.
+    multiprocess : bool, optional
+        If True, the function will be applied in parallel using multiple processes.
+    **kwargs : Any
+        Additional keyword arguments to be passed to the applied function.
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        The processed dataset after applying the function to each time zone chunk.
+
+    """
+
+    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
+        raise ValueError(
+            "The dataset must have (time, lat, lon) dimensions to apply the function."
+        )
+
+    if kwargs is None:
+        kwargs = {}
+
+    chunks = chunk_longitudes(obj)
+
+    if multiprocess and len(chunks) > 1:
+        return _tz_apply_func_parallel(func, chunks, kwargs)
+    else:
+        return _tz_apply_func_serial(func, chunks, kwargs)
+
+
+def infer_time_frequency(
+    times: Union[pd.Series, np.ndarray, xr.DataArray],
+) -> tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]:
+    """
+    Infer the time frequency of a series of timestamps.
+    This function analyzes the time intervals in the provided timestamps and returns
+    a frequency string along with the ranges of hours, months, and years present in the data.
+
+    Parameters
+    ----------
+    times : Union[pd.Series, np.ndarray, xr.DataArray]
+        A series of timestamps, which can be a pandas Series, a NumPy array, or
+        an xarray DataArray containing datetime objects.
+    Returns
+    -------
+    tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]
+        A tuple containing:
+        - freq: A string representing the inferred frequency (e.g., '1H', '1D', '1M').
+        - hour_range: A tuple of integers representing the minimum and maximum hours present in the data.
+        - month_range: A tuple of integers representing the minimum and maximum months present in the data.
+        - year_range: A tuple of integers representing the minimum and maximum years present in the data.
+    """
+
+    time_vals = pd.DataFrame({"time": times})
+    time_vals["diff"] = time_vals["time"].diff().dt.total_seconds()
+    diffs = time_vals["diff"].value_counts()
+    time_vals = time_vals[time_vals["diff"] == diffs.idxmax()]  # 2nd filtering
+
+    mean_step_seconds = time_vals["diff"].mean()
+    mean_step_seconds = int(mean_step_seconds)
+
+    # Step 4: Infer frequency string
+    freq = None
+
+    if mean_step_seconds < 60:
+        freq = f"{mean_step_seconds}S"  # seconds
+    elif mean_step_seconds < 3600:
+        freq = f"{mean_step_seconds // 60}T"  # minutes
+    elif mean_step_seconds < 86400:
+        freq = f"{mean_step_seconds // 3600}H"  # hours
+    elif mean_step_seconds < 604800:
+        freq = f"{mean_step_seconds // 86400}D"  # days
+    elif mean_step_seconds < 2419200:
+        freq = f"{mean_step_seconds // 604800}W"  # weeks
+    elif mean_step_seconds < 29030400:
+        freq = f"{mean_step_seconds // 2419200}M"  # months (approx 28 days)
+    elif mean_step_seconds < 290304000:
+        freq = f"{mean_step_seconds // 29030400}Y"  # years (approx 336 days)
+    else:
+        freq = f"{mean_step_seconds // 290304000}10Y"  # years (approx 336 days)
+
+        # Time part ranges
+    hour_range = (time_vals["time"].dt.hour.min(), time_vals["time"].dt.hour.max())
+    month_range = (time_vals["time"].dt.month.min(), time_vals["time"].dt.month.max())
+    year_range = (time_vals["time"].dt.year.min(), time_vals["time"].dt.year.max())
+
+    return freq, hour_range, month_range, year_range
+
+
+def interp_data(
+    obj: xr.DataArray | xr.Dataset,
+    resolution: float = 0.25,
+    *,
+    x: str = "lon",
+    y: str = "lat",
+    method: Literal["linear", "nearest", "cubic"] = "linear",
+    bbox: tuple[float, float, float, float] = None,
+) -> xr.DataArray | xr.Dataset:
+    """
+    Interpolate data to a regular grid using xarray.
+    This function uses the xarray library to interpolate
+    data to a regular grid. The function will create temporary files in the system
+    temporary directory and delete them after use.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The data to be interpolated. The data must have latitude and longitude
+        coordinates.
+    resolution : float, optional
+        The resolution of the output grid in degrees. The default is 0.25.
+    method : str, optional
+        The interpolation method to be used. The default is "linear".
+        Other options are "nearest" and "cubic".
+    x : str, optional
+        The name of the longitude coordinate in the data. The default is "lon".
+    y : str, optional
+        The name of the latitude coordinate in the data. The default is "lat".
+
+
+    """
+
+    obj = obj.sortby([y, x])
+
+    if bbox is not None:
+        lon_min, lat_min, lon_max, lat_max = bbox
+
+        obj = obj.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+
+    else:
+
+        lat_min, lat_max = obj[y].min().values, obj[y].max().values
+        lon_min, lon_max = obj[x].min().values, obj[x].max().values
+
+    new_lat = np.arange(lat_min, lat_max, resolution)
+    new_lon = np.arange(lon_min, lon_max, resolution)
+
+    interp_data = obj.interp(lat=new_lat, lon=new_lon, method=method)
+
+    return interp_data
+
+
+# get the total number of grid points
+def get_spatiotemporal_info(
+    obj: xr.DataArray | xr.Dataset,
+) -> dict:
+    """
+    Get the spatiotemporal information of an xarray object.
+    This function extracts the dimensions, resolution, and time frequency of the provided
+    xarray object, along with the bounds of each dimension.
+
+    Parameters
+    ----------
+    obj : Union[xr.Dataset, xr.DataArray]
+        An xarray object (either a Dataset or DataArray) containing spatial and temporal data.
+    Returns
+    -------
+    dict
+    """
+
+    dims = list(obj.dims)
+
+    resolution = {}
+
+    t_freq, hours_range, months_range, years_range = None, None, None, None
+
+    for k in dims:
+        if str(obj[k].dtype) == "datetime64[ns]":
+            t_freq, hours_range, months_range, years_range = infer_time_frequency(
+                obj[k]
+            )
+            resolution[k] = t_freq
+
+        else:
+            resolution[k] = float(np.round(obj[k].diff(k).mean().values, 2))
+
+    names = ["resolution", "hours_range", "months_range", "years_range"]
+    data = [resolution, hours_range, months_range, years_range]
+
+    result = {}
+    for k, v in zip(names, data):
+        if v is not None:
+            result[k] = v
+
+    for k in dims:
+        if k != "time":
+            result[f"{k}_bounds"] = (
+                float(np.round(obj[k].min().values, 2)),
+                float(np.round(obj[k].max().values, 2)),
+            )
+
+    return result
 
 
 def close_dask():
@@ -298,4 +789,6 @@ def setup_dask(
 
     atexit.register(_cleanup)
 
+    return client
+    return client
     return client

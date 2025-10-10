@@ -7,54 +7,43 @@ import pymannkendall as mk
 import xarray as xr
 from scipy import stats
 
-from .logs import log
-
 
 def mk_trend_test(
     array: np.ndarray,
     scale: float = 1,
-    data_type: str = None,
-    **coords,
 ) -> np.ndarray:
 
-    nan_list = [np.nan] * 7
-
-    if data_type == "pd":
-
-        nan_data = np.array(list(coords.values()) + nan_list)
-
-    else:
-        nan_data = np.array(nan_list)
+    result_array = None
+    nan_array = np.array([np.nan] * 7)
 
     df = pd.DataFrame({"array": array})
     df = df.dropna()
-    if df.empty or len(df) < 2:
-        log("Not enough data to calculate trend ! Returning NaN values.")
-        return nan_data
 
-    result = mk.hamed_rao_modification_test(df["array"])
-    mean_val = df["array"].mean()
-    std_val = df["array"].std()
+    try:
+        if not df.empty or len(df) < 2:
 
-    trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
-    stats = [
-        result.slope * scale,
-        result.p,
-        trend,
-        mean_val,
-        std_val,
-        result.Tau,
-        result.z,
-    ]
+            result = mk.hamed_rao_modification_test(df["array"])
+            mean_val = df["array"].mean()
+            std_val = df["array"].std()
 
-    if data_type == "pd":
+            trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
+            stats = [
+                result.slope * scale,
+                result.p,
+                trend,
+                mean_val,
+                std_val,
+                result.Tau,
+                result.z,
+            ]
 
-        array = np.array(list(coords.values()) + stats)
+            result_array = np.array(stats)
 
-    else:
-        array = np.array(stats)
-
-    return array
+            return result_array
+        else:
+            return nan_array
+    except Exception:
+        return nan_array
 
 
 def _dataset_dispacher(
@@ -127,7 +116,7 @@ def _xr_dispacher(
         dask="parallelized",
         output_dtypes=[np.float32],
         dask_gufunc_kwargs=dask_gufunc_kwargs,
-        kwargs={"scale": scale, "data_type": "xr"},
+        kwargs={"scale": scale},
     )
 
     trends = xr.Dataset()
@@ -138,77 +127,10 @@ def _xr_dispacher(
     return trends.compute(scheduler=dask_scheduler)
 
 
-def _pd_dispatcher(
-    data,
-    along,
-    data_var,
-    groupby,
-    scale,
-    use_dask,
-    dask_scheduler,
-    out_vars,
-):
-    if not data_var:
-        raise ValueError("Argument 'data_var' is required for pd.DataFrame input.")
-
-    if groupby:
-
-        if isinstance(groupby, str):
-            groupby = [groupby]
-        elif isinstance(groupby, tuple):
-            groupby = list(groupby)
-
-        if along in groupby:
-            groupby.remove(along)
-
-        names = groupby + out_vars
-
-        dfs = []
-        tasks = []
-        grouped_data = data.groupby(groupby)
-        for key, group in grouped_data:
-
-            if along is not None:
-                group = group.sort_values(by=along).reset_index(drop=True)
-
-            if not isinstance(key, tuple):
-                key = (key,)
-            coords = dict(zip(groupby, key))
-
-            array = group[data_var].values
-
-            if use_dask:
-
-                task = dask.delayed(mk_trend_test)(array, scale, "pd", **coords)
-                tasks.append(task)
-
-            else:
-                res = mk_trend_test(array, scale, "pd", **coords)
-                dfs.append(pd.DataFrame(res.reshape(1, -1), columns=names))
-
-        if use_dask:
-            results = dask.compute(*tasks, scheduler=dask_scheduler)
-            dfs = [pd.DataFrame(res.reshape(1, -1), columns=names) for res in results]
-
-        trends = pd.concat(dfs).reset_index(drop=True)
-
-        return trends
-
-    elif not groupby and data_var:
-
-        if data_var is not None:
-            array = data[data_var].values
-            res = mk_trend_test(array, scale, data_type="np")
-            trends = pd.DataFrame(res.reshape(1, -1), columns=out_vars)
-        return trends
-
-
 def calc_trends(
     data: Union[pd.DataFrame, xr.DataArray, xr.Dataset],
     along: str = None,
     *,
-    data_var: str = None,
-    groupby: Union[str, list[str]] = None,
     scale: float = 1,
     use_dask: bool = True,
     dask_scheduler: Literal["threads", "processes"] = "threads",
@@ -219,8 +141,6 @@ def calc_trends(
     Parameters:
         data ( pd.DataFrame | xr.Dataset): Input dataset.
         along (str): Dimension along which to calculate the trend test (Required for xarray).
-        data_var (str): Variable to calculate the trend test for (Required for xarray.Dataset).
-        groupby (str | list[str], optional): Dimensions to group data by (Required for DataFrame).
         scale (float, optional): Scaling factor for the slope (e.g., convert to per hour, per day). Default is 1.
         use_dask (bool, optional): Whether to parallelize calculations using Dask. Default is True.
         dask_scheduler (str, optional): Dask scheduler type. Default is "processes".
@@ -243,17 +163,6 @@ def calc_trends(
         return _xr_dispacher(
             data,
             along,
-            scale,
-            use_dask,
-            dask_scheduler,
-            out_vars,
-        )
-    elif isinstance(data, pd.DataFrame):
-        return _pd_dispatcher(
-            data,
-            along,
-            data_var,
-            groupby,
             scale,
             use_dask,
             dask_scheduler,
@@ -346,7 +255,7 @@ def calc_signicance(
     return res
 
 
-def xr_polyfit(data, data_var, along, scale=1):
+def polyfit(data, data_var, along, scale=1):
     """
     Calculate the linear trend for the given xarray Dataset.
 

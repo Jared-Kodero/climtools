@@ -1,5 +1,4 @@
 import difflib
-import subprocess
 import uuid
 from os import PathLike
 
@@ -8,7 +7,7 @@ import xarray as xr
 import xesmf as xe
 
 from .logs import log
-from .tools import _TMP_FILES, CPU_COUNT, CWD
+from .tools import _TMP_FILES, CPU_COUNT, CWD, execute_cmd
 
 
 def ESMF_RegridWeightGen(
@@ -110,113 +109,110 @@ def ESMF_RegridWeightGen(
     - This function does not enforce default values; all arguments must be provided explicitly if required.
     """
 
-    try:
+    PARAMS = [
+        "source",
+        "s",
+        "destination",
+        "d",
+        "weight",
+        "w",
+        "method",
+        "m",
+        "pole",
+        "p",
+        "line_type",
+        "l",
+        "norm_type",
+        "extrap_method",
+        "extrap_num_src_pnts",
+        "extrap_dist_exponent",
+        "extrap_num_levels",
+        "ignore_unmapped",
+        "i",
+        "ignore_degenerate",
+        "src_type",
+        "dst_type",
+        "t",
+        "r",
+        "src_regional",
+        "dst_regional",
+        "64bit_offset",
+        "netcdf4",
+        "weight_only",
+        "src_missingvalue",
+        "dst_missingvalue",
+        "src_coordinates",
+        "dst_coordinates",
+        "user_areas",
+        "src_loc",
+        "dst_loc",
+        "tilefile_path",
+        "no_log",
+        "check",
+        "checkFlag",
+        "help",
+        "h",
+        "version",
+        "V",
+    ]
 
-        PARAMS = [
-            "source",
-            "s",
-            "destination",
-            "d",
-            "weight",
-            "w",
-            "method",
-            "m",
-            "pole",
-            "p",
-            "line_type",
-            "l",
-            "norm_type",
-            "extrap_method",
-            "extrap_num_src_pnts",
-            "extrap_dist_exponent",
-            "extrap_num_levels",
-            "ignore_unmapped",
-            "i",
-            "ignore_degenerate",
-            "src_type",
-            "dst_type",
-            "t",
-            "r",
-            "src_regional",
-            "dst_regional",
-            "64bit_offset",
-            "netcdf4",
-            "weight_only",
-            "src_missingvalue",
-            "dst_missingvalue",
-            "src_coordinates",
-            "dst_coordinates",
-            "user_areas",
-            "src_loc",
-            "dst_loc",
-            "tilefile_path",
-            "no_log",
-            "check",
-            "checkFlag",
-            "help",
-            "h",
-            "version",
-            "V",
-        ]
+    BOOL_FLAGS = [
+        "ignore_unmapped",
+        "i",
+        "ignore_degenerate",
+        "r",
+        "src_regional",
+        "dst_regional",
+        "64bit_offset",
+        "netcdf4",
+        "weight_only",
+        "user_areas",
+        "no_log",
+        "check",
+        "checkFlag",
+        "help",
+        "h",
+        "version",
+        "V",
+    ]
 
-        bool_flags = [
-            "ignore_unmapped",
-            "i",
-            "ignore_degenerate",
-            "r",
-            "src_regional",
-            "dst_regional",
-            "64bit_offset",
-            "netcdf4",
-            "weight_only",
-            "user_areas",
-            "no_log",
-            "check",
-            "checkFlag",
-            "help",
-            "h",
-            "version",
-            "V",
-        ]
+    weight_file = None
 
-        weight_file = None
+    def _hint(name):
 
-        def _hint(name):
+        suggestions = difflib.get_close_matches(name, PARAMS, n=5)
+        if suggestions != []:
+            hint = f"Did you mean one of {suggestions}?"
+        return hint
 
-            suggestions = difflib.get_close_matches(name, PARAMS, n=5)
-            if suggestions != []:
-                hint = f"Did you mean one of {suggestions}?"
-            return hint
+    subprocess_args = ["mpirun", "-np", str(CPU_COUNT), "ESMF_RegridWeightGen"]
 
-        subprocess_args = ["mpirun", "-np", str(CPU_COUNT), "ESMF_RegridWeightGen"]
+    for k, v in kwargs.items():
+        if k not in PARAMS:
+            raise ValueError(f"Unknown parameter: {k}. {_hint(k)}")
 
-        for k, v in kwargs.items():
-            if k not in PARAMS:
-                raise ValueError(f"Unknown parameter: {k}. {_hint(k)}")
+        if k in BOOL_FLAGS:
+            if v:  # only append if True
+                subprocess_args.append(f"--{k}")
+        else:
+            if v:
+                subprocess_args.append(f"--{k}")
+                subprocess_args.append(str(v))  # cast to string to avoid TypeError
 
-            if k in bool_flags:
-                if v:  # only append if True
-                    subprocess_args.append(f"--{k}")
-            else:
-                if v:
-                    subprocess_args.append(f"--{k}")
-                    subprocess_args.append(str(v))  # cast to string to avoid TypeError
+    if "--weight" not in subprocess_args or "-w" not in subprocess_args:
+        weight_file = (CWD() / "weights" / f"{uuid.uuid4()}.nc").resolve()
+        _TMP_FILES.append(weight_file)
+        weight_file.parent.mkdir(parents=True, exist_ok=True)
 
-        if "--weight" not in subprocess_args or "-w" not in subprocess_args:
-            weight_file = (CWD() / "weights" / f"{uuid.uuid4()}.nc").resolve()
-            _TMP_FILES.append(weight_file)
-            weight_file.parent.mkdir(parents=True, exist_ok=True)
+        w = ["--weight", f"{weight_file}"]
+        subprocess_args.extend(w)
 
-            w = ["--weight", f"{weight_file}"]
-            subprocess_args.extend(w)
+    res = execute_cmd(subprocess_args)
 
-        subprocess.run(subprocess_args, check=True, capture_output=True, text=True)
-
-        if weight_file and weight_file.exists():
-            return weight_file
-
-    except subprocess.CalledProcessError as e:
-        print(e.stderr)
+    if weight_file and weight_file.exists():
+        return weight_file
+    else:
+        return res
 
 
 def regrid_cam_se(dataset: xr.Dataset, weight_file: PathLike) -> xr.Dataset:

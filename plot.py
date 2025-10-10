@@ -3,7 +3,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from multiprocessing import Pool
 from os import PathLike
 from pathlib import Path
@@ -16,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
+from cartopy.util import add_cyclic_point
 
 from .tools import CPU_COUNT, get_func_signature
 
@@ -132,6 +132,31 @@ def get_cbar_axes(
         )
 
     return cax
+
+
+def make_lon_cyclic(obj: xr.DataArray, longitude: str = "lon"):
+    """
+    Add a cyclic point to a DataArray along the specified longitude dimension.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray
+        The input DataArray to which a cyclic point will be added.
+    longitude : str, optional
+        The name of the longitude dimension in the DataArray. Default is 'lon'.
+    """
+
+    if not isinstance(obj, xr.DataArray):
+        raise ValueError("Input object must be an xarray.DataArray.")
+    if longitude not in obj.dims:
+        raise ValueError(f"Longitude dimension '{longitude}' not found in data dims.")
+
+    attrs = obj.attrs
+    cyclic_data, cyclic_longitude = add_cyclic_point(obj.values, coord=obj[longitude])
+    coords = {dim: obj.coords[dim] for dim in obj.dims}
+    coords["lon"] = cyclic_longitude
+
+    return xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
 
 
 def create_map_figure(
@@ -477,7 +502,7 @@ def cartplot(
         "NorthPolarStereo",
         "SouthPolarStereo",
     ] = "PlateCarree",
-    central_longitude: float = 0.0,
+    central_longitude: float = -100,
     global_extent: bool = False,
     figsize: tuple[float, float] = None,
     cmap: Union[str, mcolors.Colormap] = None,
@@ -603,7 +628,7 @@ def cartplot(
     map_kwags = {k: v for k, v in allargs.items() if k in map_kwags}
     plot_kwargs = {k: v for k, v in allargs.items() if k not in map_kwags}
 
-    fig, ax = create_map_figure(**map_kwags)
+    figure, ax = create_map_figure(**map_kwags)
 
     plot_funcs = {
         "default": [data.plot, get_func_signature(data.plot)],
@@ -633,7 +658,7 @@ def cartplot(
     plot_kwargs["transform"] = ccrs.PlateCarree()
     del plot_kwargs["kwargs"]
 
-    p = plot_func(**plot_kwargs)
+    plot_obj = plot_func(**plot_kwargs)
 
     if ocean and not land:
         ax.add_feature(cfeature.LAND, facecolor="white", zorder=1)
@@ -651,10 +676,10 @@ def cartplot(
         gl.left_labels = True
 
     if add_colorbar:
-        cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
+        cax = get_cbar_axes(fig=figure, axes=ax, orientation=orientation)
 
         cb = plt.colorbar(
-            p,
+            plot_obj,
             cax=cax,
             ax=ax,
             orientation=orientation,
@@ -673,7 +698,7 @@ def cartplot(
                 cbar_label.append(data.attrs["units"])
             cb.set_label("\n".join(cbar_label))
 
-    return (fig, ax, p)
+    return figure, ax, plot_obj
 
 
 see_data = cartplot
