@@ -1,24 +1,16 @@
 import os
 import subprocess
 import uuid
+from io import StringIO
 from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
 
+import pandas as pd
 import xarray as xr
 
 from .pac_man import which
-from .tools import (
-    _TMP_FILES,
-    CPU_COUNT,
-    CWD,
-    TMPDIR,
-    execute_cmd,
-    mv,
-    rm,
-    symlink,
-    type_cast,
-)
+from .tools import _TMP_FILES, cwd, execute_cmd, mv, n_cpu, rm, symlink, tmp, type_cast
 
 
 class CDONotFoundError(FileNotFoundError):
@@ -53,9 +45,9 @@ class CDO:
                 See https://code.mpimet.mpg.de/projects/cdo/wiki"
             )
 
-        self.tmp_dir = TMPDIR / "_tmp_cdo"
+        self.tmp_dir = tmp / "_tmp_cdo"
         self.tmp_dir.mkdir(exist_ok=True)
-        self.cwd = CWD()
+        self.cwd = cwd()
         self.cwd_tmp = self.cwd / ".tmp"
 
         self.cwd_tmp.mkdir(parents=True, exist_ok=True)
@@ -66,7 +58,7 @@ class CDO:
 
     def _cdo(self, input_cmds: list[str]):
         try:
-            cmd = ["cdo", "-s", "-w", "-P", str(CPU_COUNT)]
+            cmd = ["cdo", "-s", "-w", "-P", str(n_cpu)]
             cmd.extend(input_cmds)
 
             seen = set()
@@ -82,26 +74,57 @@ class CDO:
         res = self._cdo(cmd)
         print(res.stdout)
 
+    def run(
+        self,
+        cmd: list[str] = None,
+    ) -> Any:
+        """
+        Run a Climate Data Operators (CDO) command.
+
+        Parameters
+        ----------
+        cmd : list of str
+            Sequence of CDO subcommand and arguments. For details on
+            available operators, see:
+            https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
+
+        Returns
+        -------
+        Any
+            The output of the CDO command, if any.
+            Executes the specified CDO command as a subprocess. Standard output
+            and error streams are passed through to the system shell.
+
+        Examples
+        --------
+        Remap input data (`infile.nc`) bilinearly onto a target grid (`gridfile`)
+        and write the result to `outfile.nc`:
+
+            >>> cmd = ["remapbil", "gridfile", "infile.nc", "outfile.nc"]
+            >>> cdo.run(cmd)
+        """
+
+        if not isinstance(cmd, list) or cmd is None:
+            example = 'e.g., cmd= ["xxx", "xxx", "xxx", "xxx"] \n cdo.run(cmd)'
+            print("Invalid command format. usage:", example)
+            raise TypeError(
+                "Input must be a list of strings representing CDO command and arguments."
+            )
+
+        res = self._cdo(cmd)
+
+        txt = StringIO(res.stdout)
+        txt = txt.read().splitlines()
+        return txt
+
     def _bbox_from_griddes(self, infile) -> tuple[float, float, float, float]:
 
-        griddes = self.griddes(infile, return_output=True)
+        data_dict = self.griddes(
+            infile,
+        )
 
-        data = griddes.stdout.split("\n")
-        data_dict = {}
-        for line in data:
-            if "=" in line:
-                key, value = line.split("=")
-                data_dict[key.strip()] = value.strip()
-
-        for key in [
-            "xsize",
-            "ysize",
-            "xfirst",
-            "yfirst",
-            "xinc",
-            "yinc",
-        ]:
-            data_dict[key] = float(data_dict[key])
+        if len(data_dict) > 1:
+            raise ValueError("Input file has multiple grids.")
 
         lon_min = data_dict["xfirst"]
         lon_max = lon_min + (data_dict["xsize"] - 1) * data_dict["xinc"]
@@ -175,6 +198,97 @@ class CDO:
         res = self._cdo(cmd)
         if res.stdout:
             print(res.stdout)
+
+        if as_xarray:
+            ret = xr.open_dataset(outfile, chunks="auto")
+        else:
+            ret = outfile
+
+        return ret
+
+    def griddes(
+        self,
+        infile: Path | PathLike,
+    ) -> dict:
+        """
+        Get the grid description of a netCDF file using CDO's griddes command.
+
+        Parameters
+        ----------
+        infile : str
+            Input netCDF file.
+
+        Returns
+        -------
+        str
+            The grid description as a string.
+        """
+
+        if not Path(infile).exists():
+            raise FileNotFoundError(f"Input file {infile} does not exist.")
+
+        cmd = ["griddes", infile]
+
+        res = self._cdo(cmd)
+
+        txt = StringIO(res.stdout)
+        txt = txt.read().splitlines()
+
+        result = {}
+        grid_key = None
+        for line in txt:
+            if line.strip() == "#":
+                continue
+            if "# gridID" in line:
+                grid_key = line.strip().replace("# ", "").replace(" ", "_")
+                result[grid_key] = {}
+                continue
+            # split key and value by =
+            key, value = line.split("=", 1)
+            result[grid_key][key.strip()] = value.strip()
+
+        if len(result) == 1:
+            result = result[grid_key]
+
+        return result
+
+    def mergetime(
+        self,
+        infiles: list[PathLike],
+        outfile: Path | PathLike,
+        *,
+        as_xarray: bool = False,
+        delete_input: bool = False,
+    ):
+        """
+        Merge multiple netCDF files along the time dimension using CDO.
+        This function uses the Climate Data Operators (CDO) to merge multiple netCDF files.
+
+        Parameters
+        ----------
+        infiles : list[str]
+            List of input netCDF files to be merged.
+        outfile : str
+        """
+
+        infiles = [str(Path(f).resolve()) for f in infiles]
+        infiles.sort()
+        for f in infiles:
+            if not Path(f).exists():
+                raise FileNotFoundError(f"Input file {f} does not exist.")
+
+        cmd = [
+            "-z",
+            "zip",
+            "-b",
+            "F32",
+            "-mergetime",
+            *infiles,
+            outfile,
+        ]
+        self._cdo(cmd)
+        if delete_input:
+            rm(infiles)
 
         if as_xarray:
             ret = xr.open_dataset(outfile, chunks="auto")
@@ -388,573 +502,9 @@ class CDO:
         if res.stdout:
             print(res.stdout)
 
-    def vertintml(
-        self,
-        infile: Path | PathLike,
-        outfile: Path | PathLike = None,
-        p_levels: list[float] = None,
-        h_levels: list[float] = None,
-        operator: Literal["ml2pl", "ml2hl"] = None,
-        extrapolate: bool = False,
-    ):
-        """
-        Interpolate 3D fields on hybrid sigma-pressure levels to pressure or height levels
-        using CDO's `ml2pl` or `ml2hl` operators.
-
-        The vertical interpolation requires the hybrid vertical coordinate definition
-        (a and b coefficients), surface pressure, and optionally surface geopotential.
-        Geopotential height must be available at the hybrid layer interfaces
-        (model half-levels). All variables must be on the same horizontal grid.
-        Missing values are not supported.
-
-        Parameters
-        ----------
-        infile : Path or PathLike
-            Input file containing 3D variables on hybrid sigma-pressure levels
-            and the necessary auxiliary fields:
-            - `a` and `b` coefficients (hybrid coordinate definition).
-            - Surface pressure (`ps` or log surface pressure).
-            - Surface geopotential (`z_surf`), required for temperature extrapolation.
-            - Geopotential height at hybrid interfaces.
-        outfile : Path or PathLike, optional
-            Path to the output file. If not provided, a temporary NetCDF file is created.
-        p_levels : list of float, optional
-            Target pressure levels in pascals (Pa). Required when using operator="ml2pl".
-        h_levels : list of float, optional
-            Target height levels in meters (m). Required when using operator="ml2hl".
-            Heights are internally converted to equivalent pressure levels via:
-                p = 101325 * exp(-h / 7000).
-        operator : {"ml2pl", "ml2hl"}
-            Choice of vertical interpolation operator:
-            - "ml2pl": Hybrid model → pressure levels.
-            - "ml2hl": Hybrid model → height levels.
-
-        Environment Variables
-        ---------------------
-        EXTRAPOLATE : int, default=0
-            If set to 1, extrapolates missing values.
-            Can also be triggered by using aliases `ml2plx` / `ml2hlx`.
-
-        Notes
-        -----
-        - Required variables must be identifiable by GRIB1 code or NetCDF CF name:
-            * log surface pressure (GRIB1 code 152, CF: `surface_air_pressure`)
-            * surface pressure (134, CF: `surface_air_pressure`)
-            * temperature (130, CF: `air_temperature`)
-            * surface geopotential (129, CF: `surface_geopotential`)
-            * geopotential height (156, CF: `geopotential_height`)
-        - Supported parameter tables: WMO standard (table 2) and ECMWF local (table 128).
-        - Input must use the same horizontal grid. Hybrid components must be defined
-        at model half-levels, even if fields are provided at midpoints.
-        """
-
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/vertintml_{uuid.uuid4()}"
-            # _TMP_FILES.extend([outfile])
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-        if operator == "ml2pl" and p_levels is None:
-            raise ValueError("p_levels must be provided for ml2pl operator.")
-        if operator == "ml2hl" and h_levels is None:
-            raise ValueError("h_levels must be provided for ml2hl operator.")
-
-        if extrapolate:
-            os.environ["EXTRAPOLATE"] = "1"
-
-        cmd = [
-            "-z",
-            "zip",
-            "-b",
-            "F32",
-        ]
-
-        if operator == "ml2pl":
-            levels = ",".join([str(p) for p in p_levels])
-            cmd.append(f"{operator},{levels}")
-        elif operator == "ml2hl":
-            levels = ",".join([str(h) for h in h_levels])
-            cmd.append(f"{operator},{levels}")
-
-        cmd.extend([f"{infile}", f"{outfile}"])
-
-        self._cdo(cmd)
-
-        return outfile
-
-    def vertintap(
-        self,
-        infile: Path | PathLike,
-        outfile: Path | PathLike = None,
-        p_levels: list[float] = None,
-        extrapolate: bool = False,
-    ):
-        """
-        Interpolate 3D variables on hybrid sigma height coordinates to pressure levels. The input file must
-        contain the 3D air pressure in pascal. The air pressure is identified by the NetCDF CF standard
-        name air_pressure. Use the alias ap2plx or the environment variable EXTRAPOLATE to extrapolate
-        missing values. This operator requires all variables on the same horizontal grid.
-
-        Parameters
-        ----------
-        infile : Path or PathLike
-            Input file containing 3D variables on pressure levels and the necessary
-            auxiliary fields:
-            - Surface geopotential (`z_surf`), required for temperature extrapolation.
-            - Geopotential height at pressure level interfaces.
-        outfile : Path or PathLike, optional
-            Path to the output file. If not provided, a temporary NetCDF file is created.
-        p_levels : list of float
-            Target pressure levels in pascals (Pa). Required for the `ap2hl` operator.
-        """
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-        if p_levels is None:
-            raise ValueError("p_levels must be provided for ap2hl operator.")
-
-        if extrapolate:
-            os.environ["EXTRAPOLATE"] = "1"
-
-        levels_str = ",".join([str(p) for p in p_levels])
-
-        cmd = (
-            [
-                "-z",
-                "zip",
-                "-b",
-                "F32",
-                "ap2pl,",
-                f"{levels_str}",
-                f"{infile}",
-                f"{outfile}",
-            ],
-        )
-
-        self._cdo(cmd)
-
-        return outfile
-
-    def vertintgh(
-        self,
-        infile: Path | PathLike,
-        outfile: Path | PathLike = None,
-        h_levels: list[float] = None,
-        extrapolate: bool = False,
-    ):
-        """
-        Interpolate 3D variables on hybrid sigma height coordinates to height levels. The input file must
-        contain the 3D geometric height in meter. The geometric height is identified by the NetCDF CF
-        standard name geometric_height_at_full_level_center. Use the alias gh2hlx or the environ
-        ment variable EXTRAPOLATE to extrapolate missing values. This operator requires all variables on the
-        same horizontal grid.
-
-        Parameters
-        ----------
-        infile : Path or PathLike
-            Input file containing 3D variables on height levels and the necessary
-            auxiliary fields:
-            - Surface geopotential (`z_surf`), required for temperature extrapolation.
-            - Geopotential height at height level interfaces.
-        outfile : Path or PathLike, optional
-            Path to the output file. If not provided, a temporary NetCDF file is created.
-        h_levels : list of float
-            Target height levels in meters (m). Required for the `gh2hl` operator.
-        """
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-        if h_levels is None:
-            raise ValueError("h_levels must be provided for gh2hl operator.")
-
-        if extrapolate:
-            os.environ["EXTRAPOLATE"] = "1"
-
-        levels_str = ",".join([str(h) for h in h_levels])
-        cmd = [
-            "-z",
-            "zip",
-            "-b",
-            "F32",
-            "gh2hl,",
-            f"{levels_str}",
-            f"{infile}",
-            f"{outfile}",
-        ]
-
-        self._cdo(cmd)
-
-        return outfile
-
-    def mergetime(
-        self,
-        infiles: list[PathLike],
-        outfile: Path | PathLike,
-        *,
-        as_xarray: bool = False,
-        delete_input: bool = False,
-    ):
-        """
-        Merge multiple netCDF files along the time dimension using CDO.
-        This function uses the Climate Data Operators (CDO) to merge multiple netCDF files.
-
-        Parameters
-        ----------
-        infiles : list[str]
-            List of input netCDF files to be merged.
-        outfile : str
-        """
-
-        infiles = [str(Path(f).resolve()) for f in infiles]
-        infiles.sort()
-        for f in infiles:
-            if not Path(f).exists():
-                raise FileNotFoundError(f"Input file {f} does not exist.")
-
-        cmd = [
-            "-z",
-            "zip",
-            "-b",
-            "F32",
-            "-mergetime",
-            *infiles,
-            outfile,
-        ]
-        self._cdo(cmd)
-        if delete_input:
-            rm(infiles)
-
-        if as_xarray:
-            ret = xr.open_dataset(outfile, chunks="auto")
-        else:
-            ret = outfile
-
-        return ret
-
-    def intlevel(
-        self,
-        infile: Path | PathLike,
-        level: list[float] = None,
-        zdescription: Path | PathLike = None,
-        zvarname: str = None,
-        extrapolate: bool = False,
-        return_output=False,
-    ) -> str:
-        """
-        This operator performs a linear vertical interpolation of 3D variables. The 1D target levels can be specified with the level parameter or read in via a Z-axis description file.
-
-        Parameters
-        ----------
-        infile : str
-            Input netCDF file.
-
-        Returns
-        -------
-        str
-            The vertical levels as a string.
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if level is None and zdescription is None:
-            raise ValueError("Either level or zdescription must be provided.")
-
-        cmd = ["intlevel", infile]
-
-        res = self._cdo(cmd)
-        if return_output:
-            return res.stdout
-        else:
-            if res.stdout:
-                print(res.stdout)
-
-    def intlevel3d(
-        self,
-        operator: Literal["intlevel3d", "intlevelx3d"] = None,
-        infile: Path | PathLike = None,
-        tgtcoordinates: Path | PathLike = None,
-        return_output=False,
-    ) -> str:
-        """
-        This operator performs a 3D vertical interpolation of 3D variables.
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if not Path(tgtcoordinates).exists():
-            raise FileNotFoundError(
-                f"Target coordinates file {tgtcoordinates} does not exist."
-            )
-
-        cmd = [
-            operator,
-            infile,
-            tgtcoordinates,
-        ]
-
-        res = self._cdo(cmd)
-        if return_output:
-            return res.stdout
-        else:
-            if res.stdout:
-                print(res.stdout)
-
-    def fourier_transform(
-        self,
-        infile: Path | PathLike,
-        outfile: Path | PathLike = None,
-        epsilon: Literal[1, -1] = 1,
-        as_xarray: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str | PathLike:
-        """
-        The fourier operator performs the fourier transformation or the inverse fourier transformation of all input fields.
-        If the number of timesteps is a power of 2 then the algorithm of the Fast Fourier Transformation (FFT) is used.
-        """
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-
-        if epsilon not in [1, -1]:
-            raise ValueError("epsilon must be either 1 (forward) or -1 (inverse).")
-
-        cmd = [
-            f"fourier,{epsilon}",
-            infile,
-            outfile,
-        ]
-        self._cdo(cmd)
-
-        if as_xarray:
-            ret = xr.open_dataset(outfile, chunks="auto")
-        else:
-            ret = outfile
-        return ret
-
-    def spectral_transform(
-        self,
-        infile: Path | PathLike,
-        outfile: Path | PathLike = None,
-        operator: Literal["sp2gp", "gp2sp", "sp2sp", "dv2ps", "dv2uv", "uv2dv"] = None,
-        p_type: Literal["linear", "quadratic", "cubic"] = None,
-        trunc=False,
-    ) -> str | PathLike:
-        """
-        Perform spectral transformations using CDO (Climate Data Operators).
-
-        This function wraps CDO operators that transform fields between
-        spectral and grid-point representations, or between different
-        spectral resolutions. The transformations are based on
-        Fast Fourier Transform (FFT) and (inverse) Legendre transformations.
-        Missing values are not supported.
-
-        Parameters
-        ----------
-        infile : str or PathLike
-            Path to the input GRIB file.
-        outfile : str or Path | PathLike, optional
-            Path to the output file. If not provided, a temporary NetCDF file will be created.
-        operator : {"sp2gp", "gp2sp", "sp2sp", "dv2ps", "dv2uv", "uv2dv"}
-            The spectral transformation operator:
-            - "sp2gp": Spectral → Gaussian gridpoint fields.
-            - "gp2sp": Gaussian gridpoint → spectral coefficients.
-            - "sp2sp": Spectral → spectral (change triangular truncation).
-            - "dv2ps": Divergence/vorticity → velocity potential and stream function.
-            - "dv2uv": Divergence/vorticity (spectral) → U and V wind (grid).
-            - "uv2dv": U and V wind (grid) → divergence and vorticity (spectral).
-        p_type : {"linear", "quadratic", "cubic"}, optional
-            Grid type specification:
-            - "linear": shortest wavelength represented by 2 grid points (ERA40 convention).
-            - "quadratic": shortest wavelength represented by 3 grid points (ECHAM, ERA15).
-            - "cubic": shortest wavelength represented by 4 grid points.
-            Used with "sp2gp", "gp2sp", "dv2uv", and "uv2dv". Default depends on CDO (usually "quadratic").
-        trunc : bool, default=False
-            If True, applies triangular truncation (mandatory for "sp2sp").
-
-        Notes
-        -----
-        Grid resolution and spectral resolution are related through the
-        triangular truncation number T and the number of Gaussian grid points:
-            - Linear grid:   4N ≈ 2(TL + 1)
-            - Quadratic grid: 4N ≈ 3(TQ + 1)
-            - Cubic grid:    4N ≈ 4(TC + 1)
-        where N is the number of grid points between the poles.
-        """
-
-        if operator == "sp2sp":
-            if not trunc:
-                trunc = True
-
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-
-        cmd = [
-            operator,
-        ]
-
-        if p_type and operator in ["sp2gp", "gp2sp"]:
-            cmd.append(f"type={p_type}")
-
-        elif p_type and operator in ["dv2uv", "uv2dv"]:
-            cmd.append(f"gridtype={p_type}")
-
-        elif trunc:
-            cmd.append("trunc")
-
-        cmd.extend([f"{infile}", f"{outfile}"])
-
-        self._cdo(cmd)
-        return outfile
-
-    def griddes(self, infile: Path | PathLike, return_output=False) -> str:
-        """
-        Get the grid description of a netCDF file using CDO's griddes command.
-
-        Parameters
-        ----------
-        infile : str
-            Input netCDF file.
-
-        Returns
-        -------
-        str
-            The grid description as a string.
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-
-        cmd = ["griddes", infile]
-
-        res = self._cdo(cmd)
-
-        if return_output:
-            return res.stdout
-        else:
-            if res.stdout:
-                print(res.stdout)
-
-    def info(
-        self,
-        infile: Path | PathLike,
-        operator: Literal["info", "infon", "sinfo", "sinfon"] = None,
-        return_output=False,
-    ) -> str:
-        """
-        Print summary statistics or structural information for each field in the input file(s).
-        Supported operators:
-
-            - info: statistics by parameter identifier
-            - infon: statistics by parameter name
-            - sinfo: summary by parameter identifier
-            - sinfon: summary by parameter name
-
-        Parameters
-        ----------
-        infile : str
-            Input netCDF file.
-        operator : str
-            The operator to use.
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-
-        cmd = [
-            operator,
-            infile,
-        ]
-
-        res = self._cdo(cmd)
-
-        if return_output:
-            return res.stdout
-        else:
-            if res.stdout:
-                print(res.stdout)
-
-    def showinfo(
-        self,
-        infile: Path | PathLike,
-        return_output=False,
-    ) -> str:
-        """
-        This module prints meta-data information of all input variables.
-
-        Parameters
-        ----------
-        infile : str
-            Input netCDF file.
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-
-        result = {}
-
-        operators = [
-            "showcode",
-            "showname",
-            "showstdname",
-            "showlevel",
-            "showyear",
-            "showmon",
-            "showtime",
-            "showltype",
-            "showfilter",
-            "showformat",
-        ]
-        for operator in operators:
-
-            cmd = [operator, infile]
-
-            res = self._cdo(cmd)
-            result[operator.removeprefix("show")] = res.stdout.strip()
-
-        for k, v in result.items():
-            v = v.split(" ")
-            if k in ["code", "level", "ltype"]:
-                v = [type_cast(i) for i in v if i]
-            elif k in ["name", "stdname", "filter"]:
-                v = [i for i in v if i]
-            elif k in ["year", "mon", "time"]:
-                v = sorted(set(filter(None, v)))
-                v = v[0] if len(v) == 1 else v
-            result[k] = v
-
-        if return_output:
-            return result
-        else:
-            import pprint
-
-            pprint.pprint(result, compact=True, width=120, sort_dicts=False)
-
     def vlist(
         self,
         infile: Path | PathLike,
-        return_output=False,
     ) -> str:
         """
         This module prints a list of all variables in the input dataset.
@@ -972,15 +522,108 @@ class CDO:
         cmd = ["vlist", infile]
         res = self._cdo(cmd)
 
-        if return_output:
-            return res.stdout
-        else:
-            print(res.stdout)
+        txt = StringIO(res.stdout)
+        txt = txt.read()
+
+        sections = txt.split("\n\n")
+        sec0 = sections[0].splitlines()
+
+        return sec0
+
+    def info(
+        self,
+        infile: Path | PathLike,
+        operator: Literal["info", "infon", "sinfo", "sinfon"] = "sinfon",
+    ) -> str:
+        """
+        Print summary statistics or structural information for each field in the input file(s).
+        Supported operators:
+
+            - info: statistics by parameter identifier
+            - infon: statistics by parameter name
+            - sinfo: summary by parameter identifier
+            - sinfon: summary by parameter name
+
+
+        Parameters
+        ----------
+        infile : str
+            Input netCDF file.
+        operator : str
+            The operator to use.
+              - Default is 'sinfon'.
+        """
+
+        if not Path(infile).exists():
+            raise FileNotFoundError(f"Input file {infile} does not exist.")
+
+        cmd = [
+            operator,
+            infile,
+        ]
+
+        res = self._cdo(cmd)
+
+        txt = StringIO(res.stdout)
+        txt = txt.read().splitlines()
+        return txt
+
+    def showinfo(
+        self,
+        infile: Path | PathLike,
+    ) -> str:
+        """
+        This module prints meta-data information of all input variables.
+
+        Parameters
+        ----------
+        infile : str
+            Input netCDF file.
+        """
+        operators = [
+            "showcode",
+            "showname",
+            "showstdname",
+            "showlevel",
+        ]
+
+        if not Path(infile).exists():
+            raise FileNotFoundError(f"Input file {infile} does not exist.")
+
+        results = {}
+
+        for op in operators:
+
+            cmd = [op, infile]
+
+            res = self._cdo(cmd)
+            txt = StringIO(res.stdout)
+            txt = txt.read().splitlines()
+
+            if op == "showlevel":
+                res = [[type_cast(i) for i in l.split()] for l in txt]
+            else:
+                res = [type_cast(i) for l in txt for i in l.split()]
+
+            results[op.removeprefix("show")] = res
+
+        df = pd.DataFrame(results).explode("level")
+
+        return df.sort_values(by=["name"]).reset_index(drop=True)
 
     def ninfo(
         self,
         infile: Path | PathLike,
-        return_output=False,
+        operator: Literal[
+            "npar",
+            "nlevel",
+            "nyear",
+            "nmon",
+            "ndate",
+            "ntime",
+            "ngridpoints",
+            "ngrids",
+        ] = None,
     ) -> str:
         """
         This module prints the number of variables, levels or times of the input dataset.
@@ -996,36 +639,16 @@ class CDO:
         if not Path(infile).exists():
             raise FileNotFoundError(f"Input file {infile} does not exist.")
 
-        result = {}
+        if operator is None:
+            raise ValueError("operator must be specified.")
 
-        operators = [
-            "npar",
-            "nlevel",
-            "nyear",
-            "nmon",
-            "ndate",
-            "ntime",
-            "ngridpoints",
-            "ngrids",
-        ]
-        for operator in operators:
+        cmd = [operator, infile]
 
-            cmd = [operator, infile]
+        res = self._cdo(cmd)
 
-            res = self._cdo(cmd)
-            result[operator] = res.stdout.strip()
-        for k, v in result.items():
-
-            v = sorted(set(filter(None, re.split(r"[ \n]+", v))))
-            v = [type_cast(i) for i in v]
-            result[k] = v[0] if len(v) == 1 else v
-
-        if return_output:
-            return result
-        else:
-            import pprint
-
-            pprint.pprint(result)
+        txt = StringIO(res.stdout)
+        txt = txt.read().splitlines()
+        return txt
 
     def split(
         self,
@@ -1180,7 +803,10 @@ class CDO:
 
         return ret
 
-    def get_vert_coords(self, infile: Path | PathLike, return_output=False) -> str:
+    def get_vert_coords(
+        self,
+        infile: Path | PathLike,
+    ) -> str:
         """
         Extract vertical coordinates from a GRIB file
         """
@@ -1189,7 +815,8 @@ class CDO:
 
         from io import StringIO
 
-        sinfo_out = self.info(infile, "sinfo", return_output=True)
+        sinfo_out = self.info(infile, "sinfo")
+        sinfo_out = "\n".join(sinfo_out)
 
         start = sinfo_out.find("Vertical coordinates")
         end = sinfo_out.find("Time coordinate")
@@ -1227,10 +854,7 @@ class CDO:
 
         block = "\n".join(lines)
 
-        if return_output:
-            return block
-        else:
-            print(block)
+        return block
 
     def netcdf_to_grib(
         self,
@@ -1323,7 +947,9 @@ class CDO:
 
         Path(outdir).mkdir(parents=True, exist_ok=True)
         # Step 1: detect if spectral → convert to gridpoint
-        gridinfo = self.griddes(infile, return_output=True)
+        gridinfo = self.griddes(
+            infile,
+        )
         if "gridtype = spectral" in gridinfo:
             print("Input file is spectral, performing spectral transform...")
             spectral_transform_out = self.spectral_transform(
@@ -1352,7 +978,9 @@ class CDO:
 
             for axfile in axis_files:
                 axis_name = Path(axfile).stem
-                get_vert_coords_out = self.get_vert_coords(axfile, return_output=True)
+                get_vert_coords_out = self.get_vert_coords(
+                    axfile,
+                )
 
                 if "hybrid" in get_vert_coords_out:
                     v_interp_operator = "ml2pl"
@@ -1467,50 +1095,6 @@ class CDO:
             print(f"SAVED : {infile.stem}.nc")
             return ds
 
-    def run(self, cmd: list[str] = None, return_output=False) -> Any:
-        """
-        Run a Climate Data Operators (CDO) command.
-
-        Parameters
-        ----------
-        cmd : list of str
-            Sequence of CDO subcommand and arguments. For details on
-            available operators, see:
-            https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
-
-        Returns
-        -------
-        Any
-            The output of the CDO command, if any.
-            Executes the specified CDO command as a subprocess. Standard output
-            and error streams are passed through to the system shell.
-
-        Examples
-        --------
-        Remap input data (`infile.nc`) bilinearly onto a target grid (`gridfile`)
-        and write the result to `outfile.nc`:
-
-            >>> cmd = ["remapbil", "gridfile", "infile.nc", "outfile.nc"]
-            >>> cdo.run(cmd)
-        """
-
-        if not isinstance(cmd, list) or cmd is None:
-            example = 'e.g., cmd= ["xxx", "xxx", "xxx", "xxx"] \n cdo.run(cmd)'
-            print("Invalid command format. usage:", example)
-            raise TypeError(
-                "Input must be a list of strings representing CDO command and arguments."
-            )
-
-        if not isinstance(return_output, bool):
-            raise TypeError("return_output must be a boolean.")
-
-        res = self._cdo(cmd)
-
-        if return_output:
-            return res
-        else:
-            print(res.stdout)
-
     def __dir__(self):
         return [
             "remapnn",
@@ -1541,4 +1125,4 @@ class CDO:
         ]
 
 
-cdo = CDO()
+cdo: CDO = CDO()

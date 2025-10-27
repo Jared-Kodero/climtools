@@ -34,7 +34,6 @@ Time & Spatial Utilities:
 Plotting (CartoPy):
 -------------------
 - cartplot: Quick CartoPy map plotting for 2D xarray DataArrays.
-- create_map_figure: Create CartoPy map figures.
 - get_cbar_axes: Utility for colorbar axes.
 - plot_p_values: Plot p-values on maps.
 
@@ -84,56 +83,50 @@ Notes:
 
 from .cdo_py import cdo
 from .corr import calc_corr
-from .logs import line_break, log
-from .plot import (
-    cartplot,
-    create_map_figure,
-    get_cbar_axes,
-    make_lon_cyclic,
-    plot_p_values,
-    see_data,
-)
+from .logs import log
+from .plot import animate, cartplot, get_cbar_axes, make_lon_cyclic, plot_p_values
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
 from .tools import (
-    CPU_COUNT,
-    CWD,
-    HOME,
-    HOST,
-    TMPDIR,
-    USER,
     chunk_by_dims,
     chunk_by_timezones,
     chunk_longitudes,
     close_dask,
     cp,
+    cwd,
     file_type,
     get_func_signature,
     get_local_solar_time,
     get_spatiotemporal_info,
     get_UTC_offset,
+    home,
+    host,
     infer_time_frequency,
     interp_data,
     land_sea_mask,
     mkdir,
     mv,
+    n_cpu,
     rm,
     setup_dask,
     symlink,
     timeit,
+    tmp,
     type_cast,
     tz_apply_func,
+    user,
 )
 from .trends import calc_signicance, calc_trends, mk_trend_test, polyfit
 
 __all__ = [
+    "animate",
     "cdo",
-    "CPU_COUNT",
-    "CWD",
+    "n_cpu",
+    "cwd",
     "ESMF_RegridWeightGen",
-    "HOME",
-    "HOST",
-    "TMPDIR",
-    "USER",
+    "home",
+    "host",
+    "tmp",
+    "user",
     "type_cast",
     "calc_corr",
     "calc_signicance",
@@ -141,7 +134,6 @@ __all__ = [
     "cartplot",
     "close_dask",
     "cp",
-    "create_map_figure",
     "file_type",
     "get_UTC_offset",
     "get_cbar_axes",
@@ -151,10 +143,8 @@ __all__ = [
     "infer_time_frequency",
     "interp_data",
     "land_sea_mask",
-    "line_break",
     "log",
     "make_lon_cyclic",
-    "mergetime",
     "mk_trend_test",
     "mkdir",
     "mv",
@@ -162,7 +152,6 @@ __all__ = [
     "polyfit",
     "regrid_cam_se",
     "rm",
-    "see_data",
     "setup_dask",
     "chunk_longitudes",
     "chunk_by_dims",

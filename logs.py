@@ -16,13 +16,6 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 
-def line_break(char: str = "═", n: int = 120):
-    """
-    Print a line break with a specified character and length.
-    """
-    print(char * n)
-
-
 def _print_result(v, file, pretty=True):
     if file is None and pretty:
         pprint.pprint(v, sort_dicts=False, compact=True)
@@ -126,13 +119,3 @@ def _exceptions(values, file, exc_info):
     _print_result(output, file, pretty=False)
 
     return None
-
-
-import pandas as pd
-
-x = "AAAAAA"
-
-try:
-    y = pd.to_datetime(x)
-except Exception:
-    log()

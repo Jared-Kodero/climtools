@@ -7,7 +7,7 @@ import xarray as xr
 import xesmf as xe
 
 from .logs import log
-from .tools import _TMP_FILES, CPU_COUNT, CWD, execute_cmd
+from .tools import _TMP_FILES, cwd, execute_cmd, n_cpu
 
 
 def ESMF_RegridWeightGen(
@@ -185,7 +185,7 @@ def ESMF_RegridWeightGen(
             hint = f"Did you mean one of {suggestions}?"
         return hint
 
-    subprocess_args = ["mpirun", "-np", str(CPU_COUNT), "ESMF_RegridWeightGen"]
+    subprocess_args = ["mpirun", "-np", str(n_cpu), "ESMF_RegridWeightGen"]
 
     for k, v in kwargs.items():
         if k not in PARAMS:
@@ -200,7 +200,7 @@ def ESMF_RegridWeightGen(
                 subprocess_args.append(str(v))  # cast to string to avoid TypeError
 
     if "--weight" not in subprocess_args or "-w" not in subprocess_args:
-        weight_file = (CWD() / "weights" / f"{uuid.uuid4()}.nc").resolve()
+        weight_file = (cwd() / "weights" / f"{uuid.uuid4()}.nc").resolve()
         _TMP_FILES.append(weight_file)
         weight_file.parent.mkdir(parents=True, exist_ok=True)
 

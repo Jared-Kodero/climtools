@@ -1,8 +1,8 @@
-import functools
 import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from multiprocessing import Pool
 from os import PathLike
 from pathlib import Path
@@ -13,11 +13,10 @@ import cartopy.feature as cfeature
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import xarray as xr
 from cartopy.util import add_cyclic_point
 
-from .tools import CPU_COUNT, get_func_signature
+from .tools import ConfigMap, get_func_signature, n_cpu
 
 
 def get_cbar_axes(
@@ -159,128 +158,6 @@ def make_lon_cyclic(obj: xr.DataArray, longitude: str = "lon"):
     return xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
 
 
-def create_map_figure(
-    *,
-    projection: Literal[
-        "PlateCarree",
-        "Mercator",
-        "Robinson",
-        "Mollweide",
-        "Orthographic",
-        "LambertConformal",
-        "AlbersEqualArea",
-        "Stereographic",
-        "NorthPolarStereo",
-        "SouthPolarStereo",
-    ] = "PlateCarree",
-    figsize: tuple[float, float] = None,
-    global_extent: bool = False,
-    central_longitude: float = 0.0,
-    states: bool = True,
-    borders: bool = True,
-    facecolor: str = "grey",
-    edgecolor: str = "face",
-    coastlines: bool = True,
-    ocean: bool = True,
-    land: bool = True,
-):
-    """
-    Create a Cartopy map figure using a specified map projection and extent.
-
-    Parameters
-    ----------
-    projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic",
-                  "LambertConformal", "AlbersEqualArea", "Stereographic",
-                  "NorthPolarStereo", "SouthPolarStereo"}, default "PlateCarree"
-        The Cartopy map projection to use. Selects from common Cartopy projections.
-
-    figsize : tuple of float, optional
-        Matplotlib figure size in inches as (width, height). If None, uses the default size.
-
-    global_extent : bool, default False
-        If True, sets the extent of the map to the full globe.
-
-    central_longitude : float, default 0.0
-        Central longitude of the projection. Used in projections where applicable.
-
-    central_latitude : float, default 0.0
-        Central latitude of the projection. Relevant for Orthographic and some regional projections.
-
-    coastlines : bool, default True
-        If True, adds coastlines to the map.
-
-    ocean : bool, default False
-        If True, shades ocean areas with a default image and hides land.
-
-    land : bool, default True
-        If True, shades land areas with a default image and hides ocean.
-
-    states : bool, default True
-        If True, overlays U.S. state boundaries (visible in North America extent).
-
-    borders : bool, default True
-        If True, overlays international country borders.
-
-    facecolor : str, default "grey"
-        Fill color for continents (if `only_ocean=False`).
-
-    edgecolor : str, default "face"
-        Edge color for coastlines, borders, and other map features.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The created Matplotlib figure.
-
-    ax : matplotlib.axes.Axes
-        The Cartopy-aware map axes.
-    """
-
-    projections = {
-        "PlateCarree": ccrs.PlateCarree,
-        "Mercator": ccrs.Mercator,
-        "Robinson": ccrs.Robinson,
-        "Mollweide": ccrs.Mollweide,
-        "Orthographic": ccrs.Orthographic,
-        "LambertConformal": ccrs.LambertConformal,
-        "AlbersEqualArea": ccrs.AlbersEqualArea,
-        "Stereographic": ccrs.Stereographic,
-        "NorthPolarStereo": ccrs.NorthPolarStereo,
-        "SouthPolarStereo": ccrs.SouthPolarStereo,
-    }
-
-    crt_projection = projections.get(projection, ccrs.PlateCarree)
-    crt_projection = crt_projection(central_longitude=central_longitude)
-
-    fig, ax = plt.subplots(subplot_kw={"projection": crt_projection}, figsize=figsize)
-
-    if global_extent:
-        ax.set_global()
-
-    if coastlines:
-        ax.add_feature(cfeature.COASTLINE)
-
-    if ocean and not land:
-
-        ax.add_feature(
-            cfeature.NaturalEarthFeature(
-                "physical",
-                "land",
-                "50m",
-                edgecolor=edgecolor,
-                facecolor=facecolor,
-                alpha=0.5,
-            )
-        )
-
-    if states:
-        ax.add_feature(cfeature.STATES, linestyle="-", alpha=0.3)
-    if borders:
-        ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3)
-
-    return fig, ax
-
-
 def plot_p_values(
     ax: plt.Axes,
     data: xr.DataArray,
@@ -311,8 +188,6 @@ def plot_p_values(
     if "lon" not in data.dims or "lat" not in data.dims:
         raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
 
-    # p_values = xr.where(data > level, 1, np.nan)
-
     p_values = data.to_dataframe(name="p_values").reset_index()
     p_values = p_values.query("p_values < @level")
 
@@ -332,22 +207,261 @@ def plot_p_values(
     return ax
 
 
-def update_animation_frame(i, data, dim, kwargs, dpi, session_tmp_dir):
-    da = data.isel({dim: i})
-    t = (
-        da[dim].values.item()
-        if dim in da.dims
-        else data[dim].isel({dim: i}).values.item()
+def cartplot(
+    data: xr.DataArray,
+    *,
+    # Spatial configuration
+    x: str = None,
+    y: str = None,
+    projection: Literal[
+        "PlateCarree",
+        "Mercator",
+        "Robinson",
+        "Mollweide",
+        "Orthographic",
+        "LambertConformal",
+        "AlbersEqualArea",
+        "Stereographic",
+        "NorthPolarStereo",
+        "SouthPolarStereo",
+    ] = "PlateCarree",
+    central_longitude: float = None,
+    central_latitude: float = None,
+    global_extent: bool = False,
+    figsize: tuple[float, float] = None,
+    # Plot appearance
+    plot_type: Literal[
+        "default", "pcolormesh", "contourf", "contour", "imshow"
+    ] = "default",
+    cmap: str | mcolors.Colormap = None,
+    vmin: float = None,
+    vmax: float = None,
+    levels: int | list = None,
+    robust: bool = False,
+    orientation: Literal["vertical", "horizontal"] = "vertical",
+    add_colorbar: bool = True,
+    drawedges: bool = False,
+    cbar_label: str = None,
+    # Map features
+    gridlines: bool = False,
+    coastlines: bool = True,
+    borders: bool = True,
+    states: bool = True,
+    ocean: bool = True,
+    land: bool = True,
+    edgecolor: str = "face",
+    **kwargs,
+):
+    """
+    Plot a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
+    projection, style
+
+    Parameters
+    ----------
+    Data and Coordinates
+    --------------------
+    data : xr.DataArray
+        Two-dimensional or time-evolving array with spatial dimensions
+        (e.g., latitude/longitude or x/y).
+    x, y : str, optional
+        Names of the horizontal dimensions. Defaults to the first and second dims.
+
+    Projection and Layout
+    ---------------------
+    projection : str, default "PlateCarree"
+        Map projection. Options include "Mercator", "Robinson", "Mollweide",
+        "Orthographic", "LambertConformal", etc.
+    central_longitude : float, default -100
+        Central longitude for the map projection.
+    central_latitude : float, default None
+        Central latitude for the map projection.
+    global_extent : bool, default False
+        If True, sets extent to show the entire globe.
+    figsize : tuple of float, optional
+        Figure size in inches (width, height).
+
+    Plot Style and Color Mapping
+    ----------------------------
+    plot_type : str, default "default"
+        Plot method: "pcolormesh", "contourf", "contour", "imshow", or "default".
+    cmap : str or Colormap, optional
+        Colormap applied to data.
+    vmin, vmax : float, optional
+        Color scale limits.
+    levels : int or sequence, optional
+        Contour levels for "contour" and "contourf".
+    robust : bool, default False
+        If True, ignores outliers using 2nd–98th percentile range.
+    orientation : str, default "vertical"
+        Colorbar orientation.
+    add_colorbar : bool, default True
+        Whether to draw a colorbar.
+    drawedges : bool, default False
+        Draw edges around colorbar color patches.
+    cbar_label : str, optional
+        Label for the colorbar.
+
+    Map Features
+    ------------
+    gridlines : bool, default False
+        Show latitude/longitude gridlines.
+    coastlines : bool, default True
+        Draw coastlines.
+    borders : bool, default True
+        Draw national borders.
+    states : bool, default True
+        Draw state or province boundaries (if available).
+    ocean, land : bool, default True
+        Fill ocean and land with default or specified colors.
+    facecolor : str, default "#d3d3d3"
+        Land face color.
+    edgecolor : str, default "face"
+        Edge color for land polygons.
+
+
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure instance.
+    ax : cartopy.mpl.geoaxes.GeoAxesSubplot
+        Cartopy GeoAxes object.
+    p : matplotlib.artist.Artist
+        Resulting plot object.
+
+    Notes
+    -----
+    This function provides a flexible interface for plotting spatial or spatiotemporal
+    `xarray.DataArray` objects on Cartopy projections. It supports both static maps
+    and animated visualizations with optional geographic and physical map layers.
+    Requires `cartopy` and `matplotlib`.
+    """
+
+    # if data is 3D, raise error
+    if data.ndim > 2:
+        raise ValueError("DataArray has more than 2 dimensions.")
+
+    proj = getattr(ccrs, projection)
+
+    proj_all_args = get_func_signature(proj)
+    proj_args = {}
+
+    if central_longitude is not None and "central_longitude" in proj_all_args:
+        proj_args["central_longitude"] = central_longitude
+    if central_latitude is not None and "central_latitude" in proj_all_args:
+        proj_args["central_latitude"] = central_latitude
+
+    fig, ax = plt.subplots(
+        subplot_kw={"projection": proj(**proj_args)},
+        figsize=figsize,
     )
 
-    if dim == "time":
-        if isinstance(t, int):
-            t = np.datetime64(t, "ns")
-            t = pd.to_datetime(t)
-        t = t.strftime("%Y-%m-%d %H:%M")
+    if global_extent:
+        ax.set_global()
+
+    if coastlines:
+        ax.add_feature(cfeature.COASTLINE)
+
+    if ocean and not land:
+
+        ax.add_feature(
+            cfeature.NaturalEarthFeature(
+                "physical",
+                "land",
+                "50m",
+                edgecolor=edgecolor,
+                facecolor="#272829",
+                alpha=0.5,
+            )
+        )
+
+    if states:
+        ax.add_feature(cfeature.STATES, linestyle="-", alpha=0.3)
+    if borders:
+        ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3)
+
+    # xarray methords
+
+    def _data_plot(data: xr.DataArray, pt: str):
+
+        p = data.plot
+
+        pts = ["pcolormesh", "contourf", "contour", "imshow"]
+        funcs = [p] + [getattr(p, m) for m in pts]
+
+        plot_args = {}
+        for f in funcs:
+            plot_args.update(get_func_signature(f))
+        if pt == "default":
+            func = p
+        elif pt in pts:
+
+            func = getattr(p, pt)
+            plot_args.update(get_func_signature(func))
+
+        return func, plot_args
+
+    # we want all possible args
+    plot, plot_args = _data_plot(data, plot_type)
+
+    all_args = dict(locals())
+    all_args.update(kwargs)
+
+    plot_kwargs = {k: v for k, v in all_args.items() if k in plot_args}
+    plot_kwargs["ax"] = ax
+    plot_kwargs["add_colorbar"] = False
+    plot_kwargs["transform"] = ccrs.PlateCarree()
+
+    del plot_kwargs["kwargs"]
+
+    plot_obj = plot(**plot_kwargs)
+
+    if ocean and not land:
+        ax.add_feature(cfeature.LAND, facecolor="white", zorder=1)
+    elif land and not ocean:
+        ax.add_feature(cfeature.OCEAN, facecolor="white", zorder=1)
+
+    if gridlines:
+        gl = ax.gridlines(
+            draw_labels=True, linewidth=0.5, color="gray", alpha=0.5, linestyle="--"
+        )
+
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.bottom_labels = True
+        gl.left_labels = True
+
+    if add_colorbar:
+        cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
+
+        cb = plt.colorbar(
+            plot_obj,
+            cax=cax,
+            ax=ax,
+            orientation=orientation,
+            drawedges=drawedges,
+        )
+
+        if cbar_label:
+            cb.set_label(cbar_label)
+
+        else:
+
+            cbar_label = []
+            if "long_name" in data.attrs:
+                cbar_label.append(data.attrs["long_name"])
+            if "units" in data.attrs:
+                cbar_label.append(data.attrs["units"])
+            cb.set_label("\n".join(cbar_label))
+
+    return fig, ax, plot_obj
+
+
+def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
+
     t = f"{dim}: {t}"
 
-    local_kwargs = kwargs.copy()
+    local_kwargs = args.copy()
     local_kwargs["data"] = da
 
     fname = session_tmp_dir / f"{i:06d}.png"
@@ -359,27 +473,170 @@ def update_animation_frame(i, data, dim, kwargs, dpi, session_tmp_dir):
     return None
 
 
-def animate_data(args):
-    kwargs = args
-    data = kwargs["data"]
-    dim = kwargs["animate_dim"]
-    indices = kwargs["animate_indices"]
-    fps = kwargs["animate_fps"]
-    quality = kwargs["animate_quality"]
-    out_file = kwargs["animate_out_file"]
-    parallel = kwargs["parallel"]
-    # clean kwargs
-    for k in [
-        "data",
-        "animate_dim",
-        "animate_indices",
-        "animate_fps",
-        "animate_quality",
-        "animate_out_file",
-        "animate",
-        "parallel",
-    ]:
-        del kwargs[k]
+def animate(
+    data: xr.DataArray,
+    # Animation control will be popped from args
+    dim: str = "time",
+    *,
+    indices: Union[tuple, list, np.ndarray] = None,
+    outfile: PathLike = None,
+    quality: Literal["low", "medium", "high"] = "medium",
+    fps: int = 10,
+    parallel: bool = True,
+    # Spatial configuration
+    x: str = None,
+    y: str = None,
+    projection: Literal[
+        "PlateCarree",
+        "Mercator",
+        "Robinson",
+        "Mollweide",
+        "Orthographic",
+        "LambertConformal",
+        "AlbersEqualArea",
+        "Stereographic",
+        "NorthPolarStereo",
+        "SouthPolarStereo",
+    ] = "PlateCarree",
+    global_extent: bool = False,
+    figsize: tuple[float, float] = None,
+    central_longitude: float = None,
+    central_latitude: float = None,
+    # Plot appearance
+    plot_type: Literal[
+        "default", "pcolormesh", "contourf", "contour", "imshow"
+    ] = "default",
+    cmap: str | mcolors.Colormap = None,
+    vmin: float = None,
+    vmax: float = None,
+    levels: int | list = None,
+    robust: bool = False,
+    transform: bool = None,
+    orientation: Literal["vertical", "horizontal"] = "vertical",
+    add_colorbar: bool = True,
+    drawedges: bool = False,
+    cbar_label: str = None,
+    # Map features
+    gridlines: bool = False,
+    coastlines: bool = True,
+    borders: bool = True,
+    states: bool = True,
+    ocean: bool = True,
+    land: bool = True,
+    facecolor: str = "#d3d3d3",
+    edgecolor: str = "face",
+    **kwargs,
+):
+    """
+    Animate a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
+    spatial projection, color mapping, and parallel rendering.
+
+    Parameters
+    ----------
+    Data
+    ----
+    data : xr.DataArray
+        Two-dimensional or time-dependent array containing the field to plot.
+        Must include spatial coordinates and optionally a time-like dimension.
+
+    Animation
+    ---------
+    dim : str, default "time"
+        Name of the dimension to animate (e.g., "time").
+    indices : sequence of int, optional
+        Specific frame indices to include in the animation along `dim`. If None, uses all indices.
+    outfile : str or Path, optional
+        Path to save the resulting animation. If None, displays interactively.
+    quality : {"low", "medium", "high"}, default "medium"
+        Output resolution and compression setting.
+    fps : int, default 10
+        Animation playback speed in frames per second.
+    parallel : bool, default False
+        Compute animation frames in parallel across available CPUs.
+
+    Spatial Configuration
+    ---------------------
+    x, y : str, optional
+        Names of the horizontal coordinates. Defaults to the first two dimensions.
+    projection : str, default "PlateCarree"
+        Cartopy map projection name. Supported options include:
+        "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal",
+        "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo".
+    global_extent : bool, default False
+        If True, sets the extent to display the full globe.
+    figsize : tuple of float, optional
+        Figure size (width, height) in inches.
+    central_longitude : float, default None
+        Central longitude for the map projection.
+    central_latitude : float, default None
+
+    Plot Appearance
+    ---------------
+    plot_type : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+        Rendering method for data visualization.
+    cmap : str or Colormap, optional
+        Colormap applied to the data field.
+    vmin, vmax : float, optional
+        Color scaling limits. If None, inferred from data range.
+    levels : int or sequence, optional
+        Contour levels used in "contour" or "contourf" plots.
+    robust : bool, default False
+        Exclude outliers using 2nd-98th percentile for color normalization.
+    transform : cartopy.crs.Projection, optional
+        Coordinate reference system of the data for plotting.
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Orientation of the colorbar.
+    add_colorbar : bool, default True
+        Whether to display a colorbar.
+    drawedges : bool, default False
+        Draw grid edges on color patches (for `pcolormesh`).
+    cbar_label : str, optional
+        Label text for the colorbar.
+
+    Map Features
+    ------------
+    gridlines : bool, default False
+        Display latitude/longitude gridlines.
+    coastlines : bool, default True
+        Draw coastlines on the map.
+    borders : bool, default True
+        Draw country borders.
+    states : bool, default True
+        Draw internal administrative boundaries (e.g., states or provinces).
+    ocean, land : bool, default True
+        Fill ocean and land regions with the specified colors.
+    facecolor : str, default "#d3d3d3"
+        Land polygon fill color.
+    edgecolor : str, default "face"
+        Outline color for land polygons.
+
+    Other Parameters
+    ----------------
+    **kwargs
+        Additional arguments passed to the plotting function.
+
+    Returns
+    -------
+    matplotlib.animation.FuncAnimation or None
+        Animation object if not saved directly to file.
+
+    Notes
+    -----
+    - Parallel frame rendering significantly accelerates long sequences.
+    - Supports any Cartopy projection with a compatible coordinate transform.
+    - Intended for geospatial fields such as temperature, precipitation, or pressure.
+    """
+
+    args = ConfigMap(locals())
+
+    # pop the above from args
+    outfile = args.pop("outfile")
+    fps = args.pop("fps")
+    dim = args.pop("dim")
+    quality = args.pop("quality")
+    parallel = args.pop("parallel")
+    indices = args.pop("indices")
+    data = args.pop("data")
 
     if dim not in data.dims:
         raise ValueError(f"{dim} not found in data.dims {data.dims}")
@@ -390,38 +647,57 @@ def animate_data(args):
 
     if indices is None:
         indices = range(data.sizes[dim])
-        print(f"Animating all {data.sizes[dim]} values along {dim}.")
-
     if parallel:
-        if len(indices) >= CPU_COUNT:
-            processes = CPU_COUNT
+        if len(indices) >= n_cpu:
+            processes = n_cpu
         else:
             processes = len(indices)
-        tasks = [(i, data.copy(), dim, kwargs, dpi, session_tmp_dir) for i in indices]
+
+        tasks = [
+            (
+                data.isel({dim: i}).load(),
+                i,
+                data[dim].values[i],
+                dim,
+                dpi,
+                args,
+                session_tmp_dir,
+            )
+            for i in indices
+        ]
+
         with Pool(processes=processes) as pool:
-            pool.starmap(update_animation_frame, tasks)
+            pool.starmap(animate_i_frame, tasks)
 
     else:
-
-        _warn_msg = (
-            f"Generating {data.sizes[dim]} frames without parallel processing. "
-            "Set parallel=True for faster animation."
-        )
-
         if len(indices) > 100:
-            print(_warn_msg)
+            warnings.warn(
+                f"Generating {data.sizes[dim]} frames sequentially. \
+                Set `parallel=True` to enable parallel processing \
+                and improve animation speed.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        for i in list(indices):
-            update_animation_frame(i, data, dim, kwargs, dpi, session_tmp_dir)
+            for i in list(indices):
+                animate_i_frame(
+                    data.isel({dim: i}).load(),
+                    i,
+                    data[dim].values[i],
+                    dim,
+                    dpi,
+                    args,
+                    session_tmp_dir,
+                )
 
     # ---- ffmpeg encode (MP4 only) ----
-    if not out_file:
-        out_file = Path("videos/animation.mp4")
+    if not outfile:
+        outfile = Path("videos/animation.mp4")
     else:
-        out_file = Path(f"videos/{out_file}")
-        out_file = out_file.with_suffix(".mp4")
+        outfile = Path(f"videos/{outfile}")
+        outfile = outfile.with_suffix(".mp4")
 
-    out_file.parent.mkdir(parents=True, exist_ok=True)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
     error = 0
@@ -450,7 +726,7 @@ def animate_data(args):
             "yuv420p",
             "-movflags",
             "+faststart",
-            out_file,
+            outfile,
         ]
 
         subprocess.run(
@@ -465,13 +741,16 @@ def animate_data(args):
     finally:
         shutil.rmtree(session_tmp_dir, ignore_errors=True)
 
+    if error == 0:
+        print(f"Animation saved to : {outfile}")
+
     # optional inline display (Jupyter)
     if "ipykernel" in sys.modules and error == 0:
         from IPython.display import Video, display
 
         return display(
             Video(
-                out_file,
+                outfile,
                 embed=True,
                 html_attributes="controls autoplay loop",
                 width=800,
@@ -482,233 +761,19 @@ def animate_data(args):
         return None
 
 
-def cartplot(
-    data: xr.DataArray,
-    *,
-    x: str = None,
-    y: str = None,
-    plot_type: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
-    ] = "default",
-    projection: Literal[
-        "PlateCarree",
-        "Mercator",
-        "Robinson",
-        "Mollweide",
-        "Orthographic",
-        "LambertConformal",
-        "AlbersEqualArea",
-        "Stereographic",
-        "NorthPolarStereo",
-        "SouthPolarStereo",
-    ] = "PlateCarree",
-    central_longitude: float = -100,
-    global_extent: bool = False,
-    figsize: tuple[float, float] = None,
-    cmap: Union[str, mcolors.Colormap] = None,
-    vmin: float = None,
-    vmax: float = None,
-    levels: Union[int, list] = None,
-    robust: bool = False,
-    orientation: Literal["vertical", "horizontal"] = "vertical",
-    add_colorbar: bool = True,
-    drawedges: bool = False,
-    cbar_label: str = None,
-    gridlines: bool = False,
-    coastlines: bool = True,
-    borders: bool = True,
-    states: bool = True,
-    ocean: bool = True,
-    land: bool = True,
-    facecolor: str = "#d3d3d3",
-    edgecolor: str = "face",
-    animate: bool = False,
-    animate_dim: str = "time",
-    animate_indices: Union[tuple, list, np.ndarray] = None,
-    animate_out_file: PathLike = None,
-    animate_quality: Literal["low", "medium", "high"] = "medium",
-    animate_fps: int = 10,
-    parallel: bool = False,
-    **kwargs,
-):
-    """
-    Plot a 2D xarray.DataArray on a Cartopy map with flexible projection and styling options.
-
-    Parameters
-    ----------
-    data : xr.DataArray
-        2D array with spatial dimensions (e.g., lat/lon or x/y).
-    x, y : str, optional
-        Names of spatial dimensions. Defaults to first and second dims.
-    plot_type : str, default "default"
-        Plot style: "pcolormesh", "contourf", "contour", "imshow", or "default".
-    projection : str, default "PlateCarree"
-        Cartopy map projection.
-    central_longitude : float, default 0.0
-        Central longitude for projection.
-    global_extent : bool, default False
-        Show full globe if True.
-    figsize : tuple, optional
-        Figure size in inches.
-    cmap : str or Colormap, optional
-        Colormap for data.
-    vmin, vmax : float, optional
-        Color scale limits.
-    levels : int or list, optional
-        Contour levels for "contour" or "contourf".
-    robust : bool, default False
-        Use 2nd-98th percentiles for color scale if vmin/vmax not set.
-    orientation : str, default "vertical"
-        Colorbar orientation.
-    add_colorbar : bool, default True
-        Show colorbar.
-    drawedges : bool, default False
-        Draw edges on colorbar.
-    cbar_label : str, optional
-        Label for colorbar.
-    gridlines : bool, default False
-        Show lat/lon gridlines.
-    coastlines, borders, states : bool, default True
-        Show geographic features.
-    ocean, land : bool, default True
-        Show physical features.
-    facecolor : str, default "#d3d3d3"
-        Land fill color.
-    edgecolor : str, default "face"
-        Border edge color.
-    animate : bool, default False
-        Enable animation over a dimension.
-    animate_dim : str, default "time"
-        Dimension to animate.
-    animate_indices : list, optional
-        Indices to animate.
-    animate_out_file : str, optional
-        Output file path for animation.
-    animate_quality : str, default "medium"
-        Animation quality.
-    animate_fps : int, default 10
-        Frames per second.
-    parallel : bool, default False
-        Use parallel processing for animation.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The figure object.
-    ax : cartopy.mpl.geoaxes.GeoAxesSubplot
-        The map axes.
-    p : matplotlib artist
-        The plotted data object.
-
-    Notes
-    -----
-    Requires `cartopy` and `matplotlib`. Designed for 2D geospatial data.
-    """
-
-    allargs = locals()
-
-    # Ensure data is 2D unless animating
-    data = data.squeeze(drop=True)
-    if data.ndim > 2 and not animate:
-        raise ValueError(
-            f"Data with shape {data.shape} has {data.ndim} dimensions.\n \
-            Please set animate=True and specify the dimension to animate\n \
-            or select a 2D slice (e.g., using .isel or .sel)."
-        )
-    if data.ndim < 2:
-        raise ValueError(
-            f"Data with shape {data.shape} has less than 2 dimensions.\n \
-            cartplot requires a 2D DataArray (e.g., with lat/lon or x/y)."
-        )
-
-    if animate:
-        return animate_data(allargs)
-
-    map_kwags = get_func_signature(create_map_figure)
-    map_kwags = {k: v for k, v in allargs.items() if k in map_kwags}
-    plot_kwargs = {k: v for k, v in allargs.items() if k not in map_kwags}
-
-    figure, ax = create_map_figure(**map_kwags)
-
-    plot_funcs = {
-        "default": [data.plot, get_func_signature(data.plot)],
-        "pcolormesh": [data.plot.pcolormesh, get_func_signature(data.plot.pcolormesh)],
-        "contourf": [data.plot.contourf, get_func_signature(data.plot.contourf)],
-        "contour": [data.plot.contour, get_func_signature(data.plot.contour)],
-        "imshow": [data.plot.imshow, get_func_signature(data.plot.imshow)],
-    }
-
-    if plot_type not in plot_funcs:
-        raise ValueError(
-            f"Invalid plot_type '{plot_type}'. Choose from {list(plot_funcs)}."
-        )
-
-    plot_kwargs = {}
-    for _, sig in plot_funcs.values():
-        for k, v in sig.items():
-            plot_kwargs.setdefault(k, v)
-
-    # plot sig = combine all signature into 1 dict, removing duplicates, we will pass that to everything
-
-    plot_func = plot_funcs[plot_type][0]
-
-    plot_kwargs = {k: v for k, v in allargs.items() if k in plot_kwargs}
-    plot_kwargs["ax"] = ax
-    plot_kwargs["add_colorbar"] = False
-    plot_kwargs["transform"] = ccrs.PlateCarree()
-    del plot_kwargs["kwargs"]
-
-    plot_obj = plot_func(**plot_kwargs)
-
-    if ocean and not land:
-        ax.add_feature(cfeature.LAND, facecolor="white", zorder=1)
-    elif land and not ocean:
-        ax.add_feature(cfeature.OCEAN, facecolor="white", zorder=1)
-
-    if gridlines:
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="gray", alpha=0.5, linestyle="--"
-        )
-
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.bottom_labels = True
-        gl.left_labels = True
-
-    if add_colorbar:
-        cax = get_cbar_axes(fig=figure, axes=ax, orientation=orientation)
-
-        cb = plt.colorbar(
-            plot_obj,
-            cax=cax,
-            ax=ax,
-            orientation=orientation,
-            drawedges=drawedges,
-        )
-
-        if cbar_label:
-            cb.set_label(cbar_label)
-
-        else:
-
-            cbar_label = []
-            if "long_name" in data.attrs:
-                cbar_label.append(data.attrs["long_name"])
-            if "units" in data.attrs:
-                cbar_label.append(data.attrs["units"])
-            cb.set_label("\n".join(cbar_label))
-
-    return figure, ax, plot_obj
-
-
-see_data = cartplot
-
-
 @xr.register_dataarray_accessor("cartopy")
 class CartPlotAccessor:
     def __init__(self, xarray_obj):
         self._obj = xarray_obj
 
-    @functools.wraps(cartplot)
     def plot(self, *args, **kwargs):
         return cartplot(self._obj, *args, **kwargs)
+
+
+@xr.register_dataset_accessor("animate")
+class CartAnimateAccessor:
+    def __init__(self, xarray_obj):
+        self._obj = xarray_obj
+
+    def plots(self, *args, **kwargs):
+        return animate(self._obj, *args, **kwargs)

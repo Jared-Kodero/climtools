@@ -18,18 +18,24 @@ import xarray as xr
 
 from .logs import *
 
-HOST = socket.gethostname()
-USER = getpass.getuser()
-HOME = Path.home()
-TMPDIR = Path(os.environ.get("TMPDIR", "/tmp"))
-CPU_COUNT = len(os.sched_getaffinity(0))
+host = socket.gethostname()
+user = getpass.getuser()
+home = Path.home()
+tmp = Path(os.environ.get("TMPDIR", "/tmp"))
+n_cpu = len(os.sched_getaffinity(0))
 SCRIPT_DIR = Path(__file__).resolve().parent
 CURRENT_DASK_CLUSTER = None
 CURRENT_DASK_CLIENT = None
 _TMP_FILES = []
 
 
-def CWD():
+class ConfigMap(dict):
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+
+def cwd():
     """
     Get the current working directory.
     """
@@ -64,7 +70,7 @@ def type_cast(x, use_numpy: bool = False):
     Returns the original input if casting fails.
     """
     if x is None or str(x).strip() == "":
-        raise ValueError("Input cannot be None or empty string")
+        return np.nan if use_numpy else None
 
     _int = np.int64 if use_numpy else int
     _float = np.float64 if use_numpy else float
@@ -81,7 +87,6 @@ def type_cast(x, use_numpy: bool = False):
             res = None
 
     if res is None:
-        print(f"Warning: Cannot cast {x} to int or float, returning type {type(x)}")
         return x
 
     return res
@@ -119,24 +124,14 @@ def timeit(func):
     return wrapper
 
 
-def mkdir(arg: Path | PathLike):
+def mkdir(path: Path | PathLike):
     """
     Create a directory using the mkdir command in unix-like systems.
 
     """
-    if isinstance(arg, Path):
-        arg = str(arg)
-    elif isinstance(arg, list):
-        arg = [str(i) for i in arg]
-
-    arg = str(arg).strip()
-
-    if arg in {"", ".", ".."}:
-        raise ValueError("Invalid or empty path passed to mkdir command")
-
-    res = execute_cmd(["mkdir", "-p", arg])
-
-    return res
+    path = Path(path).resolve()
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def get_func_signature(func):
@@ -468,15 +463,15 @@ def _process_chunk(func, kwargs, data, chunk):
 
 
 def _tz_apply_func_parallel(
-    func,
-    chunks,
-    kwargs,
-):
+    func: Callable,
+    chunks: dict[str, xr.DataArray | xr.Dataset],
+    kwargs: Mapping | None,
+) -> xr.DataArray | xr.Dataset:
 
     args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
 
-    processes = max(1, min(CPU_COUNT, len(args)))
-    chunksize = max(1, len(args) // CPU_COUNT)
+    processes = max(1, min(n_cpu, len(args)))
+    chunksize = max(1, len(args) // n_cpu)
 
     if chunksize == 1:
         maxtasksperchild = 2
@@ -735,7 +730,7 @@ def close_dask():
 
 def setup_dask(
     *,
-    workers: int = CPU_COUNT,
+    workers: int = n_cpu,
     threads_per_worker: int = 1,
     processes=True,
     filter_warnings=True,
