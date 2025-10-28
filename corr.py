@@ -251,8 +251,8 @@ def _pd_dispatcher(
 
 
 def calc_corr(
-    x: Union[pd.DataFrame, xr.DataArray, xr.Dataset],
-    y: Union[pd.DataFrame, xr.DataArray, xr.Dataset],
+    x: pd.DataFrame | xr.DataArray | xr.Dataset,
+    y: pd.DataFrame | xr.DataArray | xr.Dataset,
     *,
     x_var: str = None,
     y_var: str = None,

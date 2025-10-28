@@ -1,4 +1,7 @@
 import xarray as xr
+from .pac_man import which as which
+from .tools import cwd as cwd, execute_cmd as execute_cmd, mv as mv, n_cpu as n_cpu, rm as rm, symlink as symlink, tmp as tmp, type_cast as type_cast
+from _typeshed import Incomplete
 from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
@@ -6,10 +9,10 @@ from typing import Any, Literal
 class CDONotFoundError(FileNotFoundError): ...
 
 class CDO:
-    cdo_path: Path
-    tmp_dir: Path
-    cwd: Path
-    cwd_tmp: Path
+    cdo_path: Incomplete
+    tmp_dir: Incomplete
+    cwd: Incomplete
+    cwd_tmp: Incomplete
     def __init__(self) -> None: ...
     def help(self) -> None: ...
     def run(self, cmd: list[str] = None) -> Any: ...
@@ -31,6 +34,5 @@ class CDO:
     def get_vert_coords(self, infile: Path | PathLike) -> str: ...
     def netcdf_to_grib(self, infile: Path | PathLike, outfile: Path | PathLike = None) -> str | PathLike: ...
     def grib_to_netcdf(self, infile: Path | PathLike, outdir: Path | PathLike = None, merge: bool = True, *, p_levels: list[float] = None, h_levels: list[float] = None, extrapolate: bool = False, spectral_operator: Literal['sp2gp', 'gp2sp', 'sp2sp', 'dv2ps', 'dv2uv', 'uv2dv'] = None, p_type: Literal['linear', 'quadratic', 'cubic'] = None, trunc: bool = False) -> xr.DataArray | xr.Dataset | str | PathLike: ...
-    def __dir__(self) -> None: ...
 
 cdo: CDO

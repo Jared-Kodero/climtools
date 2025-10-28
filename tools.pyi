@@ -2,30 +2,31 @@ from .logs import *
 import numpy as np
 import pandas as pd
 import xarray as xr
+from _typeshed import Incomplete
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping
+from typing import Callable, Literal, Mapping
 
-host: str
-user: str
-home: Path
-tmp: Path
-n_cpu: int
-SCRIPT_DIR: Path
-CURRENT_DASK_CLUSTER: Any
-CURRENT_DASK_CLIENT: Any
+host: Incomplete
+user: Incomplete
+home: Incomplete
+tmp: Incomplete
+n_cpu: Incomplete
+SCRIPT_DIR: Incomplete
+CURRENT_DASK_CLUSTER: Incomplete
+CURRENT_DASK_CLIENT: Incomplete
 
 class ConfigMap(dict):
-    __getattr__: Any
-    __setattr__: Any
-    __delattr__: Any
+    __getattr__: Incomplete
+    __setattr__: Incomplete
+    __delattr__: Incomplete
 
-def cwd() -> None: ...
+def cwd(): ...
 def cleanup() -> None: ...
 def execute_cmd(cmd: list[str]): ...
 def type_cast(x, use_numpy: bool = False): ...
-def timeit(func) -> None: ...
+def timeit(func): ...
 def mkdir(path: Path): ...
-def get_func_signature(func) -> None: ...
+def get_func_signature(func): ...
 def file_type(file_path: Path) -> str: ...
 def symlink(src: Path, dst: Path): ...
 def rm(arg: Path | list[Path]): ...

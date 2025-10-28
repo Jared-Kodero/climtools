@@ -116,6 +116,9 @@ from .tools import (
     user,
 )
 from .trends import calc_signicance, calc_trends, mk_trend_test, polyfit
+from .xr_plot import GeoDataArray
+
+GeoDataArray = GeoDataArray
 
 __all__ = [
     "animate",
@@ -140,6 +143,7 @@ __all__ = [
     "get_func_signature",
     "get_local_solar_time",
     "get_spatiotemporal_info",
+    "GeoDataArray",
     "infer_time_frequency",
     "interp_data",
     "land_sea_mask",

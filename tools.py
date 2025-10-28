@@ -124,7 +124,7 @@ def timeit(func):
     return wrapper
 
 
-def mkdir(path: Path | PathLike):
+def mkdir(path: Path):
     """
     Create a directory using the mkdir command in unix-like systems.
 
@@ -145,7 +145,7 @@ def get_func_signature(func):
     }
 
 
-def file_type(file_path: Path | PathLike) -> str:
+def file_type(file_path: Path) -> str:
     """
     Get the file type using the `file` command in unix-like systems.
     """
@@ -158,8 +158,8 @@ def file_type(file_path: Path | PathLike) -> str:
 
 
 def symlink(
-    src: Path | PathLike,
-    dst: Path | PathLike,
+    src: Path,
+    dst: Path,
 ):
     """
     Create a symbolic link from src to dst.
@@ -183,7 +183,7 @@ def symlink(
         raise FileNotFoundError(f"Source path does not exist: {src}")
 
 
-def rm(arg: Path | PathLike | list[Path | PathLike]):
+def rm(arg: Path | list[Path]):
     """
     Remove files or directories
 
@@ -201,8 +201,8 @@ def rm(arg: Path | PathLike | list[Path | PathLike]):
 
 
 def cp(
-    src: Path | PathLike,
-    dst: Path | PathLike,
+    src: Path,
+    dst: Path,
 ):
     """
     Copy files or directories
@@ -221,8 +221,8 @@ def cp(
 
 
 def mv(
-    src: Path | PathLike,
-    dst: Path | PathLike,
+    src: Path,
+    dst: Path,
 ):
     """
     Move files or directories

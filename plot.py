@@ -6,7 +6,7 @@ import warnings
 from multiprocessing import Pool
 from os import PathLike
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -478,7 +478,7 @@ def animate(
     # Animation control will be popped from args
     dim: str = "time",
     *,
-    indices: Union[tuple, list, np.ndarray] = None,
+    indices: tuple | list | np.ndarray = None,
     outfile: PathLike = None,
     quality: Literal["low", "medium", "high"] = "medium",
     fps: int = 10,
@@ -759,21 +759,3 @@ def animate(
         )
     else:
         return None
-
-
-@xr.register_dataarray_accessor("cartopy")
-class CartPlotAccessor:
-    def __init__(self, xarray_obj):
-        self._obj = xarray_obj
-
-    def plot(self, *args, **kwargs):
-        return cartplot(self._obj, *args, **kwargs)
-
-
-@xr.register_dataset_accessor("animate")
-class CartAnimateAccessor:
-    def __init__(self, xarray_obj):
-        self._obj = xarray_obj
-
-    def plots(self, *args, **kwargs):
-        return animate(self._obj, *args, **kwargs)

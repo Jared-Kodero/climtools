@@ -1095,34 +1095,5 @@ class CDO:
             print(f"SAVED : {infile.stem}.nc")
             return ds
 
-    def __dir__(self):
-        return [
-            "remapnn",
-            "remapcon",
-            "remapbil",
-            "remapbic",
-            "remaplaf",
-            "remapeta",
-            "vertintml",
-            "vertintap",
-            "vertintgh",
-            "mergetime",
-            "intlevel",
-            "intlevel3d",
-            "fourier_transform",
-            "griddes",
-            "info",
-            "showinfo",
-            "ninfo",
-            "split",
-            "grib_to_netcdf",
-            "netcdf_to_grib",
-            "to_nc4",
-            "spectral_transform",
-            "get_vert_coords",
-            "run",
-            "vlist",
-        ]
-
 
 cdo: CDO = CDO()
