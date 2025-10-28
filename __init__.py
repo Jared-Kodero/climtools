@@ -84,7 +84,7 @@ Notes:
 from .cdo_py import cdo
 from .corr import calc_corr
 from .logs import log
-from .plot import animate, cartplot, get_cbar_axes, make_lon_cyclic, plot_p_values
+from .plot import animate, cartplot, get_cbar_axes, make_cyclic, plot_p_values
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
 from .tools import (
     chunk_by_dims,
@@ -105,7 +105,7 @@ from .tools import (
     land_sea_mask,
     mkdir,
     mv,
-    n_cpu,
+    n_cpus,
     rm,
     setup_dask,
     symlink,
@@ -123,7 +123,7 @@ GeoDataArray = GeoDataArray
 __all__ = [
     "animate",
     "cdo",
-    "n_cpu",
+    "n_cpus",
     "cwd",
     "ESMF_RegridWeightGen",
     "home",
@@ -148,7 +148,7 @@ __all__ = [
     "interp_data",
     "land_sea_mask",
     "log",
-    "make_lon_cyclic",
+    "make_cyclic",
     "mk_trend_test",
     "mkdir",
     "mv",

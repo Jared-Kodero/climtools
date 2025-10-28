@@ -22,7 +22,7 @@ host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 tmp = Path(os.environ.get("TMPDIR", "/tmp"))
-n_cpu = len(os.sched_getaffinity(0))
+n_cpus = len(os.sched_getaffinity(0))
 _tmp_files = []
 
 script_dir = Path(__file__).resolve().parent
@@ -471,8 +471,8 @@ def _tz_apply_func_parallel(
 
     args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
 
-    processes = max(1, min(n_cpu, len(args)))
-    chunksize = max(1, len(args) // n_cpu)
+    processes = max(1, min(n_cpus, len(args)))
+    chunksize = max(1, len(args) // n_cpus)
 
     if chunksize == 1:
         maxtasksperchild = 2
@@ -731,7 +731,7 @@ def close_dask():
 
 def setup_dask(
     *,
-    workers: int = n_cpu,
+    workers: int = n_cpus,
     threads_per_worker: int = 1,
     processes=True,
     filter_warnings=True,

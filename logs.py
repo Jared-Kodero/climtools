@@ -1,14 +1,12 @@
 import pprint
 import sys
 import traceback
-from datetime import datetime
 from os import PathLike
 from pathlib import Path
-from tkinter.font import BOLD
-from typing import Any, Literal
+from typing import Any
 
 # Detect whether output is a terminal
-USE_COLOR = sys.stdout.isatty()
+use_color = sys.stdout.isatty()
 
 # ANSI color codes
 RED = "\033[31m"
@@ -102,7 +100,7 @@ def _exceptions(values, file, exc_info):
         frame_line = frame.line.strip() if frame.line else ""
         pointer = " " * (len(str(lineno)) + 3) + "^" * len(frame_line)
 
-        if USE_COLOR:
+        if use_color:
             frame_line = f"{RED}{frame_line}{RESET}"
             pointer = f"{RED}{pointer}{RESET}"
 
@@ -114,7 +112,7 @@ def _exceptions(values, file, exc_info):
     new_ft = "\n".join(new_ft)
     error_type = f"{exc_type.__qualname__} : {exc_value}"
 
-    output = f"\n{error_type}\n" f"{new_ft}\n\t{msg}\n"
+    output = f"\n{error_type}\n {new_ft}\n\t{msg}\n"
 
     _print_result(output, file, pretty=False)
 

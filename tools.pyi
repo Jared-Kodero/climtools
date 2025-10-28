@@ -10,7 +10,7 @@ host: Incomplete
 user: Incomplete
 home: Incomplete
 tmp: Incomplete
-n_cpu: Incomplete
+n_cpus: Incomplete
 script_dir: Incomplete
 current_dask_cluster: Incomplete
 current_dask_client: Incomplete
