@@ -4,12 +4,11 @@ from pathlib import Path
 from typing import Literal
 
 import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
 # Assuming your cartplot() and animate() functions are imported from the same module
-from .plot import animate, cartplot  # adjust import path as needed
+from .plot import animate, cartplot, make_cyclic  # adjust import path as needed
 
 PathLike = str | Path
 
@@ -20,17 +19,11 @@ class GeoDataArray(xr.DataArray):
     Extension of xarray.DataArray with Cartopy-based plotting and animation methods.
     """
 
+    def add_cyclic_point(self, dim: str = "lon") -> GeoDataArray:
+        return make_cyclic(self, dim)
+
     def cartplot(
         self,
-        # Animation control will be popped from args
-        dim: str = "time",
-        *,
-        indices: tuple | list | np.ndarray = None,
-        outfile: PathLike = None,
-        quality: Literal["low", "medium", "high"] = "medium",
-        fps: int = 10,
-        parallel: bool = True,
-        # Spatial configuration
         x: str = None,
         y: str = None,
         projection: Literal[
@@ -45,10 +38,10 @@ class GeoDataArray(xr.DataArray):
             "NorthPolarStereo",
             "SouthPolarStereo",
         ] = "PlateCarree",
-        global_extent: bool = False,
-        figsize: tuple[float, float] = None,
         central_longitude: float = None,
         central_latitude: float = None,
+        global_extent: bool = False,
+        figsize: tuple[float, float] = None,
         # Plot appearance
         plot_type: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow"
@@ -57,8 +50,8 @@ class GeoDataArray(xr.DataArray):
         vmin: float = None,
         vmax: float = None,
         levels: int | list = None,
+        extend: str = None,
         robust: bool = False,
-        transform: bool = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -70,21 +63,14 @@ class GeoDataArray(xr.DataArray):
         states: bool = True,
         ocean: bool = True,
         land: bool = True,
-        facecolor: str = "#d3d3d3",
         edgecolor: str = "face",
         **kwargs,
-    ) -> tuple[plt.Figure, plt.Axes, plt.Artist]:
+    ):
         """
         Plot this DataArray on a Cartopy map using the global `cartplot()` function.
         """
         return cartplot(
             self,
-            dim=dim,
-            indices=indices,
-            outfile=outfile,
-            quality=quality,
-            fps=fps,
-            parallel=parallel,
             x=x,
             y=y,
             projection=projection,
@@ -98,7 +84,7 @@ class GeoDataArray(xr.DataArray):
             vmax=vmax,
             levels=levels,
             robust=robust,
-            transform=transform,
+            extend=extend,
             orientation=orientation,
             add_colorbar=add_colorbar,
             drawedges=drawedges,
@@ -109,7 +95,6 @@ class GeoDataArray(xr.DataArray):
             states=states,
             ocean=ocean,
             land=land,
-            facecolor=facecolor,
             edgecolor=edgecolor,
             **kwargs,
         )
@@ -150,8 +135,8 @@ class GeoDataArray(xr.DataArray):
         vmin: float = None,
         vmax: float = None,
         levels: int | list = None,
+        extend: str = None,
         robust: bool = False,
-        transform: bool = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -163,7 +148,6 @@ class GeoDataArray(xr.DataArray):
         states: bool = True,
         ocean: bool = True,
         land: bool = True,
-        facecolor: str = "#d3d3d3",
         edgecolor: str = "face",
         **kwargs,
     ) -> None:
@@ -191,7 +175,7 @@ class GeoDataArray(xr.DataArray):
             vmax=vmax,
             levels=levels,
             robust=robust,
-            transform=transform,
+            extend=extend,
             orientation=orientation,
             add_colorbar=add_colorbar,
             drawedges=drawedges,
@@ -202,7 +186,6 @@ class GeoDataArray(xr.DataArray):
             states=states,
             ocean=ocean,
             land=land,
-            facecolor=facecolor,
             edgecolor=edgecolor,
             **kwargs,
         )

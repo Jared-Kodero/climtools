@@ -11,9 +11,9 @@ user: Incomplete
 home: Incomplete
 tmp: Incomplete
 n_cpu: Incomplete
-SCRIPT_DIR: Incomplete
-CURRENT_DASK_CLUSTER: Incomplete
-CURRENT_DASK_CLIENT: Incomplete
+script_dir: Incomplete
+current_dask_cluster: Incomplete
+current_dask_client: Incomplete
 
 class ConfigMap(dict):
     __getattr__: Incomplete

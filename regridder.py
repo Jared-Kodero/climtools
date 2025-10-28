@@ -7,7 +7,7 @@ import xarray as xr
 import xesmf as xe
 
 from .logs import log
-from .tools import _TMP_FILES, cwd, execute_cmd, n_cpu
+from .tools import _tmp_files, cwd, execute_cmd, n_cpu
 
 
 def ESMF_RegridWeightGen(
@@ -201,7 +201,7 @@ def ESMF_RegridWeightGen(
 
     if "--weight" not in subprocess_args or "-w" not in subprocess_args:
         weight_file = (cwd() / "weights" / f"{uuid.uuid4()}.nc").resolve()
-        _TMP_FILES.append(weight_file)
+        _tmp_files.append(weight_file)
         weight_file.parent.mkdir(parents=True, exist_ok=True)
 
         w = ["--weight", f"{weight_file}"]

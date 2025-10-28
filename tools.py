@@ -23,10 +23,11 @@ user = getpass.getuser()
 home = Path.home()
 tmp = Path(os.environ.get("TMPDIR", "/tmp"))
 n_cpu = len(os.sched_getaffinity(0))
-SCRIPT_DIR = Path(__file__).resolve().parent
-CURRENT_DASK_CLUSTER = None
-CURRENT_DASK_CLIENT = None
-_TMP_FILES = []
+_tmp_files = []
+
+script_dir = Path(__file__).resolve().parent
+current_dask_cluster = None
+current_dask_client = None
 
 
 class ConfigMap(dict):
@@ -43,7 +44,7 @@ def cwd():
 
 
 def cleanup():
-    rm(_TMP_FILES)
+    rm(_tmp_files)
 
 
 atexit.register(cleanup)
@@ -257,7 +258,7 @@ def land_sea_mask(
         "era5": "era5_0.25_mask",
     }
 
-    file = SCRIPT_DIR / "data" / masks[mask_file]
+    file = script_dir / "data" / masks[mask_file]
 
     mask = xr.open_dataset(file)
 
@@ -720,12 +721,12 @@ def close_dask():
     Close the active Dask client and cluster if they exist.
     This is useful for cleaning up resources when done with Dask computations.
     """
-    global CURRENT_DASK_CLIENT, CURRENT_DASK_CLUSTER
-    if CURRENT_DASK_CLIENT and CURRENT_DASK_CLUSTER:
-        CURRENT_DASK_CLIENT.close()
-        CURRENT_DASK_CLUSTER.close()
-        CURRENT_DASK_CLIENT = None
-        CURRENT_DASK_CLUSTER = None
+    global current_dask_client, current_dask_cluster
+    if current_dask_client and current_dask_cluster:
+        current_dask_client.close()
+        current_dask_cluster.close()
+        current_dask_client = None
+        current_dask_cluster = None
 
 
 def setup_dask(
@@ -754,10 +755,10 @@ def setup_dask(
         >>> setup_dask(get_info=True, filter_warnings=False)
     """
 
-    global CURRENT_DASK_CLIENT, CURRENT_DASK_CLUSTER
+    global current_dask_client, current_dask_cluster
 
-    if CURRENT_DASK_CLIENT and CURRENT_DASK_CLUSTER:
-        return CURRENT_DASK_CLIENT
+    if current_dask_client and current_dask_cluster:
+        return current_dask_client
 
     from dask.distributed import Client, LocalCluster
 
@@ -775,12 +776,12 @@ def setup_dask(
     )
     client = Client(cluster)
 
-    CURRENT_DASK_CLIENT = client
-    CURRENT_DASK_CLUSTER = cluster
+    current_dask_client = client
+    current_dask_cluster = cluster
 
     def _cleanup():
-        CURRENT_DASK_CLIENT.close()
-        CURRENT_DASK_CLUSTER.close()
+        current_dask_client.close()
+        current_dask_cluster.close()
 
     atexit.register(_cleanup)
 

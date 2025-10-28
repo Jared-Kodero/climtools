@@ -10,7 +10,7 @@ import pandas as pd
 import xarray as xr
 
 from .pac_man import which
-from .tools import _TMP_FILES, cwd, execute_cmd, mv, n_cpu, rm, symlink, tmp, type_cast
+from .tools import _tmp_files, cwd, execute_cmd, mv, n_cpu, rm, symlink, tmp, type_cast
 
 
 class CDONotFoundError(FileNotFoundError):
@@ -51,7 +51,7 @@ class CDO:
         self.cwd_tmp = self.cwd / ".tmp"
 
         self.cwd_tmp.mkdir(parents=True, exist_ok=True)
-        _TMP_FILES.append(self.tmp_dir)
+        _tmp_files.append(self.tmp_dir)
 
         os.environ["CDO_VERSION_INFO"] = "false"
         os.environ["CDO_HISTORY_INFO"] = "false"
@@ -154,7 +154,7 @@ class CDO:
 
     def _h_interp_data(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -166,17 +166,28 @@ class CDO:
         grdfile = f"{self.tmp_dir}/{uuid.uuid4()}.grid"
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile, grdfile])
+            _tmp_files.extend([outfile, grdfile])
 
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
+        da_name = None
+
+        if isinstance(obj, (xr.DataArray, xr.Dataset)):
+            tmp_input = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
+            if isinstance(obj, xr.DataArray):
+                da_name = obj.name or "var"
+                obj = obj.to_dataset(name=da_name)
+
+            obj.to_netcdf(tmp_input)
+            obj = tmp_input
+
+        if not Path(obj).exists():
+            raise FileNotFoundError(f"Input file {obj} does not exist.")
         if Path(outfile).exists():
             rm(outfile)
 
         if bbox:
             lon_min, lat_min, lon_max, lat_max = bbox
         else:
-            lon_min, lat_min, lon_max, lat_max = self._bbox_from_griddes(infile)
+            lon_min, lat_min, lon_max, lat_max = self._bbox_from_griddes(obj)
 
         grid_description = self._make_grid_description(
             lon_min, lat_min, lon_max, lat_max, resolution
@@ -191,7 +202,7 @@ class CDO:
             "-b",
             "F32",
             f"{method},{grdfile}",
-            f"{infile}",
+            f"{obj}",
             f"{outfile}",
         ]
 
@@ -201,6 +212,8 @@ class CDO:
 
         if as_xarray:
             ret = xr.open_dataset(outfile, chunks="auto")
+            if da_name:
+                ret = ret[da_name]
         else:
             ret = outfile
 
@@ -299,7 +312,7 @@ class CDO:
 
     def remapdis(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -309,7 +322,7 @@ class CDO:
         """Interpolate data using CDO's remapdis method."""
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remapdis",
@@ -319,7 +332,7 @@ class CDO:
 
     def remapnn(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -332,7 +345,7 @@ class CDO:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remapnn",
@@ -342,7 +355,7 @@ class CDO:
 
     def remapcon(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -352,7 +365,7 @@ class CDO:
         """Interpolate data using CDO's remapcon method."""
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remapcon",
@@ -362,7 +375,7 @@ class CDO:
 
     def remapbil(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -376,7 +389,7 @@ class CDO:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remapbil",
@@ -386,7 +399,7 @@ class CDO:
 
     def remapbic(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -400,7 +413,7 @@ class CDO:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remapbic",
@@ -410,7 +423,7 @@ class CDO:
 
     def remaplaf(
         self,
-        infile: Path | PathLike,
+        obj: Path | PathLike | xr.DataArray | xr.Dataset,
         outfile: Path | PathLike = None,
         *,
         resolution: float = 0.25,
@@ -424,7 +437,7 @@ class CDO:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
         return self._h_interp_data(
-            infile=infile,
+            obj=obj,
             outfile=outfile,
             resolution=resolution,
             method="remaplaf",
@@ -476,7 +489,7 @@ class CDO:
         """
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
+            _tmp_files.extend([outfile])
 
         if not Path(infile).exists():
             raise FileNotFoundError(f"Input file {infile} does not exist.")
@@ -734,7 +747,7 @@ class CDO:
             if not (self.cwd_tmp / Path(infile).stem).exists():
                 symlink(filestem_dir, self.cwd_tmp / Path(infile).stem)
 
-            _TMP_FILES.extend([outdir, self.cwd_tmp])
+            _tmp_files.extend([outdir, self.cwd_tmp])
         else:
             outdir = Path(outdir) / Path(infile).stem / op_dir
             outdir.mkdir(parents=True, exist_ok=True)
@@ -780,7 +793,7 @@ class CDO:
 
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _TMP_FILES.extend([outfile])
+            _tmp_files.extend([outfile])
 
         if not Path(infile).exists():
             raise FileNotFoundError(f"Input file {infile} does not exist.")
@@ -882,7 +895,7 @@ class CDO:
 
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.grb"
-            _TMP_FILES.extend([outfile])
+            _tmp_files.extend([outfile])
         if Path(outfile).exists():
             rm(outfile)
 

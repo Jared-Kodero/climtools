@@ -133,7 +133,7 @@ def get_cbar_axes(
     return cax
 
 
-def make_lon_cyclic(obj: xr.DataArray, longitude: str = "lon"):
+def make_cyclic(obj: xr.DataArray, dim: str = "lon"):
     """
     Add a cyclic point to a DataArray along the specified longitude dimension.
 
@@ -147,13 +147,13 @@ def make_lon_cyclic(obj: xr.DataArray, longitude: str = "lon"):
 
     if not isinstance(obj, xr.DataArray):
         raise ValueError("Input object must be an xarray.DataArray.")
-    if longitude not in obj.dims:
-        raise ValueError(f"Longitude dimension '{longitude}' not found in data dims.")
+    if dim not in obj.dims:
+        raise ValueError(f"Longitude dimension '{dim}' not found in data dims.")
 
     attrs = obj.attrs
-    cyclic_data, cyclic_longitude = add_cyclic_point(obj.values, coord=obj[longitude])
+    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[dim])
     coords = {dim: obj.coords[dim] for dim in obj.dims}
-    coords["lon"] = cyclic_longitude
+    coords[dim] = cyclic_dim
 
     return xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
 
@@ -237,6 +237,7 @@ def cartplot(
     vmin: float = None,
     vmax: float = None,
     levels: int | list = None,
+    extend: str = None,
     robust: bool = False,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
@@ -292,6 +293,10 @@ def cartplot(
         Contour levels for "contour" and "contourf".
     robust : bool, default False
         If True, ignores outliers using 2nd–98th percentile range.
+    extend : str, optional
+        If 'both', extends color limits to include both ends of the data range.
+        If 'min', extends only the minimum limit.
+        If 'max', extends only the maximum limit.
     orientation : str, default "vertical"
         Colorbar orientation.
     add_colorbar : bool, default True
@@ -510,8 +515,8 @@ def animate(
     vmin: float = None,
     vmax: float = None,
     levels: int | list = None,
+    extend: str = None,
     robust: bool = False,
-    transform: bool = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -523,7 +528,6 @@ def animate(
     states: bool = True,
     ocean: bool = True,
     land: bool = True,
-    facecolor: str = "#d3d3d3",
     edgecolor: str = "face",
     **kwargs,
 ):
@@ -580,6 +584,8 @@ def animate(
         Color scaling limits. If None, inferred from data range.
     levels : int or sequence, optional
         Contour levels used in "contour" or "contourf" plots.
+    extend : str, optional
+        If 'both', extends color limits to include both ends of the data range.
     robust : bool, default False
         Exclude outliers using 2nd-98th percentile for color normalization.
     transform : cartopy.crs.Projection, optional
