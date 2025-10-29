@@ -23,7 +23,7 @@ user = getpass.getuser()
 home = Path.home()
 tmp = Path(os.environ.get("TMPDIR", "/tmp"))
 n_cpus = len(os.sched_getaffinity(0))
-_tmp_files = []
+tmp_files = []
 
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
@@ -44,7 +44,7 @@ def cwd():
 
 
 def cleanup():
-    rm(_tmp_files)
+    rm(tmp_files)
 
 
 atexit.register(cleanup)

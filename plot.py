@@ -16,7 +16,7 @@ import numpy as np
 import xarray as xr
 from cartopy.util import add_cyclic_point
 
-from .tools import ConfigMap, get_func_signature, n_cpu
+from .tools import ConfigMap, get_func_signature, n_cpus
 
 
 def get_cbar_axes(
@@ -654,8 +654,8 @@ def animate(
     if indices is None:
         indices = range(data.sizes[dim])
     if parallel:
-        if len(indices) >= n_cpu:
-            processes = n_cpu
+        if len(indices) >= n_cpus:
+            processes = n_cpus
         else:
             processes = len(indices)
 

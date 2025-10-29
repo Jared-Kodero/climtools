@@ -11,6 +11,7 @@ user: Incomplete
 home: Incomplete
 tmp: Incomplete
 n_cpus: Incomplete
+tmp_files: Incomplete
 script_dir: Incomplete
 current_dask_cluster: Incomplete
 current_dask_client: Incomplete

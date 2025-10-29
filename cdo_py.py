@@ -10,7 +10,7 @@ import pandas as pd
 import xarray as xr
 
 from .pac_man import which
-from .tools import _tmp_files, cwd, execute_cmd, mv, n_cpu, rm, symlink, tmp, type_cast
+from .tools import cwd, execute_cmd, mv, n_cpus, rm, symlink, tmp, tmp_files, type_cast
 
 
 class CDONotFoundError(FileNotFoundError):
@@ -51,14 +51,14 @@ class CDO:
         self.cwd_tmp = self.cwd / ".tmp"
 
         self.cwd_tmp.mkdir(parents=True, exist_ok=True)
-        _tmp_files.append(self.tmp_dir)
+        tmp_files.append(self.tmp_dir)
 
         os.environ["CDO_VERSION_INFO"] = "false"
         os.environ["CDO_HISTORY_INFO"] = "false"
 
     def _cdo(self, input_cmds: list[str]):
         try:
-            cmd = ["cdo", "-s", "-w", "-P", str(n_cpu)]
+            cmd = ["cdo", "-s", "-w", "-P", str(n_cpus)]
             cmd.extend(input_cmds)
 
             seen = set()
@@ -166,7 +166,7 @@ class CDO:
         grdfile = f"{self.tmp_dir}/{uuid.uuid4()}.grid"
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _tmp_files.extend([outfile, grdfile])
+            tmp_files.extend([outfile, grdfile])
 
         da_name = None
 
@@ -489,7 +489,7 @@ class CDO:
         """
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _tmp_files.extend([outfile])
+            tmp_files.extend([outfile])
 
         if not Path(infile).exists():
             raise FileNotFoundError(f"Input file {infile} does not exist.")
@@ -747,7 +747,7 @@ class CDO:
             if not (self.cwd_tmp / Path(infile).stem).exists():
                 symlink(filestem_dir, self.cwd_tmp / Path(infile).stem)
 
-            _tmp_files.extend([outdir, self.cwd_tmp])
+            tmp_files.extend([outdir, self.cwd_tmp])
         else:
             outdir = Path(outdir) / Path(infile).stem / op_dir
             outdir.mkdir(parents=True, exist_ok=True)
@@ -793,7 +793,7 @@ class CDO:
 
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.nc"
-            _tmp_files.extend([outfile])
+            tmp_files.extend([outfile])
 
         if not Path(infile).exists():
             raise FileNotFoundError(f"Input file {infile} does not exist.")
@@ -895,7 +895,7 @@ class CDO:
 
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4()}.grb"
-            _tmp_files.extend([outfile])
+            tmp_files.extend([outfile])
         if Path(outfile).exists():
             rm(outfile)
 
