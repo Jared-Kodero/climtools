@@ -1,5 +1,5 @@
 # Ignore symlinks
 __pycache__
-
-
+plot_cmaps.py
+.cmap_meta.json
 
