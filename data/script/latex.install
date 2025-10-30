@@ -1,0 +1,86 @@
+#!/bin/bash
+
+
+# Exit on any error
+set -e
+
+# Define installation directory
+LATEX_INSTALL_DIR="$HOME/texlive"
+WORK_DIR="/tmp/$(date +%s%N)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Create working directory
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+
+# Download the TeX Live installer
+echo "Downloading TeX Live installer..."
+wget https://mirror.ctan.org/systems/texlive/tlnet/install-tl-unx.tar.gz
+
+# Extract the installer
+echo "Extracting installer..."
+tar -xzf install-tl-unx.tar.gz
+rm -rf install-tl-*.tar.gz
+cd install-tl-*
+
+# Run the installer with minimal interaction
+echo "Starting installation..."
+perl ./install-tl \
+  --no-interaction \
+  --texdir="$LATEX_INSTALL_DIR" \
+  --no-doc-install \
+  --no-src-install
+
+
+export PATH="$HOME/texlive/bin/x86_64-linux:$PATH"
+export TEXMFHOME="$LATEX_INSTALL_DIR/texmf"
+export TEXMFVAR="$LATEX_INSTALL_DIR/texmf-var"
+export TLUSERDIR="$LATEX_INSTALL_DIR/tlpkg"
+export TEXMFCONFIG="$LATEX_INSTALL_DIR/texmf-config"
+
+# Update tlmgr (TeX Live Manager)
+# Install additional packages
+echo "Installing additional packages..."
+cd "$LATEX_INSTALL_DIR"
+
+
+mkdir -p "$TEXMFHOME" "$TEXMFVAR" "$TEXMFCONFIG"
+# Set up tlmgr (needed on first run if not already initialized)
+tlmgr init-usertree
+
+# Install required tools for Matplotlib
+tlmgr install dvipng dvips psfrag psnfss luatex latex-bin xetex amsmath tools
+
+# (Optional but useful fonts and math packages)
+tlmgr install newtx cm-super helvetic courier mathpazo
+
+# Upgrade everything (optional)
+tlmgr update --self --all
+
+
+
+# Cleanup installer files
+echo "Cleaning up..."
+rm -rf "$WORK_DIR"
+
+
+
+
+cat <<'EOL' >> ~/.bashrc
+
+
+
+# <<< Initialize LaTeX environment >>>
+
+export PATH="$HOME/texlive/bin/x86_64-linux:$PATH"
+
+# <<< Initialize LaTeX environment >>>
+
+EOL
+
+source ~/.bashrc
+
+
+
+
+rm -rf "$SCRIPT_DIR/lock"

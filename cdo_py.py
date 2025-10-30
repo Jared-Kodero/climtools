@@ -1,6 +1,7 @@
 import os
 import subprocess
 import uuid
+import warnings
 from io import StringIO
 from os import PathLike
 from pathlib import Path
@@ -13,7 +14,7 @@ from .pac_man import which
 from .tools import cwd, execute_cmd, mv, n_cpus, rm, symlink, tmp, tmp_files, type_cast
 
 
-class CDONotFoundError(FileNotFoundError):
+class CDONotFoundError(RuntimeError):
     pass
 
 
@@ -40,9 +41,10 @@ class CDO:
         # check CDO availability on initialization
         self.cdo_path = which("cdo")
         if not self.cdo_path:
-            raise CDONotFoundError(
+            warnings.warn(
                 "CDO is not installed or not available in PATH.\
-                See https://code.mpimet.mpg.de/projects/cdo/wiki"
+                See https://code.mpimet.mpg.de/projects/cdo/wiki",
+                UserWarning,
             )
 
         self.tmp_dir = tmp / "_tmp_cdo"

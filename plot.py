@@ -10,6 +10,7 @@ from typing import Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import cartopy.mpl.geoaxes
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -158,12 +159,14 @@ def make_cyclic(obj: xr.DataArray, dim: str = "lon"):
     return xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
 
 
-def plot_p_values(
-    ax: plt.Axes,
+def plot_pvalues(
     data: xr.DataArray,
+    ax: plt.Axes = None,
     level: float = 0.05,
     color: str = "grey",
     alpha: float = 1,
+    marker: str = None,
+    edgecolors: str = None,
     s: float = 1,
 ):
     """
@@ -185,6 +188,14 @@ def plot_p_values(
         Size of the points to plot. Default is 1.
     """
 
+    if ax is None:
+        ax = plt.gca()
+
+    # check if ax is cartopy axis
+    transform = None
+    if isinstance(ax, cartopy.mpl.geoaxes.GeoAxes):
+        transform = ccrs.PlateCarree()
+
     if "lon" not in data.dims or "lat" not in data.dims:
         raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
 
@@ -198,10 +209,12 @@ def plot_p_values(
     ax.scatter(
         p_values["lon"],
         p_values["lat"],
-        transform=ccrs.PlateCarree(),
+        transform=transform,
         color=color,
         alpha=alpha,
         s=s,
+        marker=marker,
+        edgecolors=edgecolors,
     )
 
     return ax

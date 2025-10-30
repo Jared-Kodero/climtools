@@ -1,11 +1,17 @@
+import warnings
 from typing import Literal, Union
 
-import dask
 import numpy as np
 import pandas as pd
-import pymannkendall as mk
 import xarray as xr
 from scipy import stats
+
+try:
+    import pymannkendall as mk
+except ImportError:
+    warnings.warn(
+        "pymannkendall is not installed. Trend calculation functionalities will not work."
+    )
 
 
 def mk_trend_test(

@@ -258,7 +258,7 @@ def land_sea_mask(
         "era5": "era5_0.25_mask",
     }
 
-    file = script_dir / "data" / masks[mask_file]
+    file = script_dir / "data" / "mask" / masks[mask_file]
 
     mask = xr.open_dataset(file)
 

@@ -1,10 +1,16 @@
 import difflib
 import uuid
+import warnings
 from os import PathLike
 
 import numpy as np
 import xarray as xr
-import xesmf as xe
+
+try:
+    import xesmf as xe
+except ImportError:
+    warnings.warn("xesmf is not installed. regridder functionalities will not work.")
+
 
 from .logs import log
 from .tools import cwd, execute_cmd, n_cpus, tmp_files

@@ -7,17 +7,15 @@ import matplotlib.colors as mcolors
 import numpy as np
 import xarray as xr
 
-# Assuming your cartplot() and animate() functions are imported from the same module
-from .plot import animate, cartplot, make_cyclic  # adjust import path as needed
-
-PathLike = str | Path
+from .plot import animate, cartplot, make_cyclic, plot_pvalues
 
 
 class GeoDataArray(xr.DataArray):
-    __slots__ = ()
     """
     Extension of xarray.DataArray with Cartopy-based plotting and animation methods.
     """
+
+    __slots__ = ()
 
     def add_cyclic_point(self, dim: str = "lon") -> GeoDataArray:
         return make_cyclic(self, dim)
@@ -99,12 +97,36 @@ class GeoDataArray(xr.DataArray):
             **kwargs,
         )
 
+    def plot_pvalues(
+        self,
+        ax=None,
+        level: float = 0.05,
+        color: str = "grey",
+        alpha: float = 1,
+        marker: str = None,
+        edgecolors: str = None,
+        s: float = 1,
+    ):
+        """
+        Plot p-values on a Cartopy map using the global `plot_pvalues()` function.
+        """
+        return plot_pvalues(
+            self,
+            ax=ax,
+            level=level,
+            color=color,
+            alpha=alpha,
+            marker=marker,
+            edgecolors=edgecolors,
+            s=s,
+        )
+
     def animate(
         self,
         dim: str = "time",
         *,
         indices: tuple | list | np.ndarray = None,
-        outfile: PathLike = None,
+        outfile: Path | str = None,
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 10,
         parallel: bool = True,
