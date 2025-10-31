@@ -291,8 +291,8 @@ def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1)
 
     p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2)))
 
-    mean_val = data[data_var].mean(dim=along)
-    std_val = data[data_var].std(dim=along)
+    mean_val = data.mean(dim=along)
+    std_val = data.std(dim=along)
 
     trends = xr.Dataset()
     trends["slope"] = slope * scale
