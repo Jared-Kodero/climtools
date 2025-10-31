@@ -28,9 +28,9 @@ def check_latex() -> int:
 def install_latex():
     # Define paths
     _file_dir = Path(__file__).resolve().parent
-    script = _file_dir / "script" / "latex.install"
-    std_out = _file_dir / "script" / "latex.install.out"
-    lock_file = _file_dir / "script" / "lock"
+    script = _file_dir / "data" / "script" / "latex.install"
+    std_out = _file_dir / "data" / "script" / "latex.install.out"
+    lock_file = _file_dir / "data" / "script" / "lock"
 
     lock_file.touch()
 

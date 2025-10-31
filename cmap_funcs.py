@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import cmocean
@@ -9,10 +8,10 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
-_src_dir = _file_dir / "src" / "data"
+_src_dir = _file_dir / "data"/"cmaps"
 
-files = os.listdir(str(_src_dir))
-ipcc_cmap_list = [f.replace(".txt", "") for f in files]
+files = _src_dir.glob("*.txt")
+ipcc_cmap_list = [f.stem for f in files]
 plt_cmap_list = plt.colormaps()
 cmocean_cmap_list = list(cmocean.cm.cmapnames)
 

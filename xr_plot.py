@@ -8,6 +8,7 @@ import numpy as np
 import xarray as xr
 
 from .plot import animate, cartplot, make_cyclic, plot_pvalues
+from .trends import calc_trends, polyfit
 
 
 class GeoDataArray(xr.DataArray):
@@ -210,6 +211,36 @@ class GeoDataArray(xr.DataArray):
             land=land,
             edgecolor=edgecolor,
             **kwargs,
+        )
+
+    def trends(
+        self,
+        along: str = None,
+        *,
+        scale: float = 1,
+        use_dask: bool = True,
+        dask_scheduler: Literal["threads", "processes"] = "threads",
+    ) -> xr.Dataset:
+        """
+        Calculate trends along a specified dimension using the Mann-Kendall trend test.
+        """
+        return calc_trends(
+            self,
+            along=along,
+            scale=scale,
+            use_dask=use_dask,
+            dask_scheduler=dask_scheduler,
+        )
+
+    def polyfit(self, along: str, data_var: str = None, scale: float = 1):
+        """
+        Calculate the linear trend for the given xarray Dataset or DataArray using polynomial fitting.
+        """
+        return polyfit(
+            self,
+            along=along,
+            data_var=data_var,
+            scale=scale,
         )
 
 

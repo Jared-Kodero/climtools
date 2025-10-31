@@ -786,5 +786,4 @@ def setup_dask(
     atexit.register(_cleanup)
 
     return client
-    return client
-    return client
+

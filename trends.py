@@ -261,9 +261,9 @@ def calc_signicance(
     return res
 
 
-def polyfit(data, data_var, along, scale=1):
+def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1):
     """
-    Calculate the linear trend for the given xarray Dataset.
+    Calculate the linear trend for the given xarray Dataset or DataArray using polynomial fitting.
 
     - data: xr.Dataset
     - data_var: The variable to calculate the trend test for.
@@ -278,7 +278,12 @@ def polyfit(data, data_var, along, scale=1):
     data[along] = (np.arange(1, len(data[along]) + 1)).astype(np.int32)
     n = data.dims[along]  #
 
-    res = data[data_var].polyfit(dim=along, deg=1, cov=True)
+    if isinstance(data, xr.Dataset):
+        if data_var is None:
+            raise ValueError("Argument 'data_var' is required for xr.Dataset input.")
+        data = data[data_var]
+
+    res = data.polyfit(dim=along, deg=1, cov=True)
     slope = res["polyfit_coefficients"].sel(degree=1)
     slope_variance = res["polyfit_covariance"].sel(cov_i=0, cov_j=0)
     stderr = slope_variance**0.5

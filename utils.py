@@ -8,9 +8,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 _file_dir = Path(__file__).resolve().parent
-_src_dir = _file_dir / "cmaps" / "data"
+_src_dir = _file_dir / "data" / "cmaps"
 _meta_file = _file_dir / ".cmap_meta.json"
-_cmap_file = _file_dir / "plot_cmaps.py"
+_cmap_file = _file_dir / "cmaps_inventory.py"
 
 ipcc_cmap_list = [f.stem for f in _src_dir.glob("*.txt")]
 plt_cmap_list = plt.colormaps()
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import matplotlib.colors as mcolors
 import numpy as np
 import seaborn as sns
-from matplotlib.colors import Colormap, LinearSegmentedColormap, ListedColormap
+from matplotlib.colors import Colormap
 
 from .cmap_funcs import *
 \n

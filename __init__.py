@@ -53,7 +53,7 @@ from .utils import gen_cmap_file
 
 gen_cmap_file()
 
-from .plot_cmaps import ColorMaps, cm, cmaps
+from .cmaps_inventory import ColorMaps, cm, cmaps
 from .plot_theme import IPCCTheme, theme
 from .trends import calc_signicance, calc_trends, mk_trend_test, polyfit
 from .xr_plot import GeoDataArray
