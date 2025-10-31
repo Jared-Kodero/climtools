@@ -7,7 +7,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 import xarray as xr
 
-from .plot import animate, cartplot, make_cyclic, plot_pvalues
+from .plot import animate, cartplot, make_cyclic
 from .trends import calc_trends, polyfit
 
 
@@ -96,30 +96,6 @@ class GeoDataArray(xr.DataArray):
             land=land,
             edgecolor=edgecolor,
             **kwargs,
-        )
-
-    def plot_pvalues(
-        self,
-        ax=None,
-        level: float = 0.05,
-        color: str = "grey",
-        alpha: float = 1,
-        marker: str = None,
-        edgecolors: str = None,
-        s: float = 1,
-    ):
-        """
-        Plot p-values on a Cartopy map using the global `plot_pvalues()` function.
-        """
-        return plot_pvalues(
-            self,
-            ax=ax,
-            level=level,
-            color=color,
-            alpha=alpha,
-            marker=marker,
-            edgecolors=edgecolors,
-            s=s,
         )
 
     def animate(
@@ -232,7 +208,7 @@ class GeoDataArray(xr.DataArray):
             dask_scheduler=dask_scheduler,
         )
 
-    def polyfit(self, along: str, data_var: str = None, scale: float = 1):
+    def trendfit(self, along: str, data_var: str = None, scale: float = 1):
         """
         Calculate the linear trend for the given xarray Dataset or DataArray using polynomial fitting.
         """

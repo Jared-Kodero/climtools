@@ -276,7 +276,7 @@ def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1)
     data.attrs = {}
     data = data.sortby(along)
     data[along] = (np.arange(1, len(data[along]) + 1)).astype(np.int32)
-    n = data.dims[along]  #
+    n = data.sizes[along]
 
     if isinstance(data, xr.Dataset):
         if data_var is None:
