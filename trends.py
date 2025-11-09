@@ -289,7 +289,11 @@ def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1)
     stderr = slope_variance**0.5
     t_stat = slope / stderr
 
-    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2)))
+    p_values = xr.DataArray(
+        2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2))),
+        coords=slope.coords,
+        dims=slope.dims,
+    )
 
     mean_val = data.mean(dim=along)
     std_val = data.std(dim=along)
@@ -299,5 +303,23 @@ def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1)
     trends["p_value"] = p_values
     trends["mean_val"] = mean_val
     trends["std_val"] = std_val
+
+    # add attributes
+    trends["slope"].attrs = {
+        "long_name": "slope",
+        "description": f"Slope of the linear trend per {scale} units of {along}",
+    }
+    trends["p_value"].attrs = {
+        "long_name": "p_value",
+        "description": "p-value of the trend significance test",
+    }
+    trends["mean_val"].attrs = {
+        "long_name": "mean_val",
+        "description": f"Mean value along {along}",
+    }
+    trends["std_val"].attrs = {
+        "long_name": "std_val",
+        "description": f"Standard deviation along {along}",
+    }
 
     return trends

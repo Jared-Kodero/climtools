@@ -2,21 +2,17 @@ import atexit
 import functools
 import getpass
 import inspect
-import logging
+import io
 import os
+import random
 import shutil
 import socket
 import subprocess
+import sys
 import time
-from multiprocessing import Pool
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Union
 
 import numpy as np
-import pandas as pd
-import xarray as xr
-
-from .logs import *
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -50,22 +46,20 @@ def cleanup():
 atexit.register(cleanup)
 
 
-def execute_cmd(cmd: list[str]):
-
+def which(cmd: str) -> bool | None:
     try:
-        res = subprocess.run(
-            cmd,
-            check=True,
-            text=True,
-            capture_output=True,
+        path = (
+            subprocess.check_output(["which", cmd], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
         )
-        return res
-    except subprocess.CalledProcessError as e:
-        print("ERROR :", e.stderr)
+
+        return True if path else False
+    except subprocess.CalledProcessError:
         return None
 
 
-def type_cast(x, use_numpy: bool = False):
+def to_numeric(x, use_numpy: bool = False):
     """
     Cast input x to int or float (optionally using numpy types).
     Returns the original input if casting fails.
@@ -135,18 +129,23 @@ def mkdir(path: Path):
         path.mkdir(parents=True, exist_ok=True)
 
 
-def get_func_signature(func):
+def du(path: Path) -> int | float:
     """
-    Get the signature of a function as a dictionary.
+    Get the size of a file or directory in bytes.
     """
-    sig = inspect.signature(func)
-    return {
-        k: v.default if v.default is not inspect.Parameter.empty else None
-        for k, v in sig.parameters.items()
-    }
+    path = Path(path).resolve()
+    if not path.exists():
+
+        raise FileNotFoundError(f"Path does not exist: {path}")
+    if path.is_file():
+        size = path.stat().st_size
+    elif path.is_dir():
+        size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    return size
 
 
-def file_type(file_path: Path) -> str:
+def f_type(file_path: Path) -> str:
     """
     Get the file type using the `file` command in unix-like systems.
     """
@@ -154,8 +153,19 @@ def file_type(file_path: Path) -> str:
     if isinstance(file_path, Path):
         file_path = str(file_path)
 
-    res = execute_cmd(["file", "-b", file_path])
-    return res.stdout.strip()
+    cmd = ["file", "-b", file_path]
+
+    try:
+        res = subprocess.run(
+            cmd,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return res.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print("ERROR :", e.stderr)
+        return None
 
 
 def symlink(
@@ -237,553 +247,446 @@ def mv(
     shutil.move(src, dst)
 
 
-def land_sea_mask(
-    obj: xr.DataArray | xr.Dataset,
-    *,
-    keep: Literal["land", "ocean"] = None,
-    mask_file: Literal["cartopy", "era5"] = "era5",
-) -> xr.DataArray | xr.Dataset:
+def get_func_signature(func):
     """
-    Apply a land-sea mask to the dataset. This function uses a netCDF file containing
-    land-sea masks to filter out specific features from the dataset.
+    Get the signature of a function as a dictionary.
     """
-
-    if "lat" not in obj.dims or "lon" not in obj.dims:
-        raise ValueError(
-            "The dataset must have 'lat' and 'lon' dimensions to apply the land-sea mask."
-        )
-
-    masks = {
-        "cartopy": "cartopy_0.1.mask",
-        "era5": "era5_0.25_mask",
+    sig = inspect.signature(func)
+    return {
+        k: v.default if v.default is not inspect.Parameter.empty else None
+        for k, v in sig.parameters.items()
     }
 
-    file = script_dir / "data" / "mask" / masks[mask_file]
 
-    mask = xr.open_dataset(file)
-
-    obj = obj.sortby(["lat", "lon"])
-
-    lat_min, lat_max = obj.lat.min().values, obj.lat.max().values
-    lon_min, lon_max = obj.lon.min().values, obj.lon.max().values
-
-    mask = mask[keep].sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
-    mask = mask.interp(lat=obj.lat, lon=obj.lon, method="nearest")
-
-    if isinstance(obj, xr.Dataset):
-
-        log(f"Removing feature(s): {keep} in {list(obj.data_vars)}", level="WARNING")
-        new_obj = xr.Dataset()
-        for data_var in list(obj.data_vars):
-            new_obj[data_var] = obj[data_var].where(mask, other=np.nan)
-
-    elif isinstance(obj, xr.DataArray):
-        log(f"Removing feature(s): {keep} in {obj.name}", level="WARNING")
-        new_obj = obj.where(mask, other=np.nan)
-
-    return new_obj
-
-
-def get_local_solar_time(data: xr.Dataset):
+class MultiProcManager:
     """
-    Calculate the local solar time for the dataset based on the longitude coordinate.
-    The local solar time is calculated as the UTC time plus the longitude offset.
-    """
+    A lightweight, file-based process manager for throttling concurrent execution.
 
-    if "lon" not in data or "lat" not in data:
-        raise ValueError("Dataset must contain 'lon' and 'lat' coordinates.")
+    This class coordinates multiple concurrently running processes by creating
+    and removing small marker files in a shared directory (default: ".pids").
+    Each active process registers itself by creating a file named after its PID
+    and unregisters upon completion. Child processes are grouped under a subdirectory
+    named after a specified parent PID (if provided). The manager monitors this directory to
+    limit the number of simultaneously active processes based on CPU availability.
 
-    offset = data["lon"] * (24 / 360) * (data["lat"] / data["lat"])
-    offset = offset.round() * pd.Timedelta(hours=1)
-
-    lst = (data["time"] + offset).transpose("time", "lat", "lon")
-
-    return data.assign_coords({"local_solar_time": lst})
-
-
-def get_UTC_offset(
-    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
-    *,
-    name: Literal["lon", "longitude", "x"] = "lon",
-) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
-    """
-    Computes the hour offset from UTC time based on the longitude coordinate.
-    """
-
-    if isinstance(obj, (xr.DataArray, xr.Dataset)):
-        data = obj.copy()
-        data[name] = ((data[name] + 180) % 360) - 180
-        offset = data[name] * (24 / 360)
-        offset = offset.round() * pd.Timedelta(hours=1)
-
-    else:
-        if isinstance(obj, str):
-            obj = float(obj)
-        obj = ((obj + 180) % 360) - 180
-        offset = obj * (24 / 360)
-        offset = np.round(offset) * pd.Timedelta(hours=1)
-
-    return offset
-
-
-def chunk_by_dims(
-    obj: xr.DataArray | xr.Dataset,
-    dim: str,
-    N: int,
-) -> dict[str, xr.DataArray | xr.Dataset]:
-    """
-    Chunk an xarray DataArray or Dataset into N parts along the specified dimension.
-
-    Parameters:
-        obj (xr.DataArray or xr.Dataset): Input data to chunk.
-        dim (str): Dimension along which to chunk.
-        N (int): Number of chunks.
-
-    Returns:
-        dict[str, xr.DataArray or xr.Dataset]: Dictionary with keys '0', ..., '{N-1}'.
-    """
-    if dim not in obj.dims:
-        raise ValueError(f"Dimension '{dim}' not found in the input data.")
-
-    dim_size = obj.sizes[dim]
-    if N < 1 or N > dim_size:
-        raise ValueError(
-            f"Invalid number of chunks N={N} for dimension size {dim_size}."
-        )
-
-    # Compute chunk indices
-    indices = np.linspace(0, dim_size, N + 1, dtype=int)
-
-    chunks = {}
-    for i in range(N):
-        chunk = obj.isel({dim: slice(indices[i], indices[i + 1])})
-        chunks[f"{i}"] = chunk
-
-    return chunks
-
-
-def chunk_longitudes(
-    obj: Union[xr.DataArray, xr.Dataset],
-    *,
-    lon: str = "lon",
-    deg: int = 15,
-) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
-    """
-    Partition a dataset into longitude bins of fixed width.
+    It is designed for lightweight parallel workflows such as batch experiments,
+    simulations, or Monte Carlo ensembles, where using a full multiprocessing
+    pool introduces unnecessary overhead. It integrates seamlessly with
+    ``subprocess.Popen``, ``subprocess.run``, or ``multiprocessing.Process``.
 
     Parameters
     ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input data containing a longitude coordinate.
-    lon : {"lon", "longitude", "x"}, optional
-        Name of the longitude coordinate. Default is "lon".
-    deg : int, optional
-        Bin width in degrees of longitude. Default is 15.
+    pid : int, optional
+        Process ID of the current process. Defaults to ``os.getpid()``.
+    main_process_pid : int, optional
+        If provided, the process file will be created under a subdirectory
+        named after this main process PID. This is useful for grouping
+        child processes under a common parent.
 
-    Returns
+    cpu_limit : float, optional
+        Fraction of total CPUs allowed to be active simultaneously (default 0.8).
+
+
+    Methods
     -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary mapping each longitude bin (e.g., "-180", "-165", ..., "165")
-        to the corresponding subset of the data. The longitude values within each
-        bin are restored to their original values and sorted.
+    register():
+        Registers the current process by throttling (if necessary) and creating a marker file.
+    unregister():
+        Unregisters the process by deleting its marker file and cleaning up stale entries.
+    throttle():
+        Blocks until the fraction of active processes falls below ``cpu_limit``.
+    wait():
+        Blocks until all process marker files are cleared (i.e., all processes complete).
+    sleep(low=0.1, high=5):
+        Sleeps for a random interval between ``low`` and ``high`` seconds.
+
+    Examples
+    --------
+    Basic parallel execution with automatic registration:
+
+    >>> import multiprocessing, random, time, os
+    >>> from pathlib import Path
+    >>>
+    >>> def worker(i):
+    ...     with MultiProcManager():
+    ...         print(f"Process {i} started (PID {os.getpid()})")
+    ...         time.sleep(random.uniform(1, 5))
+    ...         print(f"Process {i} finished")
+    ...
+    >>> if __name__ == "__main__":
+    ...     procs = []
+    ...     for i in range(20):
+    ...         p = multiprocessing.Process(target=worker, args=(i,))
+    ...         p.start()
+    ...         procs.append(p)
+    ...
+    ...     for p in procs:
+    ...         p.join()
+    ...
+    ...     MultiProcManager().wait()
+    ...     print("All processes completed.")
+    """
+
+    def __init__(self, pid: int = None, ppid: int = None, cpu_limit: float = 0.8):
+
+        self.pid = pid or os.getpid()
+        self.ppid = ppid
+        self._sysrand = random.SystemRandom()
+        self.n_cpus = n_cpus
+        self.cpu_limit = cpu_limit
+        self.root = Path.cwd() / ".pids"
+        self.storage = self.root
+        if self.ppid:
+            self.storage = self.storage / str(self.ppid)
+            if self.storage.is_file():
+                self.storage.unlink(missing_ok=True)
+        self.storage.mkdir(exist_ok=True)
+
+        self.proc_file = self.storage / str(self.pid)
+
+        # cleanup stale process files
+        self.cleanup()
+
+    def cleanup(self):
+        for p in self.storage.rglob("*"):
+            try:
+                pid = int(p.name)
+                # os.kill(pid, 0) raises ProcessLookupError if PID doesn’t exist
+                os.kill(pid, 0)
+            except (ValueError, ProcessLookupError):
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+                rm(p)
+            except PermissionError:
+                continue
+
+    def sleep(self, low=0.1, high=10):
+        delay = self._sysrand.uniform(low, high)
+        time.sleep(delay)
+
+    def current_usage(self, path: Path) -> float:
+        n_procs = len(list(path.glob("*")))
+        return n_procs / self.n_cpus
+
+    def check_concurrency(self, path: Path) -> bool:
+        return self.current_usage(path) < 0.95
+
+    def throttle(self):
+        """Block until CPU utilization (estimated by active processes) falls below 80%."""
+        path = self.storage.parent if self.ppid else self.storage
+
+        if self.check_concurrency(path):
+            return
+
+        while True:
+            n_procs = len(list(path.glob("*")))
+            usage = n_procs / self.n_cpus
+
+            if usage <= self.cpu_limit:
+                break
+
+            # Sleep briefly before checking again
+            self.sleep()
+
+    # a another method to make sure all processes are done
+    def wait(self):
+        """
+        Block until all tracked processes finish.
+
+        If `parent_pid` is set, waits only for its child processes;
+        otherwise, waits for all processes under the storage path.
+        """
+
+        # check until there are no files in the proc dir
+        while True:
+            if self.proc_file.is_dir():
+                procs = self.proc_file.glob("*")
+            else:
+                procs = self.root.rglob("*")
+
+            n_procs = len(list(procs))
+            if n_procs == 0:
+                break
+            self.sleep(1, 60)  # Wait for a random time before checking again
+
+    def block(self):
+        """
+        Block until all tracked processes finish.
+        """
+        # check until there are no files in the proc dir
+        while True:
+            n_procs = len(list(self.root.rglob("*")))
+            if n_procs == 0:
+                break
+            self.sleep(1, 120)  # Wait for a random time before checking again
+
+    def register(self):
+        """Register the process by creating a process file."""
+        self.throttle()
+        self.proc_file.touch()
+
+    def unregister(self):
+        """Unregister the process if alive"""
+        self.proc_file.unlink(missing_ok=True)
+        self.cleanup()
+
+    def __enter__(self):
+        self.register()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unregister()
+
+
+class RedirectStreams:
+    """
+    A lightweight context manager to temporarily redirect `sys.stdout` and `sys.stderr`.
+
+    This utility captures all printed output and error messages within its context,
+    either to an in-memory buffer (`io.StringIO`) or to a file on disk. It is
+    especially useful in parallel or batch workflows where subprocesses may print
+    diagnostic information that needs to be captured for logging or post-analysis.
+
+    Parameters
+    ----------
+    path : pathlib.Path or None, optional
+        Path to a file where the redirected output will be written.
+        If `None` (default), output is captured in memory using an `io.StringIO` buffer.
+    mode : str, optional
+        File mode for the output file if `path` is provided (default is `"w+"`).
+        Common options:
+        - `"w"` : overwrite file each time.
+        - `"a"` : append to existing file.
+        - `"w+"` : overwrite and allow reading.
+
+    Attributes
+    ----------
+    target : io.StringIO or io.TextIOWrapper
+        The active output stream (in-memory or file object).
+    state : str
+        Either `"buffer"` (for in-memory) or `"file"` (for file-based capture).
+    _original_stdout, _original_stderr : io.TextIOWrapper
+        Saved references to the original standard output and error streams.
+
+    Methods
+    -------
+    start():
+        Redirect `sys.stdout` and `sys.stderr` to the target.
+    stop():
+        Restore `sys.stdout` and `sys.stderr` to their original streams.
+    retrieve() -> str:
+        Return the captured output as a string. Only available for buffer mode.
+        For file-based redirection, reads from the target file.
+    __enter__(), __exit__():
+        Context management protocol for use with `with` statements.
+
+    Examples
+    --------
+    **Example 1: Capture output in memory**
+
+    >>> from pathlib import Path
+    >>> import sys
+    >>> redirector = RedirectStreams()
+    >>> with redirector:
+    ...     print("This will be captured.")
+    ...     sys.stderr.write("Error message.\\n")
+    >>> print(redirector.retrieve())
+    This will be captured.
+    Error message.
+
+    **Example 2: Redirect output to a file**
+
+    >>> from pathlib import Path
+    >>> log_path = Path("output.log")
+    >>> with RedirectStreams(log_path, mode="w") as rs:
+    ...     print("Writing to log file...")
+    ...     sys.stderr.write("This also goes to the log.\\n")
+    >>> # Retrieve contents for verification
+    >>> print(rs.retrieve())
+    Writing to log file...
+    This also goes to the log.
+
+    **Example 3: Combined with multiprocessing or logging**
+
+    >>> import multiprocessing
+    >>> def task(i):
+    ...     with RedirectStreams(Path(f"task_{i}.log")):
+    ...         print(f"Task {i} started")
+    ...         print(f"Task {i} completed")
+    >>> if __name__ == "__main__":
+    ...     procs = [multiprocessing.Process(target=task, args=(i,)) for i in range(4)]
+    ...     for p in procs: p.start()
+    ...     for p in procs: p.join()
 
     Notes
     -----
-    - Longitudes are first normalized to the range [-180, 180).
-    - Each partition is labeled by its central longitude value (rounded to the nearest
-      multiple of `deg`).
+    - Always call `retrieve()` *after* exiting the context if you want to
+      inspect the captured output.
+    - When using file mode, the file remains open until `stop()` is called.
+      It is automatically closed at the end of the context.
     """
 
-    chunks = {}
-    data = obj.copy()
-    data[lon] = ((data[lon] + 180) % 360) - 180
-
-    original_lons = data[lon]
-    lon_rounded = (original_lons / deg).round() * deg
-
-    idx_df = pd.DataFrame(
-        {
-            "lon_original": original_lons,
-            "lon_rounded": lon_rounded,
-        }
-    )
-
-    data[lon] = idx_df["lon_rounded"].values
-
-    for lon_val in idx_df["lon_rounded"].unique():
-        lon_val_data = data.sel({lon: lon_val})
-
-        lon_val_df = idx_df[idx_df["lon_rounded"] == lon_val]
-        lon_val_data[lon] = lon_val_df["lon_original"].values
-
-        chunks[f"{lon_val}"] = lon_val_data.sortby(lon)
-
-    return chunks
-
-
-def chunk_by_timezones(
-    obj: xr.DataArray | xr.Dataset,
-) -> dict[str, xr.DataArray | xr.Dataset]:
-    """
-    Chunk the dataset into chunks based on time zones.
-    This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
-    based on the hour offset from UTC time for each chunk.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be split into time zone chunks.
-
-    Returns
-    -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary where keys are time zone identifiers (e.g., "UTC+0", "UTC+1", etc.)
-        and values are the corresponding xarray objects for each time zone chunk.
-    """
-
-    data = obj.copy()
-    tz_chunks = {}
-    chunks = chunk_longitudes(data)
-    for chunk in chunks:
-        offset = get_UTC_offset(chunk)
-        data = chunks[chunk]
-        data["time"] = data["time"] + offset
-        timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
-        tz_chunks[f"UTC{timezone}"] = data
-
-    return tz_chunks
-
-
-def _process_chunk(func, kwargs, data, chunk):
-    offset = get_UTC_offset(chunk)
-    data["time"] = data["time"] + offset
-    res = func(data, **kwargs)
-    print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
-
-    return res
-
-
-def _tz_apply_func_parallel(
-    func: Callable,
-    chunks: dict[str, xr.DataArray | xr.Dataset],
-    kwargs: Mapping | None,
-) -> xr.DataArray | xr.Dataset:
-
-    args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
-
-    processes = max(1, min(n_cpus, len(args)))
-    chunksize = max(1, len(args) // n_cpus)
-
-    if chunksize == 1:
-        maxtasksperchild = 2
-    else:
-        maxtasksperchild = chunksize
-
-    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
-        datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
-
-    kwargs = {
-        "dim": "lon",
-        "join": "exact",
-        "compat": "override",
-        "data_vars": "minimal",
-        "coords": "minimal",
-    }
-
-    return xr.concat(datasets, **kwargs).sortby("lon")
-
-
-def _tz_apply_func_serial(
-    func,
-    chunks,
-    kwargs,
-):
-    datasets = []
-    for chunk in chunks:
-        datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
-
-    if len(datasets) > 1:
-        result = xr.concat(datasets, dim="lon").sortby("lon")
-    else:
-        result = datasets[0]
-
-    return result
-
-
-def tz_apply_func(
-    func: Callable,
-    obj: xr.DataArray | xr.Dataset,
-    multiprocess: bool = True,
-    kwargs: Mapping | None = None,
-) -> xr.DataArray | xr.Dataset:
-    """
-    Process the dataset by time zones using a specified function.
-
-    Parameters
-    ----------
-    func : Callable,
-        The function to be applied to each chunk of the dataset.
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be processed.
-    multiprocess : bool, optional
-        If True, the function will be applied in parallel using multiple processes.
-    **kwargs : Any
-        Additional keyword arguments to be passed to the applied function.
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The processed dataset after applying the function to each time zone chunk.
-
-    """
-
-    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
-        raise ValueError(
-            "The dataset must have (time, lat, lon) dimensions to apply the function."
-        )
-
-    if kwargs is None:
-        kwargs = {}
-
-    chunks = chunk_longitudes(obj)
-
-    if multiprocess and len(chunks) > 1:
-        return _tz_apply_func_parallel(func, chunks, kwargs)
-    else:
-        return _tz_apply_func_serial(func, chunks, kwargs)
-
-
-def infer_time_frequency(
-    times: Union[pd.Series, np.ndarray, xr.DataArray],
-) -> tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]:
-    """
-    Infer the time frequency of a series of timestamps.
-    This function analyzes the time intervals in the provided timestamps and returns
-    a frequency string along with the ranges of hours, months, and years present in the data.
-
-    Parameters
-    ----------
-    times : Union[pd.Series, np.ndarray, xr.DataArray]
-        A series of timestamps, which can be a pandas Series, a NumPy array, or
-        an xarray DataArray containing datetime objects.
-    Returns
-    -------
-    tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]
-        A tuple containing:
-        - freq: A string representing the inferred frequency (e.g., '1H', '1D', '1M').
-        - hour_range: A tuple of integers representing the minimum and maximum hours present in the data.
-        - month_range: A tuple of integers representing the minimum and maximum months present in the data.
-        - year_range: A tuple of integers representing the minimum and maximum years present in the data.
-    """
-
-    time_vals = pd.DataFrame({"time": times})
-    time_vals["diff"] = time_vals["time"].diff().dt.total_seconds()
-    diffs = time_vals["diff"].value_counts()
-    time_vals = time_vals[time_vals["diff"] == diffs.idxmax()]  # 2nd filtering
-
-    mean_step_seconds = time_vals["diff"].mean()
-    mean_step_seconds = int(mean_step_seconds)
-
-    # Step 4: Infer frequency string
-    freq = None
-
-    if mean_step_seconds < 60:
-        freq = f"{mean_step_seconds}S"  # seconds
-    elif mean_step_seconds < 3600:
-        freq = f"{mean_step_seconds // 60}T"  # minutes
-    elif mean_step_seconds < 86400:
-        freq = f"{mean_step_seconds // 3600}H"  # hours
-    elif mean_step_seconds < 604800:
-        freq = f"{mean_step_seconds // 86400}D"  # days
-    elif mean_step_seconds < 2419200:
-        freq = f"{mean_step_seconds // 604800}W"  # weeks
-    elif mean_step_seconds < 29030400:
-        freq = f"{mean_step_seconds // 2419200}M"  # months (approx 28 days)
-    elif mean_step_seconds < 290304000:
-        freq = f"{mean_step_seconds // 29030400}Y"  # years (approx 336 days)
-    else:
-        freq = f"{mean_step_seconds // 290304000}10Y"  # years (approx 336 days)
-
-        # Time part ranges
-    hour_range = (time_vals["time"].dt.hour.min(), time_vals["time"].dt.hour.max())
-    month_range = (time_vals["time"].dt.month.min(), time_vals["time"].dt.month.max())
-    year_range = (time_vals["time"].dt.year.min(), time_vals["time"].dt.year.max())
-
-    return freq, hour_range, month_range, year_range
-
-
-def interp_data(
-    obj: xr.DataArray | xr.Dataset,
-    resolution: float = 0.25,
-    *,
-    x: str = "lon",
-    y: str = "lat",
-    method: Literal["linear", "nearest", "cubic"] = "linear",
-    bbox: tuple[float, float, float, float] = None,
-) -> xr.DataArray | xr.Dataset:
-    """
-    Interpolate data to a regular grid using xarray.
-    This function uses the xarray library to interpolate
-    data to a regular grid. The function will create temporary files in the system
-    temporary directory and delete them after use.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The data to be interpolated. The data must have latitude and longitude
-        coordinates.
-    resolution : float, optional
-        The resolution of the output grid in degrees. The default is 0.25.
-    method : str, optional
-        The interpolation method to be used. The default is "linear".
-        Other options are "nearest" and "cubic".
-    x : str, optional
-        The name of the longitude coordinate in the data. The default is "lon".
-    y : str, optional
-        The name of the latitude coordinate in the data. The default is "lat".
-
-
-    """
-
-    obj = obj.sortby([y, x])
-
-    if bbox is not None:
-        lon_min, lat_min, lon_max, lat_max = bbox
-
-        obj = obj.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
-
-    else:
-
-        lat_min, lat_max = obj[y].min().values, obj[y].max().values
-        lon_min, lon_max = obj[x].min().values, obj[x].max().values
-
-    new_lat = np.arange(lat_min, lat_max, resolution)
-    new_lon = np.arange(lon_min, lon_max, resolution)
-
-    interp_data = obj.interp(lat=new_lat, lon=new_lon, method=method)
-
-    return interp_data
-
-
-# get the total number of grid points
-def get_spatiotemporal_info(
-    obj: xr.DataArray | xr.Dataset,
-) -> dict:
-    """
-    Get the spatiotemporal information of an xarray object.
-    This function extracts the dimensions, resolution, and time frequency of the provided
-    xarray object, along with the bounds of each dimension.
-
-    Parameters
-    ----------
-    obj : Union[xr.Dataset, xr.DataArray]
-        An xarray object (either a Dataset or DataArray) containing spatial and temporal data.
-    Returns
-    -------
-    dict
-    """
-
-    dims = list(obj.dims)
-
-    resolution = {}
-
-    t_freq, hours_range, months_range, years_range = None, None, None, None
-
-    for k in dims:
-        if str(obj[k].dtype) == "datetime64[ns]":
-            t_freq, hours_range, months_range, years_range = infer_time_frequency(
-                obj[k]
-            )
-            resolution[k] = t_freq
-
+    def __init__(self, path: Path = None, mode: str = "w+"):
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        self.state = None
+
+        if path is None:
+            self.target = io.StringIO()
+            self.state = "buffer"
         else:
-            resolution[k] = float(np.round(obj[k].diff(k).mean().values, 2))
+            self.target = open(path, mode)
+            self.state = "file"
 
-    names = ["resolution", "hours_range", "months_range", "years_range"]
-    data = [resolution, hours_range, months_range, years_range]
+    def retrieve(self) -> str:
+        """Retrieve the contents of the redirected streams."""
+        if self.state == "buffer":
+            return self.target.getvalue()
+        else:
+            self.target.seek(0)
+            contents = self.target.read()
+            self.target.seek(0, os.SEEK_END)
+            return contents
 
-    result = {}
-    for k, v in zip(names, data):
-        if v is not None:
-            result[k] = v
+    def start(self):
+        """Redirect sys.stdout and sys.stderr to the target."""
+        sys.stdout = self.target
+        sys.stderr = self.target
 
-    for k in dims:
-        if k != "time":
-            result[f"{k}_bounds"] = (
-                float(np.round(obj[k].min().values, 2)),
-                float(np.round(obj[k].max().values, 2)),
-            )
+    def stop(self):
+        """Restore sys.stdout and sys.stderr to their original values."""
+        sys.stdout = self._original_stdout
+        sys.stderr = self._original_stderr
+        self.target.close()
 
-    return result
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
 
 
-def close_dask():
+class FileLock:
     """
-    Close the active Dask client and cluster if they exist.
-    This is useful for cleaning up resources when done with Dask computations.
+    A lightweight file-based lock mechanism for inter-process synchronization.
+
+    This class provides a simple and portable locking mechanism using a sentinel
+    file to coordinate access between concurrent processes. The lock is acquired
+    by atomically creating a lock file, and released by deleting it. If the file
+    already exists, the process waits (with randomized backoff) until it becomes
+    available.
+
+    File-based locks are especially useful in multi-process or distributed
+    environments where shared state is coordinated through the filesystem
+    (e.g., cluster scratch directories or shared network mounts).
+
+    Parameters
+    ----------
+    path : pathlib.Path or None, optional
+        Path to the lock file. If `None` (default), a lock file named
+        `.lock` is created in the current working directory.
+
+    Attributes
+    ----------
+    path : pathlib.Path
+        Filesystem path of the lock file.
+    _sysrand : random.SystemRandom
+        Cryptographically secure random number generator for backoff delays.
+
+    Methods
+    -------
+    acquire():
+        Acquire the lock by atomically creating the lock file.
+    release():
+        Release the lock by deleting the lock file.
+    sleep(low=0.1, high=5):
+        Wait for a random delay between `low` and `high` seconds before retrying.
+    __enter__(), __exit__():
+        Context management support for use with `with` statements.
+
+    Examples
+    --------
+    **Example 1: Basic use**
+
+    >>> from pathlib import Path
+    >>> lock = FileLock(Path("mytask.lock"))
+    >>> with lock:
+    ...     print("Lock acquired, performing critical section...")
+    ...     # Perform safe file write or shared resource update
+    ...     time.sleep(2)
+    >>> print("Lock released.")
+
+    **Example 2: Protect shared output in parallel tasks**
+
+    >>> import multiprocessing, time
+    >>> from pathlib import Path
+    >>> def task(i):
+    ...     with FileLock(Path("shared.lock")):
+    ...         with open("shared.txt", "a") as f:
+    ...             f.write(f"Task {i} started\\n")
+    ...             time.sleep(0.5)
+    ...             f.write(f"Task {i} finished\\n")
+    >>> if __name__ == "__main__":
+    ...     procs = [multiprocessing.Process(target=task, args=(i,)) for i in range(4)]
+    ...     for p in procs: p.start()
+    ...     for p in procs: p.join()
+    >>> print(Path("shared.txt").read_text())
+
+    **Example 3: Custom backoff interval**
+
+    >>> lock = FileLock()
+    >>> lock.sleep(low=0.5, high=2)  # Wait with controlled random delay
+    >>> # Typically used internally when the lock file already exists.
+
+    Notes
+    -----
+    - The lock is implemented via `os.open(..., os.O_CREAT | os.O_EXCL)` for
+      atomic file creation across processes.
+    - Safe to use across processes on shared filesystems (e.g., NFS, Lustre),
+      provided atomic file creation is supported.
+    - Always use the context manager form (`with FileLock(...):`) to ensure
+      release even if exceptions occur.
     """
-    global current_dask_client, current_dask_cluster
-    if current_dask_client and current_dask_cluster:
-        current_dask_client.close()
-        current_dask_cluster.close()
-        current_dask_client = None
-        current_dask_cluster = None
 
+    def __init__(self, path: Path = None):
+        self.path = path if path is not None else Path.cwd() / ".lock"
+        self._sysrand = random.SystemRandom()
 
-def setup_dask(
-    *,
-    workers: int = n_cpus,
-    threads_per_worker: int = 1,
-    processes=True,
-    filter_warnings=True,
-):
-    """
-    - Imports Dask and Dask distributed.
-    - Creates a Dask client.
-    - Sets up the Dask dashboard.
+    def sleep(self, low=0.1, high=5):
+        """Wait for a random duration between `low` and `high` seconds before retrying."""
+        delay = self._sysrand.uniform(low, high)
+        time.sleep(delay)
 
-    Parameters:
-    ___________
-        workers (int, optional): Number of workers to create. Default is 8.
-        threads_per_worker (int, optional): Number of threads per worker. Default is 4.
-        processes (bool, optional): Whether to use processes instead of threads. Default is True.
-        get_info (bool, optional): Whether to return the Dask dashboard URL. Default is False.
-        dynamic_port (bool, optional): Whether to use a dynamic port. Default is False and uses port 8787.
-        filter_warnings (bool, optional): Whether to filter warnings. Default is True.
+    def acquire(self):
+        """
+        Acquire the file lock by creating a lock file atomically.
 
-    Example:
-    ________
-        >>> setup_dask(get_info=True, filter_warnings=False)
-    """
+        This method blocks until the lock file can be created. If another process
+        already holds the lock, the method waits for a random delay and retries.
 
-    global current_dask_client, current_dask_cluster
+        Notes
+        -----
+        The atomic creation uses:
+        - `os.O_CREAT` : create file if it does not exist.
+        - `os.O_EXCL`  : fail if file already exists (ensures atomicity).
+        - `os.O_WRONLY`: open for writing only.
+        """
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                break  # Lock acquired successfully
+            except FileExistsError:
+                self.sleep()
 
-    if current_dask_client and current_dask_cluster:
-        return current_dask_client
+    def release(self):
+        """Release the file lock by deleting the lock file."""
+        self.path.unlink(missing_ok=True)
 
-    from dask.distributed import Client, LocalCluster
+    def __enter__(self):
+        self.acquire()
+        return self
 
-    if filter_warnings:
-        silence_level = logging.ERROR
-    else:
-        silence_level = logging.WARN
-
-    cluster = LocalCluster(
-        n_workers=workers,
-        threads_per_worker=threads_per_worker,
-        memory_limit=0,
-        silence_logs=silence_level,
-        processes=processes,
-    )
-    client = Client(cluster)
-
-    current_dask_client = client
-    current_dask_cluster = cluster
-
-    def _cleanup():
-        current_dask_client.close()
-        current_dask_cluster.close()
-
-    atexit.register(_cleanup)
-
-    return client
-
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()

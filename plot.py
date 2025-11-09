@@ -4,7 +4,6 @@ import sys
 import tempfile
 import warnings
 from multiprocessing import Pool
-from os import PathLike
 from pathlib import Path
 from typing import Literal
 
@@ -356,6 +355,7 @@ def cartplot(
     """
 
     # if data is 3D, raise error
+    data = data.squeeze()
     if data.ndim > 2:
         raise ValueError("DataArray has more than 2 dimensions.")
 
@@ -497,7 +497,7 @@ def animate(
     dim: str = "time",
     *,
     indices: tuple | list | np.ndarray = None,
-    outfile: PathLike = None,
+    outfile: Path = None,
     quality: Literal["low", "medium", "high"] = "medium",
     fps: int = 10,
     parallel: bool = True,

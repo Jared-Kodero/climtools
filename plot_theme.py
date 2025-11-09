@@ -1,6 +1,5 @@
 import os
 import platform
-import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -9,20 +8,12 @@ from typing import Callable, Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from .tools import which
+
 if "ipykernel" in sys.modules:
     import matplotlib_inline as plt_inline
 
     plt_inline.backend_inline.set_matplotlib_formats("retina")
-
-
-def check_latex() -> int:
-    latex = subprocess.run(["which", "latex"], capture_output=True, text=True)
-
-    res = int(latex.returncode)
-
-    if not res:
-        return True
-    return False
 
 
 def install_latex():
@@ -58,7 +49,7 @@ def install_latex():
 
 class IPCCTheme:
     def __init__(self):
-        self.latex: bool = check_latex()
+        self.latex: bool = which("latex")
         self.install_latex: Callable = install_latex
 
         # --- Context management methods ---

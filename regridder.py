@@ -1,7 +1,8 @@
 import difflib
+import subprocess
 import uuid
 import warnings
-from os import PathLike
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
@@ -12,8 +13,7 @@ except ImportError:
     warnings.warn("xesmf is not installed. regridder functionalities will not work.")
 
 
-from .logs import log
-from .tools import cwd, execute_cmd, n_cpus, tmp_files
+from .tools import cwd, n_cpus, tmp_files
 
 
 def ESMF_RegridWeightGen(
@@ -206,22 +206,31 @@ def ESMF_RegridWeightGen(
                 subprocess_args.append(str(v))  # cast to string to avoid TypeError
 
     if "--weight" not in subprocess_args or "-w" not in subprocess_args:
-        weight_file = (cwd() / "weights" / f"{uuid.uuid4()}.nc").resolve()
+        weight_file = (cwd() / "weights" / f"{uuid.uuid4().hex}.nc").resolve()
         tmp_files.append(weight_file)
         weight_file.parent.mkdir(parents=True, exist_ok=True)
 
         w = ["--weight", f"{weight_file}"]
         subprocess_args.extend(w)
 
-    res = execute_cmd(subprocess_args)
+    cmd = subprocess_args
 
-    if weight_file and weight_file.exists():
-        return weight_file
-    else:
-        return res
+    try:
+        res = subprocess.run(
+            cmd,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        if weight_file and weight_file.exists():
+            return weight_file
+        else:
+            return res
+    except subprocess.CalledProcessError as e:
+        print("ERROR :", e.stderr)
 
 
-def regrid_cam_se(dataset: xr.Dataset, weight_file: PathLike) -> xr.Dataset:
+def regrid_cam_se(dataset: xr.Dataset, weight_file: Path) -> xr.Dataset:
     """
     Regrid CAM-SE output using an existing ESMF weights file.
 
@@ -251,7 +260,7 @@ def regrid_cam_se(dataset: xr.Dataset, weight_file: PathLike) -> xr.Dataset:
     # output variable shapew
     out_shape = weights.dst_grid_dims.load().data.tolist()[::-1]
 
-    log(f"Regridding from {in_shape} to {out_shape}")
+    print(f"Regridding from {in_shape} to {out_shape}")
 
     # Insert dummy dimension
     vars_with_ncol = [
@@ -285,7 +294,7 @@ def regrid_cam_se(dataset: xr.Dataset, weight_file: PathLike) -> xr.Dataset:
         reuse_weights=True,
         periodic=True,
     )
-    log(regridder)
+    print(regridder)
 
     # Actually regrid, after renaming
     regridded = regridder(updated.rename({"dummy": "lat", "ncol": "lon"}))
