@@ -29,7 +29,7 @@ cmocean_cmap_list = list(cmocean.cm.cmapnames)
 all_cmaps = ipcc_cmap_list + plt_cmap_list + cmocean_cmap_list
 
 
-def _print_result(v, file=None, pretty=True):
+def _logmsg(v, file=None, pretty=True):
     if pretty:
         if file is None:
             pprint.pprint(v, sort_dicts=False, compact=True)
@@ -43,59 +43,18 @@ def _print_result(v, file=None, pretty=True):
         else:
             with open(file, "a", encoding="utf-8") as f:
                 f.write(f"{v}\n")
+
                 f.flush()  # ensure immediate write
 
 
-def logmsg(
-    *values: Any | None,
-    file: Path | Path = None,
-) -> None:
-    """
-    Log one or more messages to standard output or a file, optionally including traceback and exception details.
+def check_exceptions(file):
 
-    This utility function provides structured logging with support for log levels,
-    traceback formatting, exception information, and flexible output redirection to
-    file paths or file-like objects.
+    if (None, None, None) == sys.exc_info():
+        return None
 
-    Parameters
-    ----------
-    *values : Any or None
-        Objects to log.
+    _type, _value, _traceback = sys.exc_info()
 
-    file : Path or Path, optional
-        File path or file-like object to write the log messages to. If None, logs to standard output.
-    -------
-    None
-    """
-
-    exc_info = sys.exc_info()
-
-    # unpack values adding  a a space between str values
-    values = [v for v in values]
-
-    if all(isinstance(v, str) for v in values):
-        values = " ".join(values)
-        return _print_result(values, file, pretty=False)
-
-    else:
-        for v in values:
-            if not isinstance(v, str):
-                _print_result(v, file, pretty=True)
-            else:
-                _print_result(v, file, pretty=False)
-
-    _print_result("\n", file, pretty=False)
-
-    if any(exc_info):
-        return _exceptions(values, file, exc_info)
-
-
-def _exceptions(values, file, exc_info):
-
-    msg = " ".join(map(str, values)) if values else ""
-    exc_type, exc_value, exc_traceback = exc_info
-
-    ft = traceback.extract_tb(exc_traceback)
+    ft = traceback.extract_tb(_traceback)
 
     ft_user = [
         x
@@ -122,13 +81,50 @@ def _exceptions(values, file, exc_info):
         new_ft.append(frame_msg)
 
     new_ft = "\n".join(new_ft)
-    error_type = f"{exc_type.__qualname__} : {exc_value}"
+    error_type = f"{_type.__qualname__} : {_value}"
 
-    output = f"\n{error_type}\n {new_ft}\n\t{msg}\n"
+    output = f"\n{error_type}\n {new_ft}\n"
 
-    _print_result(output, file, pretty=False)
+    _logmsg(output, file, pretty=False)
 
     return None
+
+
+def logmsg(
+    *values: Any | None,
+    file: Path = None,
+) -> None:
+    """
+    Log one or more messages to standard output or a file, optionally including traceback and exception details.
+
+    This utility function provides structured logging with support for log levels,
+    traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+
+    file : Path or Path, optional
+        File path or file-like object to write the log messages to. If None, logs to standard output.
+    -------
+    None
+    """
+
+    if len(values) > 0:
+        if all(isinstance(v, str) for v in values):
+            values = " ".join(values)
+            return _logmsg(values, file, pretty=False)
+
+        else:
+            for v in values:
+                if not isinstance(v, str):
+                    _logmsg(v, file, pretty=True)
+                else:
+                    _logmsg(v, file, pretty=False)
+
+    return check_exceptions(file)
 
 
 def _compute_hash():

@@ -76,6 +76,7 @@ class IPCCTheme:
         latex: bool = False,
         context: Literal["paper", "notebook", "talk", "poster"] = "paper",
         style: str = "ticks",
+        spine: bool = True,
         rc: dict = None,
     ):
         """
@@ -108,6 +109,8 @@ class IPCCTheme:
             This affects font sizes and other parameters to suit different presentation formats.
         style : str, optional
             Seaborn style to use. Options include "darkgrid", "whitegrid", "dark", "white", and "ticks". Default is "ticks".
+        spine: bool, default False
+            If True, top and left spines are removed.
         rc : dict, optional
             Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
 
@@ -127,7 +130,7 @@ class IPCCTheme:
             self.install_latex()
             latex = False
 
-        default_rc = {
+        _rc = {
             "lines.linewidth": line_width,
             "xtick.direction": "in",
             "ytick.direction": "in",
@@ -140,14 +143,14 @@ class IPCCTheme:
         }
 
         if fig_size:
-            default_rc["figure.figsize"] = fig_size
+            _rc["figure.figsize"] = fig_size
         if latex:
-            default_rc["font.size"] = 12
+            _rc["font.size"] = 12
 
         if not rc:
             rc = {}
 
-        rc.update(default_rc)
+        _rc.update(rc)
 
         sns.set_theme(
             style=style,
@@ -155,8 +158,11 @@ class IPCCTheme:
             context=context,
             font_scale=font_scale,
             palette="colorblind",
-            rc=rc,
+            rc=_rc,
         )
+
+        if not spine:
+            self.spine_off()
 
         return self
 
