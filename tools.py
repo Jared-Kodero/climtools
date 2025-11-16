@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -132,10 +132,19 @@ def mkdir(path: Path):
         path.mkdir(parents=True, exist_ok=True)
 
 
-def du(path: Path) -> int | float:
+def du(path: Path, units: Literal["B", "kB", "MB", "GB", "TB"] = "B") -> int | float:
     """
-    Get the size of a file or directory in bytes.
+    Return the size of a file or directory.
+
+    Parameters
+    ----------
+    path : Path
+        File or directory to measure.
+    units : {"B", "kB", "MB", "GB", "TB"}, default "B"
+        Output units using SI decimal scaling (1 kB = 10^3 B).
+
     """
+
     path = Path(path).resolve()
     if not path.exists():
 
@@ -145,7 +154,14 @@ def du(path: Path) -> int | float:
     elif path.is_dir():
         size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
-    return size
+    scale = {
+        "B": 1,
+        "kB": 10**3,
+        "MB": 10**6,
+        "GB": 10**9,
+        "TB": 10**12,
+    }
+    return size / scale[units]
 
 
 def f_type(file_path: Path) -> str:
