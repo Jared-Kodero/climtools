@@ -1,6 +1,11 @@
+import hashlib
+import json
+import os
+import textwrap
 from pathlib import Path
 
 import cmocean
+import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,7 +13,7 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
-_src_dir = _file_dir / "data"/"cmaps"
+_src_dir = _file_dir / "data" / "cmaps"
 
 files = _src_dir.glob("*.txt")
 ipcc_cmap_list = [f.stem for f in files]
@@ -16,7 +21,7 @@ plt_cmap_list = plt.colormaps()
 cmocean_cmap_list = list(cmocean.cm.cmapnames)
 
 
-def get_cm(name):
+def build_cm(name):
     names = [name, name.lower(), name.capitalize(), name.upper()]
     for c in names:
         ipcc_file = _src_dir / f"{c}.txt"
@@ -29,14 +34,15 @@ def get_cm(name):
     raise KeyError(f"Colormap '{name}' is not valid.")
 
 
-def get_func(name, N, reverse, split, add_colors, discrete):
-    return adjust(
-        cmap=get_cm(name),
+def get_colormap(name, N, reverse, split, add_colors, discrete, as_colors):
+    return adjust_cmap(
+        cmap=build_cm(name),
         N=N,
         split=split,
         add_colors=add_colors,
         reverse=reverse,
         discrete=discrete,
+        as_colors=as_colors,
     )
 
 
@@ -108,7 +114,12 @@ def add_cmap_colors(
     return cmap
 
 
-def adjust(
+def get_colors(cmap, N):
+    colors = cmap(np.linspace(0, 1, N))
+    return [to_hex(c) for c in colors]
+
+
+def adjust_cmap(
     cmap=None,
     N: int = 25,
     *,
@@ -116,6 +127,7 @@ def adjust(
     add_colors: dict[int, str | list[str]] = None,
     reverse: bool = False,
     discrete: bool = True,
+    as_colors: bool = False,
 ):
     """
     Retrieve and modify a matplotlib colormap with optional slicing, color insertion,
@@ -146,10 +158,14 @@ def adjust(
     discrete : bool, default=True
         If ``True``, return a discrete ``ListedColormap`` with ``N`` bins.
         If ``False``, return a continuous ``LinearSegmentedColormap``.
+    as_colors : bool, default=False
+        If ``True``, return a list of colors instead of a cmap
+
+
 
     Returns
     -------
-    matplotlib.colors.Colormap
+    matplotlib.colors.Colormap or list of colors
         The adjusted colormap after applying all transformations.
 
     Notes
@@ -202,6 +218,9 @@ def adjust(
             )
     if reverse:
         res = res.reversed()
+
+    if as_colors:
+        return get_colors(res, N)
     return res
 
 
@@ -219,3 +238,106 @@ def blend(colors: list[str], N: int = 25, *, discrete: bool = True):
     if discrete:
         return ListedColormap(color_list, N=N, name=f"blend_{len(colors)}")
     return LinearSegmentedColormap.from_list(f"blend_{len(colors)}", color_list, N=N)
+
+
+def gen_cmap_file():
+    _meta_file = _file_dir / ".cmap_meta.json"
+    _cmap_file = _file_dir / "cmaps_inventory.py"
+
+    ipcc_cmap_list = [f.stem for f in _src_dir.glob("*.txt")]
+    plt_cmap_list = plt.colormaps()
+    cmocean_cmap_list = list(cmocean.cm.cmapnames)
+    all_cmaps = ipcc_cmap_list + plt_cmap_list + cmocean_cmap_list
+
+    def _compute_hash():
+        """Compute a hash from versions and src file metadata (names + modification times)."""
+        src_files = sorted(_src_dir.glob("*.txt"))
+        src_state = {f.name: os.path.getmtime(f) for f in src_files}
+
+        data = {
+            "matplotlib_version": matplotlib.__version__,
+            "cmocean_version": cmocean.__version__,
+            "src_state": src_state,
+        }
+
+        hash_str = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+        return hash_str, data
+
+    def _load_meta():
+
+        if _meta_file.exists():
+            try:
+                with open(_meta_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _write_meta(data, hash_str):
+        data["_hash"] = hash_str
+        with open(_meta_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _cmap_file_contents():
+
+        imports = """
+        from dataclasses import dataclass
+        from matplotlib.colors import Colormap
+
+        from .cmap_funcs import *
+        \n
+        """
+        imports = textwrap.dedent(imports)
+
+        body = """
+        @dataclass
+        class ColorMaps:
+
+            @staticmethod
+            def new(colors: list[str], N: int = 25, *, discrete: bool = True):
+                return blend(colors, N=N, discrete=discrete)
+            \n
+                """
+
+        for name in all_cmaps:
+            if name.endswith("_r") or "cmo" in name.lower():
+                continue
+            body = f""" {body}
+            
+            @staticmethod
+            def {name.lower()}(
+                N: int = 25,
+                reverse: bool = False,
+                split: tuple[float, float] = (0, 1),
+                add_colors: dict[int, str | list[str]] = None,
+                discrete: bool = True,
+                as_colors : bool =False
+            ) -> Colormap:
+                return get_colormap("{name}", N, reverse, split, add_colors, discrete,as_colors)
+                \n
+            """
+        body = textwrap.dedent(body)
+
+        init = """
+        cmaps: ColorMaps = ColorMaps()
+        cm : ColorMaps = cmaps
+        """
+        init = textwrap.dedent(init)
+        return imports, body, init
+
+    def _generate():
+        """Generate plot_cmaps.py only if versions or src files changed (added, removed, or modified)."""
+        new_hash, meta_data = _compute_hash()
+        old_meta = _load_meta()
+
+        if _cmap_file.exists() and old_meta.get("_hash") == new_hash:
+            return  # Up to date
+        imports, body, init = _cmap_file_contents()
+        with open(_cmap_file, "w") as f:
+            f.write(imports)
+            f.write(body)
+            f.write(init)
+
+        _write_meta(meta_data, new_hash)
+
+    _generate()

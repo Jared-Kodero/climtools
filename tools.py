@@ -4,13 +4,16 @@ import getpass
 import inspect
 import io
 import os
+import pprint
 import random
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -690,3 +693,127 @@ class FileLock:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+
+class LogExc:
+    """
+    Log traceback and exception details.
+
+    This class provides automatic direct to error exception handling without long tracebacks. It supports traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+
+    file : Path or Path, optional
+        File path or file-like object to write the log messages to. If None, logs to standard output.
+    -------
+    None
+    """
+
+    def __init__(self, *values: Any | None, file: Path | None = None) -> None:
+        # Force evaluation of current exception info inside LogMsg
+        LogMsg(*values, file=file)
+
+
+class LogMsg:
+    """
+    Log one or more messages to standard output or a file, optionally including traceback and exception details.
+
+    This class provides structured logging  and automatic direct to error exception handling without long tracebacks. It supports traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+
+    file : Path or Path, optional
+        File path or file-like object to write the log messages to. If None, logs to standard output.
+    -------
+    None
+    """
+
+    def __init__(self, *values: Any | None, file: Path | None = None) -> None:
+        self.RED = "\033[31m"
+        self.BOLD = "\033[1m"
+        self.RESET = "\033[0m"
+        self.values = values if len(values) > 0 else None
+        self.file = file if file else None
+        self.fd = sys.stdout.fileno()
+        self.isatty = sys.stdout.isatty()
+        self.exc_info = sys.exc_info()
+        self.exc_type = self.exc_info[0]
+        self.exc_value = self.exc_info[1]
+        self.exc_tb = self.exc_info[2]
+        self.has_exc = self.exc_type is not None
+
+        if self.values:
+            self.parse_values()
+        if self.has_exc:
+            self.check_exceptions()
+
+    def parse_values(self) -> None:
+        if all(isinstance(v, str) for v in self.values):
+            values = " ".join(self.values)
+            self.lprint(values, pretty=False)
+        else:
+            for v in self.values:
+                if not isinstance(v, str):
+                    self.lprint(v, pretty=True)
+                else:
+                    self.lprint(v, pretty=False)
+
+    def lprint(self, obj: Any, pretty: bool = True) -> None:
+
+        if self.file:
+            with open(self.file, "a", encoding="utf-8") as f:
+                if pretty:
+                    pprint.pprint(obj, stream=f, sort_dicts=False, compact=True)
+                else:
+                    f.write(f"{obj}\n")
+                    f.flush()  # ensure immediate write
+
+        else:
+            if pretty:
+                pprint.pprint(obj, sort_dicts=False, compact=True)
+            else:
+                os.write(self.fd, f"{obj}\n".encode("utf-8"))
+
+    def check_exceptions(self) -> None:
+        ft = traceback.extract_tb(self.exc_tb)
+        ft_user = [
+            x
+            for x in ft
+            if "site-packages" not in str(Path(x.filename).resolve())
+            and str(x.filename).endswith(".py")
+        ]
+
+        ft = ft_user
+        new_ft = []
+        for frame in ft:
+            file_path = Path(frame.filename).resolve()
+            lineno = f"{frame.lineno:>5}"
+            frame_line = frame.line.strip() if frame.line else ""
+            pointer = " " * (len(str(lineno)) + 3) + "^" * len(frame_line)
+
+            if self.isatty:
+                frame_line = f"{self.RED}{frame_line}{self.RESET}"
+                pointer = f"{self.RED}{pointer}{self.RESET}"
+
+            frame_msg = (
+                f"{lineno} | {frame_line}\n{pointer}\n\t"
+                f"  {frame.name} :  {file_path}\n"
+            )
+            new_ft.append(frame_msg)
+
+        new_ft = "\n".join(new_ft)
+        error_type = f"{self.exc_type.__qualname__} : {self.exc_value}"
+
+        output = f"\n{error_type}\n {new_ft}\n"
+
+        self.lprint(output, pretty=False)
+
+        return None

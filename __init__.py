@@ -15,12 +15,19 @@ individual modules (for example ``from climtools import plot, trends``) or the
 specific functions you need.
 """
 
+from .cmap_funcs import gen_cmap_file
+
+gen_cmap_file()
+from .cmaps_inventory import ColorMaps, cm, cmaps
 from .corr import calc_corr
 from .plot import animate, cartplot, get_cbar_axes, make_cyclic, plot_pvalues
+from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
 from .tools import (
     FileLock,
+    LogExc,
+    LogMsg,
     MultiProcManager,
     RedirectStreams,
     cp,
@@ -40,12 +47,6 @@ from .tools import (
     to_numeric,
     user,
 )
-from .utils import gen_cmap_file, logmsg
-
-gen_cmap_file()
-
-from .cmaps_inventory import ColorMaps, cm, cmaps
-from .plot_theme import IPCCTheme, theme
 from .trends import calc_signicance, calc_trends, mk_trend_test, polyfit
 from .xgeo import (
     GeoDataArray,
@@ -104,7 +105,8 @@ __all__ = [
     "infer_time_frequency",
     "interp_data",
     "land_sea_mask",
-    "logmsg",
+    "LogMsg",
+    "LogExc",
     "make_cyclic",
     "mk_trend_test",
     "mkdir",
