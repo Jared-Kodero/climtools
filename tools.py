@@ -716,6 +716,10 @@ class LogExc:
     def __init__(self, *values: Any | None, file: Path | None = None) -> None:
         # Force evaluation of current exception info inside LogMsg
         LogMsg(*values, file=file)
+        return None
+
+    def __repr__(self):
+        return ""
 
 
 class LogMsg:
@@ -740,10 +744,11 @@ class LogMsg:
         self.RED = "\033[31m"
         self.BOLD = "\033[1m"
         self.RESET = "\033[0m"
+        self.jupyter = "ipykernel" in sys.modules
+        self.isatty = sys.stdout.isatty() or self.jupyter
         self.values = values if len(values) > 0 else None
         self.file = file if file else None
         self.fd = sys.stdout.fileno()
-        self.isatty = sys.stdout.isatty()
         self.exc_info = sys.exc_info()
         self.exc_type = self.exc_info[0]
         self.exc_value = self.exc_info[1]
@@ -755,6 +760,8 @@ class LogMsg:
         if self.has_exc:
             self.check_exceptions()
 
+        return None
+
     def parse_values(self) -> None:
         if all(isinstance(v, str) for v in self.values):
             values = " ".join(self.values)
@@ -765,6 +772,7 @@ class LogMsg:
                     self.lprint(v, pretty=True)
                 else:
                     self.lprint(v, pretty=False)
+        return None
 
     def lprint(self, obj: Any, pretty: bool = True) -> None:
 
@@ -773,14 +781,17 @@ class LogMsg:
                 if pretty:
                     pprint.pprint(obj, stream=f, sort_dicts=False, compact=True)
                 else:
-                    f.write(f"{obj}\n")
+                    _ = f.write(f"{obj}\n")
                     f.flush()  # ensure immediate write
 
         else:
             if pretty:
                 pprint.pprint(obj, sort_dicts=False, compact=True)
+            elif self.jupyter:
+                print(obj)
             else:
-                os.write(self.fd, f"{obj}\n".encode("utf-8"))
+                _ = os.write(self.fd, f"{obj}\n".encode("utf-8"))
+        return None
 
     def check_exceptions(self) -> None:
         ft = traceback.extract_tb(self.exc_tb)
@@ -817,3 +828,6 @@ class LogMsg:
         self.lprint(output, pretty=False)
 
         return None
+
+    def __repr__(self):
+        return ""

@@ -18,9 +18,8 @@ specific functions you need.
 from .cmap_funcs import gen_cmap_file
 
 gen_cmap_file()
-from .cmaps_inventory import ColorMaps, cm, cmaps
-from .corr import calc_corr
-from .plot import animate, cartplot, get_cbar_axes, make_cyclic, plot_pvalues
+from .cmaps_inventory import CMap, cm, cmaps
+from .plot import get_cbar_axes, plot_pvalues
 from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
@@ -47,7 +46,6 @@ from .tools import (
     to_numeric,
     user,
 )
-from .trends import calc_signicance, calc_trends, mk_trend_test, polyfit
 from .xgeo import (
     GeoDataArray,
     chunk_by_dims,
@@ -55,10 +53,7 @@ from .xgeo import (
     chunk_longitudes,
     close_dask,
     get_local_solar_time,
-    get_spatiotemporal_info,
     get_UTC_offset,
-    infer_time_frequency,
-    interp_data,
     land_sea_mask,
     open_grib_datatree,
     setup_dask,
@@ -72,18 +67,13 @@ RedirectStreams = RedirectStreams
 
 
 __all__ = [
-    "ColorMaps",
+    "CMap",
     "ESMF_RegridWeightGen",
     "FileLock",
     "GeoDataArray",
     "IPCCTheme",
     "MultiProcManager",
     "RedirectStreams",
-    "animate",
-    "calc_corr",
-    "calc_signicance",
-    "calc_trends",
-    "cartplot",
     "cdo",
     "chunk_by_dims",
     "chunk_by_timezones",
@@ -99,22 +89,16 @@ __all__ = [
     "get_cbar_axes",
     "get_func_signature",
     "get_local_solar_time",
-    "get_spatiotemporal_info",
     "home",
     "host",
-    "infer_time_frequency",
-    "interp_data",
     "land_sea_mask",
     "LogMsg",
     "LogExc",
-    "make_cyclic",
-    "mk_trend_test",
     "mkdir",
     "mv",
     "n_cpus",
     "open_grib_datatree",
     "plot_pvalues",
-    "polyfit",
     "regrid_cam_se",
     "rm",
     "setup_dask",

@@ -291,7 +291,7 @@ def gen_cmap_file():
 
         body = """
         @dataclass
-        class ColorMaps:
+        class CMap:
 
             @staticmethod
             def new(colors: list[str], N: int = 25, *, discrete: bool = True):
@@ -319,8 +319,8 @@ def gen_cmap_file():
         body = textwrap.dedent(body)
 
         init = """
-        cmaps: ColorMaps = ColorMaps()
-        cm : ColorMaps = cmaps
+        cmaps: CMap = CMap()
+        cm : CMap = cmaps
         """
         init = textwrap.dedent(init)
         return imports, body, init

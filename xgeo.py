@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 from .plot import animate, cartplot, make_cyclic
 from .pycdo import cdo
 from .tools import n_cpus, tmp_files
-from .trends import calc_trends, polyfit
+from .xgeo_stats import calc_trends, correlate, period_difference, polyfit
 
 script_dir = Path(__file__).resolve().parent
 
@@ -340,170 +340,6 @@ def tz_apply_func(
         return _tz_apply_func_parallel(func, chunks, kwargs)
     else:
         return _tz_apply_func_serial(func, chunks, kwargs)
-
-
-def infer_time_frequency(
-    times: Union[pd.Series, np.ndarray, xr.DataArray],
-) -> tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]:
-    """
-    Infer the time frequency of a series of timestamps.
-    This function analyzes the time intervals in the provided timestamps and returns
-    a frequency string along with the ranges of hours, months, and years present in the data.
-
-    Parameters
-    ----------
-    times : Union[pd.Series, np.ndarray, xr.DataArray]
-        A series of timestamps, which can be a pandas Series, a NumPy array, or
-        an xarray DataArray containing datetime objects.
-    Returns
-    -------
-    tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]
-        A tuple containing:
-        - freq: A string representing the inferred frequency (e.g., '1H', '1D', '1M').
-        - hour_range: A tuple of integers representing the minimum and maximum hours present in the data.
-        - month_range: A tuple of integers representing the minimum and maximum months present in the data.
-        - year_range: A tuple of integers representing the minimum and maximum years present in the data.
-    """
-
-    time_vals = pd.DataFrame({"time": times})
-    time_vals["diff"] = time_vals["time"].diff().dt.total_seconds()
-    diffs = time_vals["diff"].value_counts()
-    time_vals = time_vals[time_vals["diff"] == diffs.idxmax()]  # 2nd filtering
-
-    mean_step_seconds = time_vals["diff"].mean()
-    mean_step_seconds = int(mean_step_seconds)
-
-    # Step 4: Infer frequency string
-    freq = None
-
-    if mean_step_seconds < 60:
-        freq = f"{mean_step_seconds}S"  # seconds
-    elif mean_step_seconds < 3600:
-        freq = f"{mean_step_seconds // 60}T"  # minutes
-    elif mean_step_seconds < 86400:
-        freq = f"{mean_step_seconds // 3600}H"  # hours
-    elif mean_step_seconds < 604800:
-        freq = f"{mean_step_seconds // 86400}D"  # days
-    elif mean_step_seconds < 2419200:
-        freq = f"{mean_step_seconds // 604800}W"  # weeks
-    elif mean_step_seconds < 29030400:
-        freq = f"{mean_step_seconds // 2419200}M"  # months (approx 28 days)
-    elif mean_step_seconds < 290304000:
-        freq = f"{mean_step_seconds // 29030400}Y"  # years (approx 336 days)
-    else:
-        freq = f"{mean_step_seconds // 290304000}10Y"  # years (approx 336 days)
-
-        # Time part ranges
-    hour_range = (time_vals["time"].dt.hour.min(), time_vals["time"].dt.hour.max())
-    month_range = (time_vals["time"].dt.month.min(), time_vals["time"].dt.month.max())
-    year_range = (time_vals["time"].dt.year.min(), time_vals["time"].dt.year.max())
-
-    return freq, hour_range, month_range, year_range
-
-
-def interp_data(
-    obj: xr.DataArray | xr.Dataset,
-    resolution: float = 0.25,
-    *,
-    x: str = "lon",
-    y: str = "lat",
-    method: Literal["linear", "nearest", "cubic"] = "linear",
-    bbox: tuple[float, float, float, float] = None,
-) -> xr.DataArray | xr.Dataset:
-    """
-    Interpolate data to a regular grid using xarray.
-    This function uses the xarray library to interpolate
-    data to a regular grid. The function will create temporary files in the system
-    temporary directory and delete them after use.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The data to be interpolated. The data must have latitude and longitude
-        coordinates.
-    resolution : float, optional
-        The resolution of the output grid in degrees. The default is 0.25.
-    method : str, optional
-        The interpolation method to be used. The default is "linear".
-        Other options are "nearest" and "cubic".
-    x : str, optional
-        The name of the longitude coordinate in the data. The default is "lon".
-    y : str, optional
-        The name of the latitude coordinate in the data. The default is "lat".
-
-
-    """
-
-    obj = obj.sortby([y, x])
-
-    if bbox is not None:
-        lon_min, lat_min, lon_max, lat_max = bbox
-
-        obj = obj.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
-
-    else:
-
-        lat_min, lat_max = obj[y].min().values, obj[y].max().values
-        lon_min, lon_max = obj[x].min().values, obj[x].max().values
-
-    new_lat = np.arange(lat_min, lat_max, resolution)
-    new_lon = np.arange(lon_min, lon_max, resolution)
-
-    interp_data = obj.interp(lat=new_lat, lon=new_lon, method=method)
-
-    return interp_data
-
-
-# get the total number of grid points
-def get_spatiotemporal_info(
-    obj: xr.DataArray | xr.Dataset,
-) -> dict:
-    """
-    Get the spatiotemporal information of an xarray object.
-    This function extracts the dimensions, resolution, and time frequency of the provided
-    xarray object, along with the bounds of each dimension.
-
-    Parameters
-    ----------
-    obj : Union[xr.Dataset, xr.DataArray]
-        An xarray object (either a Dataset or DataArray) containing spatial and temporal data.
-    Returns
-    -------
-    dict
-    """
-
-    dims = list(obj.dims)
-
-    resolution = {}
-
-    t_freq, hours_range, months_range, years_range = None, None, None, None
-
-    for k in dims:
-        if str(obj[k].dtype) == "datetime64[ns]":
-            t_freq, hours_range, months_range, years_range = infer_time_frequency(
-                obj[k]
-            )
-            resolution[k] = t_freq
-
-        else:
-            resolution[k] = float(np.round(obj[k].diff(k).mean().values, 2))
-
-    names = ["resolution", "hours_range", "months_range", "years_range"]
-    data = [resolution, hours_range, months_range, years_range]
-
-    result = {}
-    for k, v in zip(names, data):
-        if v is not None:
-            result[k] = v
-
-    for k in dims:
-        if k != "time":
-            result[f"{k}_bounds"] = (
-                float(np.round(obj[k].min().values, 2)),
-                float(np.round(obj[k].max().values, 2)),
-            )
-
-    return result
 
 
 def close_dask():
@@ -836,29 +672,120 @@ class GeoDataArray(xr.DataArray):
         along: str = None,
         *,
         scale: float = 1,
-        use_dask: bool = True,
         dask_scheduler: Literal["threads", "processes"] = "threads",
     ) -> xr.Dataset:
         """
-        Calculate trends along a specified dimension using the Mann-Kendall trend test.
+        Calculate the Mann-Kendall trend test for a given dataset.
+
+        Parameters
+        ----------
+        along : str
+            Dimension along which the trend is evaluated (e.g., "time"). This
+            dimension must exist in the data.
+        scale : float, default 1
+            Factor applied to the Sen slope estimate (e.g., convert from
+            units per timestep to units per year).
+        dask_scheduler : {"threads", "processes"}, default "threads"
+            Scheduler used when executing the trend computations on Dask-backed
+            arrays.
+
+
+        Returns:
+            xr.Dataset: DataFrame or Dataset containing the trend test results.
         """
         return calc_trends(
             self,
             along=along,
             scale=scale,
-            use_dask=use_dask,
             dask_scheduler=dask_scheduler,
         )
 
     def trendfit(self, along: str, data_var: str = None, scale: float = 1):
         """
-        Calculate the linear trend for the given xarray Dataset or DataArray using polynomial fitting.
+        Calculate the linear trend for the given xarray Dataset or DataArray using xr.polyfit.
+
+        Parameters
+        ----------
+        - along: str
+            Dimension to calculate the trend test along. Also used for sorting the data.
+        - scale: float
+            The scale to multiply the slope by i.e convert to per hour, per day, etc.
+
+        Returns: xr.Dataset
         """
         return polyfit(
             self,
             along=along,
             data_var=data_var,
             scale=scale,
+        )
+
+    def period_difference(
+        self,
+        period1: tuple[str | pd.Timestamp],
+        period2: tuple[str | pd.Timestamp],
+        along: str = "time",
+        level: float = 0.05,
+    ) -> xr.Dataset:
+        """
+        Compute the difference between two time periods in a DataArray or Dataset.
+
+        Parameters
+        ----------
+        period1 : tuple of str
+            (start, end) timestamps for the first period.
+        period2 : tuple of str
+            (start, end) timestamps for the second period.
+        along : str, default "time"
+            Name of the time dimension.
+        level : float, default 0.05
+            Significance level for the significance test.
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset containing the mean difference between the two periods.
+        """
+        return period_difference(
+            self,
+            period1=period1,
+            period2=period2,
+            along=along,
+            level=level,
+        )
+
+    def correlate(
+        self,
+        other: xr.DataArray,
+        corr_type: Literal["pearson", "spearman", "kendall"] = "pearson",
+        alternative: Literal["two-sided", "less", "greater"] = "two-sided",
+        along: str = None,
+        dask_scheduler: Literal["threads", "processes"] = "threads",
+    ) -> xr.Dataset:
+        """
+        Compute the correlation between this DataArray/Dataset and another along a specified dimension.
+
+        Parameters
+        ----------
+        other : xr.DataArray or xr.Dataset
+            The other DataArray or Dataset to correlate with.
+        along : str, default "time"
+            The dimension along which to compute the correlation.
+        method : {"pearson", "spearman"}, default "pearson"
+            The correlation method to use.
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset containing the correlation coefficients.
+        """
+        return correlate(
+            self,
+            other,
+            corr_type=corr_type,
+            alternative=alternative,
+            along=along,
+            dask_scheduler=dask_scheduler,
         )
 
 
