@@ -6,6 +6,7 @@ import io
 import os
 import pprint
 import random
+import resource
 import shutil
 import socket
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+import psutil
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -350,6 +352,9 @@ class MultiProcManager:
 
         self.pid = pid or os.getpid()
         self.ppid = ppid
+        self.rlimit = resource.getrlimit(resource.RLIMIT_NPROC)
+        self.soft_limit = self.rlimit[0]
+        self.hard_limit = self.rlimit[1]
         self._sysrand = random.SystemRandom()
         self.n_cpus = n_cpus
         self.cpu_limit = cpu_limit
@@ -383,6 +388,31 @@ class MultiProcManager:
         delay = self._sysrand.uniform(low, high)
         time.sleep(delay)
 
+    def ulimit_u(self):
+        """
+        Monitor the number of processes owned by the current user and block
+        if it approaches the system-imposed soft limit.
+
+        Note: This method requires the `psutil` library to be installed.
+        """
+
+        threshold = int(0.95 * self.soft_limit)  # e.g., start waiting at ~95% usage
+
+        while True:
+            # Count processes owned by the current user
+            proc_count = sum(
+                1
+                for p in psutil.process_iter(["username"])
+                if p.info["username"] == psutil.Process().username()
+            )
+
+            if proc_count >= threshold:
+                self.sleep()
+
+            else:
+                break
+        return True
+
     def current_usage(self, path: Path) -> float:
         n_procs = len(list(path.glob("*")))
         return n_procs / self.n_cpus
@@ -392,6 +422,8 @@ class MultiProcManager:
 
     def throttle(self):
         """Block until CPU utilization (estimated by active processes) falls below 80%."""
+
+        self.ulimit_u()  # ensure we are within system process limits
         path = self.storage.parent if self.ppid else self.storage
 
         if self.check_concurrency(path):
