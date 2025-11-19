@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import atexit
 import logging
 import tempfile
 import uuid
@@ -16,402 +15,16 @@ import pandas as pd
 import xarray as xr
 from cfgrib.dataset import DatasetBuildError
 
+from .statistics import *
+
 warnings.filterwarnings("ignore")
 
 
 from .plot import animate, cartplot, make_cyclic
 from .pycdo import cdo
 from .tools import n_cpus, tmp_files
-from .xgeo_stats import calc_trends, correlate, period_difference, polyfit
 
 script_dir = Path(__file__).resolve().parent
-
-current_dask_cluster = None
-current_dask_client = None
-
-
-def land_sea_mask(
-    obj: xr.DataArray | xr.Dataset,
-    *,
-    keep: Literal["land", "ocean"] = None,
-    mask_file: Literal["cartopy", "era5"] = "era5",
-) -> xr.DataArray | xr.Dataset:
-    """
-    Apply a land-sea mask to the dataset. This function uses a netCDF file containing
-    land-sea masks to filter out specific features from the dataset.
-    """
-
-    if "lat" not in obj.dims or "lon" not in obj.dims:
-        raise ValueError(
-            "The dataset must have 'lat' and 'lon' dimensions to apply the land-sea mask."
-        )
-
-    masks = {
-        "cartopy": "cartopy_0.1.mask",
-        "era5": "era5_0.25_mask",
-    }
-
-    file = script_dir / "data" / "mask" / masks[mask_file]
-
-    mask = xr.open_dataset(file)
-
-    obj = obj.sortby(["lat", "lon"])
-
-    lat_min, lat_max = obj.lat.min().values, obj.lat.max().values
-    lon_min, lon_max = obj.lon.min().values, obj.lon.max().values
-
-    mask = mask[keep].sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
-    mask = mask.interp(lat=obj.lat, lon=obj.lon, method="nearest")
-
-    if isinstance(obj, xr.Dataset):
-        new_obj = xr.Dataset()
-        for data_var in list(obj.data_vars):
-            new_obj[data_var] = obj[data_var].where(mask, other=np.nan)
-
-    elif isinstance(obj, xr.DataArray):
-        new_obj = obj.where(mask, other=np.nan)
-
-    return new_obj
-
-
-def get_local_solar_time(data: xr.Dataset):
-    """
-    Calculate the local solar time for the dataset based on the longitude coordinate.
-    The local solar time is calculated as the UTC time plus the longitude offset.
-    """
-
-    if "lon" not in data or "lat" not in data:
-        raise ValueError("Dataset must contain 'lon' and 'lat' coordinates.")
-
-    offset = data["lon"] * (24 / 360) * (data["lat"] / data["lat"])
-    offset = offset.round() * pd.Timedelta(hours=1)
-
-    lst = (data["time"] + offset).transpose("time", "lat", "lon")
-
-    return data.assign_coords({"local_solar_time": lst})
-
-
-def get_UTC_offset(
-    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
-    *,
-    name: Literal["lon", "longitude", "x"] = "lon",
-) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
-    """
-    Computes the hour offset from UTC time based on the longitude coordinate.
-    """
-
-    if isinstance(obj, (xr.DataArray, xr.Dataset)):
-        data = obj.copy()
-        data[name] = ((data[name] + 180) % 360) - 180
-        offset = data[name] * (24 / 360)
-        offset = offset.round() * pd.Timedelta(hours=1)
-
-    else:
-        if isinstance(obj, str):
-            obj = float(obj)
-        obj = ((obj + 180) % 360) - 180
-        offset = obj * (24 / 360)
-        offset = np.round(offset) * pd.Timedelta(hours=1)
-
-    return offset
-
-
-def chunk_by_dims(
-    obj: xr.DataArray | xr.Dataset,
-    dim: str,
-    N: int,
-) -> dict[str, xr.DataArray | xr.Dataset]:
-    """
-    Chunk an xarray DataArray or Dataset into N parts along the specified dimension.
-
-    Parameters:
-        obj (xr.DataArray or xr.Dataset): Input data to chunk.
-        dim (str): Dimension along which to chunk.
-        N (int): Number of chunks.
-
-    Returns:
-        dict[str, xr.DataArray or xr.Dataset]: Dictionary with keys '0', ..., '{N-1}'.
-    """
-    if dim not in obj.dims:
-        raise ValueError(f"Dimension '{dim}' not found in the input data.")
-
-    dim_size = obj.sizes[dim]
-    if N < 1 or N > dim_size:
-        raise ValueError(
-            f"Invalid number of chunks N={N} for dimension size {dim_size}."
-        )
-
-    # Compute chunk indices
-    indices = np.linspace(0, dim_size, N + 1, dtype=int)
-
-    chunks = {}
-    for i in range(N):
-        chunk = obj.isel({dim: slice(indices[i], indices[i + 1])})
-        chunks[f"{i}"] = chunk
-
-    return chunks
-
-
-def chunk_longitudes(
-    obj: Union[xr.DataArray, xr.Dataset],
-    *,
-    lon: str = "lon",
-    deg: int = 15,
-) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
-    """
-    Partition a dataset into longitude bins of fixed width.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input data containing a longitude coordinate.
-    lon : {"lon", "longitude", "x"}, optional
-        Name of the longitude coordinate. Default is "lon".
-    deg : int, optional
-        Bin width in degrees of longitude. Default is 15.
-
-    Returns
-    -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary mapping each longitude bin (e.g., "-180", "-165", ..., "165")
-        to the corresponding subset of the data. The longitude values within each
-        bin are restored to their original values and sorted.
-
-    Notes
-    -----
-    - Longitudes are first normalized to the range [-180, 180).
-    - Each partition is labeled by its central longitude value (rounded to the nearest
-      multiple of `deg`).
-    """
-
-    chunks = {}
-    data = obj.copy()
-    data[lon] = ((data[lon] + 180) % 360) - 180
-
-    original_lons = data[lon]
-    lon_rounded = (original_lons / deg).round() * deg
-
-    idx_df = pd.DataFrame(
-        {
-            "lon_original": original_lons,
-            "lon_rounded": lon_rounded,
-        }
-    )
-
-    data[lon] = idx_df["lon_rounded"].values
-
-    for lon_val in idx_df["lon_rounded"].unique():
-        lon_val_data = data.sel({lon: lon_val})
-
-        lon_val_df = idx_df[idx_df["lon_rounded"] == lon_val]
-        lon_val_data[lon] = lon_val_df["lon_original"].values
-
-        chunks[f"{lon_val}"] = lon_val_data.sortby(lon)
-
-    return chunks
-
-
-def chunk_by_timezones(
-    obj: xr.DataArray | xr.Dataset,
-) -> dict[str, xr.DataArray | xr.Dataset]:
-    """
-    Chunk the dataset into chunks based on time zones.
-    This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
-    based on the hour offset from UTC time for each chunk.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be split into time zone chunks.
-
-    Returns
-    -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary where keys are time zone identifiers (e.g., "UTC+0", "UTC+1", etc.)
-        and values are the corresponding xarray objects for each time zone chunk.
-    """
-
-    data = obj.copy()
-    tz_chunks = {}
-    chunks = chunk_longitudes(data)
-    for chunk in chunks:
-        offset = get_UTC_offset(chunk)
-        data = chunks[chunk]
-        data["time"] = data["time"] + offset
-        timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
-        tz_chunks[f"UTC{timezone}"] = data
-
-    return tz_chunks
-
-
-def _process_chunk(func, kwargs, data, chunk):
-    offset = get_UTC_offset(chunk)
-    data["time"] = data["time"] + offset
-    res = func(data, **kwargs)
-    print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
-
-    return res
-
-
-def _tz_apply_func_parallel(
-    func: Callable,
-    chunks: dict[str, xr.DataArray | xr.Dataset],
-    kwargs: Mapping | None,
-) -> xr.DataArray | xr.Dataset:
-
-    args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
-
-    processes = max(1, min(n_cpus, len(args)))
-    chunksize = max(1, len(args) // n_cpus)
-
-    if chunksize == 1:
-        maxtasksperchild = 2
-    else:
-        maxtasksperchild = chunksize
-
-    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
-        datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
-
-    kwargs = {
-        "dim": "lon",
-        "join": "exact",
-        "compat": "override",
-        "data_vars": "minimal",
-        "coords": "minimal",
-    }
-
-    return xr.concat(datasets, **kwargs).sortby("lon")
-
-
-def _tz_apply_func_serial(
-    func,
-    chunks,
-    kwargs,
-):
-    datasets = []
-    for chunk in chunks:
-        datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
-
-    if len(datasets) > 1:
-        result = xr.concat(datasets, dim="lon").sortby("lon")
-    else:
-        result = datasets[0]
-
-    return result
-
-
-def tz_apply_func(
-    func: Callable,
-    obj: xr.DataArray | xr.Dataset,
-    multiprocess: bool = True,
-    kwargs: Mapping | None = None,
-) -> xr.DataArray | xr.Dataset:
-    """
-    Process the dataset by time zones using a specified function.
-
-    Parameters
-    ----------
-    func : Callable,
-        The function to be applied to each chunk of the dataset.
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be processed.
-    multiprocess : bool, optional
-        If True, the function will be applied in parallel using multiple processes.
-    **kwargs : Any
-        Additional keyword arguments to be passed to the applied function.
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The processed dataset after applying the function to each time zone chunk.
-
-    """
-
-    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
-        raise ValueError(
-            "The dataset must have (time, lat, lon) dimensions to apply the function."
-        )
-
-    if kwargs is None:
-        kwargs = {}
-
-    chunks = chunk_longitudes(obj)
-
-    if multiprocess and len(chunks) > 1:
-        return _tz_apply_func_parallel(func, chunks, kwargs)
-    else:
-        return _tz_apply_func_serial(func, chunks, kwargs)
-
-
-def close_dask():
-    """
-    Close the active Dask client and cluster if they exist.
-    This is useful for cleaning up resources when done with Dask computations.
-    """
-    global current_dask_client, current_dask_cluster
-    if current_dask_client and current_dask_cluster:
-        current_dask_client.close()
-        current_dask_cluster.close()
-        current_dask_client = None
-        current_dask_cluster = None
-
-
-def setup_dask(
-    *,
-    workers: int = n_cpus,
-    threads_per_worker: int = 1,
-    processes=True,
-    filter_warnings=True,
-):
-    """
-    - Imports Dask and Dask distributed.
-    - Creates a Dask client.
-    - Sets up the Dask dashboard.
-
-    Parameters:
-    ___________
-        workers (int, optional): Number of workers to create. Default is 8.
-        threads_per_worker (int, optional): Number of threads per worker. Default is 4.
-        processes (bool, optional): Whether to use processes instead of threads. Default is True.
-        get_info (bool, optional): Whether to return the Dask dashboard URL. Default is False.
-        dynamic_port (bool, optional): Whether to use a dynamic port. Default is False and uses port 8787.
-        filter_warnings (bool, optional): Whether to filter warnings. Default is True.
-
-    Example:
-    ________
-        >>> setup_dask(get_info=True, filter_warnings=False)
-    """
-
-    global current_dask_client, current_dask_cluster
-
-    if current_dask_client and current_dask_cluster:
-        return current_dask_client
-
-    from dask.distributed import Client, LocalCluster
-
-    if filter_warnings:
-        silence_level = logging.ERROR
-    else:
-        silence_level = logging.WARN
-
-    cluster = LocalCluster(
-        n_workers=workers,
-        threads_per_worker=threads_per_worker,
-        memory_limit=0,
-        silence_logs=silence_level,
-        processes=processes,
-    )
-    client = Client(cluster)
-
-    current_dask_client = client
-    current_dask_cluster = cluster
-
-    def _cleanup():
-        current_dask_client.close()
-        current_dask_cluster.close()
-
-    atexit.register(_cleanup)
-
-    return client
 
 
 def open_grib_datatree(infile: Path) -> xr.DataTree:
@@ -498,6 +111,30 @@ class GeoDataArray(xr.DataArray):
 
     def add_cyclic_point(self, dim: str = "lon") -> GeoDataArray:
         return make_cyclic(self, dim)
+
+    def get_local_solar_time(self, *, longitude="lon") -> GeoDataArray:
+        """
+        Calculate the local solar time for the DataArray based on the longitude coordinate.
+        The local solar time is calculated as the UTC time plus the longitude offset.
+        """
+        lsted = get_local_solar_time(self, longitude=longitude)
+        return GeoDataArray(lsted)
+
+    def land_sea_mask(
+        self,
+        *,
+        keep: Literal["land", "ocean"] = None,
+        mask_file: Literal["cartopy", "era5"] = "era5",
+    ) -> GeoDataArray:
+        """
+        Apply a land-sea mask to the DataArray.
+        """
+        masked = land_sea_mask(
+            self,
+            keep=keep,
+            mask_file=mask_file,
+        )
+        return GeoDataArray(masked)
 
     def cartplot(
         self,
@@ -792,13 +429,366 @@ class GeoDataArray(xr.DataArray):
 # Alias for convenience
 
 
-@xr.register_dataarray_accessor("cartplot")
-class CartPlotAccessor:
-    def __init__(self, xarray_obj):
-        self._obj = xarray_obj
+class Daskit:
+    """
+    A class to manage Dask client and cluster setup for parallel computations.
+    It provides methods to start and close a Dask client and cluster with specified configurations.
+    """
 
-    def plot(self, *args, **kwargs):
-        return cartplot(self._obj, *args, **kwargs)
+    def __init__(
+        self,
+        workers: int = n_cpus,
+        threads_per_worker: int = 1,
+        processes: bool = True,
+        filter_warnings: bool = True,
+        memory_limit: int = 0,
+    ):
 
-    def animate(self, *args, **kwargs):
-        return animate(self._obj, *args, **kwargs)
+        self.cluster = None
+        self.client = None
+        self.workers = workers
+        self.threads_per_worker = threads_per_worker
+        self.processes = processes
+        self.filter_warnings = filter_warnings
+        self.memory_limit = memory_limit
+
+    def close(self):
+        """
+        Close the active Dask client and cluster if they exist.
+        This is useful for cleaning up resources when done with Dask computations.
+        """
+        if self.client and self.cluster:
+            self.client.close()
+            self.cluster.close()
+            self.client = None
+            self.cluster = None
+
+    def start(
+        self,
+    ):
+        """
+        - Imports Dask and Dask distributed.
+        - Creates a Dask client.
+        - Sets up the Dask dashboard.
+
+        Parameters:
+        ___________
+            workers (int, optional): Number of workers to create. Default is 8.
+            threads_per_worker (int, optional): Number of threads per worker. Default is 4.
+            processes (bool, optional): Whether to use processes instead of threads. Default is True.
+            get_info (bool, optional): Whether to return the Dask dashboard URL. Default is False.
+            dynamic_port (bool, optional): Whether to use a dynamic port. Default is False and uses port 8787.
+            filter_warnings (bool, optional): Whether to filter warnings. Default is True.
+
+        Example:
+        ________
+            >>> setup_dask(get_info=True, filter_warnings=False)
+        """
+
+        if self.client is not None:
+            return self.client
+
+        from dask.distributed import Client, LocalCluster
+
+        if self.filter_warnings:
+            silence_level = logging.ERROR
+        else:
+            silence_level = logging.WARN
+
+        self.cluster = LocalCluster(
+            n_workers=self.workers,
+            threads_per_worker=self.threads_per_worker,
+            memory_limit=self.memory_limit,
+            silence_logs=silence_level,
+            processes=self.processes,
+        )
+        self.client = Client(self.cluster)
+
+        return self.client
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+def land_sea_mask(
+    obj: xr.DataArray | xr.Dataset,
+    *,
+    keep: Literal["land", "ocean"] = None,
+    mask_file: Literal["cartopy", "era5"] = "era5",
+) -> xr.DataArray | xr.Dataset:
+    """
+    Apply a land-sea mask to the dataset. This function uses a netCDF file containing
+    land-sea masks to filter out specific features from the dataset.
+    """
+
+    if "lat" not in obj.dims or "lon" not in obj.dims:
+        raise ValueError(
+            "The dataset must have 'lat' and 'lon' dimensions to apply the land-sea mask."
+        )
+
+    masks = {
+        "cartopy": "cartopy_0.1.mask",
+        "era5": "era5_0.25_mask",
+    }
+
+    file = script_dir / "data" / "mask" / masks[mask_file]
+
+    mask = xr.open_dataset(file)
+
+    obj = obj.sortby(["lat", "lon"])
+
+    lat_min, lat_max = obj.lat.min().values, obj.lat.max().values
+    lon_min, lon_max = obj.lon.min().values, obj.lon.max().values
+
+    mask = mask[keep].sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+    mask = mask.interp(lat=obj.lat, lon=obj.lon, method="nearest")
+
+    if isinstance(obj, xr.Dataset):
+        new_obj = xr.Dataset()
+        for data_var in list(obj.data_vars):
+            new_obj[data_var] = obj[data_var].where(mask, other=np.nan)
+
+    elif isinstance(obj, xr.DataArray):
+        new_obj = obj.where(mask, other=np.nan)
+
+    return new_obj
+
+
+def get_local_solar_time(
+    data: xr.Dataset | xr.DataArray, *, longitude="lon"
+) -> xr.Dataset | xr.DataArray:
+    """
+    Calculate the local solar time for the dataset based on the longitude coordinate.
+    The local solar time is calculated as the UTC time plus the longitude offset.
+    """
+
+    if longitude not in data:
+        raise ValueError(f"Dataset must contain '{longitude}' coordinate.")
+
+    offset = data[longitude] * (24 / 360)
+    offset = offset.round() * pd.Timedelta(hours=1)
+
+    lst = data["time"] + offset
+    lst.attributes["long_name"] = "Local Solar Time"
+    lst.attributes["standard_name"] = "local_solar_time"
+
+    return data.assign_coords({"lst": lst})
+
+
+def get_UTC_offset(
+    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
+    *,
+    name: Literal["lon", "longitude", "x"] = "lon",
+) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
+    """
+    Computes the hour offset from UTC time based on the longitude coordinate.
+    """
+
+    if isinstance(obj, (xr.DataArray, xr.Dataset)):
+        data = obj.copy()
+        data[name] = ((data[name] + 180) % 360) - 180
+        offset = data[name] * (24 / 360)
+        offset = offset.round() * pd.Timedelta(hours=1)
+
+    else:
+        if isinstance(obj, str):
+            obj = float(obj)
+        obj = ((obj + 180) % 360) - 180
+        offset = obj * (24 / 360)
+        offset = np.round(offset) * pd.Timedelta(hours=1)
+
+    return offset
+
+
+def chunk_longitudes(
+    obj: Union[xr.DataArray, xr.Dataset],
+    *,
+    lon: str = "lon",
+    deg: int = 15,
+) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
+    """
+    Partition a dataset into longitude bins of fixed width.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The input data containing a longitude coordinate.
+    lon : {"lon", "longitude", "x"}, optional
+        Name of the longitude coordinate. Default is "lon".
+    deg : int, optional
+        Bin width in degrees of longitude. Default is 15.
+
+    Returns
+    -------
+    dict[str, xarray.DataArray or xarray.Dataset]
+        A dictionary mapping each longitude bin (e.g., "-180", "-165", ..., "165")
+        to the corresponding subset of the data. The longitude values within each
+        bin are restored to their original values and sorted.
+
+    Notes
+    -----
+    - Longitudes are first normalized to the range [-180, 180).
+    - Each partition is labeled by its central longitude value (rounded to the nearest
+      multiple of `deg`).
+    """
+
+    chunks = {}
+    data = obj.copy()
+    data[lon] = ((data[lon] + 180) % 360) - 180
+
+    original_lons = data[lon]
+    lon_rounded = (original_lons / deg).round() * deg
+
+    idx_df = pd.DataFrame(
+        {
+            "lon_original": original_lons,
+            "lon_rounded": lon_rounded,
+        }
+    )
+
+    data[lon] = idx_df["lon_rounded"].values
+
+    for lon_val in idx_df["lon_rounded"].unique():
+        lon_val_data = data.sel({lon: lon_val})
+
+        lon_val_df = idx_df[idx_df["lon_rounded"] == lon_val]
+        lon_val_data[lon] = lon_val_df["lon_original"].values
+
+        chunks[f"{lon_val}"] = lon_val_data.sortby(lon)
+
+    return chunks
+
+
+def chunk_by_timezones(
+    obj: xr.DataArray | xr.Dataset,
+) -> dict[str, xr.DataArray | xr.Dataset]:
+    """
+    Chunk the dataset into chunks based on time zones.
+    This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
+    based on the hour offset from UTC time for each chunk.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The dataset to be split into time zone chunks.
+
+    Returns
+    -------
+    dict[str, xarray.DataArray or xarray.Dataset]
+        A dictionary where keys are time zone identifiers (e.g., "UTC+0", "UTC+1", etc.)
+        and values are the corresponding xarray objects for each time zone chunk.
+    """
+
+    data = obj.copy()
+    tz_chunks = {}
+    chunks = chunk_longitudes(data)
+    for chunk in chunks:
+        offset = get_UTC_offset(chunk)
+        data = chunks[chunk]
+        data["time"] = data["time"] + offset
+        timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
+        tz_chunks[f"UTC{timezone}"] = data
+
+    return tz_chunks
+
+
+def _process_chunk(func, kwargs, data, chunk):
+    offset = get_UTC_offset(chunk)
+    data["time"] = data["time"] + offset
+    res = func(data, **kwargs)
+    print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
+
+    return res
+
+
+def _tz_apply_func_parallel(
+    func: Callable,
+    chunks: dict[str, xr.DataArray | xr.Dataset],
+    kwargs: Mapping | None,
+) -> xr.DataArray | xr.Dataset:
+
+    args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
+
+    processes = max(1, min(n_cpus, len(args)))
+    chunksize = max(1, len(args) // n_cpus)
+
+    if chunksize == 1:
+        maxtasksperchild = 2
+    else:
+        maxtasksperchild = chunksize
+
+    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
+        datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
+
+    kwargs = {
+        "dim": "lon",
+        "join": "exact",
+        "compat": "override",
+        "data_vars": "minimal",
+        "coords": "minimal",
+    }
+
+    return xr.concat(datasets, **kwargs).sortby("lon")
+
+
+def _tz_apply_func_serial(
+    func,
+    chunks,
+    kwargs,
+):
+    datasets = []
+    for chunk in chunks:
+        datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
+
+    if len(datasets) > 1:
+        result = xr.concat(datasets, dim="lon").sortby("lon")
+    else:
+        result = datasets[0]
+
+    return result
+
+
+def tz_apply_func(
+    func: Callable,
+    obj: xr.DataArray | xr.Dataset,
+    multiprocess: bool = True,
+    kwargs: Mapping | None = None,
+) -> xr.DataArray | xr.Dataset:
+    """
+    Process the dataset by time zones using a specified function.
+
+    Parameters
+    ----------
+    func : Callable,
+        The function to be applied to each chunk of the dataset.
+    obj : xarray.DataArray or xarray.Dataset
+        The dataset to be processed.
+    multiprocess : bool, optional
+        If True, the function will be applied in parallel using multiple processes.
+    **kwargs : Any
+        Additional keyword arguments to be passed to the applied function.
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        The processed dataset after applying the function to each time zone chunk.
+
+    """
+
+    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
+        raise ValueError(
+            "The dataset must have (time, lat, lon) dimensions to apply the function."
+        )
+
+    if kwargs is None:
+        kwargs = {}
+
+    chunks = chunk_longitudes(obj)
+
+    if multiprocess and len(chunks) > 1:
+        return _tz_apply_func_parallel(func, chunks, kwargs)
+    else:
+        return _tz_apply_func_serial(func, chunks, kwargs)

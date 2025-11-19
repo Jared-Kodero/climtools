@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import psutil
+from tabulate import tabulate
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -761,9 +763,9 @@ class LogExc:
     None
     """
 
-    def __init__(self, *values: Any | None, file: Path | None = None) -> None:
+    def __init__(self, *values: Any | None) -> None:
         # Force evaluation of current exception info inside LogMsg
-        LogMsg(*values, file=file)
+        LogMsg(*values)
         return None
 
     def __repr__(self):
@@ -788,14 +790,13 @@ class LogMsg:
     None
     """
 
-    def __init__(self, *values: Any | None, file: Path | None = None) -> None:
+    def __init__(self, *values: Any | None) -> None:
         self.RED = "\033[31m"
         self.BOLD = "\033[1m"
         self.RESET = "\033[0m"
         self.jupyter = "ipykernel" in sys.modules
         self.isatty = sys.stdout.isatty() or self.jupyter
         self.values = values if len(values) > 0 else None
-        self.file = file if file else None
         self.fd = sys.stdout.fileno()
         self.exc_info = sys.exc_info()
         self.exc_type = self.exc_info[0]
@@ -824,21 +825,19 @@ class LogMsg:
 
     def lprint(self, obj: Any, pretty: bool = True) -> None:
 
-        if self.file:
-            with open(self.file, "a", encoding="utf-8") as f:
-                if pretty:
-                    pprint.pprint(obj, stream=f, sort_dicts=False, compact=True)
-                else:
-                    _ = f.write(f"{obj}\n")
-                    f.flush()  # ensure immediate write
+        if isinstance(obj, pd.DataFrame):
+            obj = tabulate(obj, headers="keys", tablefmt="psql", showindex=False)
+            print("\n")
+            print(obj)
+            print("\n")
+            return None
 
+        if pretty:
+            pprint.pprint(obj, sort_dicts=False, compact=True)
+        elif self.jupyter:
+            print(obj)
         else:
-            if pretty:
-                pprint.pprint(obj, sort_dicts=False, compact=True)
-            elif self.jupyter:
-                print(obj)
-            else:
-                _ = os.write(self.fd, f"{obj}\n".encode("utf-8"))
+            _ = os.write(self.fd, f"{obj}\n".encode("utf-8"))
         return None
 
     def check_exceptions(self) -> None:

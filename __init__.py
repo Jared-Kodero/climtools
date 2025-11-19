@@ -18,11 +18,12 @@ specific functions you need.
 from .cmap_funcs import gen_cmap_file
 
 gen_cmap_file()
-from .cmaps_inventory import CMap, cm, cmaps
+from .cmaps_inventory import cm, cmaps
 from .plot import get_cbar_axes, plot_pvalues
 from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
 from .regridder import ESMF_RegridWeightGen, regrid_cam_se
+from .statistics import calc_significance
 from .tools import (
     FileLock,
     LogExc,
@@ -47,19 +48,18 @@ from .tools import (
     user,
 )
 from .xgeo import (
+    Daskit,
     GeoDataArray,
-    chunk_by_dims,
     chunk_by_timezones,
     chunk_longitudes,
-    close_dask,
     get_local_solar_time,
     get_UTC_offset,
     land_sea_mask,
     open_grib_datatree,
-    setup_dask,
     tz_apply_func,
 )
 
+Daskit = Daskit
 GeoDataArray = GeoDataArray
 FileLock = FileLock
 MultiProcManager = MultiProcManager
@@ -67,7 +67,8 @@ RedirectStreams = RedirectStreams
 
 
 __all__ = [
-    "CMap",
+    "calc_significance",
+    "Daskit",
     "ESMF_RegridWeightGen",
     "FileLock",
     "GeoDataArray",
@@ -75,10 +76,8 @@ __all__ = [
     "MultiProcManager",
     "RedirectStreams",
     "cdo",
-    "chunk_by_dims",
     "chunk_by_timezones",
     "chunk_longitudes",
-    "close_dask",
     "cm",
     "cmaps",
     "cp",
@@ -101,7 +100,6 @@ __all__ = [
     "plot_pvalues",
     "regrid_cam_se",
     "rm",
-    "setup_dask",
     "symlink",
     "theme",
     "timeit",

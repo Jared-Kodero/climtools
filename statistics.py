@@ -272,8 +272,8 @@ def calc_trends(
 
 def period_difference(
     da: xr.DataArray,
-    period1: tuple[str, str],
-    period2: tuple[str, str],
+    period1: tuple[str | pd.Timestamp] = None,
+    period2: tuple[str | pd.Timestamp] = None,
     *,
     along: str = "time",
     level: float = 0.05,
@@ -325,7 +325,7 @@ def period_difference(
 def calc_significance(
     a: Union[xr.DataArray, xr.Dataset],
     b: Union[xr.DataArray, xr.Dataset],
-    along: str,
+    along: str = "time",
     *,
     data_var: str = None,
     level: float = 0.05,
