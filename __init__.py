@@ -15,6 +15,8 @@ individual modules (for example ``from climtools import plot, trends``) or the
 specific functions you need.
 """
 
+from __future__ import annotations
+
 from .cmap_funcs import gen_cmap_file
 
 gen_cmap_file()
@@ -22,9 +24,10 @@ from .cmaps_inventory import cm, cmaps
 from .plot import get_cbar_axes, plot_pvalues
 from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
-from .regridder import ESMF_RegridWeightGen, regrid_cam_se
+from .regridder import esmf_regrid_weight_gen, regrid_cam_se
 from .statistics import calc_significance
 from .tools import (
+    BoundingBox,
     FileLock,
     LogExc,
     LogMsg,
@@ -33,7 +36,7 @@ from .tools import (
     cp,
     cwd,
     du,
-    f_type,
+    file_kind,
     get_func_signature,
     home,
     host,
@@ -50,49 +53,54 @@ from .tools import (
 from .xgeo import (
     Daskit,
     GeoDataArray,
-    chunk_by_timezones,
-    chunk_longitudes,
-    get_local_solar_time,
-    get_UTC_offset,
-    land_sea_mask,
+    GeoDataset,
+    apply_func_by_time_zone,
+    chunk_by_lon,
+    chunk_by_tz,
+    lst,
+    mask,
     open_grib_datatree,
-    tz_apply_func,
+    utc_offset,
 )
 
-Daskit = Daskit
-GeoDataArray = GeoDataArray
-FileLock = FileLock
-MultiProcManager = MultiProcManager
-RedirectStreams = RedirectStreams
+# Daskit = Daskit
+# BoundingBox = BoundingBox
+# GeoDataArray = GeoDataArray
+# GeoDataset = GeoDataset
+# FileLock = FileLock
+# MultiProcManager = MultiProcManager
+# RedirectStreams = RedirectStreams
 
 
 __all__ = [
-    "calc_significance",
+    "BoundingBox",
     "Daskit",
-    "ESMF_RegridWeightGen",
+    "esmf_regrid_weight_gen",
     "FileLock",
     "GeoDataArray",
+    "GeoDataset",
     "IPCCTheme",
+    "LogExc",
+    "LogMsg",
     "MultiProcManager",
     "RedirectStreams",
+    "apply_func_by_time_zone",
+    "calc_significance",
     "cdo",
-    "chunk_by_timezones",
-    "chunk_longitudes",
+    "chunk_by_tz",
+    "chunk_by_lon",
     "cm",
     "cmaps",
     "cp",
     "cwd",
     "du",
-    "f_type",
-    "get_UTC_offset",
+    "file_kind",
     "get_cbar_axes",
     "get_func_signature",
-    "get_local_solar_time",
     "home",
     "host",
-    "land_sea_mask",
-    "LogMsg",
-    "LogExc",
+    "lst",
+    "mask",
     "mkdir",
     "mv",
     "n_cpus",
@@ -105,6 +113,6 @@ __all__ = [
     "timeit",
     "tmp",
     "to_numeric",
-    "tz_apply_func",
     "user",
+    "utc_offset",
 ]

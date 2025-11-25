@@ -13,10 +13,10 @@ except ImportError:
     warnings.warn("xesmf is not installed. regridder functionalities will not work.")
 
 
-from .tools import cwd, n_cpus, tmp_files
+from .tools import _tmp_files, cwd, n_cpus
 
 
-def ESMF_RegridWeightGen(
+def esmf_regrid_weight_gen(
     **kwargs,
 ):
     """
@@ -207,7 +207,7 @@ def ESMF_RegridWeightGen(
 
     if "--weight" not in subprocess_args or "-w" not in subprocess_args:
         weight_file = (cwd() / "weights" / f"{uuid.uuid4().hex}.nc").resolve()
-        tmp_files.append(weight_file)
+        _tmp_files.append(weight_file)
         weight_file.parent.mkdir(parents=True, exist_ok=True)
 
         w = ["--weight", f"{weight_file}"]

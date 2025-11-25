@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import atexit
 import functools
 import getpass
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections import namedtuple
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,20 +29,68 @@ user = getpass.getuser()
 home = Path.home()
 tmp = Path(os.environ.get("TMPDIR", "/tmp"))
 n_cpus = len(os.sched_getaffinity(0))
-tmp_files = []
+_tmp_files = []
 
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
 current_dask_client = None
 
 
-class ConfigMap(dict):
+class RicedDict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
 
-def cwd():
+class BoundingBox:
+    def __init__(
+        self,
+        lon_bounds: tuple[float, float],
+        lat_bounds: tuple[float, float],
+        height_bounds: tuple[float, float] = (None, None),
+    ) -> BoundingBox:
+        """
+        Initialize a BoundingBox with user-defined longitude and latitude bounds.
+
+        Parameters
+        ----------
+        lon_bounds : tuple[float, float]
+            Two longitude values defining the interval in the order provided.
+            The class does not reorder or normalize these values.
+        lat_bounds : tuple[float, float]
+            Two latitude values defining the interval in the order provided.
+            The class does not reorder or normalize these values.
+        height_bounds : tuple[float, float], optional
+            Two vertical coordinate values defining the interval in the order provided.
+            The class does not reorder or normalize these values.
+
+        Notes
+        -----
+        The input values are stored directly as given. No checks are performed
+        to determine whether the interval wraps across the dateline or whether
+        the first value is less than the second.
+        """
+        if len(lon_bounds) != 2 or len(lat_bounds) != 2:
+            raise ValueError("Bounds must be tuples of length 2.")
+
+        Bounds = namedtuple("Bounds", ["min", "max"])
+        Point = namedtuple("Point", ["lat", "lon", "height"])
+
+        self.lat = Bounds(min=lat_bounds[0], max=lat_bounds[1])
+        self.lon = Bounds(min=lon_bounds[0], max=lon_bounds[1])
+        self.height = Bounds(min=height_bounds[0], max=height_bounds[1])
+
+        _lat_c = (lat_bounds[0] + lat_bounds[1]) / 2
+        _lon_c = (lon_bounds[0] + lon_bounds[1]) / 2
+        _height_c = (height_bounds[0] + height_bounds[1]) / 2
+
+        self.center = Point(lat=_lat_c, lon=_lon_c, height=_height_c)
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+
+def cwd() -> Path:
     """
     Get the current working directory.
     """
@@ -47,7 +98,7 @@ def cwd():
 
 
 def cleanup():
-    rm(tmp_files)
+    rm(_tmp_files)
 
 
 atexit.register(cleanup)
@@ -66,11 +117,14 @@ def which(cmd: str) -> bool | None:
         return None
 
 
-def to_numeric(x, use_numpy: bool = False):
+def to_numeric(x: Any, use_numpy: bool = False) -> Any:
     """
     Cast input x to int or float (optionally using numpy types).
     Returns the original input if casting fails.
     """
+    if not isinstance(x, str):
+        return x
+
     if x is None or str(x).strip() == "":
         return np.nan if use_numpy else None
 
@@ -101,7 +155,7 @@ def timeit(func):
     """
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs) -> Any:
         start = time.perf_counter()
 
         result = func(*args, **kwargs)
@@ -168,9 +222,11 @@ def du(path: Path, units: Literal["B", "kB", "MB", "GB", "TB"] = "B") -> int | f
     return size / scale[units]
 
 
-def f_type(file_path: Path) -> str:
+def file_kind(
+    file_path: Path,
+) -> str:
     """
-    Get the file type using the `file` command in unix-like systems.
+    Tests each argument in an attempt to classify it. for more info, see `file` unix command.
     """
 
     if isinstance(file_path, Path):

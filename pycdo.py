@@ -9,7 +9,7 @@ from typing import Any, Literal
 import pandas as pd
 import xarray as xr
 
-from .tools import cwd, n_cpus, rm, tmp, tmp_files, to_numeric, which
+from .tools import _tmp_files, cwd, n_cpus, rm, tmp, to_numeric, which
 
 
 class CDONotFoundError(RuntimeError):
@@ -180,7 +180,7 @@ class CDO:
         grdfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.grid"
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.nc"
-            tmp_files.extend([outfile, grdfile])
+            _tmp_files.extend([outfile, grdfile])
 
         da_name = None
 

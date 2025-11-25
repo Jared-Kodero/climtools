@@ -5,7 +5,7 @@ import tempfile
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Tuple
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -14,9 +14,16 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+from cartopy.mpl.geoaxes import GeoAxes
 from cartopy.util import add_cyclic_point
+from matplotlib.artist import Artist
+from matplotlib.axes import Axes
+from matplotlib.collections import QuadMesh
+from matplotlib.contour import QuadContourSet
+from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
 
-from .tools import ConfigMap, get_func_signature, n_cpus
+from .tools import RicedDict, get_func_signature, n_cpus
 
 
 def get_cbar_axes(
@@ -264,7 +271,7 @@ def cartplot(
     land: bool = True,
     edgecolor: str = "face",
     **kwargs,
-):
+) -> Tuple[Figure, Axes | GeoAxes, QuadMesh | QuadContourSet | AxesImage | Artist]:
     """
     Plot a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
     projection, style
@@ -646,7 +653,7 @@ def animate(
     - Intended for geospatial fields such as temperature, precipitation, or pressure.
     """
 
-    args = ConfigMap(locals())
+    args = RicedDict(locals())
 
     # pop the above from args
     outfile = args.pop("outfile")

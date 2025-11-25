@@ -7,22 +7,30 @@ import uuid
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Union
+from typing import Callable, Literal, Mapping, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 import xarray as xr
+from cartopy.mpl.geoaxes import GeoAxes
 from cfgrib.dataset import DatasetBuildError
+from matplotlib.artist import Artist
+from matplotlib.axes import Axes
+from matplotlib.collections import QuadMesh
+from matplotlib.contour import QuadContourSet
+from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
 
 from .statistics import *
+from .tools import n_cpus
 
 warnings.filterwarnings("ignore")
 
 
 from .plot import animate, cartplot, make_cyclic
 from .pycdo import cdo
-from .tools import n_cpus, tmp_files
+from .tools import _tmp_files, n_cpus
 
 script_dir = Path(__file__).resolve().parent
 
@@ -34,7 +42,7 @@ def open_grib_datatree(infile: Path) -> xr.DataTree:
     """
 
     tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
-    tmp_files.append(tmpdir)
+    _tmp_files.append(tmpdir)
     files = cdo.split(infile, operator="splitname", outdir=tmpdir)
 
     combined_datasets = {}
@@ -117,10 +125,10 @@ class GeoDataArray(xr.DataArray):
         Calculate the local solar time for the DataArray based on the longitude coordinate.
         The local solar time is calculated as the UTC time plus the longitude offset.
         """
-        lsted = get_local_solar_time(self, longitude=longitude)
+        lsted = lst(self, longitude=longitude)
         return GeoDataArray(lsted)
 
-    def land_sea_mask(
+    def mask(
         self,
         *,
         keep: Literal["land", "ocean"] = None,
@@ -129,7 +137,7 @@ class GeoDataArray(xr.DataArray):
         """
         Apply a land-sea mask to the DataArray.
         """
-        masked = land_sea_mask(
+        masked = mask(
             self,
             keep=keep,
             mask_file=mask_file,
@@ -179,7 +187,7 @@ class GeoDataArray(xr.DataArray):
         land: bool = True,
         edgecolor: str = "face",
         **kwargs,
-    ):
+    ) -> Tuple[Figure, Axes | GeoAxes, QuadMesh | QuadContourSet | AxesImage | Artist]:
         """
         Plot this DataArray on a Cartopy map using the global `cartplot()` function.
         """
@@ -337,7 +345,7 @@ class GeoDataArray(xr.DataArray):
             dask_scheduler=dask_scheduler,
         )
 
-    def trendfit(self, along: str, data_var: str = None, scale: float = 1):
+    def polyfit(self, along: str, data_var: str = None, scale: float = 1):
         """
         Calculate the linear trend for the given xarray Dataset or DataArray using xr.polyfit.
 
@@ -426,7 +434,14 @@ class GeoDataArray(xr.DataArray):
         )
 
 
-# Alias for convenience
+class GeoDataset(xr.Dataset):
+    __slots__ = ()
+
+    def __getitem__(self, key):
+        obj = super().__getitem__(key)
+        if isinstance(obj, xr.DataArray):
+            return GeoDataArray(obj)
+        return obj
 
 
 class Daskit:
@@ -514,7 +529,7 @@ class Daskit:
         self.close()
 
 
-def land_sea_mask(
+def mask(
     obj: xr.DataArray | xr.Dataset,
     *,
     keep: Literal["land", "ocean"] = None,
@@ -558,7 +573,7 @@ def land_sea_mask(
     return new_obj
 
 
-def get_local_solar_time(
+def lst(
     data: xr.Dataset | xr.DataArray, *, longitude="lon"
 ) -> xr.Dataset | xr.DataArray:
     """
@@ -579,7 +594,7 @@ def get_local_solar_time(
     return data.assign_coords({"lst": lst})
 
 
-def get_UTC_offset(
+def utc_offset(
     obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
     *,
     name: Literal["lon", "longitude", "x"] = "lon",
@@ -604,7 +619,7 @@ def get_UTC_offset(
     return offset
 
 
-def chunk_longitudes(
+def chunk_by_lon(
     obj: Union[xr.DataArray, xr.Dataset],
     *,
     lon: str = "lon",
@@ -663,7 +678,7 @@ def chunk_longitudes(
     return chunks
 
 
-def chunk_by_timezones(
+def chunk_by_tz(
     obj: xr.DataArray | xr.Dataset,
 ) -> dict[str, xr.DataArray | xr.Dataset]:
     """
@@ -685,9 +700,9 @@ def chunk_by_timezones(
 
     data = obj.copy()
     tz_chunks = {}
-    chunks = chunk_longitudes(data)
+    chunks = chunk_by_lon(data)
     for chunk in chunks:
-        offset = get_UTC_offset(chunk)
+        offset = utc_offset(chunk)
         data = chunks[chunk]
         data["time"] = data["time"] + offset
         timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
@@ -697,7 +712,7 @@ def chunk_by_timezones(
 
 
 def _process_chunk(func, kwargs, data, chunk):
-    offset = get_UTC_offset(chunk)
+    offset = utc_offset(chunk)
     data["time"] = data["time"] + offset
     res = func(data, **kwargs)
     print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
@@ -705,7 +720,7 @@ def _process_chunk(func, kwargs, data, chunk):
     return res
 
 
-def _tz_apply_func_parallel(
+def _tz_apply_parallel(
     func: Callable,
     chunks: dict[str, xr.DataArray | xr.Dataset],
     kwargs: Mapping | None,
@@ -735,7 +750,7 @@ def _tz_apply_func_parallel(
     return xr.concat(datasets, **kwargs).sortby("lon")
 
 
-def _tz_apply_func_serial(
+def _tz_apply_serial(
     func,
     chunks,
     kwargs,
@@ -752,7 +767,7 @@ def _tz_apply_func_serial(
     return result
 
 
-def tz_apply_func(
+def apply_func_by_time_zone(
     func: Callable,
     obj: xr.DataArray | xr.Dataset,
     multiprocess: bool = True,
@@ -778,6 +793,11 @@ def tz_apply_func(
 
     """
 
+    if "longitude" in obj.dims:
+        obj = obj.rename({"longitude": "lon"})
+    elif "latitude" in obj.dims:
+        obj = obj.rename({"latitude": "lat"})
+
     if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
         raise ValueError(
             "The dataset must have (time, lat, lon) dimensions to apply the function."
@@ -786,9 +806,9 @@ def tz_apply_func(
     if kwargs is None:
         kwargs = {}
 
-    chunks = chunk_longitudes(obj)
+    chunks = chunk_by_lon(obj)
 
     if multiprocess and len(chunks) > 1:
-        return _tz_apply_func_parallel(func, chunks, kwargs)
+        return _tz_apply_parallel(func, chunks, kwargs)
     else:
-        return _tz_apply_func_serial(func, chunks, kwargs)
+        return _tz_apply_serial(func, chunks, kwargs)
