@@ -256,7 +256,7 @@ class GeoDataArray(xr.DataArray):
         cmap: str | mcolors.Colormap = None,
         vmin: float = None,
         vmax: float = None,
-        levels: int | list = None,
+        levels: int | list[int] = None,
         extend: str = None,
         robust: bool = False,
         orientation: Literal["vertical", "horizontal"] = "vertical",
