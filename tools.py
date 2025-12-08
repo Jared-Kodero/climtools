@@ -48,6 +48,7 @@ class BoundingBox:
         lon_bounds: tuple[float, float],
         lat_bounds: tuple[float, float],
         height_bounds: tuple[float, float] = (None, None),
+        wrap_lon: bool = False,
     ) -> BoundingBox:
         """
         Initialize a BoundingBox with user-defined longitude and latitude bounds.
@@ -55,36 +56,45 @@ class BoundingBox:
         Parameters
         ----------
         lon_bounds : tuple[float, float]
-            Two longitude values defining the interval in the order provided.
-            The class does not reorder or normalize these values.
+            Upper and lower longitude values
         lat_bounds : tuple[float, float]
-            Two latitude values defining the interval in the order provided.
-            The class does not reorder or normalize these values.
+            Upper and lower latitude values
         height_bounds : tuple[float, float], optional
-            Two vertical coordinate values defining the interval in the order provided.
-            The class does not reorder or normalize these values.
+            Upper and lower height values. Default is (None, None).
 
-        Notes
-        -----
-        The input values are stored directly as given. No checks are performed
-        to determine whether the interval wraps across the dateline or whether
-        the first value is less than the second.
+        wrap_lon : bool, optional
+            If True, the longitude bounds are used as provided, else they are sorted
+            to ensure min < max. Default is False.
         """
         if len(lon_bounds) != 2 or len(lat_bounds) != 2:
             raise ValueError("Bounds must be tuples of length 2.")
 
-        Bounds = namedtuple("Bounds", ["min", "max"])
-        Point = namedtuple("Point", ["lat", "lon", "height"])
+        LatBounds = namedtuple("LatBounds", ["min", "max"])
+        LonBounds = namedtuple("LonBounds", ["min", "max"])
+        HeightBounds = namedtuple("HeightBounds", ["min", "max"])
+        CenterPoint = namedtuple("CenterPoint", ["lat", "lon", "height"])
 
-        self.lat = Bounds(min=lat_bounds[0], max=lat_bounds[1])
-        self.lon = Bounds(min=lon_bounds[0], max=lon_bounds[1])
-        self.height = Bounds(min=height_bounds[0], max=height_bounds[1])
+        if wrap_lon:
+            self.lon = LonBounds(min=lon_bounds[0], max=lon_bounds[1])
+        else:
+            self.lon = LonBounds(min=min(lon_bounds), max=max(lon_bounds))
+
+        self.lat = LatBounds(min=min(lat_bounds), max=max(lat_bounds))
+
+        if height_bounds == (None, None):
+            self.height = HeightBounds(min=None, max=None)
+        else:
+            self.height = HeightBounds(min=min(height_bounds), max=max(height_bounds))
 
         _lat_c = (lat_bounds[0] + lat_bounds[1]) / 2
         _lon_c = (lon_bounds[0] + lon_bounds[1]) / 2
-        _height_c = (height_bounds[0] + height_bounds[1]) / 2
 
-        self.center = Point(lat=_lat_c, lon=_lon_c, height=_height_c)
+        if height_bounds == (None, None):
+            _height_c = None
+        else:
+            _height_c = (height_bounds[0] + height_bounds[1]) / 2
+
+        self.center = CenterPoint(lat=_lat_c, lon=_lon_c, height=_height_c)
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
@@ -205,7 +215,6 @@ def du(path: Path, units: Literal["B", "kB", "MB", "GB", "TB"] = "B") -> int | f
 
     path = Path(path).resolve()
     if not path.exists():
-
         raise FileNotFoundError(f"Path does not exist: {path}")
     if path.is_file():
         size = path.stat().st_size
@@ -407,7 +416,6 @@ class MultiProcManager:
     """
 
     def __init__(self, pid: int = None, ppid: int = None, cpu_limit: float = 0.8):
-
         self.pid = pid or os.getpid()
         self.ppid = ppid
         self.rlimit = resource.getrlimit(resource.RLIMIT_NPROC)
@@ -812,9 +820,6 @@ class LogExc:
     ----------
     *values : Any or None
         Objects to log.
-
-    file : Path or Path, optional
-        File path or file-like object to write the log messages to. If None, logs to standard output.
     -------
     None
     """
@@ -839,9 +844,6 @@ class LogMsg:
     ----------
     *values : Any or None
         Objects to log.
-
-    file : Path or Path, optional
-        File path or file-like object to write the log messages to. If None, logs to standard output.
     -------
     None
     """
@@ -850,8 +852,8 @@ class LogMsg:
         self.RED = "\033[31m"
         self.BOLD = "\033[1m"
         self.RESET = "\033[0m"
-        self.jupyter = "ipykernel" in sys.modules
-        self.isatty = sys.stdout.isatty() or self.jupyter
+        self.ipykernel = "ipykernel" in sys.modules
+        self.isatty = sys.stdout.isatty() or self.ipykernel
         self.values = values if len(values) > 0 else None
         self.fd = sys.stdout.fileno()
         self.exc_info = sys.exc_info()
@@ -880,7 +882,6 @@ class LogMsg:
         return None
 
     def lprint(self, obj: Any, pretty: bool = True) -> None:
-
         if isinstance(obj, pd.DataFrame):
             obj = tabulate(obj, headers="keys", tablefmt="psql", showindex=False)
             print("\n")
@@ -888,10 +889,12 @@ class LogMsg:
             print("\n")
             return None
 
-        if pretty:
-            pprint.pprint(obj, sort_dicts=False, compact=True)
-        elif self.jupyter:
+        if self.ipykernel:
             print(obj)
+
+        elif pretty:
+            pprint.pprint(obj, sort_dicts=False, compact=True)
+
         else:
             _ = os.write(self.fd, f"{obj}\n".encode("utf-8"))
         return None
@@ -918,8 +921,7 @@ class LogMsg:
                 pointer = f"{self.RED}{pointer}{self.RESET}"
 
             frame_msg = (
-                f"{lineno} | {frame_line}\n{pointer}\n\t"
-                f"  {frame.name} :  {file_path}\n"
+                f"{lineno} | {frame_line}\n{pointer}\n\t  {frame.name} :  {file_path}\n"
             )
             new_ft.append(frame_msg)
 

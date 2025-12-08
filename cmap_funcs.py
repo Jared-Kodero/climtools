@@ -21,7 +21,7 @@ plt_cmap_list = plt.colormaps()
 cmocean_cmap_list = list(cmocean.cm.cmapnames)
 
 
-def build_cm(name):
+def build_cm(name: str) -> LinearSegmentedColormap | ListedColormap:
     names = [name, name.lower(), name.capitalize(), name.upper()]
     for c in names:
         ipcc_file = _src_dir / f"{c}.txt"
@@ -34,7 +34,9 @@ def build_cm(name):
     raise KeyError(f"Colormap '{name}' is not valid.")
 
 
-def get_colormap(name, N, reverse, split, add_colors, discrete, as_colors):
+def get_colormap(
+    name, N, reverse, split, add_colors, discrete, as_colors
+) -> ListedColormap | LinearSegmentedColormap | list[str]:
     return adjust_cmap(
         cmap=build_cm(name),
         N=N,
@@ -47,12 +49,11 @@ def get_colormap(name, N, reverse, split, add_colors, discrete, as_colors):
 
 
 def add_cmap_colors(
-    obj,
-    cmap,
-    N=256,
-    idx=256,
-    reverse: bool = True,
-):
+    obj: str | list[str],
+    cmap: ListedColormap | LinearSegmentedColormap,
+    N: int = 256,
+    idx: int = 256,
+) -> ListedColormap | LinearSegmentedColormap:
     """
     Add custom colors into an existing matplotlib colormap or combine multiple colormaps.
 
@@ -60,20 +61,16 @@ def add_cmap_colors(
     ----------
     obj : str | list[str]
         Hex color(s) or CSS4 color name(s) to insert.
-    cmap : Colormap
+    cmap : ListedColormap | LinearSegmentedColormap
         Existing matplotlib colormap.
     N : int, default=256
         Number of colors to sample from the colormap.
     idx : int, default=256
         Index at which to insert the new colors.
-    reverse : bool, default=True
-        Whether to reverse the colormap before adding colors.
 
 
 
     """
-    if reverse:
-        cmap = cmap.reversed()
 
     # Clamp index within [0, N]
     idx = max(0, min(idx, N))
@@ -108,19 +105,18 @@ def add_cmap_colors(
     # Insert at position `where`
     new_colors = colors[:idx] + colors_to_add + colors[idx:]
     new_colors = np.array(new_colors)
-    N += len(colors_to_add)
     cmap = LinearSegmentedColormap.from_list(cmap.name, new_colors, N=N)
 
     return cmap
 
 
-def get_colors(cmap, N):
+def get_colors(cmap: ListedColormap | LinearSegmentedColormap, N: int) -> list[str]:
     colors = cmap(np.linspace(0, 1, N))
     return [to_hex(c) for c in colors]
 
 
 def adjust_cmap(
-    cmap=None,
+    cmap: str | ListedColormap | LinearSegmentedColormap,
     N: int = 25,
     *,
     split: tuple[float, float] = (0, 1),
@@ -128,14 +124,14 @@ def adjust_cmap(
     reverse: bool = False,
     discrete: bool = True,
     as_colors: bool = False,
-):
+) -> ListedColormap | LinearSegmentedColormap | list[str]:
     """
     Retrieve and modify a matplotlib colormap with optional slicing, color insertion,
     reversal, and discretization.
 
     Parameters
     ----------
-    cmap : str or matplotlib.colors.Colormap, optional
+    cmap : str | ListedColormap | LinearSegmentedColormap
         Name or colormap object to adjust.
 
     N : int, default=25
@@ -184,6 +180,9 @@ def adjust_cmap(
     if not isinstance(split, tuple) or len(split) != 2:
         raise ValueError("`split` must be a tuple of two floats (start, end).")
 
+    if reverse:
+        cmap = cmap.reversed()
+
     range_values = np.linspace(split[0], split[1], N)
     colors = [cmap(value) for value in range_values]
 
@@ -193,10 +192,9 @@ def adjust_cmap(
         res = LinearSegmentedColormap.from_list(cmap.name, colors, N=N)
 
     if add_colors:
-
         if not isinstance(add_colors, dict):
             raise TypeError(
-                f"`add_colors` must be a dictionary of dict[int, str | list[str]]."
+                "`add_colors` must be a dictionary of dict[int, str | list[str]]."
             )
 
         for k, v in add_colors.items():
@@ -214,20 +212,19 @@ def adjust_cmap(
                 idx=k,
                 cmap=res,
                 N=N,
-                reverse=False,
             )
-    if reverse:
-        res = res.reversed()
 
     if as_colors:
         return get_colors(res, N)
     return res
 
 
-def blend(colors: list[str], N: int = 25, *, discrete: bool = True):
-    valid = lambda c: isinstance(c, str) and (
-        c.startswith("#") or c in mcolors.CSS4_COLORS
-    )
+def blend(
+    colors: list[str], N: int = 25, *, discrete: bool = True
+) -> ListedColormap | LinearSegmentedColormap:
+    def valid(c):
+        return isinstance(c, str) and (c.startswith("#") or c in mcolors.CSS4_COLORS)
+
     if not all(map(valid, colors)):
         raise ValueError("All colors must be valid hex codes or CSS4 color names.")
 
@@ -264,7 +261,6 @@ def gen_cmap_file():
         return hash_str, data
 
     def _load_meta():
-
         if _meta_file.exists():
             try:
                 with open(_meta_file, "r") as f:
@@ -279,10 +275,9 @@ def gen_cmap_file():
             json.dump(data, f, indent=2)
 
     def _cmap_file_contents():
-
         imports = """
         from dataclasses import dataclass
-        from matplotlib.colors import Colormap
+        from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
         from .cmap_funcs import *
         \n
@@ -312,7 +307,9 @@ def gen_cmap_file():
                 add_colors: dict[int, str | list[str]] = None,
                 discrete: bool = True,
                 as_colors : bool =False
-            ) -> Colormap:
+            ) -> ListedColormap | LinearSegmentedColormap:
+                ''' Get the '{name}' colormap '''
+                
                 return get_colormap("{name}", N, reverse, split, add_colors, discrete,as_colors)
                 \n
             """
