@@ -1,30 +1,10 @@
-"""climtools — utilities for climate data analysis and plotting.
-
-This package provides a collection of small helper routines used while
-exploring and plotting climate datasets with xarray. The top-level package
-exposes plotting helpers, statistical/trend utilities, regridding helpers
-that wrap CDO/ESMF calls (when available), and a number of convenience
-file/system utilities.
-
-For a short list of the main exported names see :pydata:`__all__` below or
-inspect the package interactively with ``help(climtools)``.
-
-The package is intended for interactive analysis and reproducible notebooks.
-If you plan to use parts of the package programmatically, import the
-individual modules (for example ``from climtools import plot, trends``) or the
-specific functions you need.
-"""
-
 from __future__ import annotations
 
-from .cmap_funcs import gen_cmap_file
-
-gen_cmap_file()
+from .cmap_funcs import *
 from .cmaps_inventory import cm, cmaps
 from .plot import get_cbar_axes, plot_pvalues
 from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
-from .regridder import esmf_regrid_weight_gen, regrid_cam_se
 from .statistics import calc_significance
 from .tools import (
     BoundingBox,
@@ -71,11 +51,26 @@ from .xgeo import (
 # MultiProcManager = MultiProcManager
 # RedirectStreams = RedirectStreams
 
+"""climtools — utilities for climate data analysis and plotting.
+
+This package provides a collection of small helper routines used while
+exploring and plotting climate datasets with xarray. The top-level package
+exposes plotting helpers, statistical/trend utilities, regridding helpers
+that wrap CDO/ESMF calls (when available), and a number of convenience
+file/system utilities.
+
+For a short list of the main exported names see :pydata:`__all__` below or
+inspect the package interactively with ``help(climtools)``.
+
+The package is intended for interactive analysis and reproducible notebooks.
+If you plan to use parts of the package programmatically, import the
+individual modules (for example ``from climtools import plot, trends``) or the
+specific functions you need.
+"""
 
 __all__ = [
     "BoundingBox",
     "Daskit",
-    "esmf_regrid_weight_gen",
     "FileLock",
     "GeoDataArray",
     "GeoDataset",
@@ -106,7 +101,6 @@ __all__ = [
     "n_cpus",
     "open_grib_datatree",
     "plot_pvalues",
-    "regrid_cam_se",
     "rm",
     "symlink",
     "theme",

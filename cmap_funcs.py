@@ -338,3 +338,6 @@ def gen_cmap_file():
         _write_meta(meta_data, new_hash)
 
     _generate()
+
+
+gen_cmap_file()
