@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 
 from .plot import animate, cartplot, make_cyclic
 from .pycdo import cdo
-from .tools import _tmp_files, n_cpus
+from .tools import _tmp_files
 
 script_dir = Path(__file__).resolve().parent
 
@@ -80,7 +80,6 @@ def open_grib_datatree(infile: Path) -> xr.DataTree:
             lines = str(e).split("\n")[1:]
             for line in lines:
                 if "=" in line:
-
                     keys = ast.literal_eval(line.split("=", 1)[1])
                     key = list(keys.keys())[0]
                     value = keys[key]
@@ -367,10 +366,13 @@ class GeoDataArray(xr.DataArray):
 
     def period_difference(
         self,
-        period1: tuple[str | pd.Timestamp],
-        period2: tuple[str | pd.Timestamp],
+        period1: tuple[str | pd.Timestamp, str | pd.Timestamp],
+        period2: tuple[str | pd.Timestamp, str | pd.Timestamp],
+        *,
         along: str = "time",
-        level: float = 0.05,
+        stat: Literal["max", "min", "mean", "median", "quantile"] = "mean",
+        quantile: float = 0.95,
+        pct: bool = False,
     ) -> xr.Dataset:
         """
         Compute the difference between two time periods in a DataArray or Dataset.
@@ -383,8 +385,12 @@ class GeoDataArray(xr.DataArray):
             (start, end) timestamps for the second period.
         along : str, default "time"
             Name of the time dimension.
-        level : float, default 0.05
-            Significance level for the significance test.
+        stat : {"max", "min", "mean", "median", "quantile"}, default "mean"
+            Statistic to compute for each period.
+        quantile : float, default 0.95
+            Quantile to compute if stat is "quantile".
+        pct : bool, default False
+            If True, compute percentage change instead of absolute difference.
 
         Returns
         -------
@@ -396,7 +402,9 @@ class GeoDataArray(xr.DataArray):
             period1=period1,
             period2=period2,
             along=along,
-            level=level,
+            stat=stat,
+            quantile=quantile,
+            pct=pct,
         )
 
     def correlate(
@@ -458,7 +466,6 @@ class Daskit:
         filter_warnings: bool = True,
         memory_limit: int = 0,
     ):
-
         self.cluster = None
         self.client = None
         self.workers = workers
@@ -725,7 +732,6 @@ def _tz_apply_parallel(
     chunks: dict[str, xr.DataArray | xr.Dataset],
     kwargs: Mapping | None,
 ) -> xr.DataArray | xr.Dataset:
-
     args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
 
     processes = max(1, min(n_cpus, len(args)))

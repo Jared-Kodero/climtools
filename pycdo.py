@@ -54,7 +54,6 @@ class CDO:
         os.environ["CDO_HISTORY_INFO"] = "false"
 
     def _cdo(self, input_cmds: list[str]):
-
         cmd = ["cdo", "-s", "-w", "-P", str(int(n_cpus / 3))]
         cmd.extend(input_cmds)
 
@@ -132,7 +131,6 @@ class CDO:
         return txt
 
     def _bbox_from_griddes(self, infile) -> tuple[float, float, float, float]:
-
         data_dict = self.griddes(
             infile,
         )
@@ -150,13 +148,12 @@ class CDO:
         return lon_min, lat_min, lon_max, lat_max
 
     def _make_grid_description(self, lon_min, lat_min, lon_max, lat_max, resolution):
-
         # Compute sizes
         xsize = abs(int(round((lon_max - lon_min) / resolution)) + 1)
         ysize = abs(int(round((lat_max - lat_min) / resolution)) + 1)
 
         grid_description = []
-        grid_description.append(f"gridtype = lonlat")
+        grid_description.append("gridtype = lonlat")
         grid_description.append(f"xsize    = {xsize}")
         grid_description.append(f"ysize    = {ysize}")
         grid_description.append(f"xfirst   = {lon_min}")
@@ -176,7 +173,6 @@ class CDO:
         bbox: tuple[float, float, float, float] = None,
         as_xarray: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-
         grdfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.grid"
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.nc"
@@ -329,7 +325,12 @@ class CDO:
         bbox: tuple[float, float, float, float] = None,
         as_xarray: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remapdis method."""
+        """
+        Interpolate data using CDO's remapdis method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+
+        """
 
         return self._h_interp_data(
             obj=obj,
@@ -350,7 +351,11 @@ class CDO:
         as_xarray: bool = False,
         extrapolate: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remapnn method."""
+        """
+        Interpolate data using CDO's remapnn method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+        """
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
@@ -372,7 +377,11 @@ class CDO:
         bbox: tuple[float, float, float, float] = None,
         as_xarray: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remapcon method."""
+        """
+        Interpolate data using CDO's remapcon method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+        """
 
         return self._h_interp_data(
             obj=obj,
@@ -393,7 +402,11 @@ class CDO:
         as_xarray: bool = False,
         extrapolate: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remapbil method."""
+        """
+        Interpolate data using CDO's remapbil method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+        """
 
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
@@ -417,7 +430,11 @@ class CDO:
         as_xarray: bool = False,
         extrapolate: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remapbic method."""
+        """
+        Interpolate data using CDO's remapbic method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+        """
 
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
@@ -441,7 +458,11 @@ class CDO:
         as_xarray: bool = False,
         extrapolate: bool = False,
     ) -> xr.DataArray | xr.Dataset | str:
-        """Interpolate data using CDO's remaplaf method."""
+        """
+        Interpolate data using CDO's remaplaf method.
+
+        bbox_format: (lon_min, lat_min, lon_max, lat_max)
+        """
 
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
@@ -504,7 +525,6 @@ class CDO:
             return attrs_df
 
         for op in operators:
-
             cmd = [op, infile]
 
             res = self._cdo(cmd)
@@ -516,10 +536,10 @@ class CDO:
                 continue
 
             if op == "showlevel":
-                res = [",".join([str(to_numeric(i)) for i in l.split()]) for l in txt]
+                res = [",".join([str(to_numeric(i)) for i in ln.split()]) for ln in txt]
 
             else:
-                res = [to_numeric(i) for l in txt for i in l.split()]
+                res = [to_numeric(i) for ln in txt for i in ln.split()]
 
             results[op.removeprefix("show")] = res
 

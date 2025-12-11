@@ -8,7 +8,6 @@ import io
 import os
 import pprint
 import random
-import resource
 import shutil
 import socket
 import subprocess
@@ -21,7 +20,6 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-import psutil
 from tabulate import tabulate
 
 host = socket.gethostname()
@@ -346,215 +344,6 @@ def get_func_signature(func):
     }
 
 
-class MultiProcManager:
-    """
-    A lightweight, file-based process manager for throttling concurrent execution.
-
-    This class coordinates multiple concurrently running processes by creating
-    and removing small marker files in a shared directory (default: ".pids").
-    Each active process registers itself by creating a file named after its PID
-    and unregisters upon completion. Child processes are grouped under a subdirectory
-    named after a specified parent PID (if provided). The manager monitors this directory to
-    limit the number of simultaneously active processes based on CPU availability.
-
-    It is designed for lightweight parallel workflows such as batch experiments,
-    simulations, or Monte Carlo ensembles, where using a full multiprocessing
-    pool introduces unnecessary overhead. It integrates seamlessly with
-    ``subprocess.Popen``, ``subprocess.run``, or ``multiprocessing.Process``.
-
-    Parameters
-    ----------
-    pid : int, optional
-        Process ID of the current process. Defaults to ``os.getpid()``.
-    main_process_pid : int, optional
-        If provided, the process file will be created under a subdirectory
-        named after this main process PID. This is useful for grouping
-        child processes under a common parent.
-
-    cpu_limit : float, optional
-        Fraction of total CPUs allowed to be active simultaneously (default 0.8).
-
-
-    Methods
-    -------
-    register():
-        Registers the current process by throttling (if necessary) and creating a marker file.
-    unregister():
-        Unregisters the process by deleting its marker file and cleaning up stale entries.
-    throttle():
-        Blocks until the fraction of active processes falls below ``cpu_limit``.
-    wait():
-        Blocks until all process marker files are cleared (i.e., all processes complete).
-    sleep(low=0.1, high=5):
-        Sleeps for a random interval between ``low`` and ``high`` seconds.
-
-    Examples
-    --------
-    Basic parallel execution with automatic registration:
-
-    >>> import multiprocessing, random, time, os
-    >>> from pathlib import Path
-    >>>
-    >>> def worker(i):
-    ...     with MultiProcManager():
-    ...         print(f"Process {i} started (PID {os.getpid()})")
-    ...         time.sleep(random.uniform(1, 5))
-    ...         print(f"Process {i} finished")
-    ...
-    >>> if __name__ == "__main__":
-    ...     procs = []
-    ...     for i in range(20):
-    ...         p = multiprocessing.Process(target=worker, args=(i,))
-    ...         p.start()
-    ...         procs.append(p)
-    ...
-    ...     for p in procs:
-    ...         p.join()
-    ...
-    ...     MultiProcManager().wait()
-    ...     print("All processes completed.")
-    """
-
-    def __init__(self, pid: int = None, ppid: int = None, cpu_limit: float = 0.8):
-        self.pid = pid or os.getpid()
-        self.ppid = ppid
-        self.rlimit = resource.getrlimit(resource.RLIMIT_NPROC)
-        self.soft_limit = self.rlimit[0]
-        self.hard_limit = self.rlimit[1]
-        self._sysrand = random.SystemRandom()
-        self.n_cpus = n_cpus
-        self.cpu_limit = cpu_limit
-        self.root = Path.cwd() / ".pids"
-        self.storage = self.root
-        if self.ppid:
-            self.storage = self.storage / str(self.ppid)
-            if self.storage.is_file():
-                self.storage.unlink(missing_ok=True)
-        self.storage.mkdir(exist_ok=True)
-
-        self.proc_file = self.storage / str(self.pid)
-
-        # cleanup stale process files
-        self.cleanup()
-
-    def cleanup(self):
-        for p in self.storage.rglob("*"):
-            try:
-                pid = int(p.name)
-                # os.kill(pid, 0) raises ProcessLookupError if PID doesn’t exist
-                os.kill(pid, 0)
-            except (ValueError, ProcessLookupError):
-                if p.is_file():
-                    p.unlink(missing_ok=True)
-                rm(p)
-            except PermissionError:
-                continue
-
-    def sleep(self, low=0.1, high=10):
-        delay = self._sysrand.uniform(low, high)
-        time.sleep(delay)
-
-    def ulimit_u(self):
-        """
-        Monitor the number of processes owned by the current user and block
-        if it approaches the system-imposed soft limit.
-
-        Note: This method requires the `psutil` library to be installed.
-        """
-
-        threshold = int(0.95 * self.soft_limit)  # e.g., start waiting at ~95% usage
-
-        while True:
-            # Count processes owned by the current user
-            proc_count = sum(
-                1
-                for p in psutil.process_iter(["username"])
-                if p.info["username"] == psutil.Process().username()
-            )
-
-            if proc_count >= threshold:
-                self.sleep()
-
-            else:
-                break
-        return True
-
-    def current_usage(self, path: Path) -> float:
-        n_procs = len(list(path.glob("*")))
-        return n_procs / self.n_cpus
-
-    def check_concurrency(self, path: Path) -> bool:
-        return self.current_usage(path) < 0.95
-
-    def throttle(self):
-        """Block until CPU utilization (estimated by active processes) falls below 80%."""
-
-        self.ulimit_u()  # ensure we are within system process limits
-        path = self.storage.parent if self.ppid else self.storage
-
-        if self.check_concurrency(path):
-            return
-
-        while True:
-            n_procs = len(list(path.glob("*")))
-            usage = n_procs / self.n_cpus
-
-            if usage <= self.cpu_limit:
-                break
-
-            # Sleep briefly before checking again
-            self.sleep()
-
-    # a another method to make sure all processes are done
-    def wait(self):
-        """
-        Block until all tracked processes finish.
-
-        If `parent_pid` is set, waits only for its child processes;
-        otherwise, waits for all processes under the storage path.
-        """
-
-        # check until there are no files in the proc dir
-        while True:
-            if self.proc_file.is_dir():
-                procs = self.proc_file.glob("*")
-            else:
-                procs = self.root.rglob("*")
-
-            n_procs = len(list(procs))
-            if n_procs == 0:
-                break
-            self.sleep(1, 60)  # Wait for a random time before checking again
-
-    def block(self):
-        """
-        Block until all tracked processes finish.
-        """
-        # check until there are no files in the proc dir
-        while True:
-            n_procs = len(list(self.root.rglob("*")))
-            if n_procs == 0:
-                break
-            self.sleep(1, 120)  # Wait for a random time before checking again
-
-    def register(self):
-        """Register the process by creating a process file."""
-        self.throttle()
-        self.proc_file.touch()
-
-    def unregister(self):
-        """Unregister the process if alive"""
-        self.proc_file.unlink(missing_ok=True)
-        self.cleanup()
-
-    def __enter__(self):
-        self.register()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.unregister()
-
-
 class RedirectStreams:
     """
     A lightweight context manager to temporarily redirect `sys.stdout` and `sys.stderr`.
@@ -809,30 +598,6 @@ class FileLock:
         self.release()
 
 
-class LogExc:
-    """
-    Log traceback and exception details.
-
-    This class provides automatic direct to error exception handling without long tracebacks. It supports traceback formatting, exception information, and flexible output redirection to
-    file paths or file-like objects.
-
-    Parameters
-    ----------
-    *values : Any or None
-        Objects to log.
-    -------
-    None
-    """
-
-    def __init__(self, *values: Any | None) -> None:
-        # Force evaluation of current exception info inside LogMsg
-        LogMsg(*values)
-        return None
-
-    def __repr__(self):
-        return ""
-
-
 class LogMsg:
     """
     Log one or more messages to standard output or a file, optionally including traceback and exception details.
@@ -848,7 +613,7 @@ class LogMsg:
     None
     """
 
-    def __init__(self, *values: Any | None) -> None:
+    def __init__(self, *values: Any | None, exc_info=(None, None, None)) -> None:
         self.RED = "\033[31m"
         self.BOLD = "\033[1m"
         self.RESET = "\033[0m"
@@ -856,7 +621,7 @@ class LogMsg:
         self.isatty = sys.stdout.isatty() or self.ipykernel
         self.values = values if len(values) > 0 else None
         self.fd = sys.stdout.fileno()
-        self.exc_info = sys.exc_info()
+        self.exc_info = exc_info
         self.exc_type = self.exc_info[0]
         self.exc_value = self.exc_info[1]
         self.exc_tb = self.exc_info[2]
@@ -936,3 +701,67 @@ class LogMsg:
 
     def __repr__(self):
         return ""
+
+
+def logmsg(*values: Any | None) -> LogMsg:
+    """
+    Log one or more messages to standard output or a file, optionally including traceback and exception details.
+
+    This function provides structured logging  and automatic direct to error exception handling without long tracebacks. It supports traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+    -------
+    LogMsg
+        An instance of the LogMsg class.
+    """
+    if len(values) == 0:
+        return None
+    return LogMsg(*values)
+
+
+def logexc(*values: Any | None) -> LogMsg:
+    """
+    Log traceback and exception details.
+
+    This function provides automatic direct to error exception handling without long tracebacks. It supports traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+    -------
+    logexc
+        An instance of the logexc class.
+    """
+    # if there is no exception, do nothing
+    exc_info = sys.exc_info()
+    exc_type = exc_info[0]
+    if exc_type is None:
+        return None
+    return LogMsg(*values, exc_info=exc_info)
+
+
+def logobj(*values: Any | None) -> LogMsg:
+    """
+    Log one or more non string objects to standard output or a file, optionally including traceback and exception details.
+
+    This function provides structured logging. It supports traceback formatting, exception information, and flexible output redirection to
+    file paths or file-like objects.
+
+    Parameters
+    ----------
+    *values : Any or None
+        Objects to log.
+    -------
+    logobj
+        An instance of the logobj class.
+    """
+    # if all values are strings, do nothing
+    if all(isinstance(v, str) for v in values):
+        return None
+    return LogMsg(*values)

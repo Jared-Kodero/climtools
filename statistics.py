@@ -19,7 +19,6 @@ def _mktrend_test(
     array: np.ndarray,
     scale: float = 1,
 ) -> np.ndarray:
-
     result_array = None
     nan_array = np.array([np.nan] * 7)
 
@@ -28,7 +27,6 @@ def _mktrend_test(
 
     try:
         if not df.empty or len(df) < 2:
-
             result = mk.hamed_rao_modification_test(df["array"])
             mean_val = df["array"].mean()
             std_val = df["array"].std()
@@ -59,7 +57,6 @@ def _corr_test(
     corr_type: str,
     alternative: str = "two-sided",
 ) -> np.ndarray:
-
     nan_list = [np.nan] * 2
 
     nan_data = np.array(nan_list)
@@ -276,7 +273,9 @@ def period_difference(
     period2: tuple[str | pd.Timestamp] = None,
     *,
     along: str = "time",
-    level: float = 0.05,
+    stat: Literal["max", "min", "mean", "median", "quantile"] = "mean",
+    quantile: float = 0.95,
+    pct: bool = False,
 ) -> xr.Dataset:
     """
     Compute the difference between two time periods in a DataArray or Dataset.
@@ -289,10 +288,12 @@ def period_difference(
         (start, end) timestamps for the first period.
     period2 : tuple of str
         (start, end) timestamps for the second period.
+    stat : {"max", "min", "mean", "median"}, default "mean"
+        Statistic to compute for each period.
+    quantile : float, default 0.95
+        Quantile to compute if stat is "quantile".
     along : str, default "time"
         Name of the time dimension.
-    level : float, default 0.05
-        Significance level for the significance test.
 
     Returns
     -------
@@ -303,20 +304,40 @@ def period_difference(
     p1 = da.sel({along: slice(period1[0], period1[1])})
     p2 = da.sel({along: slice(period2[0], period2[1])})
 
-    sig = calc_significance(p1, p2, along=along, data_var=None, level=level)
+    sig = calc_significance(p1, p2, along=along, data_var=None)
     p_values = sig["p_values"]
 
-    p1 = p1.mean(dim="time").squeeze(drop=True)
-    p2 = p2.mean(dim="time").squeeze(drop=True)
+    # only keep where data is not nan in both periods
 
-    change = p2 - p1
+    stat_funcs = {
+        "max": lambda x: x.max(dim="time").squeeze(drop=True),
+        "min": lambda x: x.min(dim="time").squeeze(drop=True),
+        "median": lambda x: x.median(dim="time").squeeze(drop=True),
+        "mean": lambda x: x.mean(dim="time").squeeze(drop=True),
+        "quantile": lambda x: x.quantile(quantile, dim="time").squeeze(drop=True),
+    }
 
+    if stat not in stat_funcs:
+        raise ValueError(f"Unknown stat: {stat}")
+
+    func = stat_funcs[stat]
+    p1 = func(p1)
+    p2 = func(p2)
+
+    if pct:
+        change = (p2 - p1) / p1 * 100
+        desc = "percentage change"
+    else:
+        change = p2 - p1
+        desc = "difference"
+
+    p_values = p_values.where(~np.isnan(change), other=np.nan)
     ds = xr.Dataset()
-    ds["pvalues"] = p_values
+    ds["p_values"] = p_values
     ds[name] = change
     ds[name].attrs = {
-        "long_name": f"Mean difference between {period2[0]}-{period2[1]} and {period1[0]}-{period1[1]}",
-        "description": f"Difference calculated as mean({period2[0]}-{period2[1]}) - mean({period1[0]}-{period1[1]})",
+        "long_name": f"{desc}",
+        "description": f"{desc} mean ({period2[0]}-{period2[1]}) - mean ({period1[0]}-{period1[1]})",
     }
 
     return ds
@@ -328,7 +349,6 @@ def calc_significance(
     along: str = "time",
     *,
     data_var: str = None,
-    level: float = 0.05,
 ) -> xr.Dataset:
     """
     Calculate the significance of the difference between two datasets.
@@ -381,17 +401,14 @@ def calc_significance(
     a = a.mean(dim=along).squeeze(drop=True)
     b = b.mean(dim=along).squeeze(drop=True)
 
-    p_values = xr.DataArray(
-        data=np.where(p_values < level, 1, np.nan), coords=a.coords, dims=b.dims
-    )
-
+    p_values = xr.DataArray(data=p_values, coords=a.coords, dims=b.dims)
     t_stats = xr.DataArray(data=t_stat, coords=a.coords, dims=b.dims)
 
     res["p_values"] = p_values
 
     res["p_values"].attrs = {
         "long_name": "p_value",
-        "description": f"Indicates if the difference is significant at the {level} level (1 = significant)",
+        "description": "p-value of the significance test",
     }
 
     res["t_stats"] = t_stats

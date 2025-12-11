@@ -74,7 +74,6 @@ def get_cbar_axes(
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len):
         if orientation == "vertical":
-
             bottommost = y0
             height = y_len
             rightmost = pad * height + x1
@@ -84,7 +83,6 @@ def get_cbar_axes(
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         elif orientation == "horizontal":
-
             rightmost = x0
             width = x_len
             bottommost = y0 - (0.12 * width)
@@ -102,7 +100,6 @@ def get_cbar_axes(
         cax = _create_cax(pos.y0, pos.x0, pos.y1, pos.x1, fig_x_len, fig_y_len)
 
     elif subplots:
-
         nrows, ncols = 1, 1
 
         if isinstance(axes, plt.Axes):
@@ -170,10 +167,11 @@ def plot_pvalues(
     ax: plt.Axes = None,
     level: float = 0.05,
     color: str = "grey",
-    alpha: float = 1,
+    alpha: float = 0.3,
     marker: str = None,
     edgecolors: str = None,
-    s: float = 1,
+    step_size: int = 1,
+    s: float = 0.25,
 ):
     """
     Plot p-values on a Cartopy axis.
@@ -190,6 +188,12 @@ def plot_pvalues(
         Color of the points to plot. Default is "grey".
     alpha : float, optional
         Alpha transparency of the points. Default is 0.05.
+    step_size : int, optional
+        Step size for plotting points to reduce overplotting. Default is 1 (plot all points).
+    marker : str, optional
+        Marker style for the points. Default is None (default marker).
+    edgecolors : str, optional
+        Edge color for the points. Default is None.
     s : float, optional
         Size of the points to plot. Default is 1.
     """
@@ -205,12 +209,14 @@ def plot_pvalues(
     if "lon" not in data.dims or "lat" not in data.dims:
         raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
 
+    data = data.isel(lat=slice(None, None, step_size), lon=slice(None, None, step_size))
+
     p_values = data.to_dataframe(name="p_values").reset_index()
     p_values = p_values.query("p_values < @level")
-
-    # replace where p_values < 1with NaN pandas
-
     p_values = p_values.dropna()
+
+    if edgecolors is None:
+        edgecolors = color
 
     ax.scatter(
         p_values["lon"],
@@ -388,7 +394,6 @@ def cartplot(
         ax.add_feature(cfeature.COASTLINE)
 
     if ocean and not land:
-
         ax.add_feature(
             cfeature.NaturalEarthFeature(
                 "physical",
@@ -408,7 +413,6 @@ def cartplot(
     # xarray methords
 
     def _data_plot(data: xr.DataArray, pt: str):
-
         p = data.plot
 
         pts = ["pcolormesh", "contourf", "contour", "imshow"]
@@ -420,7 +424,6 @@ def cartplot(
         if pt == "default":
             func = p
         elif pt in pts:
-
             func = getattr(p, pt)
             plot_args.update(get_func_signature(func))
 
@@ -471,7 +474,6 @@ def cartplot(
             cb.set_label(cbar_label)
 
         else:
-
             cbar_label = []
             if "long_name" in data.attrs:
                 cbar_label.append(data.attrs["long_name"])
@@ -483,7 +485,6 @@ def cartplot(
 
 
 def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
-
     t = f"{dim}: {t}"
 
     local_kwargs = args.copy()
