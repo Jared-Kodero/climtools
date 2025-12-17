@@ -3,27 +3,31 @@ import subprocess
 import sys
 import tempfile
 import warnings
+from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Tuple
+from typing import Any, Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-from cartopy.mpl.geoaxes import GeoAxes
 from cartopy.util import add_cyclic_point
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
-from matplotlib.collections import QuadMesh
-from matplotlib.contour import QuadContourSet
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
-from matplotlib.image import AxesImage
 
 from .tools import RicedDict, get_func_signature, n_cpus
+
+
+@dataclass(frozen=True)
+class PlotObj:
+    fig: Figure
+    ax: Axes
+    artist: Artist
 
 
 def get_cbar_axes(
@@ -229,8 +233,6 @@ def plot_pvalues(
         edgecolors=edgecolors,
     )
 
-    return ax
-
 
 def cartplot(
     data: xr.DataArray,
@@ -253,12 +255,14 @@ def cartplot(
     central_longitude: float = None,
     central_latitude: float = None,
     global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
     figsize: tuple[float, float] = None,
     # Plot appearance
-    plot_type: Literal[
+    method: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow"
     ] = "default",
-    cmap: str | mcolors.Colormap = None,
+    cmap: str | LinearSegmentedColormap | ListedColormap = None,
+    norm: Any = None,
     vmin: float = None,
     vmax: float = None,
     levels: int | list = None,
@@ -277,7 +281,7 @@ def cartplot(
     land: bool = True,
     edgecolor: str = "face",
     **kwargs,
-) -> Tuple[Figure, Axes | GeoAxes, QuadMesh | QuadContourSet | AxesImage | Artist]:
+) -> PlotObj:
     """
     Plot a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
     projection, style
@@ -303,21 +307,25 @@ def cartplot(
         Central latitude for the map projection.
     global_extent : bool, default False
         If True, sets extent to show the entire globe.
+    set_extent : BoundingBox, optional
+        Set the extent (x0, x1, y0, y1) of the map in the given coordinate system.
     figsize : tuple of float, optional
         Figure size in inches (width, height).
 
     Plot Style and Color Mapping
     ----------------------------
-    plot_type : str, default "default"
+    method : str, default "default"
         Plot method: "pcolormesh", "contourf", "contour", "imshow", or "default".
     cmap : str or Colormap, optional
         Colormap applied to data.
+    norm : Normalize, optional
+        Normalization function for the color scale.
     vmin, vmax : float, optional
         Color scale limits.
     levels : int or sequence, optional
         Contour levels for "contour" and "contourf".
     robust : bool, default False
-        If True, ignores outliers using 2nd–98th percentile range.
+        If True, ignores outliers using 2nd-98th percentile range.
     extend : str, optional
         If 'both', extends color limits to include both ends of the data range.
         If 'min', extends only the minimum limit.
@@ -352,13 +360,8 @@ def cartplot(
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-        Figure instance.
-    ax : cartopy.mpl.geoaxes.GeoAxesSubplot
-        Cartopy GeoAxes object.
-    p : matplotlib.artist.Artist
-        Resulting plot object.
-
+    PlotObj
+        A dataclass containing the figure, axes, and artist objects.
     Notes
     -----
     This function provides a flexible interface for plotting spatial or spatiotemporal
@@ -389,6 +392,9 @@ def cartplot(
 
     if global_extent:
         ax.set_global()
+
+    if set_extent:
+        ax.set_extent([*set_extent])
 
     if coastlines:
         ax.add_feature(cfeature.COASTLINE)
@@ -430,7 +436,7 @@ def cartplot(
         return func, plot_args
 
     # we want all possible args
-    plot, plot_args = _data_plot(data, plot_type)
+    plot, plot_args = _data_plot(data, method)
 
     all_args = dict(locals())
     all_args.update(kwargs)
@@ -442,7 +448,7 @@ def cartplot(
 
     del plot_kwargs["kwargs"]
 
-    plot_obj = plot(**plot_kwargs)
+    artist = plot(**plot_kwargs)
 
     if ocean and not land:
         ax.add_feature(cfeature.LAND, facecolor="white", zorder=1)
@@ -463,7 +469,7 @@ def cartplot(
         cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
 
         cb = plt.colorbar(
-            plot_obj,
+            artist,
             cax=cax,
             ax=ax,
             orientation=orientation,
@@ -481,7 +487,7 @@ def cartplot(
                 cbar_label.append(data.attrs["units"])
             cb.set_label("\n".join(cbar_label))
 
-    return fig, ax, plot_obj
+    return PlotObj(fig, ax, artist)
 
 
 def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
@@ -491,11 +497,12 @@ def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
     local_kwargs["data"] = da
 
     fname = session_tmp_dir / f"{i:06d}.png"
-    fig, ax, _ = cartplot(**local_kwargs)
-    ax.set_title(t)
+    plot = cartplot(**local_kwargs)
+
+    plot.ax.set_title(t)
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
-    ax.clear()
-    plt.close(fig)
+    plot.ax.clear()
+    plt.close(plot.fig)
     return None
 
 
@@ -525,14 +532,16 @@ def animate(
         "SouthPolarStereo",
     ] = "PlateCarree",
     global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
     figsize: tuple[float, float] = None,
     central_longitude: float = None,
     central_latitude: float = None,
     # Plot appearance
-    plot_type: Literal[
+    method: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow"
     ] = "default",
-    cmap: str | mcolors.Colormap = None,
+    cmap: str | LinearSegmentedColormap | ListedColormap = None,
+    norm: Any = None,
     vmin: float = None,
     vmax: float = None,
     levels: int | list = None,
@@ -597,8 +606,10 @@ def animate(
 
     Plot Appearance
     ---------------
-    plot_type : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
         Rendering method for data visualization.
+    norm : Normalize, optional
+        Normalization function for the color scale.
     cmap : str or Colormap, optional
         Colormap applied to the data field.
     vmin, vmax : float, optional

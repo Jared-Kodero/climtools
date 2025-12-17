@@ -72,8 +72,12 @@ class IPCCTheme:
         *,
         font_scale: float = 1.5,
         line_width: float = 1.5,
+        font_size: int = None,
         column_width: Literal["single", "double"] = None,
         latex: bool = False,
+        palette: Literal[
+            "pastel", "deep", "muted", "bright", "dark", "colorblind"
+        ] = "colorblind",
         context: Literal["paper", "notebook", "talk", "poster"] = "paper",
         style: str = "ticks",
         spine: bool = True,
@@ -104,6 +108,8 @@ class IPCCTheme:
         latex: bool, optional
             If True, enables latextext rendering for all plot text via `matplotlib.rcParams["text.usetex"]`.
             Requires a working latexinstallation. Default is False.
+        palette : str, optional
+            Seaborn color palette to use. Default is "colorblind".
         context : str, optional
             Sets the context for the plot. Options are "paper", "notebook", "talk", or "poster". Default is "paper".
             This affects font sizes and other parameters to suit different presentation formats.
@@ -140,12 +146,27 @@ class IPCCTheme:
             "xtick.minor.visible": True,
             "savefig.dpi": 1200,
             "text.usetex": latex,
+            "svg.fonttype": "none",
         }
+
+        if font_size:
+            font_dict = {
+                "font.size": font_size,
+                "axes.titlesize": font_size + 1,
+                "axes.labelsize": font_size,
+                "axes.titlepad": font_size - 2,
+                "xtick.labelsize": font_size,
+                "ytick.labelsize": font_size,
+                "legend.fontsize": font_size,
+                "legend.title_fontsize": font_size,
+                "figure.titlesize": font_size + 2,
+                "figure.labelsize": font_size,
+            }
+
+            _rc.update(font_dict)
 
         if fig_size:
             _rc["figure.figsize"] = fig_size
-        if latex:
-            _rc["font.size"] = 12
 
         if not rc:
             rc = {}
@@ -157,7 +178,7 @@ class IPCCTheme:
             font="sans-serif",
             context=context,
             font_scale=font_scale,
-            palette="colorblind",
+            palette=palette,
             rc=_rc,
         )
 

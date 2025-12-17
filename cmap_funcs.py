@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import textwrap
+import uuid
 from pathlib import Path
 
 import cmocean
@@ -9,7 +10,6 @@ import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
@@ -35,24 +35,27 @@ def build_cm(name: str) -> LinearSegmentedColormap | ListedColormap:
 
 
 def get_colormap(
-    name, N, reverse, split, add_colors, discrete, as_colors
+    name, N, r, split, add_colors, discrete, as_colors, gamma=1.0
 ) -> ListedColormap | LinearSegmentedColormap | list[str]:
     return adjust_cmap(
         cmap=build_cm(name),
         N=N,
         split=split,
         add_colors=add_colors,
-        reverse=reverse,
+        r=r,
         discrete=discrete,
         as_colors=as_colors,
+        gamma=gamma,
     )
 
 
 def add_cmap_colors(
     obj: str | list[str],
     cmap: ListedColormap | LinearSegmentedColormap,
-    N: int = 256,
     idx: int = 256,
+    N: int = 256,
+    gamma: float = 1.0,
+    cmap_name: str = None,
 ) -> ListedColormap | LinearSegmentedColormap:
     """
     Add custom colors into an existing matplotlib colormap or combine multiple colormaps.
@@ -67,10 +70,16 @@ def add_cmap_colors(
         Number of colors to sample from the colormap.
     idx : int, default=256
         Index at which to insert the new colors.
+    gamma : float, default=1.0
+        Gamma correction factor for the colormap.
+    cmap_name : str, optional
+        Name of the new colormap to create. If not provided, the original colormap's name is used.
 
 
 
     """
+
+    N = cmap.N
 
     # Clamp index within [0, N]
     idx = max(0, min(idx, N))
@@ -105,7 +114,7 @@ def add_cmap_colors(
     # Insert at position `where`
     new_colors = colors[:idx] + colors_to_add + colors[idx:]
     new_colors = np.array(new_colors)
-    cmap = LinearSegmentedColormap.from_list(cmap.name, new_colors, N=N)
+    cmap = LinearSegmentedColormap.from_list(cmap_name, new_colors, N, gamma=gamma)
 
     return cmap
 
@@ -121,9 +130,10 @@ def adjust_cmap(
     *,
     split: tuple[float, float] = (0, 1),
     add_colors: dict[int, str | list[str]] = None,
-    reverse: bool = False,
+    r: bool = False,
     discrete: bool = True,
     as_colors: bool = False,
+    gamma: float = 1.0,
 ) -> ListedColormap | LinearSegmentedColormap | list[str]:
     """
     Retrieve and modify a matplotlib colormap with optional slicing, color insertion,
@@ -148,7 +158,7 @@ def adjust_cmap(
         a single color (hex string or CSS4 name) or a list of colors.
         For example: ``{0: "black", 128: ["white", "#ff0000"]}``.
 
-    reverse : bool, default=False
+    r : bool, default=False
         If ``True``, reverse the colormap before applying other adjustments.
 
     discrete : bool, default=True
@@ -173,23 +183,25 @@ def adjust_cmap(
 
     Examples
     --------
-    >>> cmap = adjust("plasma", N=256, split=(0.2, 0.8), reverse=True)
+    >>> cmap = adjust("plasma", N=256, split=(0.2, 0.8), r=True)
     >>> cmap = adjust("viridis", add_colors={128: ["#ffffff", "red"]}, discrete=False)
     """
 
     if not isinstance(split, tuple) or len(split) != 2:
         raise ValueError("`split` must be a tuple of two floats (start, end).")
 
-    if reverse:
+    cmap_name = cmap.name
+    if r:
         cmap = cmap.reversed()
+        cmap_name = f"reversed_{cmap_name}"
 
     range_values = np.linspace(split[0], split[1], N)
     colors = [cmap(value) for value in range_values]
 
     if discrete:
-        res = ListedColormap(colors, N=N, name=cmap.name)
+        res = ListedColormap(colors, N=N, name=cmap_name)
     else:
-        res = LinearSegmentedColormap.from_list(cmap.name, colors, N=N)
+        res = LinearSegmentedColormap.from_list(cmap_name, colors, N=N, gamma=gamma)
 
     if add_colors:
         if not isinstance(add_colors, dict):
@@ -197,7 +209,9 @@ def adjust_cmap(
                 "`add_colors` must be a dictionary of dict[int, str | list[str]]."
             )
 
-        for k, v in add_colors.items():
+        for k in sorted(add_colors):
+            v = add_colors[k]
+
             if not isinstance(v, (list, tuple, str)):
                 raise TypeError(
                     "Values in `add_colors` must be a string or list of strings."
@@ -212,15 +226,22 @@ def adjust_cmap(
                 idx=k,
                 cmap=res,
                 N=N,
+                gamma=gamma,
+                cmap_name=cmap_name,
             )
 
     if as_colors:
-        return get_colors(res, N)
+        return get_colors(res, res.N)
     return res
 
 
 def blend(
-    colors: list[str], N: int = 25, *, discrete: bool = True
+    colors: list[str],
+    N: int = 25,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+    name: str = None,
 ) -> ListedColormap | LinearSegmentedColormap:
     def valid(c):
         return isinstance(c, str) and (c.startswith("#") or c in mcolors.CSS4_COLORS)
@@ -228,13 +249,12 @@ def blend(
     if not all(map(valid, colors)):
         raise ValueError("All colors must be valid hex codes or CSS4 color names.")
 
-    range_values = np.linspace(0, 1, N)
-    cmap = sns.blend_palette(colors, as_cmap=True, input="hex", n_colors=N)
-    color_list = [cmap(value) for value in range_values]
+    if name is None:
+        name = f"{uuid.uuid4().hex[:6]}"
 
     if discrete:
-        return ListedColormap(color_list, N=N, name=f"blend_{len(colors)}")
-    return LinearSegmentedColormap.from_list(f"blend_{len(colors)}", color_list, N=N)
+        return ListedColormap(colors, N=N, name=name)
+    return LinearSegmentedColormap.from_list(name, colors, N=N, gamma=gamma)
 
 
 def gen_cmap_file():
@@ -289,8 +309,9 @@ def gen_cmap_file():
         class CMap:
 
             @staticmethod
-            def new(colors: list[str], N: int = 25, *, discrete: bool = True):
-                return blend(colors, N=N, discrete=discrete)
+            def new(colors: list[str], N: int = 25, *, discrete: bool = True, gamma: float = 1.0):
+                ''' Create a new colormap from a list of colors '''
+                return blend(colors, N=N, discrete=discrete, gamma=gamma)
             \n
                 """
 
@@ -302,15 +323,16 @@ def gen_cmap_file():
             @staticmethod
             def {name.lower()}(
                 N: int = 25,
-                reverse: bool = False,
+                r: bool = False,
                 split: tuple[float, float] = (0, 1),
                 add_colors: dict[int, str | list[str]] = None,
                 discrete: bool = True,
-                as_colors : bool =False
+                as_colors : bool =False,
+                gamma: float = 1.0
             ) -> ListedColormap | LinearSegmentedColormap:
                 ''' Get the '{name}' colormap '''
                 
-                return get_colormap("{name}", N, reverse, split, add_colors, discrete,as_colors)
+                return get_colormap("{name}", N, r, split, add_colors, discrete,as_colors, gamma)
                 \n
             """
         body = textwrap.dedent(body)

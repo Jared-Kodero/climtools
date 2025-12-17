@@ -7,31 +7,20 @@ import uuid
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Tuple, Union
+from typing import Any, Callable, Literal, Mapping, Union
 
-import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 import xarray as xr
-from cartopy.mpl.geoaxes import GeoAxes
 from cfgrib.dataset import DatasetBuildError
-from matplotlib.artist import Artist
-from matplotlib.axes import Axes
-from matplotlib.collections import QuadMesh
-from matplotlib.contour import QuadContourSet
-from matplotlib.figure import Figure
-from matplotlib.image import AxesImage
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
+from .plot import PlotObj, animate, cartplot, make_cyclic
+from .pycdo import cdo
 from .statistics import *
-from .tools import n_cpus
+from .tools import _tmp_files, n_cpus
 
 warnings.filterwarnings("ignore")
-
-
-from .plot import animate, cartplot, make_cyclic
-from .pycdo import cdo
-from .tools import _tmp_files
-
 script_dir = Path(__file__).resolve().parent
 
 
@@ -162,12 +151,14 @@ class GeoDataArray(xr.DataArray):
         central_longitude: float = None,
         central_latitude: float = None,
         global_extent: bool = False,
+        set_extent: tuple[float, float, float, float] = None,
         figsize: tuple[float, float] = None,
         # Plot appearance
-        plot_type: Literal[
+        method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow"
         ] = "default",
-        cmap: str | mcolors.Colormap = None,
+        norm: Any = None,
+        cmap: str | LinearSegmentedColormap | ListedColormap = None,
         vmin: float = None,
         vmax: float = None,
         levels: int | list = None,
@@ -186,9 +177,9 @@ class GeoDataArray(xr.DataArray):
         land: bool = True,
         edgecolor: str = "face",
         **kwargs,
-    ) -> Tuple[Figure, Axes | GeoAxes, QuadMesh | QuadContourSet | AxesImage | Artist]:
+    ) -> PlotObj:
         """
-        Plot this DataArray on a Cartopy map using the global `cartplot()` function.
+        Plot this DataArray using Cartopy
         """
         return cartplot(
             self,
@@ -196,10 +187,12 @@ class GeoDataArray(xr.DataArray):
             y=y,
             projection=projection,
             global_extent=global_extent,
+            set_extent=set_extent,
             figsize=figsize,
             central_longitude=central_longitude,
             central_latitude=central_latitude,
-            plot_type=plot_type,
+            method=method,
+            norm=norm,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
@@ -245,14 +238,16 @@ class GeoDataArray(xr.DataArray):
             "SouthPolarStereo",
         ] = "PlateCarree",
         global_extent: bool = False,
+        set_extent: tuple[float, float, float, float] = None,
         figsize: tuple[float, float] = None,
         central_longitude: float = None,
         central_latitude: float = None,
         # Plot appearance
-        plot_type: Literal[
+        method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow"
         ] = "default",
-        cmap: str | mcolors.Colormap = None,
+        cmap: str | LinearSegmentedColormap | ListedColormap = None,
+        norm: Any = None,
         vmin: float = None,
         vmax: float = None,
         levels: int | list[int] = None,
@@ -287,10 +282,12 @@ class GeoDataArray(xr.DataArray):
             y=y,
             projection=projection,
             global_extent=global_extent,
+            set_extent=set_extent,
             figsize=figsize,
             central_longitude=central_longitude,
             central_latitude=central_latitude,
-            plot_type=plot_type,
+            method=method,
+            norm=norm,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
@@ -364,49 +361,6 @@ class GeoDataArray(xr.DataArray):
             scale=scale,
         )
 
-    def period_difference(
-        self,
-        period1: tuple[str | pd.Timestamp, str | pd.Timestamp],
-        period2: tuple[str | pd.Timestamp, str | pd.Timestamp],
-        *,
-        along: str = "time",
-        stat: Literal["max", "min", "mean", "median", "quantile"] = "mean",
-        quantile: float = 0.95,
-        pct: bool = False,
-    ) -> xr.Dataset:
-        """
-        Compute the difference between two time periods in a DataArray or Dataset.
-
-        Parameters
-        ----------
-        period1 : tuple of str
-            (start, end) timestamps for the first period.
-        period2 : tuple of str
-            (start, end) timestamps for the second period.
-        along : str, default "time"
-            Name of the time dimension.
-        stat : {"max", "min", "mean", "median", "quantile"}, default "mean"
-            Statistic to compute for each period.
-        quantile : float, default 0.95
-            Quantile to compute if stat is "quantile".
-        pct : bool, default False
-            If True, compute percentage change instead of absolute difference.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset containing the mean difference between the two periods.
-        """
-        return period_difference(
-            self,
-            period1=period1,
-            period2=period2,
-            along=along,
-            stat=stat,
-            quantile=quantile,
-            pct=pct,
-        )
-
     def correlate(
         self,
         other: xr.DataArray,
@@ -440,16 +394,6 @@ class GeoDataArray(xr.DataArray):
             along=along,
             dask_scheduler=dask_scheduler,
         )
-
-
-class GeoDataset(xr.Dataset):
-    __slots__ = ()
-
-    def __getitem__(self, key):
-        obj = super().__getitem__(key)
-        if isinstance(obj, xr.DataArray):
-            return GeoDataArray(obj)
-        return obj
 
 
 class Daskit:

@@ -33,7 +33,6 @@ from .tools import (
 from .xgeo import (
     Daskit,
     GeoDataArray,
-    GeoDataset,
     apply_func_by_time_zone,
     chunk_by_lon,
     chunk_by_tz,
@@ -42,14 +41,6 @@ from .xgeo import (
     open_grib_datatree,
     utc_offset,
 )
-
-# Daskit = Daskit
-# BoundingBox = BoundingBox
-# GeoDataArray = GeoDataArray
-# GeoDataset = GeoDataset
-# FileLock = FileLock
-# MultiProcManager = MultiProcManager
-# RedirectStreams = RedirectStreams
 
 """climtools — utilities for climate data analysis and plotting.
 
@@ -73,7 +64,6 @@ __all__ = [
     "Daskit",
     "FileLock",
     "GeoDataArray",
-    "GeoDataset",
     "IPCCTheme",
     "logexc",
     "logmsg",
