@@ -24,80 +24,6 @@ warnings.filterwarnings("ignore")
 script_dir = Path(__file__).resolve().parent
 
 
-def open_grib_datatree(infile: Path) -> xr.DataTree:
-    """
-    Parse a GRIB file into separate xarray Datasets grouped by filter_by_keys.
-    Handles both multi-level and single-level fields.
-    """
-
-    tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
-    _tmp_files.append(tmpdir)
-    files = cdo.split(infile, operator="splitname", outdir=tmpdir)
-
-    combined_datasets = {}
-    rejected_singles = {}
-    single_level_datasets = []
-
-    standard_dims = ["time", "latitude", "longitude", "lat", "lon", "x", "y"]
-
-    for f in files:
-        datasets = {}
-        try:
-            ds = xr.open_dataset(f, engine="cfgrib").squeeze()
-            dims = list(ds.dims)
-
-            # Determine expected dimensionality
-            single_dims = 3 if ("time" in dims and len(ds["time"]) > 1) else 2
-
-            # Detect non-standard dimensions (vertical or ensemble)
-            extra_dims = [d for d in dims if d not in standard_dims]
-
-            if len(dims) > single_dims:
-                # Multi-level dataset detected
-                if len(extra_dims) != 1:
-                    raise Exception("Too many non-standard dimensions in dataset")
-
-                level_dim = extra_dims[0]
-                rejected_singles.setdefault(level_dim, []).append(ds)
-                continue  # handled; skip to next file
-
-            # Otherwise, treat as single-level
-            single_level_datasets.append(ds)
-
-        except DatasetBuildError as e:
-            # Handle multi-field (multi-level) GRIB subsets
-            lines = str(e).split("\n")[1:]
-            for line in lines:
-                if "=" in line:
-                    keys = ast.literal_eval(line.split("=", 1)[1])
-                    key = list(keys.keys())[0]
-                    value = keys[key]
-                    ds = xr.open_dataset(f, engine="cfgrib", filter_by_keys=keys)
-                    datasets.setdefault(key, {})[value] = ds.squeeze()
-
-        grouped_datasets = {}
-        for key, value in datasets.items():
-            for subkey, ds in value.items():
-                grouped_datasets.setdefault(subkey, []).append(ds)
-
-        for subkey, rejected in rejected_singles.items():
-            if subkey in grouped_datasets:
-                grouped_datasets[subkey].extend(rejected)
-            else:
-                grouped_datasets[subkey] = list(rejected)
-
-        for k, groups in grouped_datasets.items():
-            combined = xr.merge(groups) if len(groups) > 1 else groups[0]
-            combined_datasets[k] = combined
-
-        single_level = xr.merge(single_level_datasets, compat="override")
-        combined_datasets["single_level"] = single_level
-
-        dt = xr.DataTree.from_dict(combined_datasets)
-
-    return dt
-
-
 class GeoDataArray(xr.DataArray):
     """
     Extension of xarray.DataArray with Cartopy-based plotting and animation methods.
@@ -762,3 +688,77 @@ def apply_func_by_time_zone(
         return _tz_apply_parallel(func, chunks, kwargs)
     else:
         return _tz_apply_serial(func, chunks, kwargs)
+
+
+def open_grib_datatree(infile: Path) -> xr.DataTree:
+    """
+    Parse a GRIB file into separate xarray Datasets grouped by filter_by_keys.
+    Handles both multi-level and single-level fields.
+    """
+
+    tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
+    _tmp_files.append(tmpdir)
+    files = cdo.split(infile, operator="splitname", outdir=tmpdir)
+
+    combined_datasets = {}
+    rejected_singles = {}
+    single_level_datasets = []
+
+    standard_dims = ["time", "latitude", "longitude", "lat", "lon", "x", "y"]
+
+    for f in files:
+        datasets = {}
+        try:
+            ds = xr.open_dataset(f, engine="cfgrib").squeeze()
+            dims = list(ds.dims)
+
+            # Determine expected dimensionality
+            single_dims = 3 if ("time" in dims and len(ds["time"]) > 1) else 2
+
+            # Detect non-standard dimensions (vertical or ensemble)
+            extra_dims = [d for d in dims if d not in standard_dims]
+
+            if len(dims) > single_dims:
+                # Multi-level dataset detected
+                if len(extra_dims) != 1:
+                    raise Exception("Too many non-standard dimensions in dataset")
+
+                level_dim = extra_dims[0]
+                rejected_singles.setdefault(level_dim, []).append(ds)
+                continue  # handled; skip to next file
+
+            # Otherwise, treat as single-level
+            single_level_datasets.append(ds)
+
+        except DatasetBuildError as e:
+            # Handle multi-field (multi-level) GRIB subsets
+            lines = str(e).split("\n")[1:]
+            for line in lines:
+                if "=" in line:
+                    keys = ast.literal_eval(line.split("=", 1)[1])
+                    key = list(keys.keys())[0]
+                    value = keys[key]
+                    ds = xr.open_dataset(f, engine="cfgrib", filter_by_keys=keys)
+                    datasets.setdefault(key, {})[value] = ds.squeeze()
+
+        grouped_datasets = {}
+        for key, value in datasets.items():
+            for subkey, ds in value.items():
+                grouped_datasets.setdefault(subkey, []).append(ds)
+
+        for subkey, rejected in rejected_singles.items():
+            if subkey in grouped_datasets:
+                grouped_datasets[subkey].extend(rejected)
+            else:
+                grouped_datasets[subkey] = list(rejected)
+
+        for k, groups in grouped_datasets.items():
+            combined = xr.merge(groups) if len(groups) > 1 else groups[0]
+            combined_datasets[k] = combined
+
+        single_level = xr.merge(single_level_datasets, compat="override")
+        combined_datasets["single_level"] = single_level
+
+        dt = xr.DataTree.from_dict(combined_datasets)
+
+    return dt

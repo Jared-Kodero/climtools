@@ -49,7 +49,7 @@ def get_colormap(
     )
 
 
-def add_cmap_colors(
+def add_colors_to_cmap(
     obj: str | list[str],
     cmap: ListedColormap | LinearSegmentedColormap,
     idx: int = 256,
@@ -131,7 +131,7 @@ def adjust_cmap(
     split: tuple[float, float] = (0, 1),
     add_colors: dict[int, str | list[str]] = None,
     r: bool = False,
-    discrete: bool = True,
+    discrete: bool = False,
     as_colors: bool = False,
     gamma: float = 1.0,
 ) -> ListedColormap | LinearSegmentedColormap | list[str]:
@@ -204,6 +204,7 @@ def adjust_cmap(
         res = LinearSegmentedColormap.from_list(cmap_name, colors, N=N, gamma=gamma)
 
     if add_colors:
+        cmap_name = f"{uuid.uuid4().hex[:6]}"
         if not isinstance(add_colors, dict):
             raise TypeError(
                 "`add_colors` must be a dictionary of dict[int, str | list[str]]."
@@ -221,7 +222,7 @@ def adjust_cmap(
                     "Keys in `add_colors` must be integers representing position to insert colors."
                 )
 
-            res = add_cmap_colors(
+            res = add_colors_to_cmap(
                 obj=v,
                 idx=k,
                 cmap=res,
@@ -235,9 +236,49 @@ def adjust_cmap(
     return res
 
 
-def blend(
+def concat(
+    cmap1, cmap2, N: int = 32, *, discrete: bool = False, gamma: float = 1.0
+) -> ListedColormap | LinearSegmentedColormap:
+    def _colors(cmap):
+        range_values = np.linspace(0, 1, N // 2)
+        colors = [to_hex(cmap(value)) for value in range_values]
+        return colors
+
+    colors1 = _colors(cmap1)
+    colors2 = _colors(cmap2)
+    return create(colors1 + colors2, N=N, discrete=discrete, gamma=gamma)
+
+
+def add_or_subtract(
+    cmap1,
+    cmap2,
+    operator: str,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> ListedColormap | LinearSegmentedColormap:
+    def _colors(cmap):
+        range_values = np.linspace(0, 1, N)
+        colors = [cmap(value) for value in range_values]
+        return np.asarray(colors, dtype=float)
+
+    c1 = _colors(cmap1)
+    c2 = _colors(cmap2)
+
+    if operator == "+":
+        c = np.clip(c1 + c2, 0.0, 1.0)
+    elif operator == "-":
+        c = np.clip(c1 - c2, 0.0, 1.0)
+
+    c = [to_hex(tuple(row)) for row in c]
+
+    return create(c, N=N, discrete=discrete, gamma=gamma)
+
+
+def create(
     colors: list[str],
-    N: int = 25,
+    N: int = 32,
     *,
     discrete: bool = False,
     gamma: float = 1.0,
@@ -304,14 +345,38 @@ def gen_cmap_file():
         """
         imports = textwrap.dedent(imports)
 
-        body = """
+        operators_signatures = """
+                cmap1: ListedColormap | LinearSegmentedColormap,
+                cmap2: ListedColormap | LinearSegmentedColormap,
+                N: int = 32,
+                *,
+                discrete: bool = False,
+                gamma: float = 1.0
+                """
+
+        body = f"""
         @dataclass
-        class CMap:
+        class Cmap:
 
             @staticmethod
-            def new(colors: list[str], N: int = 25, *, discrete: bool = True, gamma: float = 1.0):
+            def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
                 ''' Create a new colormap from a list of colors '''
-                return blend(colors, N=N, discrete=discrete, gamma=gamma)
+                return create(colors, N=N, discrete=discrete, gamma=gamma)
+
+            @staticmethod
+            def concat({operators_signatures}):
+                ''' Concat two colormaps together '''
+                return concat(cmap1, cmap2, N=N, discrete=discrete, gamma=gamma)
+
+            @staticmethod
+            def add({operators_signatures}):
+                ''' Add two colormaps together '''
+                return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
+
+            @staticmethod
+            def substract({operators_signatures}):
+                ''' Subtract two colormaps '''
+                return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
             \n
                 """
 
@@ -322,12 +387,12 @@ def gen_cmap_file():
             
             @staticmethod
             def {name.lower()}(
-                N: int = 25,
+                N: int = 32,
                 r: bool = False,
                 split: tuple[float, float] = (0, 1),
                 add_colors: dict[int, str | list[str]] = None,
-                discrete: bool = True,
-                as_colors : bool =False,
+                discrete: bool = False,
+                as_colors : bool = False,
                 gamma: float = 1.0
             ) -> ListedColormap | LinearSegmentedColormap:
                 ''' Get the '{name}' colormap '''
@@ -338,8 +403,8 @@ def gen_cmap_file():
         body = textwrap.dedent(body)
 
         init = """
-        cmaps: CMap = CMap()
-        cm : CMap = cmaps
+        cmaps: Cmap = Cmap()
+        cm : Cmap = cmaps
         """
         init = textwrap.dedent(init)
         return imports, body, init
