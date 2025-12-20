@@ -279,7 +279,8 @@ def cartplot(
     states: bool = True,
     ocean: bool = True,
     land: bool = True,
-    edgecolor: str = "face",
+    lakes: bool = False,
+    rivers: bool = False,
     **kwargs,
 ) -> PlotObj:
     """
@@ -350,13 +351,13 @@ def cartplot(
     states : bool, default True
         Draw state or province boundaries (if available).
     ocean, land : bool, default True
-        Fill ocean and land with default or specified colors.
+        Mask ocean and land areas if any is False.
+    lakes : bool, default False
+        If True, adds lakes to the map.
+    rivers : bool, default False
+        If True, adds rivers to the map.
     facecolor : str, default "#d3d3d3"
         Land face color.
-    edgecolor : str, default "face"
-        Edge color for land polygons.
-
-
 
     Returns
     -------
@@ -399,22 +400,41 @@ def cartplot(
     if coastlines:
         ax.add_feature(cfeature.COASTLINE)
 
+    if states:
+        ax.add_feature(cfeature.STATES, linestyle="-", alpha=0.3, zorder=3)
+
+    if borders:
+        ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3, zorder=3)
+
+    if lakes:
+        ax.add_feature(cfeature.LAKES, zorder=2)
+
+    if rivers:
+        ax.add_feature(cfeature.RIVERS, zorder=2)
+
     if ocean and not land:
-        ax.add_feature(
-            cfeature.NaturalEarthFeature(
-                "physical",
-                "land",
-                "50m",
-                edgecolor=edgecolor,
-                facecolor="#272829",
-                alpha=0.5,
-            )
+        ax.add_feature(cfeature.LAND, facecolor="#d9d9d9", zorder=2)
+
+    elif land and not ocean:
+        ax.add_feature(cfeature.OCEAN, zorder=2)
+
+    if gridlines:
+        gl = ax.gridlines(
+            crs=ccrs.PlateCarree(),
+            draw_labels=True,
+            linewidth=0.5,
+            color="gray",
+            alpha=0.5,
+            linestyle="--",
+            zorder=1,
         )
 
-    if states:
-        ax.add_feature(cfeature.STATES, linestyle="-", alpha=0.3)
-    if borders:
-        ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3)
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.bottom_labels = True
+        gl.left_labels = True
+
+    transform = ccrs.PlateCarree()
 
     # xarray methords
 
@@ -444,26 +464,11 @@ def cartplot(
     plot_kwargs = {k: v for k, v in all_args.items() if k in plot_args}
     plot_kwargs["ax"] = ax
     plot_kwargs["add_colorbar"] = False
-    plot_kwargs["transform"] = ccrs.PlateCarree()
-
+    plot_kwargs["zorder"] = 1
+    plot_kwargs["transform"] = transform
     del plot_kwargs["kwargs"]
 
     artist = plot(**plot_kwargs)
-
-    if ocean and not land:
-        ax.add_feature(cfeature.LAND, facecolor="white", zorder=1)
-    elif land and not ocean:
-        ax.add_feature(cfeature.OCEAN, facecolor="white", zorder=1)
-
-    if gridlines:
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="gray", alpha=0.5, linestyle="--"
-        )
-
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.bottom_labels = True
-        gl.left_labels = True
 
     if add_colorbar:
         cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
@@ -558,111 +563,116 @@ def animate(
     states: bool = True,
     ocean: bool = True,
     land: bool = True,
-    edgecolor: str = "face",
+    lakes: bool = False,
+    rivers: bool = False,
     **kwargs,
 ):
     """
-    Animate a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
-    spatial projection, color mapping, and parallel rendering.
+        Animate a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
+        spatial projection, color mapping, and parallel rendering.
 
-    Parameters
-    ----------
-    Data
-    ----
-    data : xr.DataArray
-        Two-dimensional or time-dependent array containing the field to plot.
-        Must include spatial coordinates and optionally a time-like dimension.
+        Parameters
+        ----------
+        Data
+        ----
+        data : xr.DataArray
+            Two-dimensional or time-dependent array containing the field to plot.
+            Must include spatial coordinates and optionally a time-like dimension.
 
-    Animation
-    ---------
-    dim : str, default "time"
-        Name of the dimension to animate (e.g., "time").
-    indices : sequence of int, optional
-        Specific frame indices to include in the animation along `dim`. If None, uses all indices.
-    outfile : str or Path, optional
-        Path to save the resulting animation. If None, displays interactively.
-    quality : {"low", "medium", "high"}, default "medium"
-        Output resolution and compression setting.
-    fps : int, default 10
-        Animation playback speed in frames per second.
-    parallel : bool, default False
-        Compute animation frames in parallel across available CPUs.
+        Animation
+        ---------
+        dim : str, default "time"
+            Name of the dimension to animate (e.g., "time").
+        indices : sequence of int, optional
+            Specific frame indices to include in the animation along `dim`. If None, uses all indices.
+        outfile : str or Path, optional
+            Path to save the resulting animation. If None, displays interactively.
+        quality : {"low", "medium", "high"}, default "medium"
+            Output resolution and compression setting.
+        fps : int, default 10
+            Animation playback speed in frames per second.
+        parallel : bool, default False
+            Compute animation frames in parallel across available CPUs.
 
-    Spatial Configuration
-    ---------------------
-    x, y : str, optional
-        Names of the horizontal coordinates. Defaults to the first two dimensions.
-    projection : str, default "PlateCarree"
-        Cartopy map projection name. Supported options include:
-        "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal",
-        "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo".
-    global_extent : bool, default False
-        If True, sets the extent to display the full globe.
-    figsize : tuple of float, optional
-        Figure size (width, height) in inches.
-    central_longitude : float, default None
-        Central longitude for the map projection.
-    central_latitude : float, default None
+        Spatial Configuration
+        ---------------------
+        x, y : str, optional
+            Names of the horizontal coordinates. Defaults to the first two dimensions.
+        projection : str, default "PlateCarree"
+            Cartopy map projection name. Supported options include:
+            "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal",
+            "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo".
+        global_extent : bool, default False
+            If True, sets the extent to display the full globe.
+        figsize : tuple of float, optional
+            Figure size (width, height) in inches.
+        central_longitude : float, default None
+            Central longitude for the map projection.
+        central_latitude : float, default None
 
-    Plot Appearance
-    ---------------
-    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
-        Rendering method for data visualization.
-    norm : Normalize, optional
-        Normalization function for the color scale.
-    cmap : str or Colormap, optional
-        Colormap applied to the data field.
-    vmin, vmax : float, optional
-        Color scaling limits. If None, inferred from data range.
-    levels : int or sequence, optional
-        Contour levels used in "contour" or "contourf" plots.
-    extend : str, optional
-        If 'both', extends color limits to include both ends of the data range.
-    robust : bool, default False
-        Exclude outliers using 2nd-98th percentile for color normalization.
-    transform : cartopy.crs.Projection, optional
-        Coordinate reference system of the data for plotting.
-    orientation : {"vertical", "horizontal"}, default "vertical"
-        Orientation of the colorbar.
-    add_colorbar : bool, default True
-        Whether to display a colorbar.
-    drawedges : bool, default False
-        Draw grid edges on color patches (for `pcolormesh`).
-    cbar_label : str, optional
-        Label text for the colorbar.
+        Plot Appearance
+        ---------------
+        method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+            Rendering method for data visualization.
+        norm : Normalize, optional
+            Normalization function for the color scale.
+        cmap : str or Colormap, optional
+            Colormap applied to the data field.
+        vmin, vmax : float, optional
+            Color scaling limits. If None, inferred from data range.
+        levels : int or sequence, optional
+            Contour levels used in "contour" or "contourf" plots.
+        extend : str, optional
+            If 'both', extends color limits to include both ends of the data range.
+        robust : bool, default False
+            Exclude outliers using 2nd-98th percentile for color normalization.
+        transform : cartopy.crs.Projection, optional
+            Coordinate reference system of the data for plotting.
+        orientation : {"vertical", "horizontal"}, default "vertical"
+            Orientation of the colorbar.
+        add_colorbar : bool, default True
+            Whether to display a colorbar.
+        drawedges : bool, default False
+            Draw grid edges on color patches (for `pcolormesh`).
+        cbar_label : str, optional
+            Label text for the colorbar.
 
-    Map Features
-    ------------
-    gridlines : bool, default False
-        Display latitude/longitude gridlines.
-    coastlines : bool, default True
-        Draw coastlines on the map.
-    borders : bool, default True
-        Draw country borders.
-    states : bool, default True
-        Draw internal administrative boundaries (e.g., states or provinces).
-    ocean, land : bool, default True
-        Fill ocean and land regions with the specified colors.
-    facecolor : str, default "#d3d3d3"
-        Land polygon fill color.
-    edgecolor : str, default "face"
-        Outline color for land polygons.
+        Map Features
+        ------------
+        gridlines : bool, default False
+            Display latitude/longitude gridlines.
+        coastlines : bool, default True
+            Draw coastlines on the map.
+        borders : bool, default True
+            Draw country borders.
+        states : bool, default True
+            Draw internal administrative boundaries (e.g., states or provinces).
+        ocean, land : bool, default True
+            Fill ocean and land regions with the specified colors.
+        lakes : bool, default False
+            If True, adds lakes to the map.
+        rivers : bool, default False
+            If True, adds rivers to the map
+        facecolor : str, default "#d3d3d3"
+            Land face color
 
-    Other Parameters
-    ----------------
-    **kwargs
-        Additional arguments passed to the plotting function.
+    .
 
-    Returns
-    -------
-    matplotlib.animation.FuncAnimation or None
-        Animation object if not saved directly to file.
+        Other Parameters
+        ----------------
+        **kwargs
+            Additional arguments passed to the plotting function.
 
-    Notes
-    -----
-    - Parallel frame rendering significantly accelerates long sequences.
-    - Supports any Cartopy projection with a compatible coordinate transform.
-    - Intended for geospatial fields such as temperature, precipitation, or pressure.
+        Returns
+        -------
+        matplotlib.animation.FuncAnimation or None
+            Animation object if not saved directly to file.
+
+        Notes
+        -----
+        - Parallel frame rendering significantly accelerates long sequences.
+        - Supports any Cartopy projection with a compatible coordinate transform.
+        - Intended for geospatial fields such as temperature, precipitation, or pressure.
     """
 
     args = RicedDict(locals())

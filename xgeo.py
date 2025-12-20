@@ -101,7 +101,8 @@ class GeoDataArray(xr.DataArray):
         states: bool = True,
         ocean: bool = True,
         land: bool = True,
-        edgecolor: str = "face",
+        lakes: bool = False,
+        rivers: bool = False,
         **kwargs,
     ) -> PlotObj:
         """
@@ -135,7 +136,8 @@ class GeoDataArray(xr.DataArray):
             states=states,
             ocean=ocean,
             land=land,
-            edgecolor=edgecolor,
+            lakes=lakes,
+            rivers=rivers,
             **kwargs,
         )
 
@@ -190,7 +192,8 @@ class GeoDataArray(xr.DataArray):
         states: bool = True,
         ocean: bool = True,
         land: bool = True,
-        edgecolor: str = "face",
+        lakes: bool = False,
+        rivers: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -230,7 +233,8 @@ class GeoDataArray(xr.DataArray):
             states=states,
             ocean=ocean,
             land=land,
-            edgecolor=edgecolor,
+            lakes=lakes,
+            rivers=rivers,
             **kwargs,
         )
 
