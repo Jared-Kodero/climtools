@@ -25,7 +25,7 @@ from tabulate import tabulate
 host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
-tmp = Path(os.environ.get("TMPDIR", "/tmp"))
+tmp = Path("/tmp")
 n_cpus = len(os.sched_getaffinity(0))
 _tmp_files = []
 
