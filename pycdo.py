@@ -46,7 +46,7 @@ class CDO:
                 UserWarning,
             )
 
-        self.tmp_dir = tmp / "cdo_tmp"
+        self.tmp_dir = tmp / f"{uuid.uuid4().hex}"
         self.tmp_dir.mkdir(exist_ok=True)
         self.cwd = cwd()
 

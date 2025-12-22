@@ -15,12 +15,15 @@ import sys
 import time
 import traceback
 from collections import namedtuple
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Iterator, Literal
 
 import numpy as np
 import pandas as pd
 from tabulate import tabulate
+from tqdm import tqdm as tqdm_terminal
+from tqdm.notebook import tqdm as tqdm_notebook
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -703,6 +706,78 @@ class LogMsg:
         return ""
 
 
+@dataclass
+class AdaptiveIteratorWithProgress:
+    """
+    Adaptive iterator with Progress reporting.
+    """
+
+    iterable: Iterable[Any]
+    log_id: str = "Job"
+    message: str = "Progress: "
+    major_step: int = 10
+    minor_step: int = 1
+
+    _count: int = 0
+    _total: int = 0
+    _prev_pct: float = -1.0
+    _threshold: float = 0.0
+    _use_tqdm: bool = False
+
+    def __enter__(self):
+        self._total = len(self.iterable)
+
+        if "ipykernel" in sys.modules:
+            self._tqdm_cls = tqdm_notebook
+            self._use_tqdm = True
+
+        elif sys.stdout.isatty():
+            self._tqdm_cls = tqdm_terminal
+            self._use_tqdm = True
+
+        else:
+            self._use_tqdm = False
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return None
+
+    def __iter__(self) -> Iterator[Any]:
+        if self._use_tqdm:
+            with self._tqdm_cls(self.iterable, desc=self.log_id) as pbar:
+                for item in pbar:
+                    yield item
+        else:
+            for item in self.iterable:
+                yield item
+                self._advance()
+
+    def _advance(self):
+        self._count += 1
+        pct = round(100.0 * self._count / self._total)
+
+        if (
+            (pct >= self._threshold) or (self._count == self._total)
+        ) and pct != self._prev_pct:
+            logmsg(f"{self.message}{self.log_id:>25} {pct:7.2f}% completed.")
+
+            self._threshold = self._next_threshold(
+                pct, self.major_step, self.minor_step
+            )
+            self._prev_pct = pct
+
+    @staticmethod
+    def _next_threshold(percent: float, major_step: float, minor_step: float) -> float:
+        step = 1.0
+        if percent < 80.0:
+            step = major_step
+        elif percent < 95.0:
+            step = minor_step
+
+        return min(100.0, ((percent // step) + 1.0) * step)
+
+
 def logmsg(*values: Any | None) -> LogMsg:
     """
     Log one or more messages to standard output or a file, optionally including traceback and exception details.
@@ -765,3 +840,25 @@ def logobj(*values: Any | None) -> LogMsg:
     if all(isinstance(v, str) for v in values):
         return None
     return LogMsg(*values)
+
+
+def _aip(
+    iterable: Iterable[Any],
+    log_id: str = "Job",
+    message: str = "Progress: ",
+    major_step: int = 10,
+    minor_step: int = 1,
+):
+    """
+    Adaptive Iterator With Progress Reporting.
+    """
+    return AdaptiveIteratorWithProgress(
+        iterable=iterable,
+        log_id=log_id,
+        message=message,
+        major_step=major_step,
+        minor_step=minor_step,
+    )
+
+
+aip: AdaptiveIteratorWithProgress = _aip
