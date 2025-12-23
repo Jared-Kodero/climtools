@@ -44,7 +44,7 @@ def install_latex():
     cmd = f"nohup bash -c {script} > {std_out} 2>&1 &"
     os.system(cmd)
 
-    return
+    return None
 
 
 class IPCCTheme:
