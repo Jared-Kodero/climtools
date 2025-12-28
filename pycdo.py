@@ -9,7 +9,7 @@ from typing import Any, Literal
 import pandas as pd
 import xarray as xr
 
-from .tools import _tmp_files, cwd, n_cpus, rm, tmp, to_numeric, which
+from .tools import cwd, n_cpus, rm, tmp, to_numeric, which
 
 
 class CDONotFoundError(RuntimeError):
@@ -46,15 +46,15 @@ class CDO:
                 UserWarning,
             )
 
-        self.tmp_dir = tmp / f"{uuid.uuid4().hex}"
+        self.tmp_dir = Path(tmp / f"{uuid.uuid4().hex}")
         self.tmp_dir.mkdir(exist_ok=True)
         self.cwd = cwd()
 
         os.environ["CDO_VERSION_INFO"] = "false"
         os.environ["CDO_HISTORY_INFO"] = "false"
 
-    def _cdo(self, input_cmds: list[str]):
-        cmd = ["cdo", "-s", "-w", "-P", str(int(n_cpus / 3))]
+    def run_cdo(self, input_cmds: list[str]):
+        cmd = ["cdo", "-s", "-w", "-P", str(n_cpus)]
         cmd.extend(input_cmds)
 
         seen = set()
@@ -71,21 +71,6 @@ class CDO:
         except subprocess.CalledProcessError as e:
             print("ERROR :", e.stderr)
             return None
-
-    def help(self, operator: str = None) -> None:
-        """
-        Display help for a specific CDO operator or general CDO help.
-
-        Parameters
-        ----------
-        operator : str, optional
-            The name of the CDO operator to get help for. If not provided, general CDO help is displayed.
-        """
-        cmd = ["cdo", "-h"]
-        if operator:
-            cmd.append(operator)
-        res = self._cdo(cmd)
-        print(res.stdout)
 
     def run(
         self,
@@ -124,11 +109,8 @@ class CDO:
                 "Input must be a list of strings representing CDO command and arguments."
             )
 
-        res = self._cdo(cmd)
-
-        txt = StringIO(res.stdout)
-        txt = txt.read().splitlines()
-        return txt
+        res = self.run_cdo(cmd)
+        return res
 
     def _bbox_from_griddes(self, infile) -> tuple[float, float, float, float]:
         data_dict = self.griddes(
@@ -176,7 +158,6 @@ class CDO:
         grdfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.grid"
         if outfile is None:
             outfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.nc"
-            _tmp_files.extend([outfile, grdfile])
 
         da_name = None
 
@@ -216,7 +197,7 @@ class CDO:
             f"{outfile}",
         ]
 
-        res = self._cdo(cmd)
+        res = self.run_cdo(cmd)
         if res.stdout:
             print(res.stdout)
 
@@ -248,7 +229,7 @@ class CDO:
 
         cmd = ["griddes", infile]
 
-        res = self._cdo(cmd)
+        res = self.run_cdo(cmd)
 
         txt = StringIO(res.stdout)
         txt = txt.read().splitlines()
@@ -305,7 +286,7 @@ class CDO:
             *infiles,
             outfile,
         ]
-        self._cdo(cmd)
+        self.run_cdo(cmd)
         if delete_input:
             rm(infiles)
 
@@ -527,7 +508,7 @@ class CDO:
         for op in operators:
             cmd = [op, infile]
 
-            res = self._cdo(cmd)
+            res = self.run_cdo(cmd)
             txt = StringIO(res.stdout)
             txt = txt.read().splitlines()
 
@@ -643,7 +624,7 @@ class CDO:
         try:
             os.chdir(prefix_dir)
             cmd = [operator, infile, ""]
-            self._cdo(cmd)
+            self.run_cdo(cmd)
         finally:
             os.chdir(f"{self.cwd}")
 

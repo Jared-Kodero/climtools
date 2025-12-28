@@ -18,7 +18,7 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from .plot import PlotObj, animate, cartplot, make_cyclic
 from .pycdo import cdo
 from .statistics import *
-from .tools import _tmp_files, n_cpus
+from .tools import n_cpus
 
 warnings.filterwarnings("ignore")
 script_dir = Path(__file__).resolve().parent
@@ -701,7 +701,6 @@ def open_grib_datatree(infile: Path) -> xr.DataTree:
     """
 
     tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
-    _tmp_files.append(tmpdir)
     files = cdo.split(infile, operator="splitname", outdir=tmpdir)
 
     combined_datasets = {}

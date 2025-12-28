@@ -212,6 +212,8 @@ def adjust_cmap(
 
         for k in sorted(add_colors):
             v = add_colors[k]
+            if k == -1:
+                k = res.N
 
             if not isinstance(v, (list, tuple, str)):
                 raise TypeError(

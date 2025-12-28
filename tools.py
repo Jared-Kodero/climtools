@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import functools
 import getpass
 import inspect
@@ -30,7 +29,7 @@ user = getpass.getuser()
 home = Path.home()
 tmp = Path("/tmp")
 n_cpus = len(os.sched_getaffinity(0))
-_tmp_files = []
+
 
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
@@ -108,13 +107,6 @@ def cwd() -> Path:
     return Path.cwd().resolve()
 
 
-def cleanup():
-    rm(_tmp_files)
-
-
-atexit.register(cleanup)
-
-
 def which(cmd: str) -> bool | None:
     try:
         path = (
@@ -185,7 +177,7 @@ def timeit(func):
             elapsed /= 60
             unit = "minutes"
 
-        print(f"[ {func.__name__} ] finished in {elapsed:.2f} {unit}")
+        print(f"[ {func.__name__} ] finished in {round(elapsed, 2):>4} {unit}")
         return result
 
     return wrapper
@@ -714,7 +706,7 @@ class AdaptiveIteratorWithProgress:
 
     iterable: Iterable[Any]
     log_id: str = "Job"
-    message: str = "Progress: "
+    message: str = "Progress"
     major_step: int = 10
     minor_step: int = 1
 
@@ -760,7 +752,7 @@ class AdaptiveIteratorWithProgress:
         if (
             (pct >= self._threshold) or (self._count == self._total)
         ) and pct != self._prev_pct:
-            logmsg(f"{self.message}{self.log_id:>25} {pct:7.2f}% completed.")
+            logmsg(f"{self.message} : {self.log_id:>25} {pct:7.2f}% completed.")
 
             self._threshold = self._next_threshold(
                 pct, self.major_step, self.minor_step
@@ -845,7 +837,7 @@ def logobj(*values: Any | None) -> LogMsg:
 def _aip(
     iterable: Iterable[Any],
     log_id: str = "Job",
-    message: str = "Progress: ",
+    message: str = "Progress",
     major_step: int = 10,
     minor_step: int = 1,
 ):
