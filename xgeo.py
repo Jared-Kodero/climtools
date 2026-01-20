@@ -143,10 +143,10 @@ class GeoDataArray(xr.DataArray):
 
     def animate(
         self,
+        outfile: Path | str = None,
         dim: str = "time",
         *,
         indices: tuple | list | np.ndarray = None,
-        outfile: Path | str = None,
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 10,
         parallel: bool = True,
@@ -199,6 +199,7 @@ class GeoDataArray(xr.DataArray):
         """
         Animate this DataArray on a Cartopy map using the global `animate()` function.
         """
+
         return animate(
             self,
             dim=dim,

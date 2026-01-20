@@ -2,6 +2,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import warnings
 from dataclasses import dataclass
 from multiprocessing import Pool
@@ -20,7 +21,7 @@ from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 
-from .tools import RicedDict, get_func_signature, n_cpus
+from .tools import RicedDict, get_func_signature, n_cpus, tmp
 
 
 @dataclass(frozen=True)
@@ -739,11 +740,14 @@ def animate(
                 )
 
     # ---- ffmpeg encode (MP4 only) ----
+
+    user_path = False
     if not outfile:
-        outfile = Path("videos/animation.mp4")
+        outfile = Path(tmp / f"{uuid.uuid4().hex}/{uuid.uuid4().hex}.mp4")
+
     else:
-        outfile = Path(f"videos/{outfile}")
-        outfile = outfile.with_suffix(".mp4")
+        outfile = Path(outfile)
+        user_path = True
 
     outfile.parent.mkdir(parents=True, exist_ok=True)
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
@@ -789,7 +793,7 @@ def animate(
     finally:
         shutil.rmtree(session_tmp_dir, ignore_errors=True)
 
-    if error == 0:
+    if error == 0 and user_path:
         print(f"Animation saved to : {outfile}")
 
     # optional inline display (Jupyter)
