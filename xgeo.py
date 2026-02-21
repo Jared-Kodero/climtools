@@ -701,6 +701,7 @@ def open_grib_datatree(infile: Path) -> xr.DataTree:
     Handles both multi-level and single-level fields.
     """
 
+    infile = Path(infile).resolve()
     tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
     files = cdo.split(infile, operator="splitname", outdir=tmpdir)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .cmap_funcs import *
 from .cmaps_inventory import cm, cmaps
-from .plot import get_cbar_axes, plot_pvalues
+from .plot import get_cbar_axes, plot_3d, plot_pvalues
 from .plot_theme import IPCCTheme, theme
 from .pycdo import cdo
 from .statistics import calc_significance
@@ -92,6 +92,7 @@ __all__ = [
     "mv",
     "n_cpus",
     "open_grib_datatree",
+    "plot_3d",
     "plot_pvalues",
     "rm",
     "symlink",

@@ -20,6 +20,7 @@ from typing import Any, Iterable, Iterator, Literal
 
 import numpy as np
 import pandas as pd
+from IPython.display import HTML, display
 from tabulate import tabulate
 from tqdm import tqdm as tqdm_terminal
 from tqdm.notebook import tqdm as tqdm_notebook
@@ -107,17 +108,8 @@ def cwd() -> Path:
     return Path.cwd().resolve()
 
 
-def which(cmd: str) -> bool | None:
-    try:
-        path = (
-            subprocess.check_output(["which", cmd], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
-        )
-
-        return True if path else False
-    except subprocess.CalledProcessError:
-        return None
+def which(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
 
 
 def to_numeric(x: Any, use_numpy: bool = False) -> Any:
@@ -854,3 +846,25 @@ def _aip(
 
 
 aip: AdaptiveIteratorWithProgress = _aip
+
+
+def set_vscode_widget_theme():
+    css = """
+    <style>
+    /* overwrite hard-coded white background by VS Code for ipywidgets */
+    .cell-output-ipywidget-background {
+        background-color: transparent !important;
+    }
+
+    /* map VS Code theme variables to Jupyter widget variables */
+    :root {
+        --jp-widgets-color: var(--vscode-editor-foreground);
+        --jp-widgets-font-size: var(--vscode-editor-font-size);
+    }
+    </style>
+    """
+    display(HTML(css))
+
+
+if "ipykernel" in sys.modules:
+    set_vscode_widget_theme()
