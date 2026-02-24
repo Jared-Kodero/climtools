@@ -44,8 +44,8 @@ class GeoDataArray(xr.DataArray):
 
     def mask(
         self,
+        keep: Literal["land", "ocean"],
         *,
-        keep: Literal["land", "ocean"] = None,
         mask_file: Literal["cartopy", "era5"] = "era5",
     ) -> GeoDataArray:
         """
@@ -413,8 +413,8 @@ class Daskit:
 
 def mask(
     obj: xr.DataArray | xr.Dataset,
+    keep: Literal["land", "ocean"],
     *,
-    keep: Literal["land", "ocean"] = None,
     mask_file: Literal["cartopy", "era5"] = "era5",
 ) -> xr.DataArray | xr.Dataset:
     """
@@ -428,13 +428,13 @@ def mask(
         )
 
     masks = {
-        "cartopy": "cartopy_0.1.mask",
+        "cartopy": "cartopy_0.1_mask",
         "era5": "era5_0.25_mask",
     }
 
     file = script_dir / "data" / "mask" / masks[mask_file]
 
-    mask = xr.open_dataset(file)
+    mask = xr.open_dataset(file, engine="netcdf4")
 
     obj = obj.sortby(["lat", "lon"])
 
