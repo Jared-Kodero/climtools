@@ -849,6 +849,7 @@ aip: AdaptiveIteratorWithProgress = _aip
 
 
 def set_vscode_widget_theme():
+
     css = """
     <style>
     /* overwrite hard-coded white background by VS Code for ipywidgets */
@@ -864,7 +865,3 @@ def set_vscode_widget_theme():
     </style>
     """
     display(HTML(css))
-
-
-if "ipykernel" in sys.modules:
-    set_vscode_widget_theme()

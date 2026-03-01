@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from .cmap_funcs import *
 from .cmaps_inventory import cm, cmaps
 from .plot import get_cbar_axes, plot_3d, plot_pvalues
@@ -25,6 +27,7 @@ from .tools import (
     mv,
     n_cpus,
     rm,
+    set_vscode_widget_theme,
     symlink,
     timeit,
     tmp,
@@ -34,13 +37,8 @@ from .tools import (
 from .xgeo import (
     Daskit,
     GeoDataArray,
-    apply_func_by_time_zone,
-    chunk_by_lon,
-    chunk_by_tz,
-    lst,
+    get_local_solar_time,
     mask,
-    open_grib_datatree,
-    utc_offset,
 )
 
 """climtools — utilities for climate data analysis and plotting.
@@ -60,6 +58,9 @@ individual modules (for example ``from climtools import plot, trends``) or the
 specific functions you need.
 """
 
+if "ipykernel" in sys.modules:
+    set_vscode_widget_theme()
+
 __all__ = [
     "BoundingBox",
     "Daskit",
@@ -70,11 +71,8 @@ __all__ = [
     "logmsg",
     "logobj",
     "RedirectStreams",
-    "apply_func_by_time_zone",
     "calc_significance",
     "cdo",
-    "chunk_by_tz",
-    "chunk_by_lon",
     "cm",
     "cmaps",
     "cp",
@@ -86,12 +84,11 @@ __all__ = [
     "home",
     "host",
     "aip",
-    "lst",
+    "get_local_solar_time",
     "mask",
     "mkdir",
     "mv",
     "n_cpus",
-    "open_grib_datatree",
     "plot_3d",
     "plot_pvalues",
     "rm",
@@ -101,5 +98,4 @@ __all__ = [
     "tmp",
     "to_numeric",
     "user",
-    "utc_offset",
 ]

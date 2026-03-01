@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-import ast
 import logging
-import tempfile
-import uuid
 import warnings
-from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Union
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import xarray as xr
-from cfgrib.dataset import DatasetBuildError
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from .plot import PlotObj, animate, cartplot, make_cyclic
-from .pycdo import cdo
+from .plot import PlotObj, animate, make_cyclic, mapplot
 from .statistics import *
 from .tools import n_cpus
 
@@ -39,7 +33,7 @@ class GeoDataArray(xr.DataArray):
         Calculate the local solar time for the DataArray based on the longitude coordinate.
         The local solar time is calculated as the UTC time plus the longitude offset.
         """
-        lsted = lst(self, longitude=longitude)
+        lsted = get_local_solar_time(self, longitude=longitude)
         return GeoDataArray(lsted)
 
     def mask(
@@ -58,7 +52,7 @@ class GeoDataArray(xr.DataArray):
         )
         return GeoDataArray(masked)
 
-    def cartplot(
+    def mapplot(
         self,
         x: str = None,
         y: str = None,
@@ -108,7 +102,7 @@ class GeoDataArray(xr.DataArray):
         """
         Plot this DataArray using Cartopy
         """
-        return cartplot(
+        return mapplot(
             self,
             x=x,
             y=y,
@@ -411,6 +405,35 @@ class Daskit:
         self.close()
 
 
+mask_data = {}  # cache for loaded mask datasets
+grid_data = {}  # cache for loaded grid datasets
+masks = {  # mapping of mask_file options to actual file names in the data
+    "cartopy": "cartopy_0.1_mask",
+    "era5": "era5_0.25_mask",
+}
+
+
+def _grid_signature(obj: xr.DataArray | xr.Dataset) -> tuple:
+    """
+    Create a deterministic grid signature based on coordinates.
+    """
+    lat = obj.lat.values
+    lon = obj.lon.values
+
+    return (
+        float(lat.min()),
+        float(lat.max()),
+        float(np.diff(lat).mean()),
+        float(lon.min()),
+        float(lon.max()),
+        float(np.diff(lon).mean()),
+        float(lat.mean()),
+        float(lon.mean()),
+        lat.size,
+        lon.size,
+    )
+
+
 def mask(
     obj: xr.DataArray | xr.Dataset,
     keep: Literal["land", "ocean"],
@@ -418,44 +441,54 @@ def mask(
     mask_file: Literal["cartopy", "era5"] = "era5",
 ) -> xr.DataArray | xr.Dataset:
     """
-    Apply a land-sea mask to the dataset. This function uses a netCDF file containing
-    land-sea masks to filter out specific features from the dataset.
+    Apply a land-sea mask to an xarray object.
+
+    The mask is interpolated to the target grid using nearest-neighbour
+    interpolation and cached per grid configuration.
     """
 
     if "lat" not in obj.dims or "lon" not in obj.dims:
-        raise ValueError(
-            "The dataset must have 'lat' and 'lon' dimensions to apply the land-sea mask."
-        )
-
-    masks = {
-        "cartopy": "cartopy_0.1_mask",
-        "era5": "era5_0.25_mask",
-    }
-
-    file = script_dir / "data" / "mask" / masks[mask_file]
-
-    mask = xr.open_dataset(file, engine="netcdf4")
+        raise ValueError("Object must contain 'lat' and 'lon' dimensions.")
 
     obj = obj.sortby(["lat", "lon"])
 
-    lat_min, lat_max = obj.lat.min().values, obj.lat.max().values
-    lon_min, lon_max = obj.lon.min().values, obj.lon.max().values
+    # Global caches assumed defined outside:
+    # mask_data: dict[str, xr.Dataset]
+    # grid_data: dict[tuple, xr.DataArray]
 
-    mask = mask[keep].sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
-    mask = mask.interp(lat=obj.lat, lon=obj.lon, method="nearest")
+    file = script_dir / "data" / "mask" / masks[mask_file]
+    grid_key = (mask_file, _grid_signature(obj))
 
-    if isinstance(obj, xr.Dataset):
-        new_obj = xr.Dataset()
-        for data_var in list(obj.data_vars):
-            new_obj[data_var] = obj[data_var].where(mask, other=np.nan)
+    # ------------------------------------------------------------------
+    # 1. Ensure raw mask file is loaded only once
+    # ------------------------------------------------------------------
+    if mask_file not in mask_data:
+        mask_data[mask_file] = xr.open_dataset(file, engine="netcdf4").load()
 
-    elif isinstance(obj, xr.DataArray):
-        new_obj = obj.where(mask, other=np.nan)
+    raw_mask = mask_data[mask_file]
 
-    return new_obj
+    # ------------------------------------------------------------------
+    # 2. Ensure interpolated mask exists for this grid
+    # ------------------------------------------------------------------
+    if grid_key not in grid_data:
+        lat_min = float(obj.lat.min())
+        lat_max = float(obj.lat.max())
+        lon_min = float(obj.lon.min())
+        lon_max = float(obj.lon.max())
+
+        mask_interp = (
+            raw_mask[keep]
+            .sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+            .interp(lat=obj.lat, lon=obj.lon, method="nearest")
+        )
+
+        grid_data[grid_key] = mask_interp
+
+    mask_interp = grid_data[grid_key]
+    return obj.where(mask_interp, other=np.nan)
 
 
-def lst(
+def get_local_solar_time(
     data: xr.Dataset | xr.DataArray, *, longitude="lon"
 ) -> xr.Dataset | xr.DataArray:
     """
@@ -474,296 +507,3 @@ def lst(
     lst.attributes["standard_name"] = "local_solar_time"
 
     return data.assign_coords({"lst": lst})
-
-
-def utc_offset(
-    obj: int | float | np.ndarray | xr.DataArray | xr.Dataset,
-    *,
-    name: Literal["lon", "longitude", "x"] = "lon",
-) -> int | float | np.ndarray | xr.DataArray | xr.Dataset:
-    """
-    Computes the hour offset from UTC time based on the longitude coordinate.
-    """
-
-    if isinstance(obj, (xr.DataArray, xr.Dataset)):
-        data = obj.copy()
-        data[name] = ((data[name] + 180) % 360) - 180
-        offset = data[name] * (24 / 360)
-        offset = offset.round() * pd.Timedelta(hours=1)
-
-    else:
-        if isinstance(obj, str):
-            obj = float(obj)
-        obj = ((obj + 180) % 360) - 180
-        offset = obj * (24 / 360)
-        offset = np.round(offset) * pd.Timedelta(hours=1)
-
-    return offset
-
-
-def chunk_by_lon(
-    obj: Union[xr.DataArray, xr.Dataset],
-    *,
-    lon: str = "lon",
-    deg: int = 15,
-) -> dict[str, Union[xr.DataArray, xr.Dataset]]:
-    """
-    Partition a dataset into longitude bins of fixed width.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input data containing a longitude coordinate.
-    lon : {"lon", "longitude", "x"}, optional
-        Name of the longitude coordinate. Default is "lon".
-    deg : int, optional
-        Bin width in degrees of longitude. Default is 15.
-
-    Returns
-    -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary mapping each longitude bin (e.g., "-180", "-165", ..., "165")
-        to the corresponding subset of the data. The longitude values within each
-        bin are restored to their original values and sorted.
-
-    Notes
-    -----
-    - Longitudes are first normalized to the range [-180, 180).
-    - Each partition is labeled by its central longitude value (rounded to the nearest
-      multiple of `deg`).
-    """
-
-    chunks = {}
-    data = obj.copy()
-    data[lon] = ((data[lon] + 180) % 360) - 180
-
-    original_lons = data[lon]
-    lon_rounded = (original_lons / deg).round() * deg
-
-    idx_df = pd.DataFrame(
-        {
-            "lon_original": original_lons,
-            "lon_rounded": lon_rounded,
-        }
-    )
-
-    data[lon] = idx_df["lon_rounded"].values
-
-    for lon_val in idx_df["lon_rounded"].unique():
-        lon_val_data = data.sel({lon: lon_val})
-
-        lon_val_df = idx_df[idx_df["lon_rounded"] == lon_val]
-        lon_val_data[lon] = lon_val_df["lon_original"].values
-
-        chunks[f"{lon_val}"] = lon_val_data.sortby(lon)
-
-    return chunks
-
-
-def chunk_by_tz(
-    obj: xr.DataArray | xr.Dataset,
-) -> dict[str, xr.DataArray | xr.Dataset]:
-    """
-    Chunk the dataset into chunks based on time zones.
-    This function splits the dataset into 15-degree longitude chunks and adjusts the time coordinate
-    based on the hour offset from UTC time for each chunk.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be split into time zone chunks.
-
-    Returns
-    -------
-    dict[str, xarray.DataArray or xarray.Dataset]
-        A dictionary where keys are time zone identifiers (e.g., "UTC+0", "UTC+1", etc.)
-        and values are the corresponding xarray objects for each time zone chunk.
-    """
-
-    data = obj.copy()
-    tz_chunks = {}
-    chunks = chunk_by_lon(data)
-    for chunk in chunks:
-        offset = utc_offset(chunk)
-        data = chunks[chunk]
-        data["time"] = data["time"] + offset
-        timezone = str(np.timedelta64(offset, "h")).split(" ")[0]
-        tz_chunks[f"UTC{timezone}"] = data
-
-    return tz_chunks
-
-
-def _process_chunk(func, kwargs, data, chunk):
-    offset = utc_offset(chunk)
-    data["time"] = data["time"] + offset
-    res = func(data, **kwargs)
-    print(f"{float(chunk):7.1f}°E : UTC {np.timedelta64(offset, 'h'):>5} - Done")
-
-    return res
-
-
-def _tz_apply_parallel(
-    func: Callable,
-    chunks: dict[str, xr.DataArray | xr.Dataset],
-    kwargs: Mapping | None,
-) -> xr.DataArray | xr.Dataset:
-    args = [(func, kwargs, chunks[chunk], chunk) for chunk in chunks]
-
-    processes = max(1, min(n_cpus, len(args)))
-    chunksize = max(1, len(args) // n_cpus)
-
-    if chunksize == 1:
-        maxtasksperchild = 2
-    else:
-        maxtasksperchild = chunksize
-
-    with Pool(processes=processes, maxtasksperchild=maxtasksperchild) as pool:
-        datasets = pool.starmap(_process_chunk, args, chunksize=chunksize)
-
-    kwargs = {
-        "dim": "lon",
-        "join": "exact",
-        "compat": "override",
-        "data_vars": "minimal",
-        "coords": "minimal",
-    }
-
-    return xr.concat(datasets, **kwargs).sortby("lon")
-
-
-def _tz_apply_serial(
-    func,
-    chunks,
-    kwargs,
-):
-    datasets = []
-    for chunk in chunks:
-        datasets.append(_process_chunk(func, kwargs, chunks[chunk], chunk))
-
-    if len(datasets) > 1:
-        result = xr.concat(datasets, dim="lon").sortby("lon")
-    else:
-        result = datasets[0]
-
-    return result
-
-
-def apply_func_by_time_zone(
-    func: Callable,
-    obj: xr.DataArray | xr.Dataset,
-    multiprocess: bool = True,
-    kwargs: Mapping | None = None,
-) -> xr.DataArray | xr.Dataset:
-    """
-    Process the dataset by time zones using a specified function.
-
-    Parameters
-    ----------
-    func : Callable,
-        The function to be applied to each chunk of the dataset.
-    obj : xarray.DataArray or xarray.Dataset
-        The dataset to be processed.
-    multiprocess : bool, optional
-        If True, the function will be applied in parallel using multiple processes.
-    **kwargs : Any
-        Additional keyword arguments to be passed to the applied function.
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The processed dataset after applying the function to each time zone chunk.
-
-    """
-
-    if "longitude" in obj.dims:
-        obj = obj.rename({"longitude": "lon"})
-    elif "latitude" in obj.dims:
-        obj = obj.rename({"latitude": "lat"})
-
-    if "lon" not in obj.dims or "lat" not in obj.dims or "time" not in obj.dims:
-        raise ValueError(
-            "The dataset must have (time, lat, lon) dimensions to apply the function."
-        )
-
-    if kwargs is None:
-        kwargs = {}
-
-    chunks = chunk_by_lon(obj)
-
-    if multiprocess and len(chunks) > 1:
-        return _tz_apply_parallel(func, chunks, kwargs)
-    else:
-        return _tz_apply_serial(func, chunks, kwargs)
-
-
-def open_grib_datatree(infile: Path) -> xr.DataTree:
-    """
-    Parse a GRIB file into separate xarray Datasets grouped by filter_by_keys.
-    Handles both multi-level and single-level fields.
-    """
-
-    infile = Path(infile).resolve()
-    tmpdir = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}"
-    files = cdo.split(infile, operator="splitname", outdir=tmpdir)
-
-    combined_datasets = {}
-    rejected_singles = {}
-    single_level_datasets = []
-
-    standard_dims = ["time", "latitude", "longitude", "lat", "lon", "x", "y"]
-
-    for f in files:
-        datasets = {}
-        try:
-            ds = xr.open_dataset(f, engine="cfgrib").squeeze()
-            dims = list(ds.dims)
-
-            # Determine expected dimensionality
-            single_dims = 3 if ("time" in dims and len(ds["time"]) > 1) else 2
-
-            # Detect non-standard dimensions (vertical or ensemble)
-            extra_dims = [d for d in dims if d not in standard_dims]
-
-            if len(dims) > single_dims:
-                # Multi-level dataset detected
-                if len(extra_dims) != 1:
-                    raise Exception("Too many non-standard dimensions in dataset")
-
-                level_dim = extra_dims[0]
-                rejected_singles.setdefault(level_dim, []).append(ds)
-                continue  # handled; skip to next file
-
-            # Otherwise, treat as single-level
-            single_level_datasets.append(ds)
-
-        except DatasetBuildError as e:
-            # Handle multi-field (multi-level) GRIB subsets
-            lines = str(e).split("\n")[1:]
-            for line in lines:
-                if "=" in line:
-                    keys = ast.literal_eval(line.split("=", 1)[1])
-                    key = list(keys.keys())[0]
-                    value = keys[key]
-                    ds = xr.open_dataset(f, engine="cfgrib", filter_by_keys=keys)
-                    datasets.setdefault(key, {})[value] = ds.squeeze()
-
-        grouped_datasets = {}
-        for key, value in datasets.items():
-            for subkey, ds in value.items():
-                grouped_datasets.setdefault(subkey, []).append(ds)
-
-        for subkey, rejected in rejected_singles.items():
-            if subkey in grouped_datasets:
-                grouped_datasets[subkey].extend(rejected)
-            else:
-                grouped_datasets[subkey] = list(rejected)
-
-        for k, groups in grouped_datasets.items():
-            combined = xr.merge(groups) if len(groups) > 1 else groups[0]
-            combined_datasets[k] = combined
-
-        single_level = xr.merge(single_level_datasets, compat="override")
-        combined_datasets["single_level"] = single_level
-
-        dt = xr.DataTree.from_dict(combined_datasets)
-
-    return dt

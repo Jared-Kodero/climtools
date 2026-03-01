@@ -31,7 +31,7 @@ Example usage
 import numpy as np
 import pandas as pd
 import xarray as xr
-from climtools import cartplot, calc_trends, calc_corr
+from climtools import mapplot, calc_trends, calc_corr
 
 # simple plotting example
 da = xr.DataArray(
@@ -42,7 +42,7 @@ da = xr.DataArray(
             "lon": np.linspace(-180, 180, 360)}
 )
 
-cartplot(da.isel(time=0), projection="PlateCarree", figsize=(8,4))
+mapplot(da.isel(time=0), projection="PlateCarree", figsize=(8,4))
 
 # compute trends
 trends = calc_trends(da)
@@ -54,7 +54,7 @@ Main features and available helpers
 The package exposes several modules and convenience functions. At the time of
 writing the top-level exports include (non-exhaustive):
 
-- Plotting & theming: `cartplot`, `animate`, `plot_pvalues`, `plot_cmaps`, `theme`, `IPCCTheme`
+- Plotting & theming: `mapplot`, `animate`, `plot_pvalues`, `plot_cmaps`, `theme`, `IPCCTheme`
 - Trends & stats: `calc_trends`, `calc_signicance`, `mk_trend_test`, `polyfit`, `calc_corr`
 - Regridding / CDO: helpers in `cdo_py.py` and `regridder.py` (e.g. `cdo`, `regrid_cam_se`)
 - Utilities: `tools.py` functions such as `interp_data`, `land_sea_mask`, `get_local_solar_time`, `tz_apply_func`, `setup_dask`, `close_dask`, `timeit`

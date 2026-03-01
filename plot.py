@@ -240,7 +240,7 @@ def plot_pvalues(
     )
 
 
-def cartplot(
+def mapplot(
     data: xr.DataArray,
     *,
     # Spatial configuration
@@ -510,7 +510,7 @@ def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
     local_kwargs["data"] = da
 
     fname = session_tmp_dir / f"{i:06d}.png"
-    plot = cartplot(**local_kwargs)
+    plot = mapplot(**local_kwargs)
 
     plot.ax.set_title(t)
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
