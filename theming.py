@@ -8,7 +8,10 @@ from typing import Callable, Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from .cmaps import Cmap
 from .tools import which
+
+cmaps: Cmap = Cmap()
 
 if "ipykernel" in sys.modules:
     import matplotlib_inline as plt_inline
@@ -47,7 +50,7 @@ def install_latex():
     return None
 
 
-class IPCCTheme:
+class PlotTheme:
     def __init__(self):
         self.latex: bool = which("latex")
         self.install_latex: Callable = install_latex
@@ -55,19 +58,19 @@ class IPCCTheme:
         # --- Context management methods ---
 
     def __enter__(self):
-        # Return self so you can use it as "with IPCCTheme() as theme:"
+        # Return self so you can use it as "with PlotTheme() as theme:"
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Automatically reset when leaving context
-        self.reset()
+        self.unset()
 
-    def reset(self):
+    def unset(self):
         """Reset matplotlib and seaborn settings to their defaults."""
         sns.reset_defaults()
         plt.rcParams.update(plt.rcParamsDefault)
 
-    def apply(
+    def set(
         self,
         *,
         font_scale: float = 1.5,
@@ -193,4 +196,4 @@ class IPCCTheme:
         ax.spines["right"].set_visible(False)
 
 
-theme: IPCCTheme = IPCCTheme()
+plot_theme: PlotTheme = PlotTheme()

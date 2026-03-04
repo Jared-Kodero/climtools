@@ -1,6 +1,4 @@
 import hashlib
-import json
-import os
 import textwrap
 import uuid
 from pathlib import Path
@@ -10,6 +8,7 @@ import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
@@ -24,9 +23,9 @@ cmocean_cmap_list = list(cmocean.cm.cmapnames)
 def build_cm(name: str) -> LinearSegmentedColormap | ListedColormap:
     names = [name, name.lower(), name.capitalize(), name.upper()]
     for c in names:
-        ipcc_file = _src_dir / f"{c}.txt"
-        if ipcc_file.exists():
-            return LinearSegmentedColormap.from_list(c, np.loadtxt(ipcc_file), N=256)
+        cmap_file = _src_dir / f"{c}.txt"
+        if cmap_file.exists():
+            return LinearSegmentedColormap.from_list(c, np.loadtxt(cmap_file), N=256)
         if c in plt_cmap_list:
             return plt.colormaps[c]
         if c in cmocean_cmap_list:
@@ -301,8 +300,8 @@ def create(
 
 
 def gen_cmap_file():
-    _meta_file = _file_dir / ".cmap_meta.json"
-    _cmap_file = _file_dir / "cmaps_inventory.py"
+    _meta_file = _file_dir / ".cmap_meta.yaml"
+    _cmap_file = _file_dir / "cmaps.py"
 
     ipcc_cmap_list = [f.stem for f in _src_dir.glob("*.txt")]
     plt_cmap_list = plt.colormaps()
@@ -312,37 +311,56 @@ def gen_cmap_file():
     def _compute_hash():
         """Compute a hash from versions and src file metadata (names + modification times)."""
         src_files = sorted(_src_dir.glob("*.txt"))
-        src_state = {f.name: os.path.getmtime(f) for f in src_files}
+
+        src_state = []
+        for s in src_files:
+            with open(s, "r") as f:
+                src_state.append(f.read())
+
+        src_state = "".join(src_state)
+
+        src_checksum = hashlib.sha256(src_state.encode("utf-8")).hexdigest().upper()
 
         data = {
             "matplotlib_version": matplotlib.__version__,
             "cmocean_version": cmocean.__version__,
-            "src_state": src_state,
+            "src_state": src_checksum,
         }
 
-        hash_str = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
-        return hash_str, data
+        data_string = [src_checksum]
+        data_string.append(data["matplotlib_version"])
+        data_string.append(data["cmocean_version"])
+
+        data_string = "_".join(map(str, data_string))
+        checksum = hashlib.sha256(data_string.encode("utf-8")).hexdigest().upper()
+
+        data["checksum"] = checksum
+
+        with open(_meta_file, "w") as f:
+            yaml.safe_dump(data, f, sort_keys=True)
+
+        return checksum, data
 
     def _load_meta():
         if _meta_file.exists():
             try:
                 with open(_meta_file, "r") as f:
-                    return json.load(f)
+                    return yaml.safe_load(f)
             except Exception:
                 return {}
         return {}
 
-    def _write_meta(data, hash_str):
-        data["_hash"] = hash_str
+    def _write_meta(data, checksum):
+        data["checksum"] = checksum
         with open(_meta_file, "w") as f:
-            json.dump(data, f, indent=2)
+            yaml.safe_dump(data, f, sort_keys=True)
 
     def _cmap_file_contents():
         imports = """
         from dataclasses import dataclass
         from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-        from .cmap_funcs import *
+        from .init_cmap import *
         \n
         """
         imports = textwrap.dedent(imports)
@@ -359,6 +377,10 @@ def gen_cmap_file():
         body = f"""
         @dataclass
         class Cmap:
+            '''
+            A utility class for working with colormaps, providing methods to create, modify, and combine colormaps in various ways.
+            '''
+             
 
             @staticmethod
             def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
@@ -404,27 +426,21 @@ def gen_cmap_file():
             """
         body = textwrap.dedent(body)
 
-        init = """
-        cmaps: Cmap = Cmap()
-        cm : Cmap = cmaps
-        """
-        init = textwrap.dedent(init)
-        return imports, body, init
+        return imports, body
 
     def _generate():
         """Generate plot_cmaps.py only if versions or src files changed (added, removed, or modified)."""
-        new_hash, meta_data = _compute_hash()
+        new_checksum, meta_data = _compute_hash()
         old_meta = _load_meta()
 
-        if _cmap_file.exists() and old_meta.get("_hash") == new_hash:
+        if _cmap_file.exists() and old_meta.get("checksum") == new_checksum:
             return  # Up to date
-        imports, body, init = _cmap_file_contents()
+        (imports, body) = _cmap_file_contents()
         with open(_cmap_file, "w") as f:
             f.write(imports)
             f.write(body)
-            f.write(init)
 
-        _write_meta(meta_data, new_hash)
+        _write_meta(meta_data, new_checksum)
 
     _generate()
 

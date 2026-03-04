@@ -12,19 +12,16 @@ from typing import Any, Literal
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes
-import ipywidgets as widgets
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 from cartopy.util import add_cyclic_point
-from IPython.display import display
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 
 # ---- Plot callback ----
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
-from scipy.ndimage import gaussian_filter
 
 from .tools import RicedDict, get_func_signature, n_cpus, tmp
 
@@ -274,6 +271,7 @@ def mapplot(
     levels: int | list = None,
     extend: str = None,
     robust: bool = False,
+    title: str = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -476,6 +474,8 @@ def mapplot(
     del plot_kwargs["kwargs"]
 
     artist = plot(**plot_kwargs, extend=extend)
+    if title:
+        plt.title(title)
 
     if add_colorbar:
         cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
@@ -560,6 +560,7 @@ def animate(
     levels: int | list = None,
     extend: str = None,
     robust: bool = False,
+    title: str = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -818,134 +819,3 @@ def animate(
         )
     else:
         return None
-
-
-def plot_3d(
-    da: xr.DataArray,
-    lon: str = "lon",
-    lat: str = "lat",
-    vertical_scale_factor: float = 1,
-    sigma: float = 0,
-    light_dir: tuple[float, float, float] = (0.4, 0.3, 0.85),
-    view_elev: float = 70,
-    view_azim: float = 90,
-    cmap: str = "terrain",
-    figsize=(10, 10),
-):
-    """
-    Create an interactive 3D plot of a geospatial dataset using Matplotlib.
-
-    Parameters
-    ----------
-    da : xarray.DataArray
-        The input data array containing the elevation data and coordinates.
-    lon : str, default "lon"
-        The name of the longitude coordinate in the data_array.
-    lat : str, default "lat"
-        The name of the latitude coordinate in the data_array.
-    vertical_scale_factor : float, default 1
-        A factor to exaggerate the vertical scale of the plot. Higher values will make elevation differences more pronounced.
-    sigma : float, default 0
-        The standard deviation for Gaussian smoothing applied to the elevation data. A value of 0 means no smoothing.
-    light_dir : tuple of 3 floats, default (0.4, 0.3, 0.85)
-        The direction of the light source for shading the surface. Should be a 3D vector (x, y, z) that will be normalized.
-    view_elev : float, default 70
-        The elevation angle (in degrees) of the camera view.
-    view_azim : float, default 90
-        The azimuth angle (in degrees) of the camera view.
-    cmap : str or Colormap, default "terrain"
-        The colormap to use for shading the surface based on illumination.
-    figsize : tuple of float, default (10, 10)
-        The size of the figure in inches (width, height).
-
-    """
-    da = da.load()
-
-    z = da.values
-    lon = da[lon].values
-    lat = da[lat].values
-
-    X, Y = np.meshgrid(lon, lat)
-
-    # ---- Precompute once ----
-    if sigma and sigma > 0:
-        z_smooth = gaussian_filter(z, sigma=sigma)
-    else:
-        z_smooth = z
-
-    dz_dy, dz_dx = np.gradient(z_smooth)
-
-    nx = -dz_dx
-    ny = -dz_dy
-    nz = np.ones_like(z_smooth)
-
-    norm = np.sqrt(nx**2 + ny**2 + nz**2)
-    nx /= norm
-    ny /= norm
-    nz /= norm
-
-    light = np.asarray(light_dir, dtype=float)
-    light /= np.linalg.norm(light)
-
-    illumination = nx * light[0] + ny * light[1] + nz * light[2]
-    illumination = np.clip(illumination, 0.0, 1.0)
-
-    if isinstance(cmap, str):
-        cmap = plt.get_cmap(cmap)
-
-    facecolors = cmap(illumination)
-
-    def _plot(vertical_exaggeration, view_elev, view_azim):
-        Z = vertical_exaggeration * z_smooth
-
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_subplot(111, projection="3d")
-
-        ax.plot_surface(
-            X,
-            Y,
-            Z,
-            facecolors=facecolors,
-            linewidth=0,
-            antialiased=False,
-            shade=False,
-        )
-
-        ax.view_init(elev=view_elev, azim=view_azim)
-        ax.set_axis_off()
-
-        plt.show()
-
-    if "ipykernel" in sys.modules:
-        plt.style.use("dark_background")
-        controls = widgets.interact(
-            _plot,
-            vertical_exaggeration=widgets.FloatSlider(
-                value=vertical_scale_factor,
-                min=1,
-                max=100,
-                step=1,
-                description="Vertical scale",
-                continuous_update=False,
-            ),
-            view_elev=widgets.FloatSlider(
-                value=view_elev,
-                min=0,
-                max=90,
-                step=1,
-                description="Camera elevation (deg)",
-                continuous_update=False,
-            ),
-            view_azim=widgets.FloatSlider(
-                value=view_azim,
-                min=0,
-                max=360,
-                step=1,
-                description="Camera azimuth (deg)",
-                continuous_update=False,
-            ),
-        )
-
-        display(controls)
-    else:
-        _plot(vertical_scale_factor, view_elev, view_azim)

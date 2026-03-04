@@ -10,12 +10,14 @@ import pandas as pd
 import xarray as xr
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from .plot import PlotObj, animate, make_cyclic, mapplot
+from .plotting import PlotObj, animate, make_cyclic, mapplot
 from .statistics import *
 from .tools import n_cpus
 
 warnings.filterwarnings("ignore")
-script_dir = Path(__file__).resolve().parent
+_script_dir = Path(__file__).resolve().parent
+_dask_client = None  # global variable to hold the Dask client instance
+_dask_cluster = None  # global variable to hold the Dask cluster instance
 
 
 class GeoDataArray(xr.DataArray):
@@ -84,6 +86,7 @@ class GeoDataArray(xr.DataArray):
         levels: int | list = None,
         extend: str = None,
         robust: bool = False,
+        title: str = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -119,6 +122,7 @@ class GeoDataArray(xr.DataArray):
             vmax=vmax,
             levels=levels,
             robust=robust,
+            title=title,
             extend=extend,
             orientation=orientation,
             add_colorbar=add_colorbar,
@@ -175,6 +179,7 @@ class GeoDataArray(xr.DataArray):
         levels: int | list[int] = None,
         extend: str = None,
         robust: bool = False,
+        title: str = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -217,6 +222,7 @@ class GeoDataArray(xr.DataArray):
             vmax=vmax,
             levels=levels,
             robust=robust,
+            title=title,
             extend=extend,
             orientation=orientation,
             add_colorbar=add_colorbar,
@@ -321,7 +327,7 @@ class GeoDataArray(xr.DataArray):
         )
 
 
-class Daskit:
+class SetupDask:
     """
     A class to manage Dask client and cluster setup for parallel computations.
     It provides methods to start and close a Dask client and cluster with specified configurations.
@@ -358,23 +364,26 @@ class Daskit:
         self,
     ):
         """
-        - Imports Dask and Dask distributed.
-        - Creates a Dask client.
-        - Sets up the Dask dashboard.
+        Start a Dask client and cluster with the specified configuration.
+        If a client and cluster already exist, it will reuse them instead of creating new ones.
 
-        Parameters:
-        ___________
-            workers (int, optional): Number of workers to create. Default is 8.
-            threads_per_worker (int, optional): Number of threads per worker. Default is 4.
-            processes (bool, optional): Whether to use processes instead of threads. Default is True.
-            get_info (bool, optional): Whether to return the Dask dashboard URL. Default is False.
-            dynamic_port (bool, optional): Whether to use a dynamic port. Default is False and uses port 8787.
-            filter_warnings (bool, optional): Whether to filter warnings. Default is True.
+        Parameters
+        ----------
 
-        Example:
-        ________
-            >>> setup_dask(get_info=True, filter_warnings=False)
+        workers: int
+            Number of worker processes to start in the Dask cluster.
+        threads_per_worker: int
+            Number of threads to use per worker process.
+        processes: bool
+            Whether to use separate processes for workers (True) or threads (False).
+        filter_warnings: bool
+            Whether to filter out Dask-related warnings for cleaner output.
+        memory_limit: int or str
+            Memory limit for each worker (e.g., '2GB' or 2048). Set to 0 for no limit.
+
         """
+
+        global _dask_client, _dask_cluster
 
         if self.client is not None:
             return self.client
@@ -386,14 +395,20 @@ class Daskit:
         else:
             silence_level = logging.WARN
 
-        self.cluster = LocalCluster(
-            n_workers=self.workers,
-            threads_per_worker=self.threads_per_worker,
-            memory_limit=self.memory_limit,
-            silence_logs=silence_level,
-            processes=self.processes,
-        )
-        self.client = Client(self.cluster)
+        if _dask_client and _dask_cluster:
+            self.client = _dask_client
+            self.cluster = _dask_cluster
+        else:
+            self.cluster = LocalCluster(
+                n_workers=self.workers,
+                threads_per_worker=self.threads_per_worker,
+                memory_limit=self.memory_limit,
+                silence_logs=silence_level,
+                processes=self.processes,
+            )
+            self.client = Client(self.cluster)
+            _dask_client = self.client
+            _dask_cluster = self.cluster
 
         return self.client
 
@@ -445,6 +460,15 @@ def mask(
 
     The mask is interpolated to the target grid using nearest-neighbour
     interpolation and cached per grid configuration.
+
+    Parameters
+    ----------
+    obj : xr.DataArray or xr.Dataset
+        The xarray object to which the mask will be applied. Must contain 'lat' and 'lon' dimensions.
+    keep : {'land', 'ocean'}
+        Specify whether to keep land or ocean points. 'land' will mask out ocean points, and 'ocean' will mask out land points.
+    mask_file : {'cartopy', 'era5'}, default 'era5'
+        The source of the land-sea mask. 'cartopy' uses a mask derived from Cartopy's shapefiles, while 'era5' uses a mask derived from ERA5 reanalysis data. The choice may affect the resolution and accuracy of the mask, especially for coastal regions.
     """
 
     if "lat" not in obj.dims or "lon" not in obj.dims:
@@ -456,7 +480,7 @@ def mask(
     # mask_data: dict[str, xr.Dataset]
     # grid_data: dict[tuple, xr.DataArray]
 
-    file = script_dir / "data" / "mask" / masks[mask_file]
+    file = _script_dir / "data" / "mask" / masks[mask_file]
     grid_key = (mask_file, _grid_signature(obj))
 
     # ------------------------------------------------------------------
@@ -494,6 +518,16 @@ def get_local_solar_time(
     """
     Calculate the local solar time for the dataset based on the longitude coordinate.
     The local solar time is calculated as the UTC time plus the longitude offset.
+
+    Parameters
+    ----------
+    data : xr.Dataset or xr.DataArray
+        The input dataset or data array containing a 'time' coordinate and a longitude coordinate.
+    longitude : str, default 'lon'
+        The name of the longitude coordinate in the dataset.
+        This coordinate is used to calculate the local solar time offset.
+
+
     """
 
     if longitude not in data:

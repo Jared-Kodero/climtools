@@ -1,7 +1,6 @@
 import os
 import subprocess
 import uuid
-import warnings
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ class CDONotFoundError(RuntimeError):
     pass
 
 
-class CDO:
+class Cdo:
     """
     Limited Python wrapper for Climate Data Operators (CDO) interpolation, merging, and transformation operations.
     The original CDO python package wasn't doing what I wanted, so I made my own.
@@ -30,7 +29,7 @@ class CDO:
     You can also display CDO help by calling `cdo.help()` after creating an instance.
 
     Example usage:
-        >>> cdo = CDO()
+        >>> cdo = Cdo()
         >>> cdo.remapbil("input.nc", resolution=0.5)
         >>> cdo.mergetime(["file1.nc", "file2.nc"], "merged.nc")
     """
@@ -39,10 +38,8 @@ class CDO:
         # check CDO availability on initialization
         self.cdo_path = which("cdo")
         if not self.cdo_path:
-            warnings.warn(
-                "CDO is not installed or not available in PATH.\
-                See https://code.mpimet.mpg.de/projects/cdo/wiki",
-                UserWarning,
+            print(
+                "CDO executable not found in system PATH. Please install CDO and ensure it is accessible."
             )
 
         self.tmp_dir = Path(tmp / f"{uuid.uuid4().hex}")
@@ -53,7 +50,7 @@ class CDO:
         os.environ["CDO_HISTORY_INFO"] = "false"
 
     def run_cdo(self, input_cmds: list[str]):
-        cmd = ["cdo", "-s", "-w", "-P", str(n_cpus)]
+        cmd = ["cdo", "-s", "-w", "-P", str(min(n_cpus, 32))]
         cmd.extend(input_cmds)
 
         seen = set()
@@ -111,23 +108,6 @@ class CDO:
         res = self.run_cdo(cmd)
         return res
 
-    def _bbox_from_griddes(self, infile) -> tuple[float, float, float, float]:
-        data_dict = self.griddes(
-            infile,
-        )
-
-        if len(data_dict) > 1:
-            raise ValueError("Input file has multiple grids.")
-
-        lon_min = data_dict["xfirst"]
-        lon_max = lon_min + (data_dict["xsize"] - 1) * data_dict["xinc"]
-        lat_max = data_dict["yfirst"]
-        lat_min = lat_max + (data_dict["ysize"] - 1) * data_dict["yinc"]
-
-        print(f"Bounding box: {lon_min}, {lat_min}, {lon_max}, {lat_max}")
-
-        return lon_min, lat_min, lon_max, lat_max
-
     def _make_grid_description(self, lon_min, lat_min, lon_max, lat_max, resolution):
         # Compute sizes
         xsize = abs(int(round((lon_max - lon_min) / resolution)) + 1)
@@ -144,7 +124,7 @@ class CDO:
 
         return "\n".join(grid_description)
 
-    def _h_interp_data(
+    def interpolate(
         self,
         obj: Path | xr.DataArray | xr.Dataset,
         outfile: Path = None,
@@ -177,7 +157,9 @@ class CDO:
         if bbox:
             lon_min, lat_min, lon_max, lat_max = bbox
         else:
-            lon_min, lat_min, lon_max, lat_max = self._bbox_from_griddes(obj)
+            raise ValueError(
+                "Bounding box [lon_min, lat_min, lon_max, lat_max] must be provided for interpolation."
+            )
 
         grid_description = self._make_grid_description(
             lon_min, lat_min, lon_max, lat_max, resolution
@@ -312,7 +294,7 @@ class CDO:
 
         """
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -339,7 +321,7 @@ class CDO:
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -363,7 +345,7 @@ class CDO:
         bbox_format: (lon_min, lat_min, lon_max, lat_max)
         """
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -391,7 +373,7 @@ class CDO:
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -419,7 +401,7 @@ class CDO:
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -447,7 +429,7 @@ class CDO:
         if extrapolate:
             os.environ["REMAP_EXTRAPOLATE"] = "on"
 
-        return self._h_interp_data(
+        return self.interpolate(
             obj=obj,
             outfile=outfile,
             resolution=resolution,
@@ -457,4 +439,4 @@ class CDO:
         )
 
 
-cdo: CDO = CDO()
+cdo: Cdo = Cdo()

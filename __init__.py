@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import sys
 
-from .cmap_funcs import *
-from .cmaps_inventory import cm, cmaps
-from .plot import get_cbar_axes, plot_3d, plot_pvalues
-from .plot_theme import IPCCTheme, theme
+# import cmaps as _cmaps --- IGNORE ---
+from .init_cmap import *
+from .plotting import get_cbar_axes, plot_pvalues
 from .pycdo import cdo
 from .statistics import calc_significance
+from .theming import cmaps, plot_theme
 from .tools import (
     BoundingBox,
-    FileLock,
     RedirectStreams,
-    aip,
     cp,
     cwd,
     du,
@@ -21,22 +19,18 @@ from .tools import (
     home,
     host,
     logexc,
-    logmsg,
-    logobj,
     mkdir,
     mv,
     n_cpus,
     rm,
-    set_vscode_widget_theme,
     symlink,
     timeit,
     tmp,
-    to_numeric,
     user,
 )
 from .xgeo import (
-    Daskit,
     GeoDataArray,
+    SetupDask,
     get_local_solar_time,
     mask,
 )
@@ -59,21 +53,16 @@ specific functions you need.
 """
 
 if "ipykernel" in sys.modules:
-    set_vscode_widget_theme()
+    # set_vscode_widget_theme()
+    ...
 
 __all__ = [
     "BoundingBox",
-    "Daskit",
-    "FileLock",
     "GeoDataArray",
-    "IPCCTheme",
-    "logexc",
-    "logmsg",
-    "logobj",
     "RedirectStreams",
+    "SetupDask",
     "calc_significance",
     "cdo",
-    "cm",
     "cmaps",
     "cp",
     "cwd",
@@ -81,21 +70,19 @@ __all__ = [
     "file_kind",
     "get_cbar_axes",
     "get_func_signature",
+    "get_local_solar_time",
     "home",
     "host",
-    "aip",
-    "get_local_solar_time",
+    "logexc",
     "mask",
     "mkdir",
     "mv",
     "n_cpus",
-    "plot_3d",
     "plot_pvalues",
+    "plot_theme",
     "rm",
     "symlink",
-    "theme",
     "timeit",
     "tmp",
-    "to_numeric",
     "user",
 ]
