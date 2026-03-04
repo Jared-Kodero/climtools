@@ -4,11 +4,9 @@ import uuid
 from pathlib import Path
 
 import cmocean
-import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import yaml
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
@@ -300,7 +298,6 @@ def create(
 
 
 def gen_cmap_file():
-    _meta_file = _file_dir / ".cmap_meta.yaml"
     _cmap_file = _file_dir / "cmaps.py"
 
     ipcc_cmap_list = [f.stem for f in _src_dir.glob("*.txt")]
@@ -308,59 +305,35 @@ def gen_cmap_file():
     cmocean_cmap_list = list(cmocean.cm.cmapnames)
     all_cmaps = ipcc_cmap_list + plt_cmap_list + cmocean_cmap_list
 
-    def _compute_hash():
-        """Compute a hash from versions and src file metadata (names + modification times)."""
-        src_files = sorted(_src_dir.glob("*.txt"))
+    src_files = sorted(_src_dir.glob("*.txt"))
 
-        src_state = []
-        for s in src_files:
-            with open(s, "r") as f:
-                src_state.append(f.read())
+    src_state = []
+    for s in src_files:
+        with open(s, "r") as f:
+            src_state.append(f.read())
 
-        src_state = "".join(src_state)
+    src_state = "".join(src_state)
 
-        src_checksum = hashlib.sha256(src_state.encode("utf-8")).hexdigest().upper()
+    src_checksum = hashlib.sha256(src_state.encode("utf-8")).hexdigest().upper()
 
-        data = {
-            "matplotlib_version": matplotlib.__version__,
-            "cmocean_version": cmocean.__version__,
-            "src_state": src_checksum,
-        }
+    checksum = None
 
-        data_string = [src_checksum]
-        data_string.append(data["matplotlib_version"])
-        data_string.append(data["cmocean_version"])
+    try:
+        from .cmaps import checksum
 
-        data_string = "_".join(map(str, data_string))
-        checksum = hashlib.sha256(data_string.encode("utf-8")).hexdigest().upper()
-
-        data["checksum"] = checksum
-
-        with open(_meta_file, "w") as f:
-            yaml.safe_dump(data, f, sort_keys=True)
-
-        return checksum, data
-
-    def _load_meta():
-        if _meta_file.exists():
-            try:
-                with open(_meta_file, "r") as f:
-                    return yaml.safe_load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def _write_meta(data, checksum):
-        data["checksum"] = checksum
-        with open(_meta_file, "w") as f:
-            yaml.safe_dump(data, f, sort_keys=True)
+        if checksum == src_checksum:
+            return
+    except Exception:
+        checksum = src_checksum
 
     def _cmap_file_contents():
-        imports = """
+        imports = f"""
         from dataclasses import dataclass
         from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
         from .init_cmap import *
+
+        checksum = "{checksum}"
         \n
         """
         imports = textwrap.dedent(imports)
@@ -404,9 +377,16 @@ def gen_cmap_file():
             \n
                 """
 
+        processed_cmaps = []
         for name in all_cmaps:
             if name.endswith("_r") or "cmo" in name.lower():
                 continue
+
+            if name.lower() in processed_cmaps:
+                continue
+
+            processed_cmaps.append(name.lower())
+
             body = f""" {body}
             
             @staticmethod
@@ -430,17 +410,13 @@ def gen_cmap_file():
 
     def _generate():
         """Generate plot_cmaps.py only if versions or src files changed (added, removed, or modified)."""
-        new_checksum, meta_data = _compute_hash()
-        old_meta = _load_meta()
 
-        if _cmap_file.exists() and old_meta.get("checksum") == new_checksum:
-            return  # Up to date
+        if _cmap_file.exists():
+            _cmap_file.unlink()
         (imports, body) = _cmap_file_contents()
         with open(_cmap_file, "w") as f:
             f.write(imports)
             f.write(body)
-
-        _write_meta(meta_data, new_checksum)
 
     _generate()
 

@@ -4,6 +4,8 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .init_cmap import *
 
+checksum = "F8735C64719F7A1EA469B1AEA3725097F5A893ADE1F4B29EA8D472A37E7338D0"
+
 
 
 @dataclass
@@ -1974,23 +1976,6 @@ class Cmap:
         ''' Get the 'ice' colormap '''
 
         return get_colormap("ice", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-    @staticmethod
-    def gray(
-        N: int = 32,
-        r: bool = False,
-        split: tuple[float, float] = (0, 1),
-        add_colors: dict[int, str | list[str]] = None,
-        discrete: bool = False,
-        as_colors : bool = False,
-        gamma: float = 1.0
-    ) -> ListedColormap | LinearSegmentedColormap:
-        ''' Get the 'gray' colormap '''
-
-        return get_colormap("gray", N, r, split, add_colors, discrete,as_colors, gamma)
 
 
 
