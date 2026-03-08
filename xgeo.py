@@ -10,7 +10,7 @@ import pandas as pd
 import xarray as xr
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from .plotting import PlotObj, animate, make_cyclic, mapplot
+from .plotting import PlotObj, animate, animate3d, make_cyclic, mapplot, mapplot3d
 from .statistics import *
 from .tools import n_cpus
 
@@ -139,6 +139,64 @@ class GeoDataArray(xr.DataArray):
             **kwargs,
         )
 
+    def mapplot3d(
+        self,
+        window_size: str | tuple = None,
+        dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
+        outfile: Path = None,
+        format: Literal["png", "html"] = "png",
+        vmin: int | float = None,
+        vmax: int | float = None,
+        zscale: int | float = 1,
+        title: str = None,
+        cam_elev: int | float = None,
+        cam_azim: int | float = None,
+        xlabel: str = None,
+        ylabel: str = None,
+        zlabel: str = None,
+        n_xlabels: int = None,
+        n_ylabels: int = None,
+        n_zlabels: int = None,
+        font_size: int = None,
+        opacity: list | Literal["linear", "sigmoid"] = "linear",
+        opacity_unit_distance: int | float = None,
+        blending: Literal[
+            "additive", "maximum", "minimum", "composite", "average"
+        ] = "composite",
+        padding: int | float = None,
+        animation: bool = False,
+    ):
+        """
+        Render a 3D scalar field from an xarray.DataArray using PyVista.
+        """
+        return mapplot3d(
+            self,
+            window_size=window_size,
+            dim_map=dim_map,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            zscale=zscale,
+            title=title,
+            cam_elev=cam_elev,
+            cam_azim=cam_azim,
+            xlabel=xlabel,
+            ylabel=ylabel,
+            zlabel=zlabel,
+            n_xlabels=n_xlabels,
+            n_ylabels=n_ylabels,
+            n_zlabels=n_zlabels,
+            font_size=font_size,
+            animation=animation,
+            outfile=outfile,
+            format=format,
+            opacity=opacity,
+            opacity_unit_distance=opacity_unit_distance,
+            blending=blending,
+            padding=padding,
+        )
+
     def animate(
         self,
         outfile: Path | str = None,
@@ -236,6 +294,73 @@ class GeoDataArray(xr.DataArray):
             land=land,
             lakes=lakes,
             rivers=rivers,
+            **kwargs,
+        )
+
+    def animate3d(
+        self,
+        dim: str = "time",
+        dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+        indices: list = None,
+        outfile: Path = None,
+        format: Literal["mp4", "html"] = "mp4",
+        window_size: str | tuple = None,
+        fps: int = 10,
+        parallel: bool = True,
+        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
+        vmin: int | float = None,
+        vmax: int | float = None,
+        zscale: int | float = 1,
+        title: str = None,
+        cam_elev: int | float = None,
+        cam_azim: int | float = None,
+        xlabel: str = None,
+        ylabel: str = None,
+        zlabel: str = None,
+        n_xlabels: int = None,
+        n_ylabels: int = None,
+        n_zlabels: int = None,
+        font_size: int = None,
+        opacity: list | Literal["linear", "sigmoid"] = "linear",
+        opacity_unit_distance: int | float = None,
+        blending: Literal[
+            "additive", "maximum", "minimum", "composite", "average"
+        ] = "composite",
+        padding: int | float = None,
+        **kwargs,
+    ):
+        """
+        Animate this DataArray in 3D using the global `animate3d()` function.
+        """
+
+        return animate3d(
+            self,
+            dim=dim,
+            dim_map=dim_map,
+            indices=indices,
+            outfile=outfile,
+            format=format,
+            window_size=window_size,
+            fps=fps,
+            parallel=parallel,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            zscale=zscale,
+            title=title,
+            cam_elev=cam_elev,
+            cam_azim=cam_azim,
+            xlabel=xlabel,
+            ylabel=ylabel,
+            zlabel=zlabel,
+            n_xlabels=n_xlabels,
+            n_ylabels=n_ylabels,
+            n_zlabels=n_zlabels,
+            font_size=font_size,
+            opacity=opacity,
+            opacity_unit_distance=opacity_unit_distance,
+            blending=blending,
+            padding=padding,
             **kwargs,
         )
 
