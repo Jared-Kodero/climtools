@@ -54,6 +54,42 @@ class GeoDataArray(xr.DataArray):
         )
         return GeoDataArray(masked)
 
+    def plot_globe(
+        self,
+        x: str = "lon",
+        y: str = "lat",
+        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
+        coarsen_by: int = 10,
+        outfile: str | Path = None,
+    ):
+        """
+        Plot this DataArray on a globe using GeoVista.
+        """
+
+        da = self
+        import geovista as gv
+
+        resolution = da[x].diff(x).mean().values
+
+        if float(resolution) < 0.25:
+            da = da.coarsen(**{x: coarsen_by, y: coarsen_by}, boundary="trim").mean()
+
+        # Create the mesh from the sample data.
+        mesh = gv.Transform.from_1d(da.lon, da.lat, data=da.data)
+
+        # Plot the mesh with coastlines.
+        p = gv.GeoPlotter()
+        sargs = {"title": f"{da.name} / {da.units}"}
+        p.add_mesh(mesh, cmap=cmap, scalar_bar_args=sargs)
+        p.add_coastlines(color="white")
+        p.camera.zoom(1.2)
+
+        if outfile and outfile.endswith(".html"):
+            p.export_html(outfile)
+        elif outfile:
+            p.screenshot(outfile)
+        p.show()
+
     def mapplot(
         self,
         x: str = None,
@@ -141,30 +177,36 @@ class GeoDataArray(xr.DataArray):
 
     def mapplot3d(
         self,
+        grid_type: Literal["uniform", "structured"] = "uniform",
+        sphere: bool = False,
         window_size: str | tuple = None,
         dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+        z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
+        z_unit_scale: int | float = 1,
         cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
         outfile: Path = None,
-        format: Literal["png", "html"] = "png",
+        format: Literal["html", "png"] = "png",
         vmin: int | float = None,
         vmax: int | float = None,
+        log_scale: bool = False,
         zscale: int | float = 1,
         title: str = None,
         cam_elev: int | float = None,
         cam_azim: int | float = None,
+        show_scalar_bar: bool = True,
         xlabel: str = None,
         ylabel: str = None,
         zlabel: str = None,
         n_xlabels: int = None,
         n_ylabels: int = None,
         n_zlabels: int = None,
-        font_size: int = None,
         opacity: list | Literal["linear", "sigmoid"] = "linear",
         opacity_unit_distance: int | float = None,
         blending: Literal[
             "additive", "maximum", "minimum", "composite", "average"
         ] = "composite",
         padding: int | float = None,
+        font_size: int = None,
         animation: bool = False,
     ):
         """
@@ -173,12 +215,17 @@ class GeoDataArray(xr.DataArray):
         return mapplot3d(
             self,
             window_size=window_size,
+            grid_type=grid_type,
+            sphere=sphere,
             dim_map=dim_map,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
+            log_scale=log_scale,
             zscale=zscale,
             title=title,
+            z_unit=z_unit,
+            z_unit_scale=z_unit_scale,
             cam_elev=cam_elev,
             cam_azim=cam_azim,
             xlabel=xlabel,
@@ -195,6 +242,7 @@ class GeoDataArray(xr.DataArray):
             opacity_unit_distance=opacity_unit_distance,
             blending=blending,
             padding=padding,
+            show_scalar_bar=show_scalar_bar,
         )
 
     def animate(
@@ -300,7 +348,11 @@ class GeoDataArray(xr.DataArray):
     def animate3d(
         self,
         dim: str = "time",
+        grid_type: Literal["uniform", "structured"] = "uniform",
+        sphere: bool = False,
         dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+        z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
+        z_unit_scale: int | float = 1,
         indices: list = None,
         outfile: Path = None,
         format: Literal["mp4", "html"] = "mp4",
@@ -310,6 +362,7 @@ class GeoDataArray(xr.DataArray):
         cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
         vmin: int | float = None,
         vmax: int | float = None,
+        log_scale: bool = False,
         zscale: int | float = 1,
         title: str = None,
         cam_elev: int | float = None,
@@ -317,6 +370,7 @@ class GeoDataArray(xr.DataArray):
         xlabel: str = None,
         ylabel: str = None,
         zlabel: str = None,
+        show_scalar_bar: bool = True,
         n_xlabels: int = None,
         n_ylabels: int = None,
         n_zlabels: int = None,
@@ -336,16 +390,21 @@ class GeoDataArray(xr.DataArray):
         return animate3d(
             self,
             dim=dim,
+            grid_type=grid_type,
+            sphere=sphere,
             dim_map=dim_map,
             indices=indices,
             outfile=outfile,
             format=format,
             window_size=window_size,
             fps=fps,
+            z_unit=z_unit,
+            z_unit_scale=z_unit_scale,
             parallel=parallel,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
+            log_scale=log_scale,
             zscale=zscale,
             title=title,
             cam_elev=cam_elev,
@@ -361,6 +420,7 @@ class GeoDataArray(xr.DataArray):
             opacity_unit_distance=opacity_unit_distance,
             blending=blending,
             padding=padding,
+            show_scalar_bar=show_scalar_bar,
             **kwargs,
         )
 
@@ -530,6 +590,7 @@ class SetupDask:
                 memory_limit=self.memory_limit,
                 silence_logs=silence_level,
                 processes=self.processes,
+                dashboard_address=":8787",
             )
             self.client = Client(self.cluster)
             _dask_client = self.client

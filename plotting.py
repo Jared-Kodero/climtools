@@ -26,13 +26,11 @@ from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 
-from .build_html import build_3d_html
+from .pvhtml import build_pvhtml
 from .tools import RicedDict, get_func_signature, n_cpus, tmp
 
-# pyvista configuration for off-screen rendering and suppressing warnings
-os.environ["PYVISTA_OFF_SCREEN"] = "true"
-os.environ["PYVISTA_TRAME_SERVER_PROXY_PREFIX"] = "/proxy/"
 vtk.vtkObject.GlobalWarningDisplayOff()
+os.environ["PYVISTA_OFF_SCREEN"] = "true"
 
 
 @dataclass(frozen=True)
@@ -833,104 +831,78 @@ def animate(
     ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
 
 
-# class Plotter(pv.Plotter):
-#     def __init__(self, notebook=None, off_screen=None, *args, **kwargs):
-#         # Check if running normal or in jupyter
+def pressure_to_height_std(p, scale=1):
+    """
+    Convert pressure (hPa) to height (km) using the
+    U.S. Standard Atmosphere lapse-rate formulation.
+    """
 
-#         notebook, off_screen = True, False
-#         # Call the parent class's constructor
-#         super().__init__(notebook=notebook, off_screen=off_screen, *args, **kwargs)
+    T0 = 288.15  # K
+    p0 = 1013.25  # hPa
+    gamma = 6.5  # K/km
+    Rd = 287.05  # J/(kg K)
+    g = 9.80665  # m/s^2
+
+    exponent = (Rd * gamma) / (g * 1000.0)
+
+    z_km = (T0 / gamma) * (1 - (p / p0) ** exponent)
+
+    return z_km * scale
 
 
-# # skipping added method for translate/panning for this snippet
-# def show(self, auto_close=False, *args, **kwargs):
-#     """Override show method with auto_close defaulting to False and custom iframe handling."""
-#     from IPython.display import HTML
+def to_sphere(X, Y, Z):
 
-#     # If in notebook and using server backend, use our custom iframe
-#     if "ipykernel" in sys.modules:
-#         self.reset_camera()
-#         # Get the viewer without displaying it
-#         viewer = super().show(
-#             return_viewer=True, jupyter_backend="trame", *args, **kwargs
-#         )
-#         # viewer = plotter_ui(self, default_server_rendering=False)
-#         # return viewer # trame viewer is more robust with local rendering, but needs more work to function in vscode if even possible
-#         w, h = self.window_size
-#         html_content = f"""
-#             <div id="debug_{self._plotter_id}" style="background: #f0f0f0; padding: 10px; margin-bottom: 10px; font-family: monospace; font-size: 12px;"></div>
-#             <iframe
-#                 id="pv_iframe_{self._plotter_id}"
-#                 src="about:blank"
-#                 width="{w}"
-#                 height="{h}"
-#                 style="display: none;"
-#             ></iframe>
-#             <script>
-#             (function() {{
-#                 const iframe = document.getElementById('pv_iframe_{self._plotter_id}');
-#                 const debug = document.getElementById('debug_{self._plotter_id}');
-#                 let attempts = 0;
-#                 const maxAttempts = 50;
+    R_earth = 6371.0  # km
 
-#                 function log(msg) {{
-#                     debug.innerHTML += msg + '<br>';
-#                 }}
+    y_rad = np.deg2rad(Y)
+    x_rad = np.deg2rad(X)
+    z_lev = Z
 
-#                 function checkServer() {{
-#                     attempts++;
-#                     log('Checking server, attempt: ' + attempts);
+    lon3, lat3, lev3 = np.meshgrid(x_rad, y_rad, z_lev, indexing="ij")
 
-#                     fetch("{viewer._src}", {{ mode: 'no-cors' }})
-#                         .then(() => {{
-#                             log('Server responded! Loading iframe...');
-#                             iframe.src = "{viewer._src}";
+    r = 1.0 + lev3 / R_earth
 
-#                             iframe.onload = function() {{
-#                                 debug.style.display = 'none';
-#                                 iframe.style.display = 'block';
-#                             }};
-#                         }})
-#                         .catch((error) => {{
-#                             log('Server not ready: ' + error.message);
-#                             if (attempts < maxAttempts) {{
-#                                 setTimeout(checkServer, 200);
-#                             }} else {{
-#                                 log('Max attempts reached, loading anyway...');
-#                                 iframe.src = "{viewer._src}";
-#                                 iframe.onload = function() {{
-#                                     debug.style.display = 'none';
-#                                     iframe.style.display = 'block';
-#                                 }};
-#                             }}
-#                         }});
-#                 }}
+    X = r * np.cos(lat3) * np.cos(lon3)
+    Y = r * np.cos(lat3) * np.sin(lon3)
+    Z = r * np.sin(lat3)
 
-#                 checkServer();
-#             }})();
-#             </script>
-#             """
+    return X, Y, Z
 
-#         return HTML(html_content)
-#     else:
-#         # Use default behavior for non-notebook or other backends
-#         """Override show method with auto_close defaulting to False."""
-#         return super().show(auto_close=auto_close, *args, **kwargs)
+
+def check_z_unit(field, z_unit, scale):
+    units = ("hpa", "Pa", "km", "generic")
+
+    if z_unit not in units:
+        raise ValueError(f"Unknown unit provided, expected one of {units}")
+    if z_unit in ["generic", "km"]:
+        return field
+    elif z_unit == "hpa":
+        field["z"] = pressure_to_height_std(field["z"], scale)
+    elif z_unit == "Pa":
+        field["z"] = pressure_to_height_std(field["z"] / 100, scale)
+
+    return field
 
 
 def mapplot3d(
     da: xr.DataArray,
+    grid_type: Literal["uniform", "structured"] = "uniform",
+    sphere: bool = False,
     window_size: str | tuple = None,
     dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+    z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
+    z_unit_scale: int | float = 1,
     cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
     outfile: Path = None,
     format: Literal["html", "png"] = "png",
     vmin: int | float = None,
     vmax: int | float = None,
+    log_scale: bool = False,
     zscale: int | float = 1,
     title: str = None,
     cam_elev: int | float = None,
     cam_azim: int | float = None,
+    show_scalar_bar: bool = True,
     xlabel: str = None,
     ylabel: str = None,
     zlabel: str = None,
@@ -950,39 +922,7 @@ def mapplot3d(
     if format not in {"html", "png"}:
         raise ValueError("format must be either 'html' or 'png'")
 
-    # if format == "html":
-    #     raise NotImplementedError(
-    #         "HTML output is not yet implemented. Please use format='png' for now."
-    #     )
-
-    dim_map_dict = dict(dim_map)
-    dims = [d for axis in ("z", "y", "x") for d, v in dim_map_dict.items() if v == axis]
-
-    missing = [d for d in dims if d not in da.dims]
-    if missing:
-        raise ValueError(f"{missing} not found in {da.dims}")
-
-    field = da.squeeze(drop=True)
-    field = field.rename(dim_map_dict)
-
-    if field.ndim != 3:
-        raise ValueError("Input field must contain exactly three spatial dimensions")
-
-    vmin = field.min().values if vmin is None else vmin
-    vmax = field.max().values if vmax is None else vmax
-    if isinstance(cmap, str):
-        cmap = plt.get_cmap(cmap)
-
-    axes_ranges = [
-        float(field.x.min()),
-        float(field.x.max()),
-        float(field.y.min()),
-        float(field.y.max()),
-        float(field.z.min()),
-        float(field.z.max()),
-    ]
-
-    # window size handling
+        # window size handling
     size_map = {
         "1080p": (1920, 1080),
         "1440p": (2560, 1440),
@@ -996,46 +936,83 @@ def mapplot3d(
             )
         window_size = size_map[window_size]
 
-    plot_args = {
-        k: v
-        for k, v in {"window_size": window_size, "title": title}.items()
-        if v is not None
-    }
-
-    show_args = {"screenshot": outfile}
-    show_args = {k: v for k, v in show_args.items() if v is not None}
-    screenshot_args = {"filename": outfile} if outfile is not None else {}
-    cbar_label = f"{da.attrs.get('long_name', da.name)}\n{da.attrs.get('units', '')}"
-
-    field = field.transpose("x", "y", "z")
-    data = field.values
-    nx = field.x.size
-    ny = field.y.size
-    nz = field.z.size
-
-    # pv.OFF_SCREEN = True
-    #
-    if "ipykernel" in sys.modules and not outfile and not animation:
-        jupyter_backend = "trame"
+    ipykernel = "ipykernel" in sys.modules
+    plot_args = {}
+    if ipykernel and not outfile and not animation:
+        jupyter_backend = "server"
         plot_args["notebook"] = True
         plot_args["off_screen"] = False
 
     else:
         jupyter_backend = "static"
 
+    plot_args["window_size"] = window_size
+    plot_args["title"] = title
+    plot_args = {k: v for k, v in plot_args.items() if v is not None}
+
+    show_args = {}
+    show_args["screenshot"] = outfile
+    show_args["window_size"] = window_size
+    show_args["title"] = title
+    show_args["interactive"] = ipykernel and not animation
+    show_args = {k: v for k, v in show_args.items() if v is not None}
+    screenshot_args = {"filename": outfile, "window_size": window_size}
+    screenshot_args = {k: v for k, v in screenshot_args.items() if v is not None}
+    cbar_label = f"{da.attrs.get('long_name', da.name)}\n{da.attrs.get('units', '')}"
+
+    dim_map_dict = dict(dim_map)
+    dims = [d for axis in ("z", "y", "x") for d, v in dim_map_dict.items() if v == axis]
+
+    missing = [d for d in dims if d not in da.dims]
+    if missing:
+        raise ValueError(f"{missing} not found in {da.dims}")
+
+    field = da.squeeze(drop=True)
+    field = field.rename(dim_map_dict)
+
+    field = check_z_unit(field, z_unit, z_unit_scale)
+
+    vmin = field.min().values if vmin is None else vmin
+    vmax = field.max().values if vmax is None else vmax
+
+    field = field.transpose("x", "y", "z")
+    data = field.values
+    X = field.x.values
+    Y = field.y.values
+    Z = field.z.values
+    axes_ranges = [
+        np.min(X),
+        np.max(X),
+        np.min(Y),
+        np.max(Y),
+        np.min(Z),
+        np.max(Z),
+    ]
+
+    if sphere:
+        X, Y, Z = to_sphere(X, Y, Z)
+    else:
+        X, Y, Z = np.meshgrid(X, Y, Z, indexing="ij")
+
     pv.set_jupyter_backend(jupyter_backend)
 
-    grid = pv.ImageData()
-    grid.dimensions = (nx, ny, nz)
-    grid.origin = (
-        float(field.x.min()),
-        float(field.y.min()),
-        float(field.z.min()),
-    )
+    grid = None
+    if grid_type == "uniform":
+        grid = pv.ImageData()
+        grid.dimensions = (field.x.size, field.y.size, field.z.size)
+        grid.origin = (np.min(X), np.min(Y), np.min(Z))
+        dx = np.mean(np.diff(X))
+        dy = np.mean(np.diff(Y))
+        dz = np.mean(np.diff(Z))
+
+        grid.spacing = (dx, dy, dz)
+
+    elif grid_type == "structured":
+        grid = pv.StructuredGrid(X, Y, Z)
 
     grid.point_data[da.name] = data.flatten(order="F")
-
-    p = pv.Plotter(**plot_args, off_screen=True)
+    grid.set_active_scalars(da.name)
+    p = pv.Plotter(**plot_args)
 
     p.set_scale(zscale=zscale)
 
@@ -1047,7 +1024,8 @@ def mapplot3d(
         # "width": 0.5,
     }
 
-    show_scalar_bar = False if (format == "html" and animation) else True
+    if isinstance(cmap, str):
+        cmap = plt.get_cmap(cmap)
 
     p.add_volume(
         grid,
@@ -1061,6 +1039,7 @@ def mapplot3d(
         name=da.name,
         show_scalar_bar=show_scalar_bar,
         shade=True,
+        log_scale=log_scale,
         scalar_bar_args=scalar_bar_args,
     )
 
@@ -1072,8 +1051,7 @@ def mapplot3d(
         "ztitle": zlabel,
         "location": "outer",
         "bold": False,
-        # "use_2d": True,  # Force 2D bounds for clearer labels and ticks
-        # "grid": "back",
+        "use_2d": True,  # Force 2D bounds for clearer labels and ticks
         "ticks": "outside",
         "font_size": font_size,
         "n_xlabels": n_xlabels,
@@ -1095,22 +1073,30 @@ def mapplot3d(
     else:
         p.camera_position = "iso"
 
-    if outfile is not None and format == "html":
-        p.show()
-        p.export_html(outfile)
-        return p
+    if animation and format == "png":
+        p.show(**show_args)
+        p.screenshot(**screenshot_args)
+        p.close()
 
-    else:
-        if animation:
-            p.show()
-            p.screenshot(**screenshot_args)
-            p.close()
-        elif "ipykernel" in sys.modules:
-            p.show(**show_args, return_viewer=True, jupyter_backend=jupyter_backend)
+    elif animation and format == "html":
+        p.render()
+        p.export_html(outfile)
+        p.close()
+
+    elif outfile is not None and format == "html":
+        p.render()
+        p.export_html(outfile)
+        if ipykernel and not animation:
             return p
-        else:
-            p.show(**show_args)
-            p.close()
+    elif outfile is not None and format == "png":
+        p.show(**show_args)
+        p.screenshot(
+            **screenshot_args, return_viewer=True, jupyter_backend=jupyter_backend
+        )
+        if ipykernel and not animation:
+            return p
+    else:
+        p.show(**show_args)
 
 
 def animate3d_i_frame(
@@ -1135,7 +1121,11 @@ def animate3d_i_frame(
 def animate3d(
     data: xr.DataArray,
     dim: str = "time",
+    grid_type: Literal["uniform", "structured"] = "uniform",
+    sphere: bool = False,
     dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
+    z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
+    z_unit_scale: int | float = 1,
     indices: list = None,
     outfile: Path = None,
     format: Literal["mp4", "html"] = "mp4",
@@ -1145,6 +1135,7 @@ def animate3d(
     cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
     vmin: int | float = None,
     vmax: int | float = None,
+    log_scale: bool = False,
     zscale: int | float = 1,
     title: str = None,
     cam_elev: int | float = None,
@@ -1152,6 +1143,7 @@ def animate3d(
     xlabel: str = None,
     ylabel: str = None,
     zlabel: str = None,
+    show_scalar_bar: bool = True,
     n_xlabels: int = None,
     n_ylabels: int = None,
     n_zlabels: int = None,
@@ -1212,7 +1204,7 @@ def animate3d(
         outfile = Path(outfile)
 
     if format == "html":
-        build_3d_html(session_tmp_dir, outfile)
+        build_pvhtml(session_tmp_dir, outfile)
 
     else:
         outfile.parent.mkdir(parents=True, exist_ok=True)

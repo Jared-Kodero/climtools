@@ -1,0 +1,25 @@
+<link rel="stylesheet" href="<<SRC_DIR>>/timeline.css">
+
+<div id="timeline">
+    <div id="timeline-lane">
+        <div id="ticks"></div>
+        <div id="frameLabel">0</div>
+        <div id="track"></div>
+        <div id="thumb"></div>
+    </div>
+    <div id="controls">
+        <button id="prev" class="timeline-btn">◀ Prev</button>
+        <button id="next" class="timeline-btn">Next ▶</button>
+    </div>
+</div>
+
+<script>
+    window.__PV_CAMERA_CONFIG__ = {
+        preset: "yz",
+        elevation: 15,
+        azimuth: -20,
+        zoom: 1.1
+    };
+</script>
+
+<script src="<<SRC_DIR>>/timeline.js"></script>
