@@ -250,6 +250,7 @@ def plot_quiver(
     v: xr.DataArray,
     ax: plt.Axes = None,
     step: int = 1,
+    **kwargs,
 ):
     """
     Plot quiver arrows on a Cartopy axis.
@@ -269,7 +270,7 @@ def plot_quiver(
     u = u[::step, ::step]
     v = v[::step, ::step]
     lon2d, lat2d = np.meshgrid(u.lon, u.lat)
-    ax.quiver(lon2d, lat2d, u.values, v.values, transform=transform)
+    ax.quiver(lon2d, lat2d, u.values, v.values, transform=transform, **kwargs)
     return ax
 
 

@@ -4,7 +4,7 @@ import sys
 
 # import cmaps as _cmaps --- IGNORE ---
 from .init_cmap import *
-from .plotting import get_cbar_axes, plot_pvalues
+from .plotting import get_cbar_axes, plot_pvalues, plot_quiver
 from .pycdo import cdo
 from .statistics import calc_significance
 from .theming import cmaps, plot_theme
@@ -81,6 +81,7 @@ __all__ = [
     "mv",
     "n_cpus",
     "plot_pvalues",
+    "plot_quiver",
     "plot_theme",
     "rm",
     "symlink",

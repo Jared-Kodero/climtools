@@ -13,7 +13,6 @@ import xesmf as xe
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .plotting import (
-    PlotObj,
     animate,
     animate3d,
     make_cyclic,
@@ -361,7 +360,7 @@ class GeoMixin:
         lakes: bool = False,
         rivers: bool = False,
         **kwargs,
-    ) -> PlotObj:
+    ) -> MapPlotter:  # PlotObj:
         """
         Plot this DataArray using Cartopy
         """
@@ -370,8 +369,64 @@ class GeoMixin:
         _params["data"] = self
 
         self._validate_da()
+        return mapplot(data=self, **_params)
 
-        # return mapplot(data=self, **_params)
+    def oomapplot(
+        self,
+        x: str = None,
+        y: str = None,
+        projection: Literal[
+            "PlateCarree",
+            "Mercator",
+            "Robinson",
+            "Mollweide",
+            "Orthographic",
+            "LambertConformal",
+            "AlbersEqualArea",
+            "Stereographic",
+            "NorthPolarStereo",
+            "SouthPolarStereo",
+        ] = "PlateCarree",
+        central_longitude: float = None,
+        central_latitude: float = None,
+        global_extent: bool = False,
+        set_extent: tuple[float, float, float, float] = None,
+        figsize: tuple[float, float] = None,
+        # Plot appearance
+        method: Literal[
+            "default", "pcolormesh", "contourf", "contour", "imshow"
+        ] = "default",
+        norm: Any = None,
+        cmap: str | LinearSegmentedColormap | ListedColormap = None,
+        vmin: float = None,
+        vmax: float = None,
+        levels: int | list = None,
+        extend: str = None,
+        robust: bool = False,
+        title: str = None,
+        orientation: Literal["vertical", "horizontal"] = "vertical",
+        add_colorbar: bool = True,
+        drawedges: bool = False,
+        cbar_label: str = None,
+        # Map features
+        gridlines: bool = False,
+        coastlines: bool = True,
+        borders: bool = True,
+        states: bool = True,
+        ocean: bool = True,
+        land: bool = True,
+        lakes: bool = False,
+        rivers: bool = False,
+        **kwargs,
+    ) -> MapPlotter:  # PlotObj:
+        """
+        Object-oriented version of mapplot. Returns a MapPlotter instance that allows for method chaining to add additional features to the plot before showing or saving.
+        """
+        _params = locals()
+        _ = _params.pop("self")
+        _params["data"] = self
+
+        self._validate_da()
         return MapPlotter(**_params)
 
     def mapplot3d(
@@ -586,35 +641,52 @@ class MapPlotter:
         self.fig = None
         self.ax = None
         self.artist = None
+        self.operations = []
 
-    def show(self):
-        plt.show()
+    def operations(self):
+        return self.operations
 
-    def save(self, outfile: str | Path, **kwargs):
-        plt.savefig(outfile, **kwargs)
-
-    def plot(self):
+    def _plot(self):
         p = mapplot(**self.plot_kwargs)
         self.fig = p.fig
         self.ax = p.ax
         self.artist = p.artist
+
+    def _run_operations(self):
+
+        for func, kwargs in self.operations:
+            func(ax=self.ax, **kwargs)
+
+    def plot(self, outfile: str | Path | None = None, **kwargs):
+
+        self._plot()
+        self._run_operations()
+
+        if outfile:
+            plt.savefig(outfile, **kwargs)
+
+        plt.show()
+
+        return self
+
+    def add_operation(self, func, **kwargs):
+        self.operations.append((func, kwargs))
         return self
 
     def plot_pvalues(
         self,
         data: xr.DataArray,
-        ax: plt.Axes = None,
         level: float = 0.05,
         color: str = "grey",
         alpha: float = 0.3,
-        marker: str = None,
-        edgecolors: str = None,
+        marker: str | None = None,
+        edgecolors: str | None = None,
         step_size: int = 1,
         s: float = 0.25,
     ):
 
-        plot_pvalues(
-            ax=self.ax,
+        return self.add_operation(
+            plot_pvalues,
             data=data,
             level=level,
             color=color,
@@ -624,8 +696,7 @@ class MapPlotter:
             step_size=step_size,
             s=s,
         )
-        return self
 
-    def plot_quiver(self, u: xr.DataArray, v: xr.DataArray, step: int = 1):
-        plot_quiver(u, v, ax=self.ax, step=step)
-        return self
+    def plot_quiver(self, u: xr.DataArray, v: xr.DataArray, step: int = 1, **kwargs):
+
+        return self.add_operation(plot_quiver, u=u, v=v, step=step, **kwargs)

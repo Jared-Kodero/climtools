@@ -24,7 +24,7 @@ host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 tmp = Path("/tmp")
-n_cpus = len(os.sched_getaffinity(0))
+n_cpus = int(os.environ.get("NTASKS", len(os.sched_getaffinity(0))))
 
 
 script_dir = Path(__file__).resolve().parent
