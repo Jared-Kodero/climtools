@@ -30,6 +30,7 @@ from .tools import (
 )
 from .xgeo import (
     GeoDataArray,
+    GeoDataset,
     SetupDask,
     get_local_solar_time,
     mask,
@@ -59,6 +60,7 @@ if "ipykernel" in sys.modules:
 __all__ = [
     "BoundingBox",
     "GeoDataArray",
+    "GeoDataset",
     "RedirectStreams",
     "SetupDask",
     "calc_significance",

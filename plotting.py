@@ -13,6 +13,7 @@ from typing import Any, Literal
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes
+import geovista as gv
 import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
@@ -242,6 +243,34 @@ def plot_pvalues(
         marker=marker,
         edgecolors=edgecolors,
     )
+
+
+def plot_quiver(
+    u: xr.DataArray,
+    v: xr.DataArray,
+    ax: plt.Axes = None,
+    step: int = 1,
+):
+    """
+    Plot quiver arrows on a Cartopy axis.
+    """
+
+    if ax is None:
+        ax = plt.gca()
+
+    import cartopy.mpl.geoaxes as cgeo
+
+    transform = None
+    if isinstance(ax, cgeo.GeoAxes):
+        import cartopy.crs as ccrs
+
+        transform = ccrs.PlateCarree()
+
+    u = u[::step, ::step]
+    v = v[::step, ::step]
+    lon2d, lat2d = np.meshgrid(u.lon, u.lat)
+    ax.quiver(lon2d, lat2d, u.values, v.values, transform=transform)
+    return ax
 
 
 def mapplot(
@@ -831,6 +860,40 @@ def animate(
     ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
 
 
+def plot_globe(
+    data: xr.DataArray,
+    x: str = "lon",
+    y: str = "lat",
+    cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
+    coarsen_by: int = 10,
+    outfile: str | Path = None,
+):
+    """
+    Plot this DataArray on a globe using GeoVista.
+    """
+
+    resolution = data[x].diff(x).mean().values
+
+    if float(resolution) < 0.25:
+        data = data.coarsen(**{x: coarsen_by, y: coarsen_by}, boundary="trim").mean()
+
+    # Create the mesh from the sample data.
+    mesh = gv.Transform.from_1d(data.lon, data.lat, data=data.data)
+
+    # Plot the mesh with coastlines.
+    p = gv.GeoPlotter()
+    sargs = {"title": f"{data.name} / {data.units}"}
+    p.add_mesh(mesh, cmap=cmap, scalar_bar_args=sargs)
+    p.add_coastlines(color="white")
+    p.camera.zoom(1.2)
+
+    if outfile and outfile.endswith(".html"):
+        p.export_html(outfile)
+    elif outfile:
+        p.screenshot(outfile)
+    p.show()
+
+
 def pressure_to_height_std(p, scale=1):
     """
     Convert pressure (hPa) to height (km) using the
@@ -869,11 +932,14 @@ def to_sphere(X, Y, Z):
     return X, Y, Z
 
 
-def check_z_unit(field, z_unit, scale):
+def check_z_unit(field: xr.DataArray, z_unit: str, scale: int) -> xr.DataArray:
     units = ("hpa", "Pa", "km", "generic")
 
     if z_unit not in units:
         raise ValueError(f"Unknown unit provided, expected one of {units}")
+
+    field = field.sortby("z", ascending=False)
+
     if z_unit in ["generic", "km"]:
         return field
     elif z_unit == "hpa":
@@ -885,10 +951,10 @@ def check_z_unit(field, z_unit, scale):
 
 
 def mapplot3d(
-    da: xr.DataArray,
+    data: xr.DataArray,
     grid_type: Literal["uniform", "structured"] = "uniform",
     sphere: bool = False,
-    window_size: str | tuple = None,
+    window_size: tuple[int, int] = None,
     dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
     z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
     z_unit_scale: int | float = 1,
@@ -922,20 +988,6 @@ def mapplot3d(
     if format not in {"html", "png"}:
         raise ValueError("format must be either 'html' or 'png'")
 
-        # window size handling
-    size_map = {
-        "1080p": (1920, 1080),
-        "1440p": (2560, 1440),
-        "4K": (3840, 2160),
-    }
-
-    if isinstance(window_size, str):
-        if window_size not in size_map:
-            raise ValueError(
-                "Valid options are '1080p', '1440p', '4K', or a tuple of (width, height)."
-            )
-        window_size = size_map[window_size]
-
     ipykernel = "ipykernel" in sys.modules
     plot_args = {}
     if ipykernel and not outfile and not animation:
@@ -958,16 +1010,18 @@ def mapplot3d(
     show_args = {k: v for k, v in show_args.items() if v is not None}
     screenshot_args = {"filename": outfile, "window_size": window_size}
     screenshot_args = {k: v for k, v in screenshot_args.items() if v is not None}
-    cbar_label = f"{da.attrs.get('long_name', da.name)}\n{da.attrs.get('units', '')}"
+    cbar_label = (
+        f"{data.attrs.get('long_name', data.name)} [{data.attrs.get('units', '')}]"
+    )
 
     dim_map_dict = dict(dim_map)
     dims = [d for axis in ("z", "y", "x") for d, v in dim_map_dict.items() if v == axis]
 
-    missing = [d for d in dims if d not in da.dims]
+    missing = [d for d in dims if d not in data.dims]
     if missing:
-        raise ValueError(f"{missing} not found in {da.dims}")
+        raise ValueError(f"{missing} not found in {data.dims}")
 
-    field = da.squeeze(drop=True)
+    field = data.squeeze(drop=True)
     field = field.rename(dim_map_dict)
 
     field = check_z_unit(field, z_unit, z_unit_scale)
@@ -975,7 +1029,8 @@ def mapplot3d(
     vmin = field.min().values if vmin is None else vmin
     vmax = field.max().values if vmax is None else vmax
 
-    field = field.transpose("x", "y", "z")
+    field = field.transpose("x", "y", "z")  # xr data array
+
     data = field.values
     X = field.x.values
     Y = field.y.values
@@ -995,33 +1050,31 @@ def mapplot3d(
         X, Y, Z = np.meshgrid(X, Y, Z, indexing="ij")
 
     pv.set_jupyter_backend(jupyter_backend)
-
     grid = None
-    if grid_type == "uniform":
+
+    if grid_type == "structured" or sphere:
+        grid = pv.StructuredGrid(X, Y, Z)
+
+    elif grid_type == "uniform":
         grid = pv.ImageData()
         grid.dimensions = (field.x.size, field.y.size, field.z.size)
         grid.origin = (np.min(X), np.min(Y), np.min(Z))
-        dx = np.mean(np.diff(X))
-        dy = np.mean(np.diff(Y))
-        dz = np.mean(np.diff(Z))
-
+        dx = abs(float(field["x"].diff("x").mean()))
+        dy = abs(float(field["y"].diff("y").mean()))
+        dz = abs(float(field["z"].diff("z").mean()))
+        dz = round(float(dz))
         grid.spacing = (dx, dy, dz)
 
-    elif grid_type == "structured":
-        grid = pv.StructuredGrid(X, Y, Z)
-
-    grid.point_data[da.name] = data.flatten(order="F")
-    grid.set_active_scalars(da.name)
+    grid.point_data[data.name] = data.flatten(order="F")
+    grid.set_active_scalars(data.name)
     p = pv.Plotter(**plot_args)
+    # p = gv.GeoPlotter(**plot_args)
 
     p.set_scale(zscale=zscale)
 
     scalar_bar_args = {
         "title": cbar_label,
-        "fmt": "%.0f",
         "n_labels": 10,
-        # "position_y": 0.88,  # Place it high in that top 20% margin
-        # "width": 0.5,
     }
 
     if isinstance(cmap, str):
@@ -1029,14 +1082,14 @@ def mapplot3d(
 
     p.add_volume(
         grid,
-        scalars=da.name,
+        scalars=data.name,
         cmap=cmap,
         opacity_unit_distance=opacity_unit_distance,
         n_colors=cmap.N,
         opacity=opacity,
         blending=blending,
         clim=(vmin, vmax),
-        name=da.name,
+        name=data.name,
         show_scalar_bar=show_scalar_bar,
         shade=True,
         log_scale=log_scale,
@@ -1051,16 +1104,16 @@ def mapplot3d(
         "ztitle": zlabel,
         "location": "outer",
         "bold": False,
-        "use_2d": True,  # Force 2D bounds for clearer labels and ticks
+        # "use_2d": True,  # Force 2D bounds for clearer labels and ticks
         "ticks": "outside",
         "font_size": font_size,
         "n_xlabels": n_xlabels,
         "n_ylabels": n_ylabels,
         "n_zlabels": n_zlabels,
     }
-
-    show_bounds_args = {k: v for k, v in show_bounds_args.items() if v is not None}
-    p.show_bounds(**show_bounds_args)
+    if not sphere:
+        show_bounds_args = {k: v for k, v in show_bounds_args.items() if v is not None}
+        p.show_bounds(**show_bounds_args)
 
     if cam_elev is not None or cam_azim is not None:
         p.camera_position = "yz"
@@ -1090,9 +1143,7 @@ def mapplot3d(
             return p
     elif outfile is not None and format == "png":
         p.show(**show_args)
-        p.screenshot(
-            **screenshot_args, return_viewer=True, jupyter_backend=jupyter_backend
-        )
+        p.screenshot(**screenshot_args)
         if ipykernel and not animation:
             return p
     else:
@@ -1129,7 +1180,7 @@ def animate3d(
     indices: list = None,
     outfile: Path = None,
     format: Literal["mp4", "html"] = "mp4",
-    window_size: str | tuple = None,
+    window_size: tuple[int, int] = None,
     fps: int = 10,
     parallel: bool = True,
     cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
