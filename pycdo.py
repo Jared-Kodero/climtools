@@ -1,7 +1,6 @@
 import os
 import subprocess
 import uuid
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -190,48 +189,6 @@ class Cdo:
             ret = outfile
 
         return ret
-
-    def griddes(
-        self,
-        infile: Path,
-    ) -> dict:
-        """
-        Get the grid description of a netCDF file using CDO's griddes command.
-
-        Parameters
-        ----------
-        infile : str
-            Input netCDF file.
-
-        """
-
-        if not Path(infile).exists():
-            raise FileNotFoundError(f"Input file {infile} does not exist.")
-
-        cmd = ["griddes", infile]
-
-        res = self.run_cdo(cmd)
-
-        txt = StringIO(res.stdout)
-        txt = txt.read().splitlines()
-
-        result = {}
-        grid_key = None
-        for line in txt:
-            if line.strip() == "#":
-                continue
-            if "# gridID" in line:
-                grid_key = line.strip().replace("# ", "").replace(" ", "_")
-                result[grid_key] = {}
-                continue
-            # split key and value by =
-            key, value = line.split("=", 1)
-            result[grid_key][key.strip()] = value.strip()
-
-        if len(result) == 1:
-            result = result[grid_key]
-
-        return result
 
     def mergetime(
         self,

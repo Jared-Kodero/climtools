@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import warnings
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
-import matplotlib.pyplot as plt
+import cartopy.mpl.geoaxes as cgeo
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -13,45 +14,60 @@ import xesmf as xe
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .plotting import (
+    MapPlot,
     animate,
-    animate3d,
     make_cyclic,
     mapplot,
-    mapplot3d,
-    plot_globe,
-    plot_pvalues,
-    plot_quiver,
 )
 from .statistics import *
 
 # ---- Plot callback ----
-from .tools import n_cpus
+from .tools import n_cpus, tmp
 
 warnings.filterwarnings("ignore")
 _script_dir = Path(__file__).resolve().parent
 _dask_client = None  # global variable to hold the Dask client instance
 _dask_cluster = None  # global variable to hold the Dask cluster instance
+_mask_cache = {}  # cache for remapped masks to avoid redundant computations
 
 
 def mask(
     data: xr.DataArray | xr.Dataset,
-    keep: Literal["land", "ocean"],
+    mask: xr.DataArray | Path | None = None,
+    keep: str = "land",
     parallel: bool = False,
 ) -> xr.DataArray | xr.Dataset:
     """
-    Apply a land-sea mask to an xarray object using ERA5 0.25 Land-Sea mask
+    Apply a land-sea mask to an xarray object.
 
     Parameters
     ----------
-    obj : xr.DataArray or xr.Dataset
-        The xarray object to which the mask will be applied. Must contain 'lat' and 'lon' dimensions.
-    keep : {'land', 'ocean'}
-        Specify whether to keep land or ocean points. 'land' will mask out ocean points, and 'ocean' will mask out land points.
+    data : xr.DataArray or xr.Dataset
+        Input data containing latitude and longitude dimensions.
+    mask : xr.DataArray or Path, optional
+        Land-sea mask. If a DataArray is provided it is used directly.
+        If a Path is provided it is opened as a dataset. If None, the
+        default ERA5 0.25° mask bundled with the package is used.
+    keep : the data variable to keep in the mask dataset
+    parallel : bool, default False
+        Enable dask-based parallel masking.
 
+    Returns
+    -------
+    xr.DataArray or xr.Dataset
+        Masked data.
     """
 
-    file = _script_dir / "data" / "mask" / "era5_0.25_mask"
-    mask_da = xr.open_dataset(file)[keep].load()
+    if mask is None:
+        mask = _script_dir / "data" / "mask" / "era5_0.25_mask"
+
+    if isinstance(mask, Path):
+        mask = xr.open_dataset(mask)[keep].load()
+
+    if isinstance(mask, xr.Dataset):
+        raise TypeError(
+            "Mask must be an xarray.DataArray. If a Dataset is provided, specify the variable to use with the 'keep' parameter."
+        )
 
     for coord in ("lat", "lon"):
         if coord not in data.dims:
@@ -59,17 +75,32 @@ def mask(
         if coord not in data.dims:
             raise ValueError(f"Output grid must contain '{coord}' dimension.")
 
-    # slice the mask to the same lat/lon + a small buffer to ensure coverage
-    lat_slice = slice(data.lat.min(), data.lat.max())
-    lon_slice = slice(data.lon.min(), data.lon.max())
-    mask_da = mask_da.sel(lat=lat_slice, lon=lon_slice)
+    lon_min, lon_max = float(data.lon.min()), float(data.lon.max())
+    lat_min, lat_max = float(data.lat.min()), float(data.lat.max())
+    lon_step = float(data["lon"].diff("lon").mean().values)
+    lat_step = float(data["lat"].diff("lat").mean().values)
+    cache_key = (lon_min, lon_max, lat_min, lat_max, lon_step, lat_step)
 
-    mask_da = xe_remap(mask_da, data, method="nearest_d2s", parallel=parallel)
+    if cache_key not in _mask_cache:
+        data = data.sortby(["lat", "lon"])
+        # slice the mask to the same lat/lon + a small buffer to ensure coverage
+        lat_slice = slice(lat_min, lat_max)
+        lon_slice = slice(lon_min, lon_max)
+        mask_da = mask.sel(lat=lat_slice, lon=lon_slice)
+        mask_da = xe_remap(mask_da, data, method="nearest_s2d", parallel=parallel)
+        _mask_cache[cache_key] = mask_da
+
+    mask_da = _mask_cache[cache_key]
+
     new_obj = data.where(mask_da == 1, other=np.nan)
     return new_obj
 
 
-def get_local_solar_time(
+def mask_data(**kwargs) -> xr.DataArray | xr.Dataset:
+    return mask(**kwargs)
+
+
+def calc_local_solar_time(
     data: xr.Dataset | xr.DataArray, *, lon="lon"
 ) -> xr.Dataset | xr.DataArray:
     """
@@ -98,6 +129,33 @@ def get_local_solar_time(
     lst.attributes["standard_name"] = "local_solar_time"
 
     return data.assign_coords({"lst": lst})
+
+
+def _to_lon_180(
+    ds: xr.Dataset | xr.DataArray, lon: str = "lon"
+) -> xr.Dataset | xr.DataArray:
+    """
+    Standardize the longitude coordinates of an xarray object to be within the range [-180, 180).
+
+    Parameters
+    ----------
+    ds : xr.Dataset or xr.DataArray
+        The input dataset or data array containing a longitude coordinate.
+    lon : str, default 'lon'
+        The name of the longitude coordinate in the dataset.
+
+    Returns
+    -------
+    xr.Dataset or xr.DataArray
+        The dataset or data array with standardized longitude coordinates.
+    """
+    if lon not in ds:
+        raise ValueError(f"Dataset must contain '{lon}' coordinate.")
+
+    ds = ds.copy()
+    ds[lon] = (ds[lon] + 180) % 360 - 180
+    ds = ds.sortby(lon)
+    return ds
 
 
 def xe_remap(
@@ -144,7 +202,23 @@ def xe_remap(
 
         _out = _out.chunk({"lat": "auto", "lon": "auto"})
 
-    regridder = xe.Regridder(_in, _out, method=method, parallel=parallel)
+    _id = [
+        f"{method}",
+        f"{_in.sizes['lat']}x{_in.sizes['lon']}",
+        f"{_out.sizes['lat']}x{_out.sizes['lon']}",
+    ]
+
+    weight_file = tmp / ("_".join(_id) + ".nc")
+    reuse = weight_file.exists()
+
+    regridder = xe.Regridder(
+        _in,
+        _out,
+        method=method,
+        parallel=parallel,
+        filename=str(weight_file),
+        reuse_weights=reuse,
+    )
 
     out = regridder(grid_in)
     return out
@@ -158,9 +232,9 @@ class SetupDask:
 
     def __init__(
         self,
-        workers: int = n_cpus,
-        threads_per_worker: int = 1,
-        processes: bool = True,
+        workers: int = 1,
+        threads_per_worker: int = n_cpus,
+        processes: bool = False,
         filter_warnings: bool = True,
         memory_limit: int = 0,
     ):
@@ -252,17 +326,21 @@ class GeoMixin:
             msg = f"This method requires a DataArray. Select one of {list(self.data_vars)} from the Dataset."
             raise TypeError(msg)
 
-    def add_cyclic_point(self, dim: str = "lon") -> GeoDataArray:
-        return type(self)(make_cyclic(self, dim))
+    @wraps(make_cyclic)
+    def add_cyclic_point(self, lon: str = "lon") -> GeoDataArray:
+        return type(self)(make_cyclic(self, lon))
 
-    def get_local_solar_time(self, *, lon="lon") -> GeoDataArray:
-        """
-        Calculate the local solar time for the DataArray based on the longitude coordinate.
-        The local solar time is calculated as the UTC time plus the longitude offset.
-        """
-        res = get_local_solar_time(data=self, lon=lon)
+    @wraps(_to_lon_180)
+    def to_lon_180(self, lon: str = "lon") -> GeoDataArray:
+        res = _to_lon_180(self, lon=lon)
         return type(self)(res)
 
+    @wraps(calc_local_solar_time)
+    def local_solar_time(self, *, lon="lon") -> GeoDataArray:
+        res = calc_local_solar_time(data=self, lon=lon)
+        return type(self)(res)
+
+    @wraps(xe_remap)
     def remap(
         self,
         grid_out: xr.Dataset | xr.DataArray,
@@ -276,47 +354,29 @@ class GeoMixin:
         ] = "bilinear",
         parallel: bool = False,
     ) -> GeoDataArray:
-        """
-        Remap source dataset to the grid of the destination dataset using xesmf.
-        """
         _params = locals()
         _ = _params.pop("self")
         remapped = xe_remap(self, **_params)
         return type(self)(remapped)
 
+    @wraps(mask)
     def mask(
         self,
-        keep: Literal["land", "ocean"],
+        mask: xr.DataArray | Path | None = None,
+        keep: str = "land",
         parallel: bool = False,
     ) -> GeoDataArray:
-        """
-        Apply a land-sea mask to an xarray object using ERA5 0.25 Land-Sea mask.
-        """
         _params = locals()
         _ = _params.pop("self")
-        masked = mask(data=self, **_params)
+        masked = mask_data(data=self, **_params)
         return type(self)(masked)
 
-    def plot_globe(
-        self,
-        x: str = "lon",
-        y: str = "lat",
-        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-        coarsen_by: int = 10,
-        outfile: str | Path = None,
-    ):
-        """
-        Plot this DataArray on a globe using GeoVista.
-        """
-        _params = locals()
-        _ = _params.pop("self")
-        self._validate_da()
-        return plot_globe(data=self, **_params)
-
+    @wraps(mapplot)
     def mapplot(
         self,
         x: str = None,
         y: str = None,
+        ax: cgeo.GeoAxes = None,
         projection: Literal[
             "PlateCarree",
             "Mercator",
@@ -344,8 +404,9 @@ class GeoMixin:
         vmax: float = None,
         levels: int | list = None,
         extend: str = None,
+        cyclic: bool = False,
         robust: bool = False,
-        title: str = None,
+        title: str = "",
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -359,118 +420,19 @@ class GeoMixin:
         land: bool = True,
         lakes: bool = False,
         rivers: bool = False,
+        p_values: xr.DataArray = None,
+        p_value_kwargs: dict = None,
+        u_component: xr.DataArray = None,
+        v_component: xr.DataArray = None,
+        quiver_kwargs: dict = None,
         **kwargs,
-    ) -> MapPlotter:  # PlotObj:
-        """
-        Plot this DataArray using Cartopy
-        """
-        _params = locals()
-        _ = _params.pop("self")
-        _params["data"] = self
-
-        self._validate_da()
-        return mapplot(data=self, **_params)
-
-    def oomapplot(
-        self,
-        x: str = None,
-        y: str = None,
-        projection: Literal[
-            "PlateCarree",
-            "Mercator",
-            "Robinson",
-            "Mollweide",
-            "Orthographic",
-            "LambertConformal",
-            "AlbersEqualArea",
-            "Stereographic",
-            "NorthPolarStereo",
-            "SouthPolarStereo",
-        ] = "PlateCarree",
-        central_longitude: float = None,
-        central_latitude: float = None,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] = None,
-        figsize: tuple[float, float] = None,
-        # Plot appearance
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow"
-        ] = "default",
-        norm: Any = None,
-        cmap: str | LinearSegmentedColormap | ListedColormap = None,
-        vmin: float = None,
-        vmax: float = None,
-        levels: int | list = None,
-        extend: str = None,
-        robust: bool = False,
-        title: str = None,
-        orientation: Literal["vertical", "horizontal"] = "vertical",
-        add_colorbar: bool = True,
-        drawedges: bool = False,
-        cbar_label: str = None,
-        # Map features
-        gridlines: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
-        **kwargs,
-    ) -> MapPlotter:  # PlotObj:
-        """
-        Object-oriented version of mapplot. Returns a MapPlotter instance that allows for method chaining to add additional features to the plot before showing or saving.
-        """
-        _params = locals()
-        _ = _params.pop("self")
-        _params["data"] = self
-
-        self._validate_da()
-        return MapPlotter(**_params)
-
-    def mapplot3d(
-        self,
-        grid_type: Literal["uniform", "structured"] = "uniform",
-        sphere: bool = False,
-        window_size: tuple[int, int] = None,
-        dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
-        z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
-        z_unit_scale: int | float = 1,
-        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-        outfile: Path = None,
-        format: Literal["html", "png"] = "png",
-        vmin: int | float = None,
-        vmax: int | float = None,
-        log_scale: bool = False,
-        zscale: int | float = 1,
-        title: str = None,
-        cam_elev: int | float = None,
-        cam_azim: int | float = None,
-        show_scalar_bar: bool = True,
-        xlabel: str = None,
-        ylabel: str = None,
-        zlabel: str = None,
-        n_xlabels: int = None,
-        n_ylabels: int = None,
-        n_zlabels: int = None,
-        opacity: list | Literal["linear", "sigmoid"] = "linear",
-        opacity_unit_distance: int | float = None,
-        blending: Literal[
-            "additive", "maximum", "minimum", "composite", "average"
-        ] = "composite",
-        padding: int | float = None,
-        font_size: int = None,
-        animation: bool = False,
-    ):
-        """
-        Render a 3D scalar field from an xarray.DataArray using PyVista.
-        """
+    ) -> MapPlot:
         _params = locals()
         _ = _params.pop("self")
         self._validate_da()
-        return mapplot3d(data=self, **_params)
+        return mapplot(da=self, **_params)
 
+    @wraps(animate)
     def animate(
         self,
         outfile: Path | str = None,
@@ -510,8 +472,9 @@ class GeoMixin:
         vmax: float = None,
         levels: int | list[int] = None,
         extend: str = None,
+        cyclic: bool = False,
         robust: bool = False,
-        title: str = None,
+        title: str = "",
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -525,62 +488,17 @@ class GeoMixin:
         land: bool = True,
         lakes: bool = False,
         rivers: bool = False,
+        u_component: xr.DataArray = None,
+        v_component: xr.DataArray = None,
+        quiver_kwargs: dict = None,
         **kwargs,
     ) -> None:
-        """
-        Animate this DataArray on a Cartopy map using the global `animate()` function.
-        """
         _params = locals()
         _ = _params.pop("self")
         self._validate_da()
-        return animate(data=self, **_params)
+        return animate(da=self, **_params)
 
-    def animate3d(
-        self,
-        dim: str = "time",
-        grid_type: Literal["uniform", "structured"] = "uniform",
-        sphere: bool = False,
-        dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
-        z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
-        z_unit_scale: int | float = 1,
-        indices: list = None,
-        outfile: Path = None,
-        format: Literal["mp4", "html"] = "mp4",
-        window_size: tuple[int, int] = None,
-        fps: int = 10,
-        parallel: bool = True,
-        cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-        vmin: int | float = None,
-        vmax: int | float = None,
-        log_scale: bool = False,
-        zscale: int | float = 1,
-        title: str = None,
-        cam_elev: int | float = None,
-        cam_azim: int | float = None,
-        xlabel: str = None,
-        ylabel: str = None,
-        zlabel: str = None,
-        show_scalar_bar: bool = True,
-        n_xlabels: int = None,
-        n_ylabels: int = None,
-        n_zlabels: int = None,
-        font_size: int = None,
-        opacity: list | Literal["linear", "sigmoid"] = "linear",
-        opacity_unit_distance: int | float = None,
-        blending: Literal[
-            "additive", "maximum", "minimum", "composite", "average"
-        ] = "composite",
-        padding: int | float = None,
-        **kwargs,
-    ):
-        """
-        Animate this DataArray in 3D using the global `animate3d()` function.
-        """
-        _params = locals()
-        _ = _params.pop("self")
-        self._validate_da()
-        return animate3d(data=self, **_params)
-
+    @wraps(calc_trends)
     def trends(
         self,
         along: str = None,
@@ -588,24 +506,19 @@ class GeoMixin:
         scale: float = 1,
         dask_scheduler: Literal["threads", "processes"] = "threads",
     ) -> xr.Dataset:
-        """
-        Calculate the Mann-Kendall trend test for a given dataset.
-        """
         _params = locals()
         _ = _params.pop("self")
         self._validate_da()
         return calc_trends(data=self, **_params)
 
+    @wraps(polyfit)
     def polyfit(self, along: str, data_var: str = None, scale: float = 1):
-        """
-        Calculate the linear trend for the given xarray Dataset or DataArray using xr.polyfit.
-        """
         _params = locals()
-
         self._validate_da()
         _ = _params.pop("self")
         return polyfit(data=self, **_params)
 
+    @wraps(correlate)
     def correlate(
         self,
         other: xr.DataArray,
@@ -614,9 +527,6 @@ class GeoMixin:
         along: str = None,
         dask_scheduler: Literal["threads", "processes"] = "threads",
     ) -> xr.Dataset:
-        """
-        Compute the correlation between this DataArray/Dataset and another along a specified dimension.
-        """
         _params = locals()
         self._validate_da()
         _ = _params.pop("self")
@@ -633,70 +543,3 @@ class GeoDataset(GeoMixin, xr.Dataset):
     """
     Extension of xarray.Dataset with Cartopy-based plotting and animation methods.
     """
-
-
-class MapPlotter:
-    def __init__(self, **kwargs):
-        self.plot_kwargs = kwargs
-        self.fig = None
-        self.ax = None
-        self.artist = None
-        self.operations = []
-
-    def operations(self):
-        return self.operations
-
-    def _plot(self):
-        p = mapplot(**self.plot_kwargs)
-        self.fig = p.fig
-        self.ax = p.ax
-        self.artist = p.artist
-
-    def _run_operations(self):
-
-        for func, kwargs in self.operations:
-            func(ax=self.ax, **kwargs)
-
-    def plot(self, outfile: str | Path | None = None, **kwargs):
-
-        self._plot()
-        self._run_operations()
-
-        if outfile:
-            plt.savefig(outfile, **kwargs)
-
-        plt.show()
-
-        return self
-
-    def add_operation(self, func, **kwargs):
-        self.operations.append((func, kwargs))
-        return self
-
-    def plot_pvalues(
-        self,
-        data: xr.DataArray,
-        level: float = 0.05,
-        color: str = "grey",
-        alpha: float = 0.3,
-        marker: str | None = None,
-        edgecolors: str | None = None,
-        step_size: int = 1,
-        s: float = 0.25,
-    ):
-
-        return self.add_operation(
-            plot_pvalues,
-            data=data,
-            level=level,
-            color=color,
-            alpha=alpha,
-            marker=marker,
-            edgecolors=edgecolors,
-            step_size=step_size,
-            s=s,
-        )
-
-    def plot_quiver(self, u: xr.DataArray, v: xr.DataArray, step: int = 1, **kwargs):
-
-        return self.add_operation(plot_quiver, u=u, v=v, step=step, **kwargs)

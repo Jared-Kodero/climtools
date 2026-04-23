@@ -4,10 +4,10 @@ import sys
 
 # import cmaps as _cmaps --- IGNORE ---
 from .init_cmap import *
-from .plotting import get_cbar_axes, plot_pvalues, plot_quiver
+from .plotting import get_cax, plot_pvalues, plot_quiver
 from .pycdo import cdo
 from .statistics import calc_significance
-from .theming import cmaps, plot_theme
+from .theming import cmaps, plot
 from .tools import (
     BoundingBox,
     RedirectStreams,
@@ -15,7 +15,8 @@ from .tools import (
     cwd,
     du,
     file_kind,
-    get_func_signature,
+    fix_vscode_widget,
+    get_fsig,
     home,
     host,
     logexc,
@@ -32,8 +33,6 @@ from .xgeo import (
     GeoDataArray,
     GeoDataset,
     SetupDask,
-    get_local_solar_time,
-    mask,
 )
 
 """climtools — utilities for climate data analysis and plotting.
@@ -54,7 +53,7 @@ specific functions you need.
 """
 
 if "ipykernel" in sys.modules:
-    # set_vscode_widget_theme()
+    fix_vscode_widget()
     ...
 
 __all__ = [
@@ -70,19 +69,17 @@ __all__ = [
     "cwd",
     "du",
     "file_kind",
-    "get_cbar_axes",
-    "get_func_signature",
-    "get_local_solar_time",
+    "get_cax",
+    "get_fsig",
     "home",
     "host",
     "logexc",
-    "mask",
     "mkdir",
     "mv",
     "n_cpus",
     "plot_pvalues",
     "plot_quiver",
-    "plot_theme",
+    "plot",
     "rm",
     "symlink",
     "timeit",

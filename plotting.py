@@ -1,10 +1,8 @@
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
-import warnings
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -12,42 +10,34 @@ from typing import Any, Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import cartopy.mpl.geoaxes
-import geovista as gv
+import cartopy.mpl.geoaxes as cgeo
 import matplotlib.pyplot as plt
 import numpy as np
-import pyvista as pv
-import vtk
+import pandas as pd
 import xarray as xr
 from cartopy.util import add_cyclic_point
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
-
-# ---- Plot callback ----
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 
-from .pvhtml import build_pvhtml
-from .tools import RicedDict, get_func_signature, n_cpus, tmp
-
-vtk.vtkObject.GlobalWarningDisplayOff()
-os.environ["PYVISTA_OFF_SCREEN"] = "true"
+from .tools import RicedDict, get_fsig, n_cpus, tmp
 
 
 @dataclass(frozen=True)
-class PlotObj:
+class MapPlot:
     fig: Figure
-    ax: Axes
+    ax: Axes | cgeo.GeoAxes
     artist: Artist
 
 
-def get_cbar_axes(
+def get_cax(
     *,
     fig: plt.Figure = None,
     axes: plt.Axes = None,
     subplots: bool = False,
     orientation: Literal["vertical", "horizontal"] = "vertical",
-    pad: float = 0.04,
+    **kwargs,
 ) -> plt.Axes:
     """
     Create a new set of axes for a colorbar by stealing space from the current axes.
@@ -59,8 +49,6 @@ def get_cbar_axes(
         The figure to which the colorbar axes will be added. If None, uses the current figure.
     ax : matplotlib.axes.Axes, optional
         The axes from which space will be stolen. If None, uses the current axes.
-    pad : float, optional
-        The padding between the colorbar axes and the existing axes. Default is 0.04. Try 0.04 and 0.05
     subplots : bool, optional
         If True, the function will adjust the colorbar position based on the subplots in the figure.
         This is useful when the figure has multiple subplots and you want to ensure the colorbar does not overlap with them.
@@ -68,7 +56,6 @@ def get_cbar_axes(
 
     orientation : str, optional
         The orientation of the colorbar. Can be either "vertical" or "horizontal". Default is "vertical".
-
     Returns
     -------
     matplotlib.axes.Axes
@@ -84,25 +71,39 @@ def get_cbar_axes(
         axes = plt.gca()
 
     plt.tight_layout()
-
     fig_width, fig_height = fig.get_size_inches()
 
-    def _create_cax(y0, x0, y1, x1, x_len, y_len):
+    def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         if orientation == "vertical":
             bottommost = y0
             height = y_len
-            rightmost = pad * height + x1
-            norm = pad if fig_height < 5 else 0.05
-            width = norm * height
+            rightmost = x1 + 0.04
+            width = 0.03
 
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         elif orientation == "horizontal":
+            xticks = True if len(list(ax.get_xticks())) > 0 else False
+            xlabel = bool(ax.xaxis.label.get_text().strip())
+            pad = 0.10
+            h_pad = 0
+            if (xlabel and not xticks) or (xticks and not xlabel):
+                pad = 0.15
+            elif xticks and xlabel:
+                pad = 0.20
+
+            if kwargs.get("quiver") and kwargs.get("xaxis_ticks"):
+                pad = 0.1
+                h_pad = 0.05
+
+            if kwargs.get("quiver") and not kwargs.get("xaxis_ticks"):
+                pad = 0.05
+                h_pad = 0.05
+
             rightmost = x0
             width = x_len
-            bottommost = y0 - (0.12 * width)
-            norm = pad if fig_width < 5 else 0.05
-            height = norm * width
+            bottommost = y0 - pad
+            height = 0.05 + h_pad
 
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
@@ -112,7 +113,7 @@ def get_cbar_axes(
         pos = axes.get_position()
         fig_x_len = pos.x1 - pos.x0
         fig_y_len = pos.y1 - pos.y0
-        cax = _create_cax(pos.y0, pos.x0, pos.y1, pos.x1, fig_x_len, fig_y_len)
+        cax = _create_cax(pos.y0, pos.x0, pos.y1, pos.x1, fig_x_len, fig_y_len, axes)
 
     elif subplots:
         nrows, ncols = 1, 1
@@ -147,45 +148,75 @@ def get_cbar_axes(
             right_bot_ax.x1,
             fig_x_len,
             fig_y_len,
+            axes[-1, -1],
         )
 
     return cax
 
 
-def make_cyclic(obj: xr.DataArray, dim: str = "lon"):
+def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
     """
     Add a cyclic point to a DataArray along the specified longitude dimension.
 
     Parameters
     ----------
-    obj : xarray.DataArray
-        The input DataArray to which a cyclic point will be added.
-    longitude : str, optional
+    obj : xarray.DataArray or xarray.Dataset
+        The input DataArray or Dataset to which a cyclic point will be added.
+    lon : str, optional
         The name of the longitude dimension in the DataArray. Default is 'lon'.
+
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        The DataArray or Dataset with a cyclic point added.
+
     """
 
-    if not isinstance(obj, xr.DataArray):
-        raise ValueError("Input object must be an xarray.DataArray.")
-    if dim not in obj.dims:
-        raise ValueError(f"Longitude dimension '{dim}' not found in data dims.")
+    dataset = False
+
+    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
+        raise ValueError(
+            "Input object must be a DataArray or a Dataset with only one data variable."
+        )
+
+    if isinstance(obj, xr.Dataset):
+        obj = list(obj.data_vars.values())[0]
+        dataset = True
+
+    if lon not in obj.dims:
+        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
 
     attrs = obj.attrs
-    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[dim])
+    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[lon])
     coords = {dim: obj.coords[dim] for dim in obj.dims}
-    coords[dim] = cyclic_dim
+    coords[lon] = cyclic_dim
 
-    return xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
+    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
+
+    if dataset:
+        new_obj = new_obj.to_dataset(name=obj.name)
+
+    return new_obj
+
+
+def _check_cartopy_axis(ax):
+
+    transform = None
+    if isinstance(ax, cgeo.GeoAxes):
+        transform = ccrs.PlateCarree()
+
+    return transform
 
 
 def plot_pvalues(
     data: xr.DataArray,
-    ax: plt.Axes = None,
+    ax: plt.Axes | cgeo.GeoAxes = None,
     level: float = 0.05,
     color: str = "grey",
     alpha: float = 0.3,
     marker: str = None,
     edgecolors: str = None,
-    step_size: int = 1,
+    subsample: int = 1,
     s: float = 0.25,
 ):
     """
@@ -203,8 +234,8 @@ def plot_pvalues(
         Color of the points to plot. Default is "grey".
     alpha : float, optional
         Alpha transparency of the points. Default is 0.05.
-    step_size : int, optional
-        Step size for plotting points to reduce overplotting. Default is 1 (plot all points).
+    subsample : int, optional
+        subsample size for plotting points to reduce overplotting. Default is 1 (plot all points).
     marker : str, optional
         Marker style for the points. Default is None (default marker).
     edgecolors : str, optional
@@ -216,16 +247,12 @@ def plot_pvalues(
     if ax is None:
         ax = plt.gca()
 
-    # check if ax is cartopy axis
-    transform = None
-    if isinstance(ax, cartopy.mpl.geoaxes.GeoAxes):
-        transform = ccrs.PlateCarree()
+    transform = _check_cartopy_axis(ax)
 
     if "lon" not in data.dims or "lat" not in data.dims:
         raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
 
-    data = data.isel(lat=slice(None, None, step_size), lon=slice(None, None, step_size))
-
+    data = data.isel(lat=slice(None, None, subsample), lon=slice(None, None, subsample))
     p_values = data.to_dataframe(name="p_values").reset_index()
     p_values = p_values.query("p_values < @level")
     p_values = p_values.dropna()
@@ -243,43 +270,275 @@ def plot_pvalues(
         marker=marker,
         edgecolors=edgecolors,
     )
+    return ax
 
 
 def plot_quiver(
     u: xr.DataArray,
     v: xr.DataArray,
-    ax: plt.Axes = None,
-    step: int = 1,
+    ax: plt.Axes | cgeo.GeoAxes = None,
+    subsample: int = 1,
+    new_ax: bool = False,
     **kwargs,
 ):
     """
     Plot quiver arrows on a Cartopy axis.
+
+    Parameters
+    ----------
+    u : xarray.DataArray
+        The u-component of the vector field.
+    v : xarray.DataArray
+        The v-component of the vector field.
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
+        The axis to plot on. If None, the current axis is used.
+    subsample : int, optional
+        The subsample size for plotting points to reduce overplotting. Default is 1.
+
+    **kwargs
+        Additional keyword arguments for the quiver plot.
+
+    Returns
+    -------
+    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis with the quiver plot.
+
     """
+
+    # pop quiver key from kwargs,
+    u_units = u.attrs.get("units", "")
+    v_units = v.attrs.get("units", "")
+    assert u_units == v_units, "Units of u and v components must match"
+    u_units = u_units.replace("[", "").replace("]", "").strip()
 
     if ax is None:
         ax = plt.gca()
 
-    import cartopy.mpl.geoaxes as cgeo
+    transform = _check_cartopy_axis(ax)
 
-    transform = None
-    if isinstance(ax, cgeo.GeoAxes):
-        import cartopy.crs as ccrs
+    u = u[::subsample, ::subsample]
+    v = v[::subsample, ::subsample]
 
-        transform = ccrs.PlateCarree()
+    lon = u.lon
+    lat = u.lat
 
-    u = u[::step, ::step]
-    v = v[::step, ::step]
-    lon2d, lat2d = np.meshgrid(u.lon, u.lat)
-    ax.quiver(lon2d, lat2d, u.values, v.values, transform=transform, **kwargs)
+    # Detect if coordinates are already 2D
+    if lon.ndim == 2 and lat.ndim == 2:
+        lon2d, lat2d = lon.values, lat.values
+    else:
+        lon2d, lat2d = np.meshgrid(lon.values, lat.values)
+
+    xaxis_ticks = kwargs.pop("xaxis_ticks")
+    U = kwargs.pop("U", None)
+
+    Q = ax.quiver(lon2d, lat2d, u.values, v.values, transform=transform, **kwargs)
+
+    if not U:
+        speed = (u**2 + v**2) ** 0.5
+        U = np.round(speed.median(skipna=True).values)
+        U = int(U)
+
+    if new_ax:
+        cax = get_cax(
+            axes=ax,
+            orientation="horizontal",
+            quiver=True,
+            xaxis_ticks=xaxis_ticks,
+        )
+        bbox = cax.get_position()
+
+        if "%" in u_units:
+            u_units = u_units.replace("%", "\\%")
+        label = rf"{U} [${u_units}$]"
+
+        ax.quiverkey(
+            Q,
+            X=0.45,
+            Y=bbox.y0,
+            U=U,
+            label=label,
+            labelpos="E",
+            coordinates="figure",
+        )
+
+        cax.set_frame_on(False)
+        cax.set_xticks([])
+        cax.set_yticks([])
+
+    return ax
+
+
+def plot_cbar(
+    fig: plt.Figure,
+    ax: plt.Axes | cgeo.GeoAxes,
+    artist: Artist,
+    orientation: str = "vertical",
+    drawedges: bool = False,
+    extend: str = None,
+    cbar_label: str = "",
+):
+    """
+    Add a colorbar to a Cartopy axis.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        The figure to add the colorbar to.
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis to add the colorbar to.
+    artist : matplotlib.artist.Artist
+        The artist to create a colorbar for.
+    orientation : str, optional
+        The orientation of the colorbar. Default is "vertical".
+    drawedges : bool, optional
+        Whether to draw edges on the colorbar. Default is False.
+    extend : str, optional
+        How to handle the colorbar extensions. Default is None.
+    cbar_label : str, optional
+        The label for the colorbar. Default is "".
+
+    Returns
+    -------
+    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis with the colorbar.
+
+    """
+    cax = get_cax(fig=fig, axes=ax, orientation=orientation)
+
+    cb = plt.colorbar(
+        artist,
+        cax=cax,
+        ax=ax,
+        orientation=orientation,
+        drawedges=drawedges,
+        extend=extend,
+    )
+
+    cb.set_label(cbar_label)
+    return ax
+
+
+def _add_map_features(
+    fig: plt.Figure,
+    ax: plt.Axes | cgeo.GeoAxes,
+    artist: Artist,
+    # colorbar
+    add_colorbar: bool = False,
+    cbar_label: str = None,
+    orientation: str = "vertical",
+    drawedges: bool = False,
+    extend: str = None,
+    # p-values
+    p_values: xr.DataArray = None,
+    p_value_kwargs: dict = None,
+    # quiver
+    u_component: xr.DataArray = None,
+    v_component: xr.DataArray = None,
+    quiver_kwargs: dict = None,
+    # meta
+    long_name: str = "",
+    units: str = "",
+    gridlines: bool = False,
+    new_ax: bool = False,
+):
+
+    if gridlines:
+        gl = ax.gridlines(
+            crs=ccrs.PlateCarree(),
+            draw_labels=True,
+            linewidth=0.5,
+            color="gray",
+            alpha=0.5,
+            linestyle="--",
+            zorder=1,
+        )
+
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.bottom_labels = True
+        gl.left_labels = True
+
+    if add_colorbar and new_ax:
+        if not cbar_label:
+            long_name = long_name.capitalize()
+            units = units.replace("[", "").replace("]", "").strip()
+            cbar_label = rf"{long_name} [${units}$]"
+
+        ax = plot_cbar(
+            fig,
+            ax,
+            artist,
+            orientation=orientation,
+            drawedges=drawedges,
+            extend=extend,
+            cbar_label=cbar_label,
+        )
+
+    if p_values is not None:
+        p_kwargs = p_value_kwargs or {}
+        ax = plot_pvalues(data=p_values, ax=ax, **p_kwargs)
+
+    if (u_component is not None) and (v_component is not None):
+        q_kwargs = quiver_kwargs or {}
+        q_kwargs["xaxis_ticks"] = gridlines
+
+        ax = plot_quiver(
+            u=u_component,
+            v=v_component,
+            ax=ax,
+            new_ax=new_ax,
+            **q_kwargs,
+        )
+
+    return ax
+
+
+def _add_cartopy_features(
+    ax: plt.Axes | cgeo.GeoAxes,
+    global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
+    coastlines: bool = False,
+    states: bool = False,
+    borders: bool = False,
+    lakes: bool = False,
+    rivers: bool = False,
+    ocean: bool = False,
+    land: bool = False,
+):
+
+    if global_extent:
+        ax.set_global()
+
+    if set_extent:
+        ax.set_extent(set_extent)
+
+    features = [
+        (coastlines, cfeature.COASTLINE, {}),
+        (states, cfeature.STATES, {"linestyle": "-", "alpha": 0.3, "zorder": 3}),
+        (borders, cfeature.BORDERS, {"linestyle": "-", "alpha": 0.3, "zorder": 3}),
+        (lakes, cfeature.LAKES, {"zorder": 2}),
+        (rivers, cfeature.RIVERS, {"zorder": 2}),
+    ]
+
+    for condition, feature, kwargs in features:
+        if condition:
+            ax.add_feature(feature, **kwargs)
+
+    if ocean and not land:
+        ax.add_feature(cfeature.LAND, facecolor="#54585f", zorder=2)
+    elif land and not ocean:
+        ax.add_feature(cfeature.OCEAN, zorder=2)
+
     return ax
 
 
 def mapplot(
-    data: xr.DataArray,
+    da: xr.DataArray,
     *,
     # Spatial configuration
     x: str = None,
     y: str = None,
+    ax: cgeo.GeoAxes = None,
     projection: Literal[
         "PlateCarree",
         "Mercator",
@@ -307,8 +566,9 @@ def mapplot(
     vmax: float = None,
     levels: int | list = None,
     extend: str = None,
+    cyclic: bool = False,
     robust: bool = False,
-    title: str = None,
+    title: str = "",
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -322,158 +582,210 @@ def mapplot(
     land: bool = True,
     lakes: bool = False,
     rivers: bool = False,
+    p_values: xr.DataArray = None,
+    p_value_kwargs: dict = None,
+    u_component: xr.DataArray = None,
+    v_component: xr.DataArray = None,
+    quiver_kwargs: dict = None,
     **kwargs,
-) -> PlotObj:
+) -> MapPlot:
     """
-    Plot a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
-    projection, style
+    Visualize a two-dimensional ``xarray.DataArray`` on a Cartopy map.
+
+    This function provides a high-level interface for rendering geospatial
+    fields using Cartopy projections together with the native xarray plotting
+    API. It supports multiple plotting backends, configurable projections,
+    geographic features, and optional overlays such as statistical
+    significance markers and vector fields.
+
+    The input array is internally reduced using ``DataArray.squeeze()``.
+    After squeezing, the data must be two-dimensional.
 
     Parameters
     ----------
-    Data and Coordinates
-    --------------------
-    data : xr.DataArray
-        Two-dimensional or time-evolving array with spatial dimensions
-        (e.g., latitude/longitude or x/y).
+    da : xarray.DataArray
+        Two-dimensional spatial field to visualize. The array must contain
+        identifiable horizontal coordinates, typically longitude and latitude.
+
     x, y : str, optional
-        Names of the horizontal dimensions. Defaults to the first and second dims.
+        Names of the horizontal coordinate dimensions. If not provided, the
+        first two dimensions of the array are used.
 
-    Projection and Layout
-    ---------------------
-    projection : str, default "PlateCarree"
-        Map projection. Options include "Mercator", "Robinson", "Mollweide",
-        "Orthographic", "LambertConformal", etc.
-    central_longitude : float, default -100
-        Central longitude for the map projection.
-    central_latitude : float, default None
-        Central latitude for the map projection.
+    ax : cartopy.mpl.geoaxes.GeoAxes, optional
+        Target axis for plotting. If omitted, a new figure and GeoAxes are
+        created using the specified projection.
+
+    projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide",
+                "Orthographic", "LambertConformal", "AlbersEqualArea",
+                "Stereographic", "NorthPolarStereo", "SouthPolarStereo"}, default "PlateCarree"
+        Cartopy map projection used to construct the GeoAxes.
+
+    central_longitude : float, optional
+        Central longitude of the projection, when supported.
+
+    central_latitude : float, optional
+        Central latitude of the projection, when supported.
+
     global_extent : bool, default False
-        If True, sets extent to show the entire globe.
-    set_extent : BoundingBox, optional
-        Set the extent (x0, x1, y0, y1) of the map in the given coordinate system.
+        If True, sets the map extent to the full globe.
+
+    set_extent : tuple of float, optional
+        Geographic extent specified as ``(lon_min, lon_max, lat_min, lat_max)``
+        in degrees.
+
     figsize : tuple of float, optional
-        Figure size in inches (width, height).
+        Figure size in inches. Only applied when a new figure is created.
 
-    Plot Style and Color Mapping
-    ----------------------------
-    method : str, default "default"
-        Plot method: "pcolormesh", "contourf", "contour", "imshow", or "default".
-    cmap : str or Colormap, optional
-        Colormap applied to data.
-    norm : Normalize, optional
-        Normalization function for the color scale.
+    Plot configuration
+    ------------------
+    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+        Plotting method delegated to the xarray plotting interface.
+
+    cmap : str or matplotlib.colors.Colormap, optional
+        Colormap used to render the data field.
+
+    norm : matplotlib.colors.Normalize, optional
+        Normalization applied prior to colormap mapping.
+
     vmin, vmax : float, optional
-        Color scale limits.
-    levels : int or sequence, optional
-        Contour levels for "contour" and "contourf".
-    robust : bool, default False
-        If True, ignores outliers using 2nd-98th percentile range.
-    extend : str, optional
-        If 'both', extends color limits to include both ends of the data range.
-        If 'min', extends only the minimum limit.
-        If 'max', extends only the maximum limit.
-    orientation : str, default "vertical"
-        Colorbar orientation.
-    add_colorbar : bool, default True
-        Whether to draw a colorbar.
-    drawedges : bool, default False
-        Draw edges around colorbar color patches.
-    cbar_label : str, optional
-        Label for the colorbar.
+        Lower and upper bounds for color scaling.
 
-    Map Features
+    levels : int or sequence of float, optional
+        Contour levels for contour-based methods.
+
+    extend : {"neither", "both", "min", "max"}, optional
+        Colorbar extension indicating out-of-range values.
+
+    cyclic : bool, default False
+        If True, a cyclic point is appended along the longitudinal dimension.
+        This is required for seamless rendering of global fields spanning
+        0-360° or -180-180°.
+
+    robust : bool, default False
+        If True, color limits are computed from the 2nd and 98th percentiles,
+        reducing sensitivity to extreme values.
+
+    title : str, optional
+        Title applied to the axes.
+
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Orientation of the colorbar.
+
+    add_colorbar : bool, default True
+        If True, a colorbar is added to the plot.
+
+    drawedges : bool, default False
+        If True, draw edges between colorbar segments.
+
+    cbar_label : str, optional
+        Label for the colorbar. If not provided, the label is inferred from
+        ``data.attrs["long_name"]`` and ``data.attrs["units"]`` when available.
+
+    Map features
     ------------
     gridlines : bool, default False
-        Show latitude/longitude gridlines.
+        Draw latitude and longitude gridlines with labels.
+
     coastlines : bool, default True
-        Draw coastlines.
+        Add coastline boundaries.
+
     borders : bool, default True
-        Draw national borders.
+        Add national borders.
+
     states : bool, default True
-        Draw state or province boundaries (if available).
-    ocean, land : bool, default True
-        Mask ocean and land areas if any is False.
+        Add subnational administrative boundaries.
+
+    ocean : bool, default True
+        Render ocean background.
+
+    land : bool, default True
+        Render land background.
+
     lakes : bool, default False
-        If True, adds lakes to the map.
+        Add lake features.
+
     rivers : bool, default False
-        If True, adds rivers to the map.
-    facecolor : str, default "#d3d3d3"
-        Land face color.
+        Add river features.
+
+    Overlays
+    --------
+    p_values : xarray.DataArray, optional
+        Field of p-values associated with ``data``. Locations satisfying
+        ``p < threshold`` are marked to indicate statistical significance.
+
+    p_value_kwargs : dict, optional
+        Keyword arguments passed to ``plot_pvalues`` (e.g., ``level``,
+        ``alpha``, ``subsample``).
+
+    u_component, v_component : xarray.DataArray, optional
+        Zonal and meridional vector components for quiver plotting. Both
+        must share identical dimensions and units.
+
+    quiver_kwargs : dict, optional
+        Keyword arguments passed to ``plot_quiver`` (e.g., ``subsample``,
+        ``scale``, ``width``, ``U``).
+
+    **kwargs
+        Additional keyword arguments forwarded to the underlying xarray
+        plotting method.
 
     Returns
     -------
-    PlotObj
-        A dataclass containing the figure, axes, and artist objects.
+    MapPlot
+        Dataclass containing:
+        - ``fig`` : matplotlib.figure.Figure
+        - ``ax`` : cartopy GeoAxes
+        - ``artist`` : primary matplotlib artist returned by the plot method
+
     Notes
     -----
-    This function provides a flexible interface for plotting spatial or spatiotemporal
-    `xarray.DataArray` objects on Cartopy projections. It supports both static maps
-    and animated visualizations with optional geographic and physical map layers.
-    Requires `cartopy` and `matplotlib`.
+    - The data are assumed to be defined in a Plate Carrée coordinate system
+    (longitude and latitude in degrees).
+    - For global fields, enabling ``cyclic=True`` prevents visual discontinuities
+    at the longitudinal boundary.
+    - When plotting vector fields, subsampling via ``subsample`` is recommended to
+    reduce visual clutter.
     """
-
     # if data is 3D, raise error
-    data = data.squeeze()
-    if data.ndim > 2:
+    da = da.squeeze()
+    long_name = da.attrs.get("long_name", "")
+    units = da.attrs.get("units", da.name)
+
+    if da.ndim > 2:
         raise ValueError("DataArray has more than 2 dimensions.")
 
-    proj = getattr(ccrs, projection)
+    if cyclic:
+        da = make_cyclic(da, lon="lon")
 
-    proj_all_args = get_func_signature(proj)
-    proj_args = {}
+    if ax:
+        new_ax = False
+        if not isinstance(ax, (cgeo.GeoAxes)):
+            raise ValueError("Provided ax must be a cartopy GeoAxes.")
+        fig = ax.get_figure()
 
-    if central_longitude is not None and "central_longitude" in proj_all_args:
-        proj_args["central_longitude"] = central_longitude
-    if central_latitude is not None and "central_latitude" in proj_all_args:
-        proj_args["central_latitude"] = central_latitude
+    if not ax:
+        new_ax = True
+        proj = getattr(ccrs, projection)
+        _cargs = get_fsig(proj)
+        cargs = {}
 
-    fig, ax = plt.subplots(
-        subplot_kw={"projection": proj(**proj_args)},
-        figsize=figsize,
-    )
+        if central_longitude is not None and "central_longitude" in _cargs:
+            cargs["central_longitude"] = central_longitude
+        if central_latitude is not None and "central_latitude" in _cargs:
+            cargs["central_latitude"] = central_latitude
 
-    if global_extent:
-        ax.set_global()
-
-    if set_extent:
-        ax.set_extent([*set_extent])
-
-    if coastlines:
-        ax.add_feature(cfeature.COASTLINE)
-
-    if states:
-        ax.add_feature(cfeature.STATES, linestyle="-", alpha=0.3, zorder=3)
-
-    if borders:
-        ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.3, zorder=3)
-
-    if lakes:
-        ax.add_feature(cfeature.LAKES, zorder=2)
-
-    if rivers:
-        ax.add_feature(cfeature.RIVERS, zorder=2)
-
-    if ocean and not land:
-        ax.add_feature(cfeature.LAND, facecolor="#d9d9d9", zorder=2)
-
-    elif land and not ocean:
-        ax.add_feature(cfeature.OCEAN, zorder=2)
-
-    if gridlines:
-        gl = ax.gridlines(
-            crs=ccrs.PlateCarree(),
-            draw_labels=True,
-            linewidth=0.5,
-            color="gray",
-            alpha=0.5,
-            linestyle="--",
-            zorder=1,
+        fig, ax = plt.subplots(
+            subplot_kw={"projection": proj(**cargs)},
+            figsize=figsize,
         )
 
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.bottom_labels = True
-        gl.left_labels = True
+        ax = _add_cartopy_features(
+            **{
+                k: v
+                for k, v in locals().items()
+                if k in get_fsig(_add_cartopy_features)
+            }
+        )
 
     transform = ccrs.PlateCarree()
 
@@ -485,75 +797,39 @@ def mapplot(
         pts = ["pcolormesh", "contourf", "contour", "imshow"]
         funcs = [p] + [getattr(p, m) for m in pts]
 
-        plot_args = {}
+        pargs = {}
         for f in funcs:
-            plot_args.update(get_func_signature(f))
+            pargs.update(get_fsig(f))
         if pt == "default":
             func = p
         elif pt in pts:
             func = getattr(p, pt)
-            plot_args.update(get_func_signature(func))
+            pargs.update(get_fsig(func))
 
-        return func, plot_args
+        return func, pargs
 
     # we want all possible args
-    plot, plot_args = _data_plot(data, method)
-
+    plot, pargs = _data_plot(da, method)
     all_args = dict(locals())
     all_args.update(kwargs)
 
-    plot_kwargs = {k: v for k, v in all_args.items() if k in plot_args}
-    plot_kwargs["ax"] = ax
-    plot_kwargs["add_colorbar"] = False
-    plot_kwargs["zorder"] = 1
-    plot_kwargs["transform"] = transform
-    del plot_kwargs["extend"]
-    del plot_kwargs["kwargs"]
+    pkwargs = {k: v for k, v in all_args.items() if k in pargs}
+    pkwargs["ax"] = ax
+    pkwargs["add_colorbar"] = False
+    pkwargs["zorder"] = 1
+    pkwargs["transform"] = transform
+    del pkwargs["extend"]
+    del pkwargs["kwargs"]
+    del pkwargs["figsize"]
 
-    artist = plot(**plot_kwargs, extend=extend)
-    if title:
-        plt.title(title)
+    artist = plot(**pkwargs, extend=extend)
+    plt.title(title)
 
-    if add_colorbar:
-        cax = get_cbar_axes(fig=fig, axes=ax, orientation=orientation)
+    ax = _add_map_features(
+        **{k: v for k, v in locals().items() if k in get_fsig(_add_map_features)}
+    )
 
-        cb = plt.colorbar(
-            artist,
-            cax=cax,
-            ax=ax,
-            orientation=orientation,
-            drawedges=drawedges,
-            extend=extend,
-        )
-
-        if cbar_label:
-            cb.set_label(cbar_label)
-
-        else:
-            cbar_label = []
-            if "long_name" in data.attrs:
-                cbar_label.append(data.attrs["long_name"])
-            if "units" in data.attrs:
-                cbar_label.append(data.attrs["units"])
-            cb.set_label("\n".join(cbar_label))
-
-    return PlotObj(fig, ax, artist)
-
-
-def animate_i_frame(da, i, t, dim, dpi, args, session_tmp_dir):
-    t = f"{dim}: {t}"
-
-    local_kwargs = args.copy()
-    local_kwargs["data"] = da
-
-    fname = session_tmp_dir / f"{i:06d}.png"
-    plot = mapplot(**local_kwargs)
-
-    plot.ax.set_title(t)
-    plt.savefig(fname, dpi=dpi, bbox_inches="tight")
-    plot.ax.clear()
-    plt.close(plot.fig)
-    return None
+    return MapPlot(fig, ax, artist)
 
 
 def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error):
@@ -617,8 +893,83 @@ def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error
         return None
 
 
-def animate(
+def _mapplot_i(
+    i,
+    dim_value,
+    dim,
+    dpi,
+    args,
+    session_tmp_dir,
+    data_slice,
+    u_slice,
+    v_slice,
+):
+
+    # if dim values is numpy datetime,the string representation is too long, so we shorten it to the date only
+    if np.issubdtype(type(dim_value), np.datetime64):
+        dim_value = pd.to_datetime(dim_value).strftime("%Y-%m-%d %H:%M")
+
+    title = f"{dim}: {dim_value}"
+
+    local_kwargs = args.copy()
+    local_kwargs["da"] = data_slice
+    local_kwargs["u_component"] = u_slice
+    local_kwargs["v_component"] = v_slice
+
+    fname = session_tmp_dir / f"{i:06d}.png"
+
+    plot = mapplot(**local_kwargs)
+    plot.ax.set_title(title)
+
+    plt.savefig(fname, dpi=dpi, bbox_inches="tight")
+
+    plot.ax.clear()
+    plt.close(plot.fig)
+
+    return None
+
+
+def _validate_animation_inputs(
+    dim: str,
     data: xr.DataArray,
+    u_component: xr.DataArray = None,
+    v_component: xr.DataArray = None,
+):
+
+    if not isinstance(data, xr.DataArray):
+        raise ValueError("data must be an xarray.DataArray")
+    if not isinstance(u_component, (xr.DataArray, type(None))):
+        raise ValueError("u_component must be an xarray.DataArray or None")
+    if not isinstance(v_component, (xr.DataArray, type(None))):
+        raise ValueError("v_component must be an xarray.DataArray or None")
+
+    if dim not in data.dims:
+        raise ValueError(f"{dim} not found in data.dims {data.dims}")
+
+    for name, da in {
+        "u_component": u_component,
+        "v_component": v_component,
+    }.items():
+        if da is not None and dim not in da.dims:
+            raise ValueError(f"{dim} not found in {name}.dims {da.dims}")
+    if (u_component is None) != (v_component is None):
+        raise ValueError("u_component and v_component must be provided together")
+    if u_component is not None:
+        assert u_component.size == v_component.size == data.size, (
+            "u_component, v_component, and data must have the same size"
+        )
+    data = data.sortby(dim)
+    if u_component is not None:
+        u_component = u_component.sortby(dim)
+        v_component = v_component.sortby(dim)
+        assert data[dim].equals(u_component[dim])
+        assert data[dim].equals(v_component[dim])
+
+    return data, u_component, v_component
+
+
+def animate(
+    da: xr.DataArray,
     # Animation control will be popped from args
     dim: str = "time",
     *,
@@ -657,8 +1008,9 @@ def animate(
     vmax: float = None,
     levels: int | list = None,
     extend: str = None,
+    cyclic: bool = False,
     robust: bool = False,
-    title: str = None,
+    title: str = "",
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -672,114 +1024,185 @@ def animate(
     land: bool = True,
     lakes: bool = False,
     rivers: bool = False,
+    u_component: xr.DataArray = None,
+    v_component: xr.DataArray = None,
+    quiver_kwargs: dict = None,
     **kwargs,
 ):
     """
-        Animate a 2D or time-evolving `xarray.DataArray` on a Cartopy map with flexible
-        spatial projection, color mapping, and parallel rendering.
+    Animate a spatial ``xarray.DataArray`` on a Cartopy map.
 
-        Parameters
-        ----------
-        Data
-        ----
-        data : xr.DataArray
-            Two-dimensional or time-dependent array containing the field to plot.
-            Must include spatial coordinates and optionally a time-like dimension.
+    This function generates a sequence of map-based visualizations by
+    iterating over a specified dimension, typically time. Each slice is
+    rendered using the same plotting interface as ``mapplot``, ensuring
+    consistent projection, styling, and overlays across frames.
 
-        Animation
-        ---------
-        dim : str, default "time"
-            Name of the dimension to animate (e.g., "time").
-        indices : sequence of int, optional
-            Specific frame indices to include in the animation along `dim`. If None, uses all indices.
-        outfile : str or Path, optional
-            Path to save the resulting animation. If None, displays interactively.
-        quality : {"low", "medium", "high"}, default "medium"
-            Output resolution and compression setting.
-        fps : int, default 10
-            Animation playback speed in frames per second.
-        parallel : bool, default False
-            Compute animation frames in parallel across available CPUs.
+    Frames may be rendered sequentially or in parallel and optionally
+    encoded to a video file.
 
-        Spatial Configuration
-        ---------------------
-        x, y : str, optional
-            Names of the horizontal coordinates. Defaults to the first two dimensions.
-        projection : str, default "PlateCarree"
-            Cartopy map projection name. Supported options include:
-            "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal",
-            "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo".
-        global_extent : bool, default False
-            If True, sets the extent to display the full globe.
-        figsize : tuple of float, optional
-            Figure size (width, height) in inches.
-        central_longitude : float, default None
-            Central longitude for the map projection.
-        central_latitude : float, default None
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Array containing a spatial field with at least two dimensions and an
+        additional animation dimension. After selecting along ``dim``, each
+        slice must be two-dimensional.
 
-        Plot Appearance
-        ---------------
-        method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
-            Rendering method for data visualization.
-        norm : Normalize, optional
-            Normalization function for the color scale.
-        cmap : str or Colormap, optional
-            Colormap applied to the data field.
-        vmin, vmax : float, optional
-            Color scaling limits. If None, inferred from data range.
-        levels : int or sequence, optional
-            Contour levels used in "contour" or "contourf" plots.
-        extend : str, optional
-            If 'both', extends color limits to include both ends of the data range.
-        robust : bool, default False
-            Exclude outliers using 2nd-98th percentile for color normalization.
-        transform : cartopy.crs.Projection, optional
-            Coordinate reference system of the data for plotting.
-        orientation : {"vertical", "horizontal"}, default "vertical"
-            Orientation of the colorbar.
-        add_colorbar : bool, default True
-            Whether to display a colorbar.
-        drawedges : bool, default False
-            Draw grid edges on color patches (for `pcolormesh`).
-        cbar_label : str, optional
-            Label text for the colorbar.
+    dim : str, default "time"
+        Name of the dimension over which frames are generated.
 
-        Map Features
-        ------------
-        gridlines : bool, default False
-            Display latitude/longitude gridlines.
-        coastlines : bool, default True
-            Draw coastlines on the map.
-        borders : bool, default True
-            Draw country borders.
-        states : bool, default True
-            Draw internal administrative boundaries (e.g., states or provinces).
-        ocean, land : bool, default True
-            Fill ocean and land regions with the specified colors.
-        lakes : bool, default False
-            If True, adds lakes to the map.
-        rivers : bool, default False
-            If True, adds rivers to the map
-        facecolor : str, default "#d3d3d3"
-            Land face color
+    indices : sequence of int, optional
+        Subset of indices along ``dim`` to include in the animation. If not
+        provided, all indices along the dimension are used.
 
-    .
+    outfile : str or pathlib.Path, optional
+        Output file path. If provided, frames are encoded and written to
+        disk. If None, a matplotlib animation object is returned for
+        interactive display.
 
-        Other Parameters
-        ----------------
-        **kwargs
-            Additional arguments passed to the plotting function.
+    quality : {"low", "medium", "high"}, default "medium"
+        Output quality preset controlling figure resolution and encoding
+        parameters.
 
-        Returns
-        -------
-        matplotlib.animation.FuncAnimation or None
-            Animation object if not saved directly to file.
+    fps : int, default 10
+        Frames per second of the output animation.
 
-        Notes
-        -----
-        - Parallel frame rendering significantly accelerates long sequences.
-        - Supports any Cartopy projection with a compatible coordinate transform.
-        - Intended for geospatial fields such as temperature, precipitation, or pressure.
+    parallel : bool, default True
+        If True, frames are rendered concurrently across available CPU
+        cores. This improves performance for long sequences but increases
+        memory usage.
+
+    Spatial configuration
+    ---------------------
+    x, y : str, optional
+        Names of the horizontal coordinate dimensions. If omitted, the first
+        two spatial dimensions are used.
+
+    projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide",
+                "Orthographic", "LambertConformal", "AlbersEqualArea",
+                "Stereographic", "NorthPolarStereo", "SouthPolarStereo"},
+        default "PlateCarree"
+        Cartopy map projection used for all frames.
+
+    central_longitude : float, optional
+        Central longitude of the projection when supported.
+
+    central_latitude : float, optional
+        Central latitude of the projection when supported.
+
+    global_extent : bool, default False
+        If True, sets the map extent to the entire globe.
+
+    set_extent : tuple of float, optional
+        Geographic extent specified as ``(lon_min, lon_max, lat_min, lat_max)``
+        in degrees.
+
+    figsize : tuple of float, optional
+        Figure size in inches.
+
+    Plot configuration
+    ------------------
+    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+        Plotting method delegated to the xarray plotting interface.
+
+    cmap : str or matplotlib.colors.Colormap, optional
+        Colormap applied to the data.
+
+    norm : matplotlib.colors.Normalize, optional
+        Normalization applied prior to color mapping.
+
+    vmin, vmax : float, optional
+        Lower and upper bounds for color scaling. These should typically be
+        fixed across frames to ensure visual consistency.
+
+    levels : int or sequence of float, optional
+        Contour levels for contour-based plotting methods.
+
+    extend : {"neither", "both", "min", "max"}, optional
+        Colorbar extension indicating out-of-range values.
+
+    cyclic : bool, default False
+        If True, a cyclic point is appended along the longitudinal dimension
+        to avoid discontinuities in global maps.
+
+    robust : bool, default False
+        If True, color limits are computed from the 2nd and 98th percentiles
+        of each frame. This may introduce frame-to-frame variability in the
+        color scale.
+
+    title : str, optional
+        Base title applied to each frame. Dimension values are typically
+        appended during rendering.
+
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Orientation of the colorbar.
+
+    add_colorbar : bool, default True
+        If True, a colorbar is added to each frame.
+
+    drawedges : bool, default False
+        If True, draw edges between colorbar segments.
+
+    cbar_label : str, optional
+        Label for the colorbar. If not provided, the label is inferred from
+        ``data.attrs["long_name"]`` and ``data.attrs["units"]`` when available.
+
+    Map features
+    ------------
+    gridlines : bool, default False
+        Draw latitude and longitude gridlines.
+
+    coastlines : bool, default True
+        Add coastline boundaries.
+
+    borders : bool, default True
+        Add national borders.
+
+    states : bool, default True
+        Add subnational administrative boundaries.
+
+    ocean : bool, default True
+        Render ocean background.
+
+    land : bool, default True
+        Render land background.
+
+    lakes : bool, default False
+        Add lake features.
+
+    rivers : bool, default False
+        Add river features.
+
+    Overlays
+    --------
+    u_component, v_component : xarray.DataArray, optional
+        Zonal and meridional vector components used for quiver plotting.
+        These must share dimensions with ``data`` and include the animation
+        dimension ``dim``.
+
+    quiver_kwargs : dict, optional
+        Keyword arguments passed to ``plot_quiver`` (e.g., ``subsample``,
+        ``scale``, ``width``).
+
+    **kwargs
+        Additional keyword arguments forwarded to the underlying xarray
+        plotting method.
+
+    Returns
+    -------
+    matplotlib.animation.FuncAnimation or None
+        Animation object if ``outfile`` is None. If an output file is
+        specified, the animation is written to disk and the function returns
+        None.
+
+    Notes
+    -----
+    - All frames share a common projection and map configuration.
+    - For physical interpretability, fixed color limits (``vmin``, ``vmax``)
+    are recommended across frames.
+    - Parallel rendering improves performance for large datasets but may
+    increase memory consumption.
+    - This function is intended for geophysical fields evolving along a
+    single dimension, such as time.
     """
 
     args = RicedDict(locals())
@@ -791,59 +1214,46 @@ def animate(
     quality = args.pop("quality")
     parallel = args.pop("parallel")
     indices = args.pop("indices")
-    data = args.pop("data")
+    da = args.pop("da")
+    u_component = args.pop("u_component")
+    v_component = args.pop("v_component")
 
-    if dim not in data.dims:
-        raise ValueError(f"{dim} not found in data.dims {data.dims}")
+    da, u_component, v_component = _validate_animation_inputs(
+        dim, da, u_component, v_component
+    )
 
     session_tmp_dir = Path(tempfile.mkdtemp())
     dpi_map = {"low": 300, "medium": 600, "high": 1200}
     dpi = dpi_map.get(quality, 600)
 
+    def _isel_dim(da: xr.DataArray | None, i: int):
+        return None if da is None else da.isel({dim: i}).load()
+
     if indices is None:
-        indices = range(data.sizes[dim])
+        indices = range(da.sizes[dim])
+
+    tasks = [
+        (
+            i,
+            da[dim].values[i],
+            dim,
+            dpi,
+            args,
+            session_tmp_dir,
+            _isel_dim(da, i),
+            _isel_dim(u_component, i),
+            _isel_dim(v_component, i),
+        )
+        for i in indices
+    ]
     if parallel:
-        if len(indices) >= n_cpus:
-            processes = n_cpus
-        else:
-            processes = len(indices)
-
-        tasks = [
-            (
-                data.isel({dim: i}).load(),
-                i,
-                data[dim].values[i],
-                dim,
-                dpi,
-                args,
-                session_tmp_dir,
-            )
-            for i in indices
-        ]
-
+        processes = min(len(indices), n_cpus)
         with Pool(processes=processes) as pool:
-            pool.starmap(animate_i_frame, tasks)
+            pool.starmap(_mapplot_i, tasks)
 
     else:
-        if len(indices) > 100:
-            warnings.warn(
-                f"Generating {data.sizes[dim]} frames sequentially. \
-                Set `parallel=True` to enable parallel processing \
-                and improve animation speed.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-            for i in list(indices):
-                animate_i_frame(
-                    data.isel({dim: i}).load(),
-                    i,
-                    data[dim].values[i],
-                    dim,
-                    dpi,
-                    args,
-                    session_tmp_dir,
-                )
+        for task in tasks:
+            _mapplot_i(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
 
@@ -859,416 +1269,3 @@ def animate(
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
     ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
-
-
-def plot_globe(
-    data: xr.DataArray,
-    x: str = "lon",
-    y: str = "lat",
-    cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-    coarsen_by: int = 10,
-    outfile: str | Path = None,
-):
-    """
-    Plot this DataArray on a globe using GeoVista.
-    """
-
-    resolution = data[x].diff(x).mean().values
-
-    if float(resolution) < 0.25:
-        data = data.coarsen(**{x: coarsen_by, y: coarsen_by}, boundary="trim").mean()
-
-    # Create the mesh from the sample data.
-    mesh = gv.Transform.from_1d(data.lon, data.lat, data=data.data)
-
-    # Plot the mesh with coastlines.
-    p = gv.GeoPlotter()
-    sargs = {"title": f"{data.name} / {data.units}"}
-    p.add_mesh(mesh, cmap=cmap, scalar_bar_args=sargs)
-    p.add_coastlines(color="white")
-    p.camera.zoom(1.2)
-
-    if outfile and outfile.endswith(".html"):
-        p.export_html(outfile)
-    elif outfile:
-        p.screenshot(outfile)
-    p.show()
-
-
-def pressure_to_height_std(p, scale=1):
-    """
-    Convert pressure (hPa) to height (km) using the
-    U.S. Standard Atmosphere lapse-rate formulation.
-    """
-
-    T0 = 288.15  # K
-    p0 = 1013.25  # hPa
-    gamma = 6.5  # K/km
-    Rd = 287.05  # J/(kg K)
-    g = 9.80665  # m/s^2
-
-    exponent = (Rd * gamma) / (g * 1000.0)
-
-    z_km = (T0 / gamma) * (1 - (p / p0) ** exponent)
-
-    return z_km * scale
-
-
-def to_sphere(X, Y, Z):
-
-    R_earth = 6371.0  # km
-
-    y_rad = np.deg2rad(Y)
-    x_rad = np.deg2rad(X)
-    z_lev = Z
-
-    lon3, lat3, lev3 = np.meshgrid(x_rad, y_rad, z_lev, indexing="ij")
-
-    r = 1.0 + lev3 / R_earth
-
-    X = r * np.cos(lat3) * np.cos(lon3)
-    Y = r * np.cos(lat3) * np.sin(lon3)
-    Z = r * np.sin(lat3)
-
-    return X, Y, Z
-
-
-def check_z_unit(field: xr.DataArray, z_unit: str, scale: int) -> xr.DataArray:
-    units = ("hpa", "Pa", "km", "generic")
-
-    if z_unit not in units:
-        raise ValueError(f"Unknown unit provided, expected one of {units}")
-
-    field = field.sortby("z", ascending=False)
-
-    if z_unit in ["generic", "km"]:
-        return field
-    elif z_unit == "hpa":
-        field["z"] = pressure_to_height_std(field["z"], scale)
-    elif z_unit == "Pa":
-        field["z"] = pressure_to_height_std(field["z"] / 100, scale)
-
-    return field
-
-
-def mapplot3d(
-    data: xr.DataArray,
-    grid_type: Literal["uniform", "structured"] = "uniform",
-    sphere: bool = False,
-    window_size: tuple[int, int] = None,
-    dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
-    z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
-    z_unit_scale: int | float = 1,
-    cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-    outfile: Path = None,
-    format: Literal["html", "png"] = "png",
-    vmin: int | float = None,
-    vmax: int | float = None,
-    log_scale: bool = False,
-    zscale: int | float = 1,
-    title: str = None,
-    cam_elev: int | float = None,
-    cam_azim: int | float = None,
-    show_scalar_bar: bool = True,
-    xlabel: str = None,
-    ylabel: str = None,
-    zlabel: str = None,
-    n_xlabels: int = None,
-    n_ylabels: int = None,
-    n_zlabels: int = None,
-    opacity: list | Literal["linear", "sigmoid"] = "linear",
-    opacity_unit_distance: int | float = None,
-    blending: Literal[
-        "additive", "maximum", "minimum", "composite", "average"
-    ] = "composite",
-    padding: int | float = None,
-    font_size: int = None,
-    animation: bool = False,
-):
-
-    if format not in {"html", "png"}:
-        raise ValueError("format must be either 'html' or 'png'")
-
-    ipykernel = "ipykernel" in sys.modules
-    plot_args = {}
-    if ipykernel and not outfile and not animation:
-        jupyter_backend = "server"
-        plot_args["notebook"] = True
-        plot_args["off_screen"] = False
-
-    else:
-        jupyter_backend = "static"
-
-    plot_args["window_size"] = window_size
-    plot_args["title"] = title
-    plot_args = {k: v for k, v in plot_args.items() if v is not None}
-
-    show_args = {}
-    show_args["screenshot"] = outfile
-    show_args["window_size"] = window_size
-    show_args["title"] = title
-    show_args["interactive"] = ipykernel and not animation
-    show_args = {k: v for k, v in show_args.items() if v is not None}
-    screenshot_args = {"filename": outfile, "window_size": window_size}
-    screenshot_args = {k: v for k, v in screenshot_args.items() if v is not None}
-    cbar_label = (
-        f"{data.attrs.get('long_name', data.name)} [{data.attrs.get('units', '')}]"
-    )
-
-    dim_map_dict = dict(dim_map)
-    dims = [d for axis in ("z", "y", "x") for d, v in dim_map_dict.items() if v == axis]
-
-    missing = [d for d in dims if d not in data.dims]
-    if missing:
-        raise ValueError(f"{missing} not found in {data.dims}")
-
-    field = data.squeeze(drop=True)
-    field = field.rename(dim_map_dict)
-
-    field = check_z_unit(field, z_unit, z_unit_scale)
-
-    vmin = field.min().values if vmin is None else vmin
-    vmax = field.max().values if vmax is None else vmax
-
-    field = field.transpose("x", "y", "z")  # xr data array
-
-    data = field.values
-    X = field.x.values
-    Y = field.y.values
-    Z = field.z.values
-    axes_ranges = [
-        np.min(X),
-        np.max(X),
-        np.min(Y),
-        np.max(Y),
-        np.min(Z),
-        np.max(Z),
-    ]
-
-    if sphere:
-        X, Y, Z = to_sphere(X, Y, Z)
-    else:
-        X, Y, Z = np.meshgrid(X, Y, Z, indexing="ij")
-
-    pv.set_jupyter_backend(jupyter_backend)
-    grid = None
-
-    if grid_type == "structured" or sphere:
-        grid = pv.StructuredGrid(X, Y, Z)
-
-    elif grid_type == "uniform":
-        grid = pv.ImageData()
-        grid.dimensions = (field.x.size, field.y.size, field.z.size)
-        grid.origin = (np.min(X), np.min(Y), np.min(Z))
-        dx = abs(float(field["x"].diff("x").mean()))
-        dy = abs(float(field["y"].diff("y").mean()))
-        dz = abs(float(field["z"].diff("z").mean()))
-        dz = round(float(dz))
-        grid.spacing = (dx, dy, dz)
-
-    grid.point_data[data.name] = data.flatten(order="F")
-    grid.set_active_scalars(data.name)
-    p = pv.Plotter(**plot_args)
-    # p = gv.GeoPlotter(**plot_args)
-
-    p.set_scale(zscale=zscale)
-
-    scalar_bar_args = {
-        "title": cbar_label,
-        "n_labels": 10,
-    }
-
-    if isinstance(cmap, str):
-        cmap = plt.get_cmap(cmap)
-
-    p.add_volume(
-        grid,
-        scalars=data.name,
-        cmap=cmap,
-        opacity_unit_distance=opacity_unit_distance,
-        n_colors=cmap.N,
-        opacity=opacity,
-        blending=blending,
-        clim=(vmin, vmax),
-        name=data.name,
-        show_scalar_bar=show_scalar_bar,
-        shade=True,
-        log_scale=log_scale,
-        scalar_bar_args=scalar_bar_args,
-    )
-
-    show_bounds_args = {
-        "padding": padding,
-        "axes_ranges": axes_ranges,
-        "xtitle": xlabel,
-        "ytitle": ylabel,
-        "ztitle": zlabel,
-        "location": "outer",
-        "bold": False,
-        # "use_2d": True,  # Force 2D bounds for clearer labels and ticks
-        "ticks": "outside",
-        "font_size": font_size,
-        "n_xlabels": n_xlabels,
-        "n_ylabels": n_ylabels,
-        "n_zlabels": n_zlabels,
-    }
-    if not sphere:
-        show_bounds_args = {k: v for k, v in show_bounds_args.items() if v is not None}
-        p.show_bounds(**show_bounds_args)
-
-    if cam_elev is not None or cam_azim is not None:
-        p.camera_position = "yz"
-
-        if cam_elev is not None:
-            p.camera.elevation = cam_elev
-
-        if cam_azim is not None:
-            p.camera.azimuth = cam_azim
-    else:
-        p.camera_position = "iso"
-
-    if animation and format == "png":
-        p.show(**show_args)
-        p.screenshot(**screenshot_args)
-        p.close()
-
-    elif animation and format == "html":
-        p.render()
-        p.export_html(outfile)
-        p.close()
-
-    elif outfile is not None and format == "html":
-        p.render()
-        p.export_html(outfile)
-        if ipykernel and not animation:
-            return p
-    elif outfile is not None and format == "png":
-        p.show(**show_args)
-        p.screenshot(**screenshot_args)
-        if ipykernel and not animation:
-            return p
-    else:
-        p.show(**show_args)
-
-
-def animate3d_i_frame(
-    field: xr.DataArray,
-    idx: int,
-    session_tmp_dir: Path,
-    args: RicedDict,
-):
-    if args.format == "mp4":
-        args.format = "png"
-
-    outfile = session_tmp_dir / f"{idx:06d}.{args.format}"
-
-    mapplot3d(
-        field,
-        outfile=outfile,
-        animation=True,
-        **args,
-    )
-
-
-def animate3d(
-    data: xr.DataArray,
-    dim: str = "time",
-    grid_type: Literal["uniform", "structured"] = "uniform",
-    sphere: bool = False,
-    dim_map: tuple = (("level", "z"), ("lat", "y"), ("lon", "x")),
-    z_unit: Literal["hpa", "Pa", "km", "generic"] = "hpa",
-    z_unit_scale: int | float = 1,
-    indices: list = None,
-    outfile: Path = None,
-    format: Literal["mp4", "html"] = "mp4",
-    window_size: tuple[int, int] = None,
-    fps: int = 10,
-    parallel: bool = True,
-    cmap: str | LinearSegmentedColormap | ListedColormap = "viridis",
-    vmin: int | float = None,
-    vmax: int | float = None,
-    log_scale: bool = False,
-    zscale: int | float = 1,
-    title: str = None,
-    cam_elev: int | float = None,
-    cam_azim: int | float = None,
-    xlabel: str = None,
-    ylabel: str = None,
-    zlabel: str = None,
-    show_scalar_bar: bool = True,
-    n_xlabels: int = None,
-    n_ylabels: int = None,
-    n_zlabels: int = None,
-    font_size: int = None,
-    opacity: list | Literal["linear", "sigmoid"] = "linear",
-    opacity_unit_distance: int | float = None,
-    blending: Literal[
-        "additive", "maximum", "minimum", "composite", "average"
-    ] = "composite",
-    padding: int | float = None,
-):
-    """
-    Animate a 3D scalar field stored in an xarray.DataArray using PyVista.
-    """
-
-    args = RicedDict(locals())
-
-    # pop flags that wont be passed to mapplot3d
-    args.pop("data")
-    args.pop("dim")
-    args.pop("indices")
-    args.pop("outfile")
-    args.pop("parallel")
-    args.pop("fps")
-
-    if dim not in data.dims:
-        raise ValueError(f"{dim} not found in {data.dims}")
-
-    if indices is None:
-        indices = list(range(data.sizes[dim]))
-
-    session_tmp_dir = Path(tempfile.mkdtemp())
-
-    tasks = [(data.isel({dim: i}).load(), i, session_tmp_dir, args) for i in indices]
-
-    if parallel:
-        processes = min(n_cpus, len(tasks))
-
-        with Pool(processes=processes) as pool:
-            pool.starmap(animate3d_i_frame, tasks)
-
-    else:
-        if len(indices) > 100:
-            warnings.warn(
-                "Sequential rendering of many frames may be slow.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        for t in tasks:
-            animate3d_i_frame(*t)
-
-    if outfile is None and format == "mp4":
-        outfile = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}.mp4"
-    elif outfile is None and format == "html":
-        outfile = Path.cwd() / "3d.html"
-    else:
-        outfile = Path(outfile)
-
-    if format == "html":
-        build_pvhtml(session_tmp_dir, outfile)
-
-    else:
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-
-        input_pattern = str(session_tmp_dir / "%06d.png")
-        ffmpeg_encode(
-            input_pattern,
-            outfile,
-            fps,
-            session_tmp_dir,
-            True,
-            0,
-        )
-
-    return outfile

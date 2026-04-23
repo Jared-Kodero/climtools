@@ -14,7 +14,7 @@ import time
 import traceback
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Literal, Optional, Tuple
+from typing import Any, Callable, Literal, Optional, Tuple
 
 import pandas as pd
 from IPython.display import HTML, display
@@ -115,7 +115,7 @@ def which(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def timeit(func):
+def timeit(func: Callable) -> Callable:
     """
     Decorator to time a function and print its runtime in appropriate units.
 
@@ -292,15 +292,20 @@ def mv(
     shutil.move(src, dst)
 
 
-def get_func_signature(func):
+def get_fsig(func: Callable) -> dict:
     """
     Get the signature of a function as a dictionary.
     """
     sig = inspect.signature(func)
-    return {
-        k: v.default if v.default is not inspect.Parameter.empty else None
-        for k, v in sig.parameters.items()
-    }
+    params = {}
+
+    for name, param in sig.parameters.items():
+        if param.default is inspect.Parameter.empty:
+            params[name] = None
+        else:
+            params[name] = param.default
+
+    return params
 
 
 class RedirectStreams:
@@ -502,7 +507,7 @@ def logexc(*values: Any | None) -> None:
     lprint(output, pretty=False)
 
 
-def set_vscode_widget_theme():
+def fix_vscode_widget():
 
     css = """
     <style>

@@ -50,7 +50,7 @@ def install_latex():
     return None
 
 
-class PlotTheme:
+class PlotConfig:
     def __init__(self):
         self.latex: bool = which("latex")
         self.install_latex: Callable = install_latex
@@ -69,10 +69,21 @@ class PlotTheme:
         """Reset matplotlib and seaborn settings to their defaults."""
         sns.reset_defaults()
         plt.rcParams.update(plt.rcParamsDefault)
+        plt.switch_backend("agg")
+
+    def interactive(self):
+        """Configure matplotlib for interactive use in Jupyter notebooks."""
+        import matplotlib
+
+        try:
+            matplotlib.use("module://ipympl.backend_nbagg")
+        except Exception:
+            matplotlib.use("nbagg")  # fallback
 
     def set(
         self,
         *,
+        interactive: bool = False,
         font_scale: float = 1.5,
         line_width: float = 1.5,
         font_size: int = None,
@@ -95,6 +106,9 @@ class PlotTheme:
 
         Parameters
         ----------
+
+        interactive : bool, optional
+            If True, configures matplotlib for interactive use in Jupyter notebooks.
 
         font_scale : float, optional
             Scaling factor for fonts. This is passed to `seaborn.set_theme()`. Default is 1.5.
@@ -124,6 +138,9 @@ class PlotTheme:
             Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
 
         """
+
+        if interactive:
+            self.interactive()
 
         if column_width == "single":
             font_scale = 1
@@ -196,4 +213,4 @@ class PlotTheme:
         ax.spines["right"].set_visible(False)
 
 
-plot_theme: PlotTheme = PlotTheme()
+plot: PlotConfig = PlotConfig()

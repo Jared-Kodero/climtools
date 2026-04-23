@@ -4,7 +4,7 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .init_cmap import *
 
-checksum = "F8735C64719F7A1EA469B1AEA3725097F5A893ADE1F4B29EA8D472A37E7338D0"
+checksum = "CCC48C3FC27AA896C9B739FD8A4A254B209C2788AAC698CEE6A6ECC77D938760"
 
 
 
@@ -55,6 +55,23 @@ class Cmap:
         ):
         ''' Subtract two colormaps '''
         return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
+
+
+
+
+    @staticmethod
+    def b2r_div(
+        N: int = 32,
+        r: bool = False,
+        split: tuple[float, float] = (0, 1),
+        add_colors: dict[int, str | list[str]] = None,
+        discrete: bool = False,
+        as_colors : bool = False,
+        gamma: float = 1.0
+    ) -> ListedColormap | LinearSegmentedColormap:
+        ''' Get the 'b2r_div' colormap '''
+
+        return get_colormap("b2r_div", N, r, split, add_colors, discrete,as_colors, gamma)
 
 
 
