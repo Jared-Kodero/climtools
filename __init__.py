@@ -37,7 +37,7 @@ from .xgeo import (
     SetupDask,
 )
 
-# # _self_update()
+# _self_update()
 
 """climtools — utilities for climate data analysis and plotting.
 
