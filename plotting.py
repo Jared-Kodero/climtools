@@ -335,7 +335,7 @@ def plot_quiver(
 
     if not U:
         speed = (u**2 + v**2) ** 0.5
-        U = np.round(speed.median(skipna=True).values)
+        U = np.round(speed.mean(skipna=True).values)
         U = int(U)
 
     if new_ax:

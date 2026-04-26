@@ -236,7 +236,7 @@ class SetupDask:
         threads_per_worker: int = n_cpus,
         processes: bool = False,
         filter_warnings: bool = True,
-        memory_limit: int = 0,
+        memory_limit="auto",
     ):
         self.cluster = None
         self.client = None

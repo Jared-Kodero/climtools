@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 
-# import cmaps as _cmaps --- IGNORE ---
 from .init_cmap import *
 from .plotting import get_cax, plot_pvalues, plot_quiver
 from .pycdo import cdo
@@ -29,11 +28,16 @@ from .tools import (
     tmp,
     user,
 )
+
+# import cmaps as _cmaps --- IGNORE ---
+from .update import _self_update
 from .xgeo import (
     GeoDataArray,
     GeoDataset,
     SetupDask,
 )
+
+# _self_update()
 
 """climtools — utilities for climate data analysis and plotting.
 

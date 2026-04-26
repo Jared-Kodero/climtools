@@ -1,5 +1,3 @@
 __pycache__
-cmaps_inventory.py
-.cmap_meta.json
-*.pyi
-
+cmaps.py
+update.py
