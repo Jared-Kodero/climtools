@@ -30,7 +30,7 @@ from .tools import (
 )
 
 # import cmaps as _cmaps --- IGNORE ---
-from .update import _self_update
+# from .update import _self_update
 from .xgeo import (
     GeoDataArray,
     GeoDataset,
