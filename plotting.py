@@ -568,6 +568,7 @@ def mapplot(
     extend: str = None,
     cyclic: bool = False,
     robust: bool = False,
+    rasterized: bool = False,
     title: str = "",
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
@@ -664,7 +665,9 @@ def mapplot(
     robust : bool, default False
         If True, color limits are computed from the 2nd and 98th percentiles,
         reducing sensitivity to extreme values.
-
+    rasterized : bool, default False
+        If True, the plot is rasterized, which can improve performance for large
+        datasets at the cost of resolution when zooming.
     title : str, optional
         Title applied to the axes.
 
@@ -789,7 +792,7 @@ def mapplot(
 
     transform = ccrs.PlateCarree()
 
-    # xarray methords
+    # xarray methods
 
     def _data_plot(data: xr.DataArray, pt: str):
         p = data.plot
@@ -818,11 +821,19 @@ def mapplot(
     pkwargs["add_colorbar"] = False
     pkwargs["zorder"] = 1
     pkwargs["transform"] = transform
+    pkwargs["rasterized"] = rasterized
     del pkwargs["extend"]
     del pkwargs["kwargs"]
     del pkwargs["figsize"]
+    del pkwargs["rasterized"]
 
     artist = plot(**pkwargs, extend=extend)
+
+    if method in ["contour", "contourf"]:
+        artist.set_edgecolor("face")
+        for c in artist.collections:
+            c.set_rasterized(rasterized)
+
     plt.title(title)
 
     ax = _add_map_features(
@@ -1009,6 +1020,7 @@ def animate(
     levels: int | list = None,
     extend: str = None,
     cyclic: bool = False,
+    rasterized: bool = False,
     robust: bool = False,
     title: str = "",
     orientation: Literal["vertical", "horizontal"] = "vertical",
@@ -1128,6 +1140,10 @@ def animate(
         If True, color limits are computed from the 2nd and 98th percentiles
         of each frame. This may introduce frame-to-frame variability in the
         color scale.
+
+    rasterized : bool, default False
+        If True, the plot is rasterized, which can improve performance for large
+        datasets at the cost of resolution when zooming.
 
     title : str, optional
         Base title applied to each frame. Dimension values are typically
