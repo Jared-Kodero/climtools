@@ -5,7 +5,6 @@ import getpass
 import inspect
 import io
 import os
-import pprint
 import shutil
 import socket
 import subprocess
@@ -16,16 +15,16 @@ from collections import namedtuple
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Tuple
 
-import pandas as pd
+from IPython import get_ipython
 from IPython.display import HTML, display
-from tabulate import tabulate
 
 host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 tmp = Path("/tmp")
 n_cpus = int(os.environ.get("NTASKS", len(os.sched_getaffinity(0))))
-
+ipykernel = "ipykernel" in sys.modules
+isatty = sys.stdout.isatty() or ipykernel
 
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
@@ -42,6 +41,26 @@ LatBounds = namedtuple("LatBounds", ["min", "max"])
 LonBounds = namedtuple("LonBounds", ["min", "max"])
 HeightBounds = namedtuple("HeightBounds", ["min", "max"])
 CenterPoint = namedtuple("CenterPoint", ["lat", "lon", "height"])
+
+ANSI_COLORS = {
+    "RESET": "\033[0m",
+    "BLACK": "\033[30m",
+    "RED": "\033[31m",
+    "GREEN": "\033[32m",
+    "YELLOW": "\033[33m",
+    "BLUE": "\033[34m",
+    "MAGENTA": "\033[35m",
+    "CYAN": "\033[36m",
+    "WHITE": "\033[37m",
+    "BRIGHT_BLACK": "\033[90m",
+    "BRIGHT_RED": "\033[91m",
+    "BRIGHT_GREEN": "\033[92m",
+    "BRIGHT_YELLOW": "\033[93m",
+    "BRIGHT_BLUE": "\033[94m",
+    "BRIGHT_MAGENTA": "\033[95m",
+    "BRIGHT_CYAN": "\033[96m",
+    "BRIGHT_WHITE": "\033[97m",
+}
 
 
 class BoundingBox:
@@ -437,74 +456,56 @@ class RedirectStreams:
         self.stop()
 
 
+def handle_errors(type, value, tb):
+    frames = traceback.extract_tb(tb)
+
+    frame = [
+        f
+        for f in frames
+        if "site-packages" not in str(Path(f.filename).resolve())
+        and f.filename.endswith(".py")
+    ][-1]
+
+    file_name = Path(frame.filename).name
+    lineno = f"{frame.lineno}"
+    code_line = frame.line.strip() if frame.line else ""
+
+    if ipykernel:
+        execution_count = get_ipython().execution_count - 1
+        e_msg = f"An Exception occurred in cell: In [{execution_count}], line: {lineno}"
+    else:
+        e_msg = f"An Exception occurred in file: {file_name}, line: {lineno}"
+
+    if isatty:
+        RED = ANSI_COLORS["RED"]
+        RESET = ANSI_COLORS["RESET"]
+
+    else:
+        RED = ""
+        RESET = ""
+
+    print(e_msg)
+    print(f"  {code_line}  ", pretty=False, ipykernel=ipykernel)
+    print(f"{RED}  {'^' * (len(code_line))}  {RESET}")
+    print(f"{RED}{type.__qualname__}: {value}{RESET}")
+
+
 def logexc(*values: Any | None) -> None:
     """
     Log messages and automatically format the active exception, if present.
     """
 
-    RED = "\033[31m"
-    RESET = "\033[0m"
-
-    ipykernel = "ipykernel" in sys.modules
-    isatty = sys.stdout.isatty() or ipykernel
-    fd = sys.stdout.fileno()
-
-    def lprint(obj: Any, pretty: bool = True) -> None:
-        if isinstance(obj, pd.DataFrame):
-            table = tabulate(obj, headers="keys", tablefmt="psql", showindex=False)
-            print("\n", table, "\n")
-            return
-
-        if ipykernel:
-            print(obj)
-        elif pretty:
-            pprint.pprint(obj, sort_dicts=False, compact=True)
-        else:
-            os.write(fd, f"{obj}\n".encode("utf-8"))
-
-    # ---- print provided values ----
     if values:
         if all(isinstance(v, str) for v in values):
-            lprint(" ".join(values), pretty=False)
+            print(" ".join(values))
         else:
             for v in values:
-                lprint(v, pretty=not isinstance(v, str))
+                print(v)
 
-    # ---- capture active exception ----
     exc_type, exc_value, exc_tb = sys.exc_info()
-
     if exc_type is None:
         return
-
-    frames = traceback.extract_tb(exc_tb)
-
-    user_frames = [
-        f
-        for f in frames
-        if "site-packages" not in str(Path(f.filename).resolve())
-        and f.filename.endswith(".py")
-    ]
-
-    formatted = []
-
-    for frame in user_frames:
-        file_path = Path(frame.filename).resolve()
-        lineno = f"{frame.lineno:>5}"
-        code_line = frame.line.strip() if frame.line else ""
-        pointer = " " * (len(lineno) + 3) + "^" * len(code_line)
-
-        if isatty:
-            code_line = f"{RED}{code_line}{RESET}"
-            pointer = f"{RED}{pointer}{RESET}"
-
-        formatted.append(
-            f"{lineno} | {code_line}\n{pointer}\n\t  {frame.name} : {file_path}\n"
-        )
-
-    header = f"{exc_type.__qualname__} : {exc_value}"
-    output = f"\n{header}\n\n" + "\n".join(formatted)
-
-    lprint(output, pretty=False)
+    handle_errors(exc_type, exc_value, exc_tb)
 
 
 def fix_vscode_widget():
@@ -524,3 +525,7 @@ def fix_vscode_widget():
     </style>
     """
     display(HTML(css))
+
+
+# Set the custom exception handler for the current session
+sys.excepthook = handle_errors
