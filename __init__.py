@@ -1,5 +1,36 @@
 from __future__ import annotations
 
+__all__ = [
+    "BoundingBox",
+    "GeoDataArray",
+    "GeoDataset",
+    "RedirectStreams",
+    "SetupDask",
+    "calc_significance",
+    "cdo",
+    "cmaps",
+    "cp",
+    "cwd",
+    "du",
+    "file_kind",
+    "get_cax",
+    "get_fsig",
+    "home",
+    "host",
+    "logexc",
+    "mkdir",
+    "mv",
+    "n_cpus",
+    "plot_pvalues",
+    "plot_quiver",
+    "plot",
+    "rm",
+    "symlink",
+    "timeit",
+    "tmp",
+    "user",
+]
+
 import sys
 
 from .init_cmap import *
@@ -59,34 +90,3 @@ specific functions you need.
 if "ipykernel" in sys.modules:
     fix_vscode_widget()
     ...
-
-__all__ = [
-    "BoundingBox",
-    "GeoDataArray",
-    "GeoDataset",
-    "RedirectStreams",
-    "SetupDask",
-    "calc_significance",
-    "cdo",
-    "cmaps",
-    "cp",
-    "cwd",
-    "du",
-    "file_kind",
-    "get_cax",
-    "get_fsig",
-    "home",
-    "host",
-    "logexc",
-    "mkdir",
-    "mv",
-    "n_cpus",
-    "plot_pvalues",
-    "plot_quiver",
-    "plot",
-    "rm",
-    "symlink",
-    "timeit",
-    "tmp",
-    "user",
-]

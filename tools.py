@@ -485,7 +485,7 @@ def handle_errors(type, value, tb):
         RESET = ""
 
     print(e_msg)
-    print(f"  {code_line}  ", pretty=False, ipykernel=ipykernel)
+    print(f"  {code_line}  ")
     print(f"{RED}  {'^' * (len(code_line))}  {RESET}")
     print(f"{RED}{type.__qualname__}: {value}{RESET}")
 
