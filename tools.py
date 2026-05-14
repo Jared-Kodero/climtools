@@ -4,6 +4,7 @@ import functools
 import getpass
 import inspect
 import io
+import logging
 import os
 import shutil
 import socket
@@ -11,9 +12,8 @@ import subprocess
 import sys
 import time
 import traceback
-from collections import namedtuple
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Tuple
+from typing import Any, Callable, Literal
 
 from IPython import get_ipython
 from IPython.display import HTML, display
@@ -31,16 +31,17 @@ current_dask_cluster = None
 current_dask_client = None
 
 
-class RicedDict(dict):
+user = getpass.getuser()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class AttrDict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-
-LatBounds = namedtuple("LatBounds", ["min", "max"])
-LonBounds = namedtuple("LonBounds", ["min", "max"])
-HeightBounds = namedtuple("HeightBounds", ["min", "max"])
-CenterPoint = namedtuple("CenterPoint", ["lat", "lon", "height"])
 
 ANSI_COLORS = {
     "RESET": "\033[0m",
@@ -61,66 +62,6 @@ ANSI_COLORS = {
     "BRIGHT_CYAN": "\033[96m",
     "BRIGHT_WHITE": "\033[97m",
 }
-
-
-class BoundingBox:
-    def __init__(
-        self,
-        lon_bounds: Tuple[float, float],
-        lat_bounds: Tuple[float, float],
-        height_bounds: Tuple[Optional[float], Optional[float]] = (None, None),
-        wrap_lon: bool = False,
-    ) -> None:
-        """
-        Initialize a BoundingBox with user-defined longitude and latitude bounds.
-        """
-
-        if len(lon_bounds) != 2 or len(lat_bounds) != 2:
-            raise ValueError("Bounds must be tuples of length 2.")
-
-        # Longitude handling
-        if wrap_lon:
-            lon_min, lon_max = lon_bounds
-        else:
-            lon_min, lon_max = sorted(lon_bounds)
-
-        self.lon = LonBounds(min=lon_min, max=lon_max)
-
-        # Latitude always sorted
-        lat_min, lat_max = sorted(lat_bounds)
-        self.lat = LatBounds(min=lat_min, max=lat_max)
-
-        # Height handling
-        if height_bounds == (None, None):
-            self.height = HeightBounds(min=None, max=None)
-            height_center = None
-        else:
-            h_min, h_max = sorted(height_bounds)
-            self.height = HeightBounds(min=h_min, max=h_max)
-            height_center = 0.5 * (h_min + h_max)
-
-        # Center calculation
-        lat_center = 0.5 * (lat_min + lat_max)
-
-        if wrap_lon and lon_max < lon_min:
-            # Antimeridian crossing
-            lon_center = ((lon_min + lon_max + 360.0) / 2.0) % 360.0
-        else:
-            lon_center = 0.5 * (lon_min + lon_max)
-
-        self.center = CenterPoint(
-            lat=lat_center,
-            lon=lon_center,
-            height=height_center,
-        )
-
-    def __getitem__(self, key: str) -> Any:
-        if key not in {"lat", "lon", "height", "center"}:
-            raise KeyError(f"{key} is not a valid BoundingBox attribute.")
-        return getattr(self, key)
-
-    def __repr__(self) -> str:
-        return f"BoundingBox(lon={self.lon}, lat={self.lat}, height={self.height})"
 
 
 def cwd() -> Path:
@@ -160,7 +101,7 @@ def timeit(func: Callable) -> Callable:
             elapsed /= 60
             unit = "minutes"
 
-        print(f"[ {func.__name__} ] finished in {round(elapsed, 2):>4} {unit}")
+        logger.info(f"[ {func.__name__} ] finished in {round(elapsed, 2):>4} {unit}")
         return result
 
     return wrapper
@@ -228,7 +169,7 @@ def file_kind(
         )
         return res.stdout.strip()
     except subprocess.CalledProcessError as e:
-        print("ERROR :", e.stderr)
+        logger.error(e.stderr)
         return None
 
 

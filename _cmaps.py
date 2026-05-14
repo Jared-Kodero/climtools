@@ -319,7 +319,7 @@ def gen_cmap_file():
     checksum = None
 
     try:
-        from .cmaps import checksum
+        from ._cmaps import checksum
 
         if checksum == src_checksum:
             return
@@ -328,10 +328,13 @@ def gen_cmap_file():
 
     def _cmap_file_contents():
         imports = f"""
+        '''
+        Fancy custom colormap utilities for creating, modifying, and combining matplotlib colormaps.
+        '''
         from dataclasses import dataclass
         from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-        from .init_cmap import *
+        from ._cmaps import *
 
         checksum = "{checksum}"
         \n
@@ -339,41 +342,35 @@ def gen_cmap_file():
         imports = textwrap.dedent(imports)
 
         operators_signatures = """
-                cmap1: ListedColormap | LinearSegmentedColormap,
-                cmap2: ListedColormap | LinearSegmentedColormap,
-                N: int = 32,
-                *,
-                discrete: bool = False,
-                gamma: float = 1.0
-                """
+cmap1: ListedColormap | LinearSegmentedColormap,
+cmap2: ListedColormap | LinearSegmentedColormap,
+N: int = 32,
+*,
+discrete: bool = False,
+gamma: float = 1.0
+"""
 
         body = f"""
-        @dataclass
-        class Cmap:
-            '''
-            A utility class for working with colormaps, providing methods to create, modify, and combine colormaps in various ways.
-            '''
-             
+       
 
-            @staticmethod
-            def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
-                ''' Create a new colormap from a list of colors '''
-                return create(colors, N=N, discrete=discrete, gamma=gamma)
+def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
+    ''' Create a new colormap from a list of colors '''
+    return create(colors, N=N, discrete=discrete, gamma=gamma)
 
-            @staticmethod
-            def concat({operators_signatures}):
-                ''' Concat two colormaps together '''
-                return concat(cmap1, cmap2, N=N, discrete=discrete, gamma=gamma)
 
-            @staticmethod
-            def add({operators_signatures}):
-                ''' Add two colormaps together '''
-                return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
+def concat({operators_signatures}):
+    ''' Concat two colormaps together '''
+    return concat(cmap1, cmap2, N=N, discrete=discrete, gamma=gamma)
 
-            @staticmethod
-            def substract({operators_signatures}):
-                ''' Subtract two colormaps '''
-                return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
+
+def add({operators_signatures}):
+    ''' Add two colormaps together '''
+    return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
+
+
+def substract({operators_signatures}):
+    ''' Subtract two colormaps '''
+    return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
             \n
                 """
 
@@ -388,22 +385,21 @@ def gen_cmap_file():
             processed_cmaps.append(name.lower())
 
             body = f""" {body}
-            
-            @staticmethod
-            def {name.lower()}(
-                N: int = 32,
-                r: bool = False,
-                split: tuple[float, float] = (0, 1),
-                add_colors: dict[int, str | list[str]] = None,
-                discrete: bool = False,
-                as_colors : bool = False,
-                gamma: float = 1.0
-            ) -> ListedColormap | LinearSegmentedColormap:
-                ''' Get the '{name}' colormap '''
-                
-                return get_colormap("{name}", N, r, split, add_colors, discrete,as_colors, gamma)
-                \n
-            """
+
+def {name.lower()}(
+    N: int = 32,
+    r: bool = False,
+    split: tuple[float, float] = (0, 1),
+    add_colors: dict[int, str | list[str]] = None,
+    discrete: bool = False,
+    as_colors : bool = False,
+    gamma: float = 1.0
+) -> ListedColormap | LinearSegmentedColormap:
+    ''' Get the '{name}' colormap '''
+    
+    return get_colormap("{name}", N, r, split, add_colors, discrete,as_colors, gamma)
+    \n
+"""
         body = textwrap.dedent(body)
 
         return imports, body

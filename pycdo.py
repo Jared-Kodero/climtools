@@ -1,399 +1,474 @@
+"""
+cdo
+===
+
+Python wrapper for the Climate Data Operators (CDO) command-line tool.
+
+This module provides a thin, xarray-aware façade over a subset of CDO
+operators relevant to climate-model post-processing: horizontal
+interpolation onto regular lon-lat grids, temporal concatenation, and
+arbitrary pass-through execution. NetCDF file paths and xarray objects are
+accepted interchangeably as inputs, and either may be returned as output.
+
+Design notes
+------------
+- Temporary files are isolated to a per-process directory created lazily on
+  first use and removed at interpreter exit via ``atexit``.
+- CDO failures propagate as ``RuntimeError`` with the captured stderr.
+- Environment variables that influence CDO behaviour (e.g.
+  ``REMAP_EXTRAPOLATE``) are set inside a context manager and restored on
+  exit, so they cannot leak across calls.
+- The default output overwrite flag ``-O`` is always passed, removing the
+  need for callers to clear stale output files.
+
+Usage
+-----
+    >>> import cdo
+    >>> cdo.remapbil("input.nc", "output.nc",
+    ...            resolution=0.25,
+    ...            bbox=(-180, -90, 180, 90))
+    >>> cdo.mergetime(["file1.nc", "file2.nc"], "merged.nc")
+    >>> cdo.run(["-sellonlatbox,-10,40,30,70", "in.nc", "out.nc"])
+
+Reference
+---------
+CDO user guide: https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import uuid
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Iterable, Iterator, Literal
 
 import xarray as xr
 
-from .tools import cwd, n_cpus, rm, tmp, which
+from .tools import n_cpus
+
+# ---------------------------------------------------------------------------
+# Module metadata
+# ---------------------------------------------------------------------------
 
 
-class CDONotFoundError(RuntimeError):
-    pass
+# ---------------------------------------------------------------------------
+# Module-level configuration
+# ---------------------------------------------------------------------------
 
 
-class Cdo:
+__all__ = [
+    "run",
+    "remap",
+    "remapbil",
+    "remapbic",
+    "remapnn",
+    "remapdis",
+    "remapcon",
+    "remaplaf",
+    "mergetime",
+    "RemapMethod",
+]
+
+logger = logging.getLogger(__name__)
+
+os.environ.setdefault("CDO_VERSION_INFO", "false")
+os.environ.setdefault("CDO_HISTORY_INFO", "false")
+
+RemapMethod = Literal[
+    "remapbil",
+    "remapbic",
+    "remapnn",
+    "remapdis",
+    "remapcon",
+    "remaplaf",
+]
+_VALID_METHODS: tuple[str, ...] = (
+    "remapbil",
+    "remapbic",
+    "remapnn",
+    "remapdis",
+    "remapcon",
+    "remaplaf",
+)
+_EXTRAPOLATING_METHODS: frozenset[str] = frozenset(
+    {"remapbil", "remapbic", "remapnn", "remaplaf"}
+)
+_DEFAULT_BBOX: tuple[float, float, float, float] = (-180.0, -90.0, 180.0, 90.0)
+
+_N_CPUS: int = n_cpus
+
+
+# ---------------------------------------------------------------------------
+# Internal utilities
+# ---------------------------------------------------------------------------
+
+
+class _TmpDir:
+    """Process-wide temporary directory, created lazily and cleaned at exit."""
+
+    _path: Path | None = None
+
+    @classmethod
+    def get(cls) -> Path:
+        if cls._path is None:
+            cls._path = Path(tempfile.mkdtemp(prefix="cdo_py_"))
+            atexit.register(cls._cleanup)
+        return cls._path
+
+    @classmethod
+    def new_file(cls, suffix: str = ".nc") -> Path:
+        return cls.get() / f"{uuid.uuid4().hex}{suffix}"
+
+    @classmethod
+    def _cleanup(cls) -> None:
+        if cls._path is not None and cls._path.exists():
+            shutil.rmtree(cls._path, ignore_errors=True)
+
+
+@contextmanager
+def _env(**kwargs: str) -> Iterator[None]:
+    """Temporarily set environment variables, restoring prior values on exit."""
+    saved: dict[str, str | None] = {k: os.environ.get(k) for k in kwargs}
+    os.environ.update(kwargs)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _check_cdo() -> None:
+    if not shutil.which("cdo"):
+        raise RuntimeError(
+            "CDO executable not found in PATH. Install CDO and ensure it is accessible."
+        )
+
+
+def _run(args: list[str], n_threads: int | None = None) -> subprocess.CompletedProcess:
+    """Execute a CDO command. Raise RuntimeError on non-zero exit."""
+    _check_cdo()
+    threads = n_threads if n_threads is not None else min(_N_CPUS, 32)
+    cmd = ["cdo", "-s", "-O", "-P", str(threads), *args]
+    try:
+        return subprocess.run(cmd, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        logger.error("CDO failed: %s\nstderr:\n%s", " ".join(cmd), exc.stderr)
+        raise RuntimeError(f"CDO command failed: {exc.stderr.strip()}") from exc
+
+
+def _to_netcdf(
+    obj: Path | str | xr.DataArray | xr.Dataset,
+) -> tuple[Path, str | None]:
     """
-    Limited Python wrapper for Climate Data Operators (CDO) interpolation, merging, and transformation operations.
-    The original CDO python package wasn't doing what I wanted, so I made my own.
+    Resolve an input to a NetCDF file path.
 
-    This class provides convenient methods to call CDO operators from Python, including horizontal and vertical interpolation,
-    file merging, format conversion, spectral transforms, and metadata inspection. Each method constructs and executes the
-    appropriate CDO command-line call, handling temporary files and input validation.
-
-    For a full list of available CDO operators and usage details, refer to:
-        https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
-
-    You can also display CDO help by calling `cdo.help()` after creating an instance.
-
-    Example usage:
-        >>> cdo = Cdo()
-        >>> cdo.remapbil("input.nc", resolution=0.5)
-        >>> cdo.mergetime(["file1.nc", "file2.nc"], "merged.nc")
+    Returns the path and, if the input was a DataArray, the original variable
+    name so the caller can re-extract the same field after CDO writes back a
+    Dataset.
     """
+    if isinstance(obj, xr.DataArray):
+        da_name = obj.name or "var"
+        path = _TmpDir.new_file()
+        obj.to_dataset(name=da_name).to_netcdf(path)
+        return path, da_name
 
-    def __init__(self):
-        # check CDO availability on initialization
-        self.cdo_path = which("cdo")
-        if not self.cdo_path:
-            print(
-                "CDO executable not found in system PATH. Please install CDO and ensure it is accessible."
-            )
+    if isinstance(obj, xr.Dataset):
+        path = _TmpDir.new_file()
+        obj.to_netcdf(path)
+        return path, None
 
-        self.tmp_dir = Path(tmp / f"{uuid.uuid4().hex}")
-        self.tmp_dir.mkdir(exist_ok=True)
-        self.cwd = cwd()
+    p = Path(obj)
+    if not p.exists():
+        raise FileNotFoundError(f"Input file does not exist: {p}")
+    return p, None
 
-        os.environ["CDO_VERSION_INFO"] = "false"
-        os.environ["CDO_HISTORY_INFO"] = "false"
 
-    def run_cdo(self, input_cmds: list[str]):
-        cmd = ["cdo", "-s", "-w", "-P", str(min(n_cpus, 32))]
-        cmd.extend(input_cmds)
+def _write_lonlat_grid(
+    bbox: tuple[float, float, float, float],
+    resolution: float,
+) -> Path:
+    """Write a CDO lon-lat grid description file and return its path."""
+    lon_min, lat_min, lon_max, lat_max = bbox
+    if lon_max <= lon_min or lat_max <= lat_min:
+        raise ValueError(
+            f"Invalid bbox {bbox}. Expected (lon_min, lat_min, lon_max, lat_max) with lon_min<lon_max and lat_min<lat_max."
+        )
+    if resolution <= 0:
+        raise ValueError(f"resolution must be positive, got {resolution}.")
 
-        seen = set()
-        cmd = [f"{x}" for x in cmd if not (x in seen or seen.add(x))]
+    xsize = int(round((lon_max - lon_min) / resolution)) + 1
+    ysize = int(round((lat_max - lat_min) / resolution)) + 1
 
-        try:
-            res = subprocess.run(
-                cmd,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            return res
-        except subprocess.CalledProcessError as e:
-            print("ERROR :", e.stderr)
-            return None
+    lines = [
+        "gridtype = lonlat",
+        f"xsize    = {xsize}",
+        f"ysize    = {ysize}",
+        f"xfirst   = {lon_min}",
+        f"xinc     = {resolution}",
+        f"yfirst   = {lat_min}",
+        f"yinc     = {resolution}",
+    ]
+    grid_file = _TmpDir.new_file(suffix=".grid")
+    grid_file.write_text("\n".join(lines))
+    return grid_file
 
-    def run(
-        self,
-        cmd: list[str] = None,
-    ) -> Any:
-        """
-        Run a Climate Data Operators (CDO) command.
 
-        Parameters
-        ----------
-        cmd : list of str
-            Sequence of CDO subcommand and arguments. For details on
-            available operators, see:
-            https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
+def _open_result(path: Path, da_name: str | None) -> xr.DataArray | xr.Dataset:
+    ds = xr.open_dataset(path, chunks="auto")
+    if da_name and da_name in ds:
+        return ds[da_name]
+    return ds
 
-        Returns
-        -------
-        Any
-            The output of the CDO command, if any.
-            Executes the specified CDO command as a subprocess. Standard output
-            and error streams are passed through to the system shell.
 
-        Examples
-        --------
-        Remap input data (`infile.nc`) bilinearly onto a target grid (`gridfile`)
-        and write the result to `outfile.nc`:
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-            >>> cmd = ["remapbil", "gridfile", "infile.nc", "outfile.nc"]
-            >>> cdo.run(cmd)
-        """
 
-        if not isinstance(cmd, list) or cmd is None:
-            example = 'e.g., cmd= ["xxx", "xxx", "xxx", "xxx"] \n cdo.run(cmd)'
-            print("Invalid command format. usage:", example)
-            raise TypeError(
-                "Input must be a list of strings representing CDO command and arguments."
-            )
+def run(
+    cmd: list[str],
+    n_threads: int | None = None,
+) -> subprocess.CompletedProcess:
+    """
+    Execute an arbitrary CDO command.
 
-        res = self.run_cdo(cmd)
-        return res
+    Parameters
+    ----------
+    cmd : list of str
+        CDO operator chain and arguments, excluding the ``cdo`` executable.
+    n_threads : int, optional
+        Override the default OpenMP thread count passed via ``-P``. Defaults
+        to ``min(os.cpu_count(), 32)``.
 
-    def _make_grid_description(self, lon_min, lat_min, lon_max, lat_max, resolution):
-        # Compute sizes
-        xsize = abs(int(round((lon_max - lon_min) / resolution)) + 1)
-        ysize = abs(int(round((lat_max - lat_min) / resolution)) + 1)
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed process object containing stdout, stderr, and return code.
 
-        grid_description = []
-        grid_description.append("gridtype = lonlat")
-        grid_description.append(f"xsize    = {xsize}")
-        grid_description.append(f"ysize    = {ysize}")
-        grid_description.append(f"xfirst   = {lon_min}")
-        grid_description.append(f"xinc     = {resolution}")
-        grid_description.append(f"yfirst   = {lat_min}")
-        grid_description.append(f"yinc     = {resolution}")
+    Raises
+    ------
+    TypeError
+        If ``cmd`` is not a list of strings.
+    RuntimeError
+        If CDO exits with a non-zero status.
 
-        return "\n".join(grid_description)
+    Examples
+    --------
+    >>> run(["remapbil,gridfile", "infile.nc", "outfile.nc"])
+    """
+    if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
+        raise TypeError("cmd must be a list of strings.")
+    return _run(cmd, n_threads=n_threads)
 
-    def interpolate(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        method: str = None,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        grdfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.grid"
-        if outfile is None:
-            outfile = f"{self.tmp_dir}/{uuid.uuid4().hex}.nc"
 
-        da_name = None
+def remap(
+    obj: Path | str | xr.DataArray | xr.Dataset,
+    outfile: Path | str | None = None,
+    *,
+    method: RemapMethod = "remapbil",
+    resolution: float = 0.25,
+    bbox: tuple[float, float, float, float] = _DEFAULT_BBOX,
+    extrapolate: bool = False,
+    as_xarray: bool = False,
+    compression: str = "zip",
+    datatype: str = "F32",
+    n_threads: int | None = None,
+) -> Path | xr.DataArray | xr.Dataset:
+    """
+    Horizontally interpolate a NetCDF dataset onto a regular lon-lat grid.
 
-        if isinstance(obj, (xr.DataArray, xr.Dataset)):
-            tmp_input = f"{self.tmp_dir}/{uuid.uuid4().hex}.nc"
-            if isinstance(obj, xr.DataArray):
-                da_name = obj.name or "var"
-                obj = obj.to_dataset(name=da_name)
+    Parameters
+    ----------
+    obj : Path, str, xr.DataArray, or xr.Dataset
+        Input data. xarray objects are written to a temporary NetCDF first.
+    outfile : Path or str, optional
+        Output NetCDF path. A temporary file is used if omitted.
+    method : {'remapbil','remapbic','remapnn','remapdis','remapcon','remaplaf'}
+        CDO remap operator.
+    resolution : float
+        Target grid spacing in degrees.
+    bbox : tuple of float
+        Target grid extent as ``(lon_min, lat_min, lon_max, lat_max)``.
+        Default is global.
+    extrapolate : bool
+        If True, set ``REMAP_EXTRAPOLATE=on`` for the duration of the call.
+        Only valid for ``remapbil``, ``remapbic``, ``remapnn``, ``remaplaf``.
+    as_xarray : bool
+        If True, open the output as xarray and return it.
+    compression : str
+        CDO ``-z`` value (e.g. ``"zip"``, ``"zip_5"``, ``"zstd_3"``).
+    datatype : str
+        CDO ``-b`` value (e.g. ``"F32"``, ``"F64"``).
+    n_threads : int, optional
+        OpenMP threads to pass via ``-P``.
 
-            obj.to_netcdf(tmp_input)
-            obj = tmp_input
+    Returns
+    -------
+    Path or xr.DataArray or xr.Dataset
+        Output path, or the opened xarray object if ``as_xarray`` is True.
 
-        if not Path(obj).exists():
-            raise FileNotFoundError(f"Input file {obj} does not exist.")
-        if Path(outfile).exists():
-            rm(outfile)
-
-        if bbox:
-            lon_min, lat_min, lon_max, lat_max = bbox
-        else:
-            raise ValueError(
-                "Bounding box [lon_min, lat_min, lon_max, lat_max] must be provided for interpolation."
-            )
-
-        grid_description = self._make_grid_description(
-            lon_min, lat_min, lon_max, lat_max, resolution
+    Raises
+    ------
+    ValueError
+        If ``method`` is unknown, if ``extrapolate`` is requested for a method
+        that does not support it, or if ``bbox`` or ``resolution`` are invalid.
+    FileNotFoundError
+        If ``obj`` is a path that does not exist.
+    RuntimeError
+        If CDO exits with a non-zero status.
+    """
+    if method not in _VALID_METHODS:
+        raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}.")
+    if extrapolate and method not in _EXTRAPOLATING_METHODS:
+        raise ValueError(
+            f"extrapolate is not supported for method {method!r}. Use one of {sorted(_EXTRAPOLATING_METHODS)}."
         )
 
-        with open(grdfile, "w") as f:
-            f.write(grid_description.strip())
+    input_path, da_name = _to_netcdf(obj)
+    grid_file = _write_lonlat_grid(bbox, resolution)
+    output_path = Path(outfile) if outfile is not None else _TmpDir.new_file()
 
-        cmd = [
-            "-b",
-            "F32",
-            "-z",
-            "zip",
-            f"{method},{grdfile}",
-            f"{obj}",
-            f"{outfile}",
-        ]
+    args = [
+        "-b",
+        datatype,
+        "-z",
+        compression,
+        f"{method},{grid_file}",
+        str(input_path),
+        str(output_path),
+    ]
 
-        res = self.run_cdo(cmd)
-        if res.stdout:
-            print(res.stdout)
+    env = {"REMAP_EXTRAPOLATE": "on"} if extrapolate else {}
+    with _env(**env):
+        _run(args, n_threads=n_threads)
 
-        if as_xarray:
-            ret = xr.open_dataset(outfile, chunks="auto")
-            if da_name:
-                ret = ret[da_name]
-        else:
-            ret = outfile
-
-        return ret
-
-    def mergetime(
-        self,
-        infiles: list[Path],
-        outfile: Path,
-        *,
-        as_xarray: bool = False,
-        delete_input: bool = False,
-    ):
-        """
-        Merge multiple netCDF files along the time dimension using CDO.
-        This function uses the Climate Data Operators (CDO) to merge multiple netCDF files.
-
-        Parameters
-        ----------
-        infiles : list[str]
-            List of input netCDF files to be merged.
-        outfile : str
-        """
-
-        infiles = [str(Path(f).resolve()) for f in infiles]
-        infiles.sort()
-        for f in infiles:
-            if not Path(f).exists():
-                raise FileNotFoundError(f"Input file {f} does not exist.")
-
-        cmd = [
-            "-b",
-            "F32",
-            "-z",
-            "zip",
-            "-mergetime",
-            *infiles,
-            outfile,
-        ]
-        self.run_cdo(cmd)
-        if delete_input:
-            rm(infiles)
-
-        if as_xarray:
-            ret = xr.open_dataset(outfile, chunks="auto")
-        else:
-            ret = outfile
-
-        return ret
-
-    def remapdis(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remapdis method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-
-        """
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remapdis",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
-
-    def remapnn(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-        extrapolate: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remapnn method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-        """
-        if extrapolate:
-            os.environ["REMAP_EXTRAPOLATE"] = "on"
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remapnn",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
-
-    def remapcon(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remapcon method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-        """
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remapcon",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
-
-    def remapbil(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-        extrapolate: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remapbil method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-        """
-
-        if extrapolate:
-            os.environ["REMAP_EXTRAPOLATE"] = "on"
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remapbil",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
-
-    def remapbic(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-        extrapolate: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remapbic method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-        """
-
-        if extrapolate:
-            os.environ["REMAP_EXTRAPOLATE"] = "on"
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remapbic",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
-
-    def remaplaf(
-        self,
-        obj: Path | xr.DataArray | xr.Dataset,
-        outfile: Path = None,
-        *,
-        resolution: float = 0.25,
-        bbox: tuple[float, float, float, float] = None,
-        as_xarray: bool = False,
-        extrapolate: bool = False,
-    ) -> xr.DataArray | xr.Dataset | str:
-        """
-        Interpolate data using CDO's remaplaf method.
-
-        bbox_format: (lon_min, lat_min, lon_max, lat_max)
-        """
-
-        if extrapolate:
-            os.environ["REMAP_EXTRAPOLATE"] = "on"
-
-        return self.interpolate(
-            obj=obj,
-            outfile=outfile,
-            resolution=resolution,
-            method="remaplaf",
-            bbox=bbox,
-            as_xarray=as_xarray,
-        )
+    if as_xarray:
+        return _open_result(output_path, da_name)
+    return output_path
 
 
-cdo: Cdo = Cdo()
+# Backwards-compatible method-specific wrappers.
+
+
+@wraps(remap)
+def remapbil(obj, outfile=None, **kwargs):
+    """Bilinear interpolation. See :func:`remap` for parameters."""
+    return remap(obj, outfile, method="remapbil", **kwargs)
+
+
+@wraps(remap)
+def remapbic(obj, outfile=None, **kwargs):
+    """Bicubic interpolation. See :func:`remap` for parameters."""
+    return remap(obj, outfile, method="remapbic", **kwargs)
+
+
+@wraps(remap)
+def remapnn(obj, outfile=None, **kwargs):
+    """Nearest-neighbour interpolation. See :func:`remap` for parameters."""
+    return remap(obj, outfile, method="remapnn", **kwargs)
+
+
+@wraps(remap)
+def remapdis(obj, outfile=None, **kwargs):
+    """Distance-weighted average of nearest neighbours. See :func:`remap`."""
+    return remap(obj, outfile, method="remapdis", **kwargs)
+
+
+@wraps(remap)
+def remapcon(obj, outfile=None, **kwargs):
+    """First-order conservative remapping. See :func:`remap`."""
+    return remap(obj, outfile, method="remapcon", **kwargs)
+
+
+@wraps(remap)
+def remaplaf(obj, outfile=None, **kwargs):
+    """Largest-area-fraction remapping, suited to categorical fields. See :func:`remap`."""
+    return remap(obj, outfile, method="remaplaf", **kwargs)
+
+
+def mergetime(
+    infiles: Iterable[Path | str],
+    outfile: Path | str,
+    *,
+    as_xarray: bool = False,
+    delete_input: bool = False,
+    compression: str = "zip",
+    datatype: str = "F32",
+    n_threads: int | None = None,
+) -> Path | xr.Dataset:
+    """
+    Concatenate multiple NetCDF files along the time dimension.
+
+    CDO's ``-mergetime`` orders records by their internal time coordinate, so
+    the order in which paths are supplied does not affect the result.
+
+    Parameters
+    ----------
+    infiles : iterable of Path or str
+        Input NetCDF files.
+    outfile : Path or str
+        Output NetCDF path.
+    as_xarray : bool
+        If True, return the merged file opened as an xarray Dataset.
+    delete_input : bool
+        Remove input files after a successful merge.
+    compression : str
+        CDO ``-z`` value.
+    datatype : str
+        CDO ``-b`` value.
+    n_threads : int, optional
+        OpenMP threads to pass via ``-P``.
+
+    Returns
+    -------
+    Path or xr.Dataset
+        Output path, or the opened Dataset if ``as_xarray`` is True.
+
+    Raises
+    ------
+    ValueError
+        If no input files are provided.
+    FileNotFoundError
+        If any input file does not exist.
+    RuntimeError
+        If CDO exits with a non-zero status.
+    """
+    paths = [Path(f).resolve() for f in infiles]
+    if not paths:
+        raise ValueError("No input files provided.")
+    for p in paths:
+        if not p.exists():
+            raise FileNotFoundError(f"Input file does not exist: {p}")
+    paths.sort()  # purely for reproducible logging
+
+    args = [
+        "-b",
+        datatype,
+        "-z",
+        compression,
+        "-mergetime",
+        *(str(p) for p in paths),
+        str(outfile),
+    ]
+    _run(args, n_threads=n_threads)
+
+    if delete_input:
+        for p in paths:
+            try:
+                p.unlink()
+            except OSError as exc:
+                logger.warning("Could not delete %s: %s", p, exc)
+
+    if as_xarray:
+        return xr.open_dataset(outfile, chunks="auto")
+    return Path(outfile)

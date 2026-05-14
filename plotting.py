@@ -21,7 +21,7 @@ from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 
-from .tools import RicedDict, get_fsig, n_cpus, tmp
+from .tools import AttrDict, get_fsig, n_cpus, tmp
 
 
 @dataclass(frozen=True)
@@ -1221,7 +1221,7 @@ def animate(
     single dimension, such as time.
     """
 
-    args = RicedDict(locals())
+    args = AttrDict(locals())
 
     # pop the above from args
     outfile = args.pop("outfile")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 __all__ = [
-    "BoundingBox",
+    "append_to_netcdf",
     "GeoDataArray",
     "GeoDataset",
     "RedirectStreams",
@@ -23,7 +23,7 @@ __all__ = [
     "n_cpus",
     "plot_pvalues",
     "plot_quiver",
-    "plot",
+    "theming",
     "rm",
     "symlink",
     "timeit",
@@ -33,13 +33,16 @@ __all__ = [
 
 import sys
 
-from .init_cmap import *
+from . import _cmaps
+from . import cmaps as cmaps
+from . import pycdo as cdo
+from . import theming as theming
+
+# import cmaps as _cmaps --- IGNORE ---
+from ._cmaps import *
 from .plotting import get_cax, plot_pvalues, plot_quiver
-from .pycdo import cdo
 from .statistics import calc_significance
-from .theming import cmaps, plot
 from .tools import (
-    BoundingBox,
     RedirectStreams,
     cp,
     cwd,
@@ -59,13 +62,12 @@ from .tools import (
     tmp,
     user,
 )
-
-# import cmaps as _cmaps --- IGNORE ---
 # from .update import _self_update
 from .xgeo import (
     GeoDataArray,
     GeoDataset,
     SetupDask,
+    append_to_netcdf,
 )
 
 # _self_update()
