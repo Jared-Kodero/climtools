@@ -4,7 +4,6 @@ import functools
 import getpass
 import inspect
 import io
-import logging
 import os
 import shutil
 import socket
@@ -32,9 +31,6 @@ current_dask_client = None
 
 
 user = getpass.getuser()
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 class AttrDict(dict):
@@ -101,7 +97,7 @@ def timeit(func: Callable) -> Callable:
             elapsed /= 60
             unit = "minutes"
 
-        logger.info(f"[ {func.__name__} ] finished in {round(elapsed, 2):>4} {unit}")
+        print(f"[ {func.__name__} ] finished in {round(elapsed, 2):>4} {unit}")
         return result
 
     return wrapper
@@ -169,8 +165,9 @@ def file_kind(
         )
         return res.stdout.strip()
     except subprocess.CalledProcessError as e:
-        logger.error(e.stderr)
-        return None
+        raise RuntimeError(
+            f"Failed to determine file type for {file_path}: {e.stderr.strip()}"
+        ) from e
 
 
 def symlink(

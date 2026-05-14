@@ -38,7 +38,6 @@ CDO user guide: https://code.mpimet.mpg.de/projects/cdo/embedded/cdo.pdf
 from __future__ import annotations
 
 import atexit
-import logging
 import os
 import shutil
 import subprocess
@@ -75,8 +74,6 @@ __all__ = [
     "mergetime",
     "RemapMethod",
 ]
-
-logger = logging.getLogger(__name__)
 
 os.environ.setdefault("CDO_VERSION_INFO", "false")
 os.environ.setdefault("CDO_HISTORY_INFO", "false")
@@ -162,7 +159,6 @@ def _run(args: list[str], n_threads: int | None = None) -> subprocess.CompletedP
     try:
         return subprocess.run(cmd, check=True, text=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
-        logger.error("CDO failed: %s\nstderr:\n%s", " ".join(cmd), exc.stderr)
         raise RuntimeError(f"CDO command failed: {exc.stderr.strip()}") from exc
 
 
@@ -467,7 +463,7 @@ def mergetime(
             try:
                 p.unlink()
             except OSError as exc:
-                logger.warning("Could not delete %s: %s", p, exc)
+                raise RuntimeError(f"Failed to delete input file {p}: {exc}") from exc
 
     if as_xarray:
         return xr.open_dataset(outfile, chunks="auto")
