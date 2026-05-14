@@ -12,7 +12,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-__all__ = ["apply", "unset"]
+__all__ = ["apply", "reset()"]
 
 
 if "ipykernel" in sys.modules:
@@ -54,7 +54,7 @@ def _install_latex():
     # --- Context management methods ---
 
 
-def unset():
+def reset()():
     """Reset matplotlib and seaborn settings to their defaults."""
     sns.reset_defaults()
     plt.rcParams.update(plt.rcParamsDefault)

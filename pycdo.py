@@ -236,31 +236,281 @@ def run(
     n_threads: int | None = None,
 ) -> subprocess.CompletedProcess:
     """
-    Execute an arbitrary CDO command.
+    Run a Climate Data Operators command and return the completed process.
+
+    This function is a thin wrapper around the internal command runner. It
+    validates that ``cmd`` is a list of strings, then delegates execution to
+    ``_run(cmd, n_threads=n_threads)``.
 
     Parameters
     ----------
-    cmd : list of str
-        CDO operator chain and arguments, excluding the ``cdo`` executable.
-    n_threads : int, optional
-        Override the default OpenMP thread count passed via ``-P``. Defaults
-        to ``min(os.cpu_count(), 32)``.
+    cmd : list[str]
+        Command arguments passed to CDO. The first element should usually be
+        ``"cdo"``, followed by CDO options, operators, input files, and output
+        files. Each element must be a string.
+    n_threads : int | None, optional
+        Number of OpenMP threads to use for CDO execution. If ``None``, the
+        default thread configuration is used.
 
     Returns
     -------
     subprocess.CompletedProcess
-        Completed process object containing stdout, stderr, and return code.
+        Completed process object returned by the underlying command runner.
 
     Raises
     ------
     TypeError
         If ``cmd`` is not a list of strings.
-    RuntimeError
-        If CDO exits with a non-zero status.
 
     Examples
     --------
-    >>> run(["remapbil,gridfile", "infile.nc", "outfile.nc"])
+    >>> run(["cdo", "-O", "timmean", "input.nc", "output.nc"])
+    >>> run(["cdo", "-O", "remapbil,target_grid.txt", "input.nc", "output.nc"], n_threads=4)
+
+    CDO command-line reference
+    --------------------------
+    Usage
+        cdo [Options] Operator1 [-Operator2 [-OperatorN]]
+
+    Info
+        --attribs <arbitrary|filesOnly|onlyFirst|noOutput|obase>
+            Lists all operators with selected features or the attributes of
+            given operator(s). The argument can be an operator name or a
+            combination of arbitrary, filesOnly, onlyFirst, noOutput, and obase.
+        --config <all|all-json|<specific_feature_name>>
+            Prints all features and the enabled status. Use ``all`` to show
+            explicit feature names.
+        --envvars
+            Prints the environment variables of CDO.
+        --module_info <module name>
+            Prints the list of operators for a module.
+        --operators
+            Prints the list of operators.
+        --operators_no_output
+            Prints all operators that produce no output.
+        --rusage
+            Prints information about resource utilization.
+        --settings
+            Prints the settings of CDO.
+        -V, --version
+            Prints the version number.
+
+    Output
+        -C, --color <auto|no|all>
+            Sets behavior of colorized output messages.
+        -d, --debug
+            Prints all available debug messages.
+        -w, --disable_warnings
+            Disables warning messages.
+        -D, --scoped_debug <comma-separated scopes>
+            Enables debug messages for selected scopes. Multiple scopes are
+            allowed. Use this option without arguments to list available scopes.
+        -s, --silent
+            Enables silent mode.
+
+    Multi-threading
+        -P, --num_threads <nthreads>
+            Sets the number of OpenMP threads.
+        --worker <num>
+            Sets the number of workers used to decode or decompress GRIB records.
+
+    Search methods
+        --gridsearchradius <degrees[0..180]>
+            Sets the grid search radius in degrees.
+
+    Format specific
+        --chunksize <size>
+            Sets the NetCDF4 chunk size.
+        -k, --chunktype <auto|grid|lines>
+            Sets the NetCDF4 chunk type.
+        --eccodes
+            Uses ecCodes to decode or encode GRIB1 messages.
+        -Q, --sortname
+            Sorts NetCDF parameter names alphanumerically.
+
+    CGRIBEX
+        -R, --regular
+            Converts GRIB1 data from global reduced Gaussian grid to regular
+            Gaussian grid. Applies only to CGRIBEX.
+        -t, --table <codetab>
+            Sets the GRIB1 default parameter code table name or file. Applies
+            only to CGRIBEX. Predefined tables include echam4, echam5, echam6,
+            mpiom1, ecmwf, remo, cosmo002, cosmo201, cosmo202, cosmo203,
+            cosmo205, and cosmo250.
+
+    Numeric
+        -b, --default_datatype <nbits>
+            Sets the number of bits for the output precision. Supported values
+            include I8, I16, I32, F32, F64 for nc1, nc2, nc4, nc4c, nc5, and
+            nczarr; U8, U16, U32 for nc4, nc4c, and nc5; F32 and F64 for grb2,
+            srv, ext, and ieg; and P1 through P24 for grb1 and grb2.
+        --double
+            Uses double-precision floats for data in memory.
+        --enableexcept <except>
+            Enables individual floating-point traps. Supported values include
+            DIVBYZERO, INEXACT, INVALID, OVERFLOW, UNDERFLOW, and ALL_EXCEPT.
+        --float
+            Uses single-precision floats for data in memory.
+        --percentile <method>
+            Sets the percentile method. Supported methods include nrank, nist,
+            rtype8, and NumPy-style methods such as linear, lower, higher, and
+            nearest.
+        --precision <float_digits[,double_digits]>
+            Sets precision for displaying floating-point data. The default is
+            7 digits for floats and 15 digits for doubles.
+        --seed <seed>
+            Sets the seed for a new sequence of pseudo-random numbers. The seed
+            must be greater than or equal to 0.
+        --single
+            Uses single-precision floats for data in memory.
+
+    History
+        --disable_history <true|false>
+            Overrides CDO_DISABLE_HISTORY. See the corresponding environment
+            variable.
+        --history
+            Appends to the NetCDF ``history`` global attribute.
+        --history_info <true|false>
+            Overrides CDO_HISTORY_INFO. See the corresponding environment
+            variable.
+        --no_history
+            Does not append to the NetCDF ``history`` global attribute.
+        --reset_history <true|false>
+            Overrides CDO_RESET_HISTORY. See the corresponding environment
+            variable.
+
+    Compression
+        -Z, --compress
+            Enables compression. The default is SZIP.
+        -z, --compression_type <aec|jpeg|zip[_1-9]|zstd[1-19]>
+            Sets the compression type. ``aec`` applies AEC compression to GRIB2
+            records; ``jpeg`` applies JPEG compression to GRIB2 records;
+            ``zip[_1-9]`` applies Deflate compression to NetCDF4 variables; and
+            ``zstd[_1-19]`` applies Zstandard compression to NetCDF4 variables.
+        -F, --filter <filterspec>
+            Sets the NetCDF4 filter specification.
+        --shuffle
+            Enables shuffling of variable data bytes before NetCDF compression.
+
+    Options
+        -a, --absolute_taxis
+            Generates an absolute time axis.
+        -S, --cdo_diagnostic
+            Creates an extra output stream for the TIMSTAT module containing the
+            number of non-missing values for each output period.
+        -c, --check_data_range
+            Enables checks for data overflow.
+        --cmor
+            Enables CMOR-conformant NetCDF output.
+        --disable_file_suffix <true|false>
+            Overrides CDO_DISABLE_FILE_SUFFIX. See the corresponding environment
+            variable.
+        --download_path <path>
+            Overrides CDO_DOWNLOAD_PATH. See the corresponding environment
+            variable.
+        -A, --dryrun
+            Performs a dry run and prints the processed CDO call.
+        --file_suffix <suffix>
+            Overrides CDO_FILE_SUFFIX. See the corresponding environment
+            variable.
+        --force
+            Forces a CDO process.
+        -f, --format <grb1|grb2|nc1|nc2|nc4|nc4c|nc5|nczarr|srv|ext|ieg>
+            Sets the output file format.
+        -g, --grid <grid>
+            Sets the default grid name or file. Available grids include
+            F<XXX>, t<RES>, tl<RES>, r<NX>x<NY>, global_<DXY>, zonal_<DY>,
+            gme<NI>, lon=<LON>/lat=<LAT>, and hpz<ZOOM>.
+        -M, --has_missval
+            Sets HAS_MISSVAL to true.
+        --icon_grids <path>
+            Overrides CDO_ICON_GRIDS. See the corresponding environment
+            variable.
+        --ignore_time_bounds
+            Ignores time bounds for time-range statistics.
+        -i, --institution <institute_name>
+            Sets the institution name.
+        -u, --interactive
+            Enables CDO interactive mode.
+        -L, --lock_io
+            Locks I/O for sequential access.
+        --netcdf_hdr_pad <nbr>
+            Pads the NetCDF output header with ``nbr`` bytes.
+        --no_remap_weights
+            Switches off generation of remap weights.
+        -O, --overwrite
+            Overwrites an existing output file, if checked.
+        --pedantic
+            Treats warnings as errors.
+        --reduce_dim
+            Reduces NetCDF dimensions.
+        -r, --relative_taxis
+            Generates a relative time axis.
+        --remap_weights <0|1>
+            Enables or disables generation of remap weights. The default is 1.
+        -m, --set_missval <missval>
+            Sets the missing value of non-NetCDF files. The default is -9e+33.
+        --sortparam
+            Sorts parameters.
+        --test <true|false>
+            Overrides CDO_TEST. See the corresponding environment variable.
+        -T, --timer
+            Enables the timer.
+        --timestat_date <srcdate>
+            Sets the target timestamp for temporal statistics. Supported values
+            are first, middle, midhigh, and last source timestep.
+        --use_fftw <true|false>
+            Sets FFTW usage.
+        --use_time_bounds
+            Enables use of time bounds.
+        -v, --verbose
+            Prints extra details for some operators.
+        --version_info <true|false>
+            Overrides CDO_VERSION_INFO. See the corresponding environment
+            variable.
+        -l, --zaxis <zaxis>
+            Sets the default z-axis name or file.
+
+    Help
+        --apply
+            Shows explanation and examples for ``-apply`` syntax.
+        --argument_groups
+            Shows explanation and examples for subgrouping operators with
+            bracket syntax.
+        -h, --help <operator>
+            Shows help information for the given operator or the general CDO
+            usage message.
+
+    Environment variables
+        CDO_CORESIZE <max. core dump size>
+            Largest size, in bytes, of a core file that may be created.
+        CDO_DISABLE_FILE_SUFFIX <true|false>
+            If true, disables file suffixes.
+        CDO_DISABLE_HISTORY <true|false>
+            If true, disables the history attribute.
+        CDO_DOWNLOAD_PATH <path>
+            Path where CDO can store downloads.
+        CDO_FILE_SUFFIX <suffix>
+            Default filename suffix.
+        CDO_HISTORY_INFO <true|false>
+            If false, does not write information to the global history attribute.
+            The default is true.
+        CDO_ICON_GRIDS <path>
+            Root directory of installed ICON grids, for example
+            ``/pool/data/ICON``.
+        CDO_RESET_HISTORY <true|false>
+            If true, resets the global history attribute. The default is false.
+        CDO_TEST <true|false>
+            If true, enables new features for testing. The default is false.
+        CDO_VERSION_INFO <true|false>
+            If false, disables the global NetCDF attribute CDO. The default is
+            true.
+
+    Notes
+    -----
+    This reference reflects CDO version 2.5.0, copyright 2002-2024
+    MPI für Meteorologie. CDO is free software and comes with no warranty.
+    Bugs may be reported to the CDO maintainers.
     """
     if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
         raise TypeError("cmd must be a list of strings.")

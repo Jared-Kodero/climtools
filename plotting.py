@@ -4,6 +4,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
+from functools import wraps
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +23,8 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 
 from .tools import AttrDict, get_fsig, n_cpus, tmp
+
+__all__ = ["get_cax", "pvalues", "quiver"]
 
 
 @dataclass(frozen=True)
@@ -1285,3 +1288,13 @@ def animate(
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
     ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
+
+
+@wraps(plot_pvalues)
+def pvalues(*args, **kwargs):
+    return plot_pvalues(*args, **kwargs)
+
+
+@wraps(plot_quiver)
+def quiver(*args, **kwargs):
+    return plot_quiver(*args, **kwargs)

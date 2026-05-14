@@ -1,74 +1,43 @@
 from __future__ import annotations
 
 __all__ = [
-    "append_to_netcdf",
-    "GeoDataArray",
-    "GeoDataset",
-    "RedirectStreams",
-    "SetupDask",
-    "calc_significance",
+    "stats",
     "cdo",
     "cmaps",
-    "cp",
-    "cwd",
-    "du",
-    "file_kind",
-    "get_cax",
     "get_fsig",
     "home",
     "host",
     "logexc",
-    "mkdir",
-    "mv",
     "n_cpus",
-    "plot_pvalues",
-    "plot_quiver",
+    "plotting",
     "theming",
-    "rm",
-    "symlink",
-    "timeit",
     "tmp",
     "user",
+    "xgeo",
 ]
 
 import sys
 
-from . import _cmaps
+from . import _cmaps, xgeo
 from . import cmaps as cmaps
+from . import plotting as plotting
 from . import pycdo as cdo
+from . import statistics as stats
 from . import theming as theming
 
 # import cmaps as _cmaps --- IGNORE ---
 from ._cmaps import *
-from .plotting import get_cax, plot_pvalues, plot_quiver
-from .statistics import calc_significance
 from .tools import (
-    RedirectStreams,
-    cp,
-    cwd,
-    du,
-    file_kind,
     fix_vscode_widget,
     get_fsig,
     home,
     host,
     logexc,
-    mkdir,
-    mv,
     n_cpus,
-    rm,
-    symlink,
-    timeit,
     tmp,
     user,
 )
 # from .update import _self_update
-from .xgeo import (
-    GeoDataArray,
-    GeoDataset,
-    SetupDask,
-    append_to_netcdf,
-)
 
 # _self_update()
 

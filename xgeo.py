@@ -362,15 +362,11 @@ class GeoDataArray(GeoMixin, xr.DataArray):
     Extension of xarray.DataArray with Cartopy-based plotting and animation methods.
     """
 
-    __slots__ = ()
-
 
 class GeoDataset(GeoMixin, xr.Dataset):
     """
     Extension of xarray.Dataset with Cartopy-based plotting and animation methods.
     """
-
-    __slots__ = ()
 
 
 __all__ = ["GeoDataArray", "GeoDataset", "SetupDask", "append_to_netcdf"]
