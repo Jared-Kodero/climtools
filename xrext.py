@@ -155,7 +155,7 @@ def calc_local_solar_time(
     if lon not in data:
         raise ValueError(f"Dataset must contain '{lon}' coordinate.")
 
-    offset = data[lon] * (24 / 360)
+    offset = ((data[lon] + 180) % 360 - 180) * (24 / 360)
     offset = offset.round() * pd.Timedelta(hours=1)
 
     lst = data["time"] + offset
@@ -166,14 +166,14 @@ def calc_local_solar_time(
 
 
 def _to_lon_180(
-    ds: xr.Dataset | xr.DataArray, lon: str = "lon"
+    data: xr.Dataset | xr.DataArray, lon: str = "lon"
 ) -> xr.Dataset | xr.DataArray:
     """
     Standardize the longitude coordinates of an xarray object to be within the range [-180, 180).
 
     Parameters
     ----------
-    ds : xr.Dataset or xr.DataArray
+    data : xr.Dataset or xr.DataArray
         The input dataset or data array containing a longitude coordinate.
     lon : str, default 'lon'
         The name of the longitude coordinate in the dataset.
@@ -183,13 +183,13 @@ def _to_lon_180(
     xr.Dataset or xr.DataArray
         The dataset or data array with standardized longitude coordinates.
     """
-    if lon not in ds:
+    if lon not in data:
         raise ValueError(f"Dataset must contain '{lon}' coordinate.")
 
-    ds = ds.copy()
-    ds[lon] = (ds[lon] + 180) % 360 - 180
-    ds = ds.sortby(lon)
-    return ds
+    data = data.copy()
+    data[lon] = (data[lon] + 180) % 360 - 180
+    data = data.sortby(lon)
+    return data
 
 
 def xe_remap(

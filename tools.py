@@ -16,7 +16,7 @@ host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 tmp = Path("/tmp")
-n_cpus = int(os.environ.get("NTASKS", len(os.sched_getaffinity(0))))
+n_cpus = int(len(os.sched_getaffinity(0)))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 

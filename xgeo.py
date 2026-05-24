@@ -13,7 +13,9 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .plotting import (
     MapPlot,
+    _plotmeta,
     animate,
+    faceted_mapplot,
     make_cyclic,
     mapplot,
 )
@@ -133,21 +135,21 @@ class GeoMixin:
     __slots__ = ()
 
     def _validate_da(self) -> None:
-        if isinstance(self, (xr.Dataset, GeoDataset)):
+        if isinstance(self, (xr.Dataset, GDS)):
             msg = f"This method requires a DataArray. Select one of {list(self.data_vars)} from the Dataset."
             raise TypeError(msg)
 
     @wraps(make_cyclic)
-    def add_cyclic_point(self, lon: str = "lon") -> GeoDataArray:
+    def add_cyclic_point(self, lon: str = "lon") -> GDA:
         return type(self)(make_cyclic(self, lon))
 
     @wraps(_to_lon_180)
-    def to_lon_180(self, lon: str = "lon") -> GeoDataArray:
+    def to_lon_180(self, lon: str = "lon") -> GDA:
         res = _to_lon_180(self, lon=lon)
         return type(self)(res)
 
     @wraps(calc_local_solar_time)
-    def local_solar_time(self, *, lon="lon") -> GeoDataArray:
+    def local_solar_time(self, *, lon="lon") -> GDA:
         res = calc_local_solar_time(data=self, lon=lon)
         return type(self)(res)
 
@@ -164,10 +166,10 @@ class GeoMixin:
             "nearest_d2s",
         ] = "bilinear",
         parallel: bool = False,
-    ) -> GeoDataArray:
-        _params = locals()
-        _ = _params.pop("self")
-        remapped = xe_remap(self, **_params)
+    ) -> GDA:
+        params = locals()
+        params.pop("self")
+        remapped = xe_remap(self, **params)
         return type(self)(remapped)
 
     @wraps(mask)
@@ -176,13 +178,78 @@ class GeoMixin:
         mask: xr.DataArray | Path | None = None,
         keep: str = "land",
         parallel: bool = False,
-    ) -> GeoDataArray:
-        _params = locals()
-        _ = _params.pop("self")
-        masked = mask_data(data=self, **_params)
+    ) -> GDA:
+        params = locals()
+        params.pop("self")
+        masked = mask_data(data=self, **params)
         return type(self)(masked)
 
-    @wraps(mapplot)
+    @wraps(_plotmeta)
+    def faceted_mapplot(
+        self,
+        dim: str,
+        # Spatial configuration
+        x: str = None,
+        y: str = None,
+        shape: tuple[int, int] = None,
+        projection: Literal[
+            "PlateCarree",
+            "Mercator",
+            "Robinson",
+            "Mollweide",
+            "Orthographic",
+            "LambertConformal",
+            "AlbersEqualArea",
+            "Stereographic",
+            "NorthPolarStereo",
+            "SouthPolarStereo",
+        ] = "PlateCarree",
+        central_longitude: float = None,
+        central_latitude: float = None,
+        global_extent: bool = False,
+        set_extent: tuple[float, float, float, float] = None,
+        figsize: tuple[float, float] = None,
+        # Plot appearance
+        method: Literal[
+            "default", "pcolormesh", "contourf", "contour", "imshow"
+        ] = "default",
+        cmap: str | LinearSegmentedColormap | ListedColormap = None,
+        norm: Any = None,
+        vmin: float = None,
+        vmax: float = None,
+        units: str = None,
+        levels: int | list = None,
+        extend: str = None,
+        cyclic: bool = False,
+        robust: bool = False,
+        rasterized: bool = False,
+        title: str = "",
+        orientation: Literal["vertical", "horizontal"] = "vertical",
+        add_colorbar: bool = True,
+        drawedges: bool = False,
+        cbar_label: str = None,
+        # Map features
+        gridlines: bool = False,
+        coastlines: bool = True,
+        borders: bool = True,
+        states: bool = True,
+        ocean: bool = True,
+        land: bool = True,
+        lakes: bool = False,
+        rivers: bool = False,
+        p_values: xr.DataArray = None,
+        p_value_kwargs: dict = None,
+        u_component: xr.DataArray = None,
+        v_component: xr.DataArray = None,
+        quiver_kwargs: dict = None,
+        **kwargs,
+    ) -> MapPlot:
+        params = locals()
+        params.pop("self")
+        self._validate_da()
+        return faceted_mapplot(da=self, **params)
+
+    @wraps(_plotmeta)
     def mapplot(
         self,
         x: str = None,
@@ -213,6 +280,7 @@ class GeoMixin:
         cmap: str | LinearSegmentedColormap | ListedColormap = None,
         vmin: float = None,
         vmax: float = None,
+        units: str = None,
         levels: int | list = None,
         extend: str = None,
         cyclic: bool = False,
@@ -239,12 +307,12 @@ class GeoMixin:
         quiver_kwargs: dict = None,
         **kwargs,
     ) -> MapPlot:
-        _params = locals()
-        _ = _params.pop("self")
+        params = locals()
+        params.pop("self")
         self._validate_da()
-        return mapplot(da=self, **_params)
+        return mapplot(da=self, **params)
 
-    @wraps(animate)
+    @wraps(_plotmeta)
     def animate(
         self,
         outfile: Path | str = None,
@@ -252,7 +320,7 @@ class GeoMixin:
         *,
         indices: tuple | list | np.ndarray = None,
         quality: Literal["low", "medium", "high"] = "medium",
-        fps: int = 10,
+        fps: int = 1,
         parallel: bool = True,
         # Spatial configuration
         x: str = None,
@@ -272,6 +340,9 @@ class GeoMixin:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] = None,
         figsize: tuple[float, float] = None,
+        faceted: bool = False,
+        faceted_dim: str = None,
+        shape: tuple[int, int] = None,
         central_longitude: float = None,
         central_latitude: float = None,
         # Plot appearance
@@ -282,6 +353,7 @@ class GeoMixin:
         norm: Any = None,
         vmin: float = None,
         vmax: float = None,
+        units: str = None,
         levels: int | list[int] = None,
         extend: str = None,
         cyclic: bool = False,
@@ -306,10 +378,10 @@ class GeoMixin:
         quiver_kwargs: dict = None,
         **kwargs,
     ) -> None:
-        _params = locals()
-        _ = _params.pop("self")
+        params = locals()
+        params.pop("self")
         self._validate_da()
-        return animate(da=self, **_params)
+        return animate(da=self, **params)
 
     @wraps(calc_trends)
     def trends(
@@ -319,17 +391,17 @@ class GeoMixin:
         scale: float = 1,
         dask_scheduler: Literal["threads", "processes"] = "threads",
     ) -> xr.Dataset:
-        _params = locals()
-        _ = _params.pop("self")
+        params = locals()
+        params.pop("self")
         self._validate_da()
-        return calc_trends(data=self, **_params)
+        return calc_trends(data=self, **params)
 
     @wraps(polyfit)
     def polyfit(self, along: str, data_var: str = None, scale: float = 1):
-        _params = locals()
+        params = locals()
         self._validate_da()
-        _ = _params.pop("self")
-        return polyfit(data=self, **_params)
+        params.pop("self")
+        return polyfit(data=self, **params)
 
     @wraps(correlate)
     def correlate(
@@ -340,10 +412,10 @@ class GeoMixin:
         along: str = None,
         dask_scheduler: Literal["threads", "processes"] = "threads",
     ) -> xr.Dataset:
-        _params = locals()
+        params = locals()
         self._validate_da()
-        _ = _params.pop("self")
-        return correlate(x=self, **_params)
+        params.pop("self")
+        return correlate(x=self, **params)
 
     @wraps(append_to_netcdf)
     def append_to_netcdf(
@@ -351,22 +423,22 @@ class GeoMixin:
         file: Path,
         name: str = None,
     ) -> None:
-        _params = locals()
+        params = locals()
         self._validate_da()
-        _ = _params.pop("self")
-        append_to_netcdf(da=self, **_params)
+        params.pop("self")
+        append_to_netcdf(da=self, **params)
 
 
-class GeoDataArray(GeoMixin, xr.DataArray):
+class GDA(GeoMixin, xr.DataArray):
     """
-    Extension of xarray.DataArray with Cartopy-based plotting and animation methods.
-    """
-
-
-class GeoDataset(GeoMixin, xr.Dataset):
-    """
-    Extension of xarray.Dataset with Cartopy-based plotting and animation methods.
+    GeoDataArray is an extension of xarray.DataArray with Cartopy-based plotting and animation methods.
     """
 
 
-__all__ = ["GeoDataArray", "GeoDataset", "SetupDask", "append_to_netcdf"]
+class GDS(GeoMixin, xr.Dataset):
+    """
+    GeoDataset is an extension of xarray.Dataset with Cartopy-based plotting and animation methods.
+    """
+
+
+__all__ = ["GDA", "GDS", "SetupDask", "append_to_netcdf"]
