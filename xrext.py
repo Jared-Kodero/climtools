@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import netCDF4 as nc
 import numpy as np
 import pandas as pd
 import xarray as xr
 import xesmf as xe
+from dask.diagnostics import ProgressBar
 
 from .statistics import *
 
@@ -18,6 +19,80 @@ from .tools import tmp
 warnings.filterwarnings("ignore")
 _script_dir = Path(__file__).resolve().parent
 _mask_cache = {}  # cache for remapped masks to avoid redundant computations
+
+
+class DaskProgressBar(ProgressBar):
+    """
+    Dask progress bar styled like rich.progress.track.
+
+    Requires:
+        pip install rich
+    """
+
+    def __init__(
+        self,
+        description: str = "",
+        transient: bool = False,
+        refresh_per_second: int = 10,
+    ) -> None:
+        super().__init__()
+        self.description = description
+        self.transient = transient
+        self.refresh_per_second = refresh_per_second
+
+        self._progress = None
+        self._task_id = None
+        self._total = 0
+        self._completed = 0
+
+    def _start(self, dsk: Any) -> None:
+        from rich.progress import Progress
+
+        self._total = len(dsk)
+        self._completed = 0
+
+        self._progress = Progress(
+            *Progress.get_default_columns(),
+            transient=self.transient,
+            refresh_per_second=self.refresh_per_second,
+        )
+
+        self._progress.start()
+        self._task_id = self._progress.add_task(
+            self.description,
+            total=self._total,
+        )
+
+    def _posttask(
+        self,
+        key: Any,
+        result: Any,
+        dsk: Any,
+        state: dict[str, Any],
+        worker_id: Any,
+    ) -> None:
+        self._completed += 1
+
+        if self._progress is not None and self._task_id is not None:
+            self._progress.update(
+                self._task_id,
+                completed=self._completed,
+            )
+
+    def _finish(
+        self,
+        dsk: Any,
+        state: dict[str, Any],
+        errored: bool,
+    ) -> None:
+        if self._progress is not None and self._task_id is not None:
+            if not errored:
+                self._progress.update(
+                    self._task_id,
+                    completed=self._total,
+                )
+
+            self._progress.stop()
 
 
 def append_to_netcdf(
@@ -76,7 +151,7 @@ def mask(
 
     Parameters
     ----------
-    data : xr.DataArray or xr.Dataset
+    data/self: xr.DataArray or xr.Dataset
         Input data containing latitude and longitude dimensions.
     mask : xr.DataArray or Path, optional
         Land-sea mask. If a DataArray is provided it is used directly.

@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 import cartopy.mpl.geoaxes as cgeo
+import dask.diagnostics
 import numpy as np
 import xarray as xr
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from .plotting import (
     MapPlot,
-    _plotmeta,
     animate,
     faceted_mapplot,
     make_cyclic,
@@ -24,6 +24,7 @@ from .statistics import *
 # ---- Plot callback ----
 from .tools import n_cpus
 from .xrext import (
+    DaskProgressBar,
     _to_lon_180,
     append_to_netcdf,
     calc_local_solar_time,
@@ -35,6 +36,8 @@ from .xrext import (
 warnings.filterwarnings("ignore")
 _dask_client = None  # global variable to hold the Dask client instance
 _dask_cluster = None  # global variable to hold the Dask cluster instance
+
+dask.diagnostics.ProgressBar = DaskProgressBar
 
 
 class SetupDask:
@@ -153,7 +156,6 @@ class GeoMixin:
         res = calc_local_solar_time(data=self, lon=lon)
         return type(self)(res)
 
-    @wraps(xe_remap)
     def remap(
         self,
         grid_out: xr.Dataset | xr.DataArray,
@@ -167,6 +169,9 @@ class GeoMixin:
         ] = "bilinear",
         parallel: bool = False,
     ) -> GDA:
+        """
+        Remap source dataset to the grid of the destination dataset using xesmf.
+        """
         params = locals()
         params.pop("self")
         remapped = xe_remap(self, **params)
@@ -184,7 +189,7 @@ class GeoMixin:
         masked = mask_data(data=self, **params)
         return type(self)(masked)
 
-    @wraps(_plotmeta)
+    @wraps(faceted_mapplot)
     def faceted_mapplot(
         self,
         dim: str,
@@ -249,7 +254,7 @@ class GeoMixin:
         self._validate_da()
         return faceted_mapplot(da=self, **params)
 
-    @wraps(_plotmeta)
+    @wraps(mapplot)
     def mapplot(
         self,
         x: str = None,
@@ -312,7 +317,7 @@ class GeoMixin:
         self._validate_da()
         return mapplot(da=self, **params)
 
-    @wraps(_plotmeta)
+    @wraps(animate)
     def animate(
         self,
         outfile: Path | str = None,

@@ -30,6 +30,7 @@ from ._cmaps import *
 from .tools import (
     fix_vscode_widget,
     get_fsig,
+    handle_errors,
     home,
     host,
     logexc,
@@ -40,6 +41,9 @@ from .tools import (
 # from .update import _self_update
 
 # _self_update()
+
+# Set the custom exception handler for the current session
+sys.excepthook = handle_errors
 
 """climtools — utilities for climate data analysis and plotting.
 

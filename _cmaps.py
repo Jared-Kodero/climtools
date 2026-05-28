@@ -282,19 +282,39 @@ def create(
     discrete: bool = False,
     gamma: float = 1.0,
     name: str = None,
+    save: bool = False,
 ) -> ListedColormap | LinearSegmentedColormap:
-    def valid(c):
+    def valid(c: str) -> bool:
         return isinstance(c, str) and (c.startswith("#") or c in mcolors.CSS4_COLORS)
 
     if not all(map(valid, colors)):
         raise ValueError("All colors must be valid hex codes or CSS4 color names.")
 
+    if save and not name:
+        raise ValueError("A name must be provided when save = True.")
+
     if name is None:
-        name = f"{uuid.uuid4().hex[:6]}"
+        name = uuid.uuid4().hex[:6]
 
     if discrete:
-        return ListedColormap(colors, N=N, name=name)
-    return LinearSegmentedColormap.from_list(name, colors, N=N, gamma=gamma)
+        cmap = ListedColormap(colors, N=N, name=name)
+    else:
+        cmap = LinearSegmentedColormap.from_list(
+            name,
+            colors,
+            N=N,
+            gamma=gamma,
+        )
+
+    if save:
+        rgb = cmap(np.linspace(0.0, 1.0, 256))[:, :3]
+        np.savetxt(
+            f"{_src_dir}/{name}.txt",
+            rgb,
+            fmt="%.6f",
+        )
+
+    return cmap
 
 
 def gen_cmap_file():
@@ -331,7 +351,6 @@ def gen_cmap_file():
         '''
         Fancy custom colormap utilities for creating, modifying, and combining matplotlib colormaps.
         '''
-        from dataclasses import dataclass
         from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
         from ._cmaps import *
@@ -353,9 +372,9 @@ gamma: float = 1.0
         body = f"""
        
 
-def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
+def new(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str = None, save: bool = False):
     ''' Create a new colormap from a list of colors '''
-    return create(colors, N=N, discrete=discrete, gamma=gamma)
+    return create(colors, N=N, discrete=discrete, gamma=gamma, name=name, save=save)
 
 
 def concat({operators_signatures}):
@@ -368,7 +387,8 @@ def add({operators_signatures}):
     return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
 
 
-def substract({operators_signatures}):
+
+def subtract({operators_signatures}):
     ''' Subtract two colormaps '''
     return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
             \n

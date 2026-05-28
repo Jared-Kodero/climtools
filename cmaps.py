@@ -2,20 +2,19 @@
 '''
 Fancy custom colormap utilities for creating, modifying, and combining matplotlib colormaps.
 '''
-from dataclasses import dataclass
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from ._cmaps import *
 
-checksum = "CCC48C3FC27AA896C9B739FD8A4A254B209C2788AAC698CEE6A6ECC77D938760"
+checksum = "73D32DD0FAD62AD190E56A55415FF6D3607962ACCE9D6F88AE2480915AA01E20"
 
 
 
 
 
-def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0):
+def new(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str = None, save: bool = False):
     ''' Create a new colormap from a list of colors '''
-    return create(colors, N=N, discrete=discrete, gamma=gamma)
+    return create(colors, N=N, discrete=discrete, gamma=gamma, name=name, save=save)
 
 
 def concat(
@@ -42,7 +41,8 @@ gamma: float = 1.0
     return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
 
 
-def substract(
+
+def subtract(
 cmap1: ListedColormap | LinearSegmentedColormap,
 cmap2: ListedColormap | LinearSegmentedColormap,
 N: int = 32,
@@ -132,6 +132,22 @@ def cryo_seq(
     ''' Get the 'cryo_seq' colormap '''
 
     return get_colormap("cryo_seq", N, r, split, add_colors, discrete,as_colors, gamma)
+
+
+
+
+def low_high(
+    N: int = 32,
+    r: bool = False,
+    split: tuple[float, float] = (0, 1),
+    add_colors: dict[int, str | list[str]] = None,
+    discrete: bool = False,
+    as_colors : bool = False,
+    gamma: float = 1.0
+) -> ListedColormap | LinearSegmentedColormap:
+    ''' Get the 'low_high' colormap '''
+
+    return get_colormap("low_high", N, r, split, add_colors, discrete,as_colors, gamma)
 
 
 

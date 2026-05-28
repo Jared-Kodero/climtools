@@ -140,7 +140,3 @@ def fix_vscode_widget():
     </style>
     """
     display(HTML(css))
-
-
-# Set the custom exception handler for the current session
-sys.excepthook = handle_errors
