@@ -99,6 +99,8 @@ def append_to_netcdf(
     file: Path,
     da: xr.DataArray,
     name: str = None,
+    mode: Literal["a", "r+"] = "r+",
+    format="NETCDF4",
 ) -> None:
     """Append a DataArray to an existing NetCDF file
 
@@ -112,7 +114,7 @@ def append_to_netcdf(
         Name of the variable to create in the NetCDF file. If None, uses da.name.
     """
 
-    with nc.Dataset(file, mode="r+") as ncf:
+    with nc.Dataset(file, mode=mode, format=format) as ncf:
         varname = name or da.name
 
         # Overwrite values if the variable was created on a previous run.
