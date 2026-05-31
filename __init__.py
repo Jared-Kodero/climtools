@@ -38,9 +38,9 @@ from .tools import (
     tmp,
     user,
 )
-# # from .update import _self_update
+# from .update import _self_update
 
-# # _self_update()
+# _self_update()
 
 # Set the custom exception handler for the current session
 sys.excepthook = handle_errors
