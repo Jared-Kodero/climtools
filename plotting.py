@@ -331,9 +331,7 @@ def get_label(
     units = escape_matplotlib_label(units)
 
     name = cbar_label or long_name
-
     label = str(name) + "\n" + rf"[${units}$]"
-
     return label
 
 
@@ -342,7 +340,6 @@ def plot_quiver(
     v: xr.DataArray,
     ax: plt.Axes | cgeo.GeoAxes = None,
     subsample: int = 1,
-    new_ax: bool = False,
     **kwargs,
 ):
     """
@@ -406,33 +403,32 @@ def plot_quiver(
         U = np.round(speed.mean(skipna=True).values)
         U = int(U)
 
-    if new_ax:
-        cax = get_cax(
-            axes=ax,
-            orientation="horizontal",
-            quiver=True,
-            xaxis_ticks=xaxis_ticks,
-        )
-        bbox = cax.get_position()
+    cax = get_cax(
+        axes=ax,
+        orientation="horizontal",
+        quiver=True,
+        xaxis_ticks=xaxis_ticks,
+    )
+    # bbox = cax.get_position()
 
-        label = get_label(U, units)
+    label = get_label(U, units)
 
-        ax.quiverkey(
-            Q,
-            # X=0.1,
-            # Y=bbox.y0 + 0.5 * bbox.height,
-            X=0.90,
-            Y=0.94,
-            U=U,
-            label=label,
-            labelpos="E",
-            coordinates="figure",
-            fontproperties={"size": 14},
-        )
+    ax.quiverkey(
+        Q,
+        # X=0.1,
+        # Y=bbox.y0 + 0.5 * bbox.height,
+        X=0.90,
+        Y=0.94,
+        U=U,
+        label=label,
+        labelpos="E",
+        coordinates="figure",
+        fontproperties={"size": 14},
+    )
 
-        cax.set_frame_on(False)
-        cax.set_xticks([])
-        cax.set_yticks([])
+    cax.set_frame_on(False)
+    cax.set_xticks([])
+    cax.set_yticks([])
 
     return ax
 
@@ -487,91 +483,19 @@ def plot_cbar(
     return ax
 
 
-def _add_map_features(
-    fig: plt.Figure,
-    ax: plt.Axes | cgeo.GeoAxes,
-    artist: Artist,
-    # colorbar
-    add_colorbar: bool = False,
-    cbar_label: str = None,
-    orientation: str = "vertical",
-    drawedges: bool = False,
-    extend: str = None,
-    # p-values
-    p_values: xr.DataArray = None,
-    p_value_kwargs: dict = None,
-    # quiver
-    u_component: xr.DataArray = None,
-    v_component: xr.DataArray = None,
-    quiver_kwargs: dict = None,
-    # meta
-    long_name: str = "",
-    units: str = "",
-    gridlines: bool = False,
-    new_ax: bool = False,
-):
+def _plot_method(data: xr.DataArray, method: str):
+    default = data.plot
 
-    if gridlines:
-        gl = ax.gridlines(
-            crs=ccrs.PlateCarree(),
-            draw_labels=True,
-            linewidth=0.5,
-            color="gray",
-            alpha=0.5,
-            linestyle="--",
-            zorder=1,
-        )
-
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.bottom_labels = True
-        gl.left_labels = True
-
-    if add_colorbar and new_ax:
-        cbar_label = get_label(long_name, units, cbar_label)
-
-        ax = plot_cbar(
-            fig,
-            ax,
-            artist,
-            orientation=orientation,
-            drawedges=drawedges,
-            extend=extend,
-            cbar_label=cbar_label,
-        )
-
-    if p_values is not None:
-        p_kwargs = p_value_kwargs or {}
-        ax = plot_pvalues(data=p_values, ax=ax, **p_kwargs)
-
-    if (u_component is not None) and (v_component is not None):
-        q_kwargs = quiver_kwargs or {}
-        q_kwargs["xaxis_ticks"] = gridlines
-
-        ax = plot_quiver(
-            u=u_component,
-            v=v_component,
-            ax=ax,
-            new_ax=new_ax,
-            **q_kwargs,
-        )
-
-    return ax
-
-
-def _data_plot(data: xr.DataArray, pt: str):
-    p = data.plot
-
-    pts = ["pcolormesh", "contourf", "contour", "imshow"]
-    funcs = [p] + [getattr(p, m) for m in pts]
+    methords = ["pcolormesh", "contourf", "contour", "imshow"]
+    funcs = [default] + [getattr(default, m) for m in methords]
 
     pargs = {}
     for f in funcs:
         pargs.update(get_fsig(f))
-    if pt == "default":
-        func = p
-    elif pt in pts:
-        func = getattr(p, pt)
+    if method == "default":
+        func = default
+    elif method in methords:
+        func = getattr(default, method)
         pargs.update(get_fsig(func))
 
     return func, pargs
@@ -614,6 +538,40 @@ def _add_cartopy_features(
         ax.add_feature(cfeature.OCEAN, zorder=2)
 
     return ax
+
+
+def _get_projection(
+    projection: str, central_longitude: float = None, central_latitude: float = None
+):
+    proj_cls = getattr(ccrs, projection)
+    _cargs = get_fsig(proj_cls)
+    cargs = {}
+
+    if central_longitude is not None and "central_longitude" in _cargs:
+        cargs["central_longitude"] = central_longitude
+    if central_latitude is not None and "central_latitude" in _cargs:
+        cargs["central_latitude"] = central_latitude
+
+    return {"projection": proj_cls(**cargs)}
+
+
+def _get_projection(
+    projection: str,
+    central_longitude: float = None,
+    central_latitude: float = None,
+):
+    proj = getattr(ccrs, projection)
+    sig = get_fsig(proj)
+
+    cargs = {}
+
+    if central_longitude is not None and "central_longitude" in sig:
+        cargs["central_longitude"] = central_longitude
+
+    if central_latitude is not None and "central_latitude" in sig:
+        cargs["central_latitude"] = central_latitude
+
+    return proj(**cargs)
 
 
 def mapplot(
@@ -765,6 +723,9 @@ def mapplot(
     transform. The display projection is controlled by ``projection``.
     """
 
+    if cyclic:
+        da = make_cyclic(da, lon="lon")
+
     da = da.squeeze()
 
     long_name = da.attrs.get("long_name", "").capitalize()
@@ -773,43 +734,26 @@ def mapplot(
     if da.ndim > 2:
         raise ValueError("DataArray has more than 2 dimensions.")
 
-    if cyclic:
-        da = make_cyclic(da, lon="lon")
+    projection = _get_projection(projection, central_longitude, central_latitude)
+    fig, ax = plt.subplots(subplot_kw=projection, figsize=figsize)
 
-    if ax:
-        new_ax = False
-        if not isinstance(ax, (cgeo.GeoAxes)):
-            raise ValueError("Provided ax must be a cartopy GeoAxes.")
-        fig = ax.get_figure()
-
-    if not ax:
-        new_ax = True
-        proj = getattr(ccrs, projection)
-        _cargs = get_fsig(proj)
-        cargs = {}
-
-        if central_longitude is not None and "central_longitude" in _cargs:
-            cargs["central_longitude"] = central_longitude
-        if central_latitude is not None and "central_latitude" in _cargs:
-            cargs["central_latitude"] = central_latitude
-
-        fig, ax = plt.subplots(
-            subplot_kw={"projection": proj(**cargs)},
-            figsize=figsize,
-        )
-
-        ax = _add_cartopy_features(
-            **{
-                k: v
-                for k, v in locals().items()
-                if k in get_fsig(_add_cartopy_features)
-            }
-        )
+    ax = _add_cartopy_features(
+        ax,
+        global_extent,
+        set_extent,
+        coastlines,
+        states,
+        borders,
+        lakes,
+        rivers,
+        ocean,
+        land,
+    )
 
     transform = ccrs.PlateCarree()
 
     # we want all possible args
-    plot, pargs = _data_plot(da, method)
+    plot, pargs = _plot_method(da, method)
     all_args = dict(locals())
     all_args.update(kwargs)
 
@@ -838,9 +782,49 @@ def mapplot(
 
     plt.title(title)
 
-    ax = _add_map_features(
-        **{k: v for k, v in locals().items() if k in get_fsig(_add_map_features)}
-    )
+    if gridlines:
+        gl = ax.gridlines(
+            crs=ccrs.PlateCarree(),
+            draw_labels=True,
+            linewidth=0.5,
+            color="gray",
+            alpha=0.5,
+            linestyle="--",
+            zorder=1,
+        )
+
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.bottom_labels = True
+        gl.left_labels = True
+
+    if p_values is not None:
+        p_value_kwargs = p_value_kwargs or {}
+        ax = plot_pvalues(data=p_values, ax=ax, **p_value_kwargs)
+
+    if (u_component is not None) and (v_component is not None):
+        quiver_kwargs = quiver_kwargs or {}
+        quiver_kwargs["xaxis_ticks"] = gridlines
+
+        ax = plot_quiver(
+            u=u_component,
+            v=v_component,
+            ax=ax,
+            **quiver_kwargs,
+        )
+
+    if add_colorbar:
+        cbar_label = get_label(long_name, units, cbar_label)
+
+        ax = plot_cbar(
+            fig,
+            ax,
+            artist,
+            orientation=orientation,
+            drawedges=drawedges,
+            extend=extend,
+            cbar_label=cbar_label,
+        )
 
     return MapPlot(fig, ax, artist)
 
@@ -906,7 +890,7 @@ def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error
         return None
 
 
-def _mapplot_i(
+def _mapplot(
     i: int,
     dim_value: Any,
     dim: str,
@@ -1198,7 +1182,7 @@ def animate(
     if parallel:
         processes = min(len(indices), n_cpus // 2)
 
-        delayed_tasks = [delayed(_mapplot_i)(*task) for task in tasks]
+        delayed_tasks = [delayed(_mapplot)(*task) for task in tasks]
 
         if ipykernel:
             # from .xrext import DaskProgressBar
@@ -1225,7 +1209,7 @@ def animate(
             total=len(tasks),
             transient=False,
         ):
-            _mapplot_i(*task)
+            _mapplot(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
 
