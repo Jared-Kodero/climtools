@@ -12,7 +12,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-__all__ = ["apply", "reset", "spine_off"]
+__all__ = ["apply_theme", "reset_theme", "spine_off"]
 
 
 if "ipykernel" in sys.modules:
@@ -54,7 +54,7 @@ def _install_latex():
     # --- Context management methods ---
 
 
-def reset():
+def reset_theme():
     """Reset matplotlib and seaborn settings to their defaults."""
     sns.reset_defaults()
     plt.rcParams.update(plt.rcParamsDefault)
@@ -71,7 +71,7 @@ def set_interactive_backend():
         matplotlib.use("nbagg")  # fallback
 
 
-def apply(
+def apply_theme(
     *,
     interactive: bool = False,
     font_scale: float = 1.5,
@@ -85,7 +85,7 @@ def apply(
     context: Literal["paper", "notebook", "talk", "poster"] = "paper",
     style: str = "ticks",
     spine: bool = True,
-    rc: dict = None,
+    **kwargs,
 ):
     """
     Configure the global matplotlib and seaborn theme for publication-quality plots.
@@ -124,7 +124,7 @@ def apply(
         Seaborn style to use. Options include "darkgrid", "whitegrid", "dark", "white", and "ticks". Default is "ticks".
     spine: bool, default False
         If True, top and left spines are removed.
-    rc : dict, optional
+    kwargs
         Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
 
     """
@@ -178,10 +178,7 @@ def apply(
     if fig_size:
         _rc["figure.figsize"] = fig_size
 
-    if not rc:
-        rc = {}
-
-    _rc.update(rc)
+    _rc.update(kwargs)
 
     sns.set_theme(
         style=style,

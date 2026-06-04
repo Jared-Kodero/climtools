@@ -18,6 +18,8 @@ __all__ = [
 
 import sys
 
+import dask
+
 from . import _cmaps, xgeo
 from . import cmaps as cmaps
 from . import plotting as plotting
@@ -42,6 +44,11 @@ from .tools import (
 
 # _self_update()
 
+if "ipykernel" in sys.modules:
+    fix_vscode_widget()
+
+dask.diagnostics.ProgressBar = xgeo.DaskProgressBar
+
 # Set the custom exception handler for the current session
 sys.excepthook = handle_errors
 
@@ -61,7 +68,3 @@ If you plan to use parts of the package programmatically, import the
 individual modules (for example ``from climtools import plot, trends``) or the
 specific functions you need.
 """
-
-if "ipykernel" in sys.modules:
-    fix_vscode_widget()
-    ...

@@ -4,14 +4,12 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
-from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes as cgeo
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -26,7 +24,15 @@ from metpy.units import units as metpy_units
 
 from .tools import AttrDict, get_fsig, ipykernel, n_cpus, tmp
 
-__all__ = ["get_cax", "pvalues", "quiver", "plt", "ccrs"]
+__all__ = [
+    "get_cax",
+    "make_cyclic",
+    "plot_pvalues",
+    "plot_quiver",
+    "plot_cbar",
+    "mapplot",
+    "animate",
+]
 
 
 @dataclass(frozen=True, repr=False)
@@ -84,7 +90,6 @@ def get_cax(
         axes = plt.gca()
 
     plt.tight_layout()
-    fig_width, fig_height = fig.get_size_inches()
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         if orientation == "vertical":
@@ -325,10 +330,10 @@ def get_label(
 
     units = escape_matplotlib_label(units)
 
-    if not cbar_label:
-        label = rf"${long_name}$" + "\n" + rf"[${units}$]"
-    else:
-        label = rf"${cbar_label}$" + "\n" + rf"[${units}$]"
+    name = cbar_label or long_name
+
+    label = str(name) + "\n" + rf"[${units}$]"
+
     return label
 
 
@@ -414,8 +419,10 @@ def plot_quiver(
 
         ax.quiverkey(
             Q,
-            X=0.45,
-            Y=bbox.y0,
+            # X=0.1,
+            # Y=bbox.y0 + 0.5 * bbox.height,
+            X=0.90,
+            Y=0.94,
             U=U,
             label=label,
             labelpos="E",
@@ -607,360 +614,6 @@ def _add_cartopy_features(
         ax.add_feature(cfeature.OCEAN, zorder=2)
 
     return ax
-
-
-def faceted_mapplot(
-    da: xr.DataArray,
-    dim: str,
-    figsize: tuple[float, float] = None,
-    # Spatial configuration
-    x: str = None,
-    y: str = None,
-    shape: tuple[int, int] = None,
-    projection: Literal[
-        "PlateCarree",
-        "Mercator",
-        "Robinson",
-        "Mollweide",
-        "Orthographic",
-        "LambertConformal",
-        "AlbersEqualArea",
-        "Stereographic",
-        "NorthPolarStereo",
-        "SouthPolarStereo",
-    ] = "PlateCarree",
-    central_longitude: float = None,
-    central_latitude: float = None,
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] = None,
-    # Plot appearance
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
-    ] = "default",
-    cmap: str | LinearSegmentedColormap | ListedColormap = None,
-    norm: Any = None,
-    vmin: float = None,
-    vmax: float = None,
-    units: str = None,
-    levels: int | list = None,
-    extend: str = None,
-    cyclic: bool = False,
-    robust: bool = False,
-    rasterized: bool = False,
-    title: str = "",
-    orientation: Literal["vertical", "horizontal"] = "vertical",
-    add_colorbar: bool = True,
-    drawedges: bool = False,
-    cbar_label: str = None,
-    # Map features
-    gridlines: bool = False,
-    coastlines: bool = True,
-    borders: bool = True,
-    states: bool = True,
-    ocean: bool = True,
-    land: bool = True,
-    lakes: bool = False,
-    rivers: bool = False,
-    p_values: xr.DataArray = None,
-    p_value_kwargs: dict = None,
-    u_component: xr.DataArray = None,
-    v_component: xr.DataArray = None,
-    quiver_kwargs: dict = None,
-    **kwargs,
-) -> MapPlot:
-    """
-    Plot one Cartopy map panel for each value along a DataArray dimension.
-
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Scalar field to plot. After ``squeeze()``, the array must have at most
-        three dimensions.
-    dim : str
-        Dimension used to define map panels.
-    figsize : tuple of float, optional
-        Figure size in inches.
-    x, y : str, optional
-        Coordinate names passed to the selected xarray plotting method when
-        supported.
-    shape : tuple of int, optional
-        Facet grid shape as ``(nrows, ncols)``. If omitted, a near-square grid
-        is inferred.
-    projection : str, default "PlateCarree"
-        Cartopy projection used for all panels.
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection
-        constructor when supported.
-    global_extent : bool, default False
-        If True, set each map extent to the full globe.
-    set_extent : tuple of float, optional
-        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in
-        degrees.
-    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
-        Xarray plotting method used for each scalar-field panel.
-    cmap : str or matplotlib colormap, optional
-        Colormap used for the scalar field.
-    norm : Any, optional
-        Matplotlib normalization object.
-    vmin, vmax : float, optional
-        Lower and upper scalar color limits. If omitted, symmetric limits are
-        inferred from the full faceted field.
-    units : str, optional
-        Units used for colorbar labeling. If omitted, inferred from
-        ``da.attrs["units"]`` or ``da.name``.
-    levels : int or sequence of float, optional
-        Contour levels for contour-based methods.
-    extend : {"neither", "both", "min", "max"}, optional
-        Colorbar extension behavior.
-    cyclic : bool, default False
-        If True, append a cyclic longitude point before plotting. The longitude
-        dimension is assumed to be named ``"lon"``.
-    rasterized : bool, default False
-        Whether dense scalar artists should be rasterized when supported.
-    title : str, optional
-        Figure-level title.
-    orientation : {"vertical", "horizontal"}, default "vertical"
-        Colorbar orientation. The shared faceted colorbar is horizontal.
-    add_colorbar : bool, default True
-        Whether to add a shared colorbar.
-    drawedges : bool, default False
-        Whether to draw edges between colorbar intervals.
-    cbar_label : str, optional
-        Explicit colorbar label. If omitted, a label is inferred from metadata.
-    gridlines : bool, default False
-        Whether to draw labeled longitude and latitude gridlines.
-    coastlines, borders, states, lakes, rivers : bool
-        Switches controlling Cartopy geographic feature overlays.
-    ocean, land : bool
-        Switches controlling ocean and land background features.
-    p_values : xarray.DataArray, optional
-        Pointwise p-value field used for significance markers.
-    p_value_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_pvalues``.
-    u_component, v_component : xarray.DataArray, optional
-        Zonal and meridional vector components for quiver overlays. These must
-        include ``dim``.
-    quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``. For faceted vector
-        plots, this must include ``"U"`` and ``"subsample"``.
-    **kwargs
-        Additional keyword arguments forwarded to the selected xarray plotting
-        method after signature filtering.
-
-    Returns
-    -------
-    MapPlot
-        Container with ``fig``, ``ax``, and ``artist`` attributes. Here ``ax``
-        is an array of Cartopy GeoAxes.
-
-    Notes
-    -----
-    One panel is rendered for each coordinate value along ``dim``. Empty axes
-    are hidden when the requested grid contains more panels than data slices.
-    """
-
-    # if data is 3D, raise error
-    da = da.squeeze()
-    long_name = da.attrs.get("long_name", "").capitalize()
-    units = units or da.attrs.get("units", da.name)
-    robust = False  # Force
-
-    if da.ndim > 3:
-        raise ValueError("DataArray has more than 3 dimensions.")
-
-    if cyclic:
-        da = make_cyclic(da, lon="lon")
-
-    plot_quivers = False
-    if u_component is not None and v_component is not None:
-        plot_quivers = True
-
-    proj = getattr(ccrs, projection)
-    _cargs = get_fsig(proj)
-    cargs = {}
-
-    if central_longitude is not None and "central_longitude" in _cargs:
-        cargs["central_longitude"] = central_longitude
-    if central_latitude is not None and "central_latitude" in _cargs:
-        cargs["central_latitude"] = central_latitude
-
-    if shape is None:
-        ncols = int(np.ceil(np.sqrt(da.sizes[dim])))
-        nrows = int(np.ceil(da.sizes[dim] / ncols))
-    else:
-        nrows, ncols = shape
-
-    fig, axes = plt.subplots(
-        figsize=figsize,
-        nrows=nrows,
-        ncols=ncols,
-        subplot_kw={"projection": proj(**cargs)},
-        # constrained_layout=True,
-    )
-
-    axes = np.asarray(axes).ravel()
-
-    cbar_mins = []
-    cbar_maxs = []
-    artist = None
-
-    for i in range(len(da[dim])):
-        ax = axes[i]
-        i_da = da.isel({dim: i})
-        if vmin is None or vmax is None:
-            cbar_mins.append(da.isel({dim: i}).min(skipna=True).values)
-            cbar_maxs.append(da.isel({dim: i}).max(skipna=True).values)
-
-        ax = _add_cartopy_features(
-            **{
-                k: v
-                for k, v in locals().items()
-                if k in get_fsig(_add_cartopy_features)
-            }
-        )
-
-        transform = ccrs.PlateCarree()
-
-        # xarray methods
-
-        # we want all possible args
-        plot, pargs = _data_plot(i_da, method)
-        all_args = dict(locals())
-        all_args.update(kwargs)
-
-        pkwargs = {k: v for k, v in all_args.items() if k in pargs}
-        pkwargs["ax"] = ax
-        pkwargs["add_colorbar"] = False
-        pkwargs["zorder"] = 1
-        pkwargs["transform"] = transform
-        pkwargs["rasterized"] = rasterized
-        del pkwargs["extend"]
-        del pkwargs["kwargs"]
-        del pkwargs["figsize"]
-        del pkwargs["rasterized"]
-
-        artist = plot(**pkwargs, extend=extend)
-
-        if method in ["contour", "contourf"]:
-            artist.set_edgecolor("face")
-            for c in artist.collections:
-                c.set_rasterized(rasterized)
-
-        ax.set_title(f"{dim}: {da[dim][i].values}")
-
-        if plot_quivers:
-            u_component_i = u_component.isel({dim: i})
-            v_component_i = v_component.isel({dim: i})
-
-            quiver_kwargs = quiver_kwargs or {}
-            if "U" not in quiver_kwargs:
-                raise ValueError(
-                    "quiver_kwargs must include 'U' and 'subsample' keys when plotting quiver overlays on faceted maps."
-                )
-        else:
-            u_component_i = None
-            v_component_i = None
-
-        ax = _add_map_features(
-            fig,
-            ax,
-            artist,
-            add_colorbar=False,
-            cbar_label=None,
-            orientation=orientation,
-            drawedges=drawedges,
-            extend=extend,
-            p_values=p_values,
-            p_value_kwargs=p_value_kwargs,
-            u_component=u_component_i,
-            v_component=v_component_i,
-            quiver_kwargs=quiver_kwargs,
-            long_name=long_name,
-            units=units,
-            gridlines=gridlines,
-            new_ax=True,
-        )
-
-    for ax in axes[len(da[dim]) :]:
-        ax.set_visible(False)
-
-    fig_width, fig_height = fig.get_size_inches()
-
-    fig.suptitle(title)
-
-    fig.subplots_adjust(
-        left=0.04,
-        right=0.96,
-        bottom=0.12,
-        top=0.94,
-        wspace=0.08,
-        hspace=0.01,
-    )
-
-    if vmin is None or vmax is None:
-        vlim = np.nanmax(np.abs([np.nanmin(cbar_mins), np.nanmax(cbar_maxs)]))
-        vmin, vmax = -vlim, vlim
-
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-
-    _sm = plt.cm.ScalarMappable(norm=norm, cmap=artist.cmap)
-    _sm.set_array([])
-
-    cb = fig.colorbar(
-        _sm,
-        ax=axes,
-        orientation="horizontal",
-        fraction=0.05,
-        pad=0.06,
-        extend=extend,
-    )
-    cb.set_label(get_label(long_name, units, cbar_label))
-
-    if plot_quivers:
-        from matplotlib.quiver import QuiverKey
-
-        qkey = None
-
-        qkeys = [
-            child
-            for _ax in np.asarray(axes).ravel()
-            for child in _ax.get_children()
-            if isinstance(child, QuiverKey)
-        ]
-
-        if qkeys:
-            qkey = qkeys[0]
-
-            for k in qkeys:
-                k.remove()
-
-        cb_bbox = cb.ax.get_position()
-
-        qkcax = fig.add_axes(
-            [
-                0.0,  # x0: start at left edge of figure
-                cb_bbox.y0,  # y0: align with colorbar bottom
-                cb_bbox.x0,  # width: from fig x0 to colorbar x0
-                cb_bbox.height,  # height: match colorbar height
-            ],
-            frameon=False,
-        )
-        qkcax.quiverkey(
-            qkey.Q,
-            X=0.02 + axes.flat[0].get_position().xmin,
-            Y=cb_bbox.y0,
-            U=qkey.U,
-            label=qkey.label,
-            labelpos=qkey.labelpos,
-            coordinates="figure",
-            fontproperties={"size": 14},
-        )
-
-        qkcax.set_frame_on(False)
-        qkcax.set_xticks([])
-        qkcax.set_yticks([])
-
-    return MapPlot(fig, axes, artist)
 
 
 def mapplot(
@@ -1174,8 +827,14 @@ def mapplot(
     artist = plot(**pkwargs, extend=extend)
 
     if method in ["contour", "contourf"]:
-        artist.set_edgecolor("face")
-        artist.set_rasterized(rasterized)
+        if hasattr(artist, "set_edgecolor"):
+            artist.set_edgecolor("face")
+
+        if hasattr(artist, "set_rasterized"):
+            artist.set_rasterized(rasterized)
+        else:
+            for c in artist.collections:
+                c.set_rasterized(rasterized)
 
     plt.title(title)
 
@@ -1251,7 +910,7 @@ def _mapplot_i(
     i: int,
     dim_value: Any,
     dim: str,
-    facet_dim: str,
+    title: str,
     dpi: int,
     session_tmp_dir: Path,
     data_slice: xr.DataArray,
@@ -1264,7 +923,10 @@ def _mapplot_i(
     if np.issubdtype(type(dim_value), np.datetime64):
         dim_value = pd.to_datetime(dim_value).strftime("%Y-%m-%d %H:%M")
 
-    title = f"{dim}: {dim_value}"
+    if title:
+        title = f"{title}\n{dim}: {dim_value}"
+    else:
+        title = f"{dim}: {dim_value}"
 
     local_kwargs = args.copy()
     local_kwargs["da"] = data_slice
@@ -1273,18 +935,8 @@ def _mapplot_i(
 
     fname = session_tmp_dir / f"{i:06d}.png"
 
-    if local_kwargs.get("faceted", False):
-        local_kwargs["dim"] = facet_dim
-        plot = faceted_mapplot(
-            **{k: v for k, v in local_kwargs.items() if k in get_fsig(faceted_mapplot)}
-        )
-
-        plot.fig.suptitle(title)
-    else:
-        plot = mapplot(
-            **{k: v for k, v in local_kwargs.items() if k in get_fsig(mapplot)}
-        )
-        plot.ax.set_title(title)
+    plot = mapplot(**{k: v for k, v in local_kwargs.items() if k in get_fsig(mapplot)})
+    plot.ax.set_title(title)
 
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
 
@@ -1299,15 +951,7 @@ def _validate_animation_inputs(
     data: xr.DataArray,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
-    faceted: bool = False,
-    faceted_dim: str = None,
-    shape: tuple = None,
 ):
-
-    if faceted and faceted_dim is None:
-        raise ValueError("faceted_dim must be provided when faceted=True")
-    if faceted and shape is None:
-        raise ValueError("shape must be provided when faceted=True")
 
     if not isinstance(data, xr.DataArray):
         raise ValueError("data must be an xarray.DataArray")
@@ -1345,6 +989,7 @@ def animate(
     da: xr.DataArray,
     # Animation control will be popped from args
     dim: str = "time",
+    *,
     indices: tuple | list | np.ndarray = None,
     outfile: Path = None,
     quality: Literal["low", "medium", "high"] = "medium",
@@ -1368,9 +1013,6 @@ def animate(
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
     figsize: tuple[float, float] = None,
-    faceted: bool = False,
-    faceted_dim: str = None,
-    shape: tuple = None,
     central_longitude: float = None,
     central_latitude: float = None,
     # Plot appearance
@@ -1387,7 +1029,7 @@ def animate(
     cyclic: bool = False,
     rasterized: bool = False,
     robust: bool = False,
-    title: str = "",
+    title: str = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -1525,7 +1167,7 @@ def animate(
     facet_dim = args.pop("faceted_dim")
 
     da, u_component, v_component = _validate_animation_inputs(
-        dim, da, u_component, v_component, faceted, facet_dim, shape
+        dim, da, u_component, v_component
     )
 
     session_tmp_dir = Path(tempfile.mkdtemp())
@@ -1542,7 +1184,7 @@ def animate(
             i,
             da[dim][i].values,
             dim,
-            facet_dim,
+            title,
             dpi,
             session_tmp_dir,
             _isel_dim(da, i),
@@ -1599,13 +1241,3 @@ def animate(
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
     ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
-
-
-@wraps(plot_pvalues)
-def pvalues(*args, **kwargs):
-    return plot_pvalues(*args, **kwargs)
-
-
-@wraps(plot_quiver)
-def quiver(*args, **kwargs):
-    return plot_quiver(*args, **kwargs)

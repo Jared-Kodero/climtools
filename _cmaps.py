@@ -1,5 +1,7 @@
 import hashlib
+import os
 import textwrap
+import time
 import uuid
 from pathlib import Path
 
@@ -317,6 +319,26 @@ def create(
     return cmap
 
 
+def _generate(_cmap_file: Path, _cmap_file_contents: callable):
+    """Generate plot_cmaps.py."""
+
+    lock_file = _cmap_file.with_suffix(".lock")
+
+    while True:
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            time.sleep(np.random.uniform(0.1, 0.5))
+
+    try:
+        imports, body = _cmap_file_contents()
+        _cmap_file.write_text(imports + body)
+    finally:
+        lock_file.unlink(missing_ok=True)
+
+
 def gen_cmap_file():
     _cmap_file = _file_dir / "cmaps.py"
 
@@ -424,17 +446,7 @@ def {name.lower()}(
 
         return imports, body
 
-    def _generate():
-        """Generate plot_cmaps.py only if versions or src files changed (added, removed, or modified)."""
-
-        if _cmap_file.exists():
-            _cmap_file.unlink()
-        (imports, body) = _cmap_file_contents()
-        with open(_cmap_file, "w") as f:
-            f.write(imports)
-            f.write(body)
-
-    _generate()
+    _generate(_cmap_file, _cmap_file_contents)
 
 
 gen_cmap_file()
