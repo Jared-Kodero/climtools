@@ -4,15 +4,8 @@ __all__ = [
     "stats",
     "cdo",
     "cmaps",
-    "get_fsig",
-    "home",
-    "host",
     "logexc",
-    "n_cpus",
-    "plotting",
     "theming",
-    "tmp",
-    "user",
     "xgeo",
 ]
 
@@ -22,7 +15,6 @@ import dask
 
 from . import _cmaps, xgeo
 from . import cmaps as cmaps
-from . import plotting as plotting
 from . import pycdo as cdo
 from . import statistics as stats
 from . import theming as theming
@@ -33,12 +25,7 @@ from .tools import (
     fix_vscode_widget,
     get_fsig,
     handle_errors,
-    home,
-    host,
     logexc,
-    n_cpus,
-    tmp,
-    user,
 )
 # from .update import _self_update
 

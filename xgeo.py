@@ -1,3 +1,7 @@
+"""
+xarray utilities for geospatial data, including remapping, masking, and local solar time calculation.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -12,10 +16,29 @@ import xarray as xr
 import xesmf as xe
 from dask.diagnostics import ProgressBar
 
-from .statistics import *
+from .plotting import (
+    animate,
+    mapplot,
+    plot_cbar,
+    plot_pvalues,
+    plot_quiver,
+)
 from .tools import n_cpus, tmp
 
 warnings.filterwarnings("ignore")
+
+__all__ = [
+    "SetupDask",
+    "append_to_netcdf",
+    "mask_data",
+    "calc_local_solar_time",
+    "remap",
+    "plot_pvalues",
+    "plot_quiver",
+    "plot_cbar",
+    "mapplot",
+    "animate",
+]
 
 _script_dir = Path(__file__).resolve().parent
 _mask_cache = {}  # cache for remapped masks to avoid redundant computations

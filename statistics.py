@@ -14,14 +14,6 @@ except ImportError:
         "pymannkendall is not installed. Trend calculation functionalities will not work."
     )
 
-__all__ = [
-    "correlate",
-    "calc_trends",
-    "period_difference",
-    "calc_significance",
-    "polyfit",
-]
-
 
 def _mktrend_test(
     array: np.ndarray,

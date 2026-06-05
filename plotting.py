@@ -1,3 +1,7 @@
+"""
+Cartopy-based plotting utilities for xarray DataArrays, including faceted map plots with customizable features and styling.
+"""
+
 import shutil
 import subprocess
 import sys
@@ -24,29 +28,19 @@ from metpy.units import units as metpy_units
 
 from .tools import AttrDict, get_fsig, ipykernel, n_cpus, tmp
 
-__all__ = [
-    "get_cax",
-    "make_cyclic",
-    "plot_pvalues",
-    "plot_quiver",
-    "plot_cbar",
-    "mapplot",
-    "animate",
-]
-
 
 @dataclass(frozen=True, repr=False)
 class MapPlot:
-    fig: Figure
-    ax: Axes | cgeo.GeoAxes | np.ndarray
-    artist: Artist
+    Figure: Figure
+    Axes: Axes | cgeo.GeoAxes | np.ndarray
+    Artist: Artist
 
     def __repr__(self) -> str:
-        if isinstance(self.ax, np.ndarray):
-            ax_repr = f"{self.ax.size} axes"
+        if isinstance(self.Axes, np.ndarray):
+            ax_repr = f"{self.Axes.size} axes"
         else:
-            ax_repr = type(self.ax).__name__
-        _repr = f"MapPlot(Figure={type(self.fig).__name__}, Axes={ax_repr}, Artist={type(self.artist).__name__})"
+            ax_repr = type(self.Axes).__name__
+        _repr = f"MapPlot(Figure={type(self.Figure).__name__}, Axes={ax_repr}, Artist={type(self.Artist).__name__})"
         return _repr
 
 
@@ -60,25 +54,22 @@ def get_cax(
 ) -> plt.Axes:
     """
     Create a new set of axes for a colorbar by stealing space from the current axes.
-    This is useful for adding a colorbar to a plot without overlapping the existing axes.
 
     Parameters
     ----------
     fig : matplotlib.figure.Figure, optional
-        The figure to which the colorbar axes will be added. If None, uses the current figure.
-    ax : matplotlib.axes.Axes, optional
-        The axes from which space will be stolen. If None, uses the current axes.
+        Figure to which the colorbar axes are added. Defaults to the current figure.
+    axes : matplotlib.axes.Axes or numpy.ndarray of Axes, optional
+        Axes from which space is taken. Defaults to the current axes.
     subplots : bool, optional
-        If True, the function will adjust the colorbar position based on the subplots in the figure.
-        This is useful when the figure has multiple subplots and you want to ensure the colorbar does not overlap with them.
-        if True, the axes and fig must be provided and will be used to determine the position of the colorbar.
+        If True, position the colorbar relative to a grid of subplots. Requires axes.
+    orientation : {"vertical", "horizontal"}, optional
+        Colorbar orientation. Default "vertical".
 
-    orientation : str, optional
-        The orientation of the colorbar. Can be either "vertical" or "horizontal". Default is "vertical".
     Returns
     -------
     matplotlib.axes.Axes
-        The new axes for the colorbar.
+        New axes for the colorbar.
     """
 
     if subplots and axes is None:
@@ -92,16 +83,30 @@ def get_cax(
     plt.tight_layout()
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
+        # Vertical uses y0, y_len, x1. Horizontal uses y0, x0, x_len.
+        # Hold the bar thickness and gaps constant in inches: a figure-fraction
+        # value times the figure size in inches is a physical length, so a fixed
+        # fraction grows on larger figures. Scale the short dimension by
+        # ref / size. Leave the long dimension (y_len, x_len) unscaled since it
+        # tracks the axes extent.
+        ref = 5.0
+        fig_w, fig_h = fig.get_size_inches()
+        scale_w = ref / fig_w
+        scale_h = ref / fig_h
+
+        # if not subplots:
+        #     scale_w = 1.0
+        #     scale_h = 1.0
+
         if orientation == "vertical":
             bottommost = y0
             height = y_len
-            rightmost = x1 + 0.04
-            width = 0.03
-
+            rightmost = x1 + 0.04 * scale_w
+            width = 0.03 * scale_w
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         elif orientation == "horizontal":
-            xticks = True if len(list(ax.get_xticks())) > 0 else False
+            xticks = len(list(ax.get_xticks())) > 0
             xlabel = bool(ax.xaxis.label.get_text().strip())
             pad = 0.10
             h_pad = 0
@@ -113,16 +118,14 @@ def get_cax(
             if kwargs.get("quiver") and kwargs.get("xaxis_ticks"):
                 pad = 0.1
                 h_pad = 0.05
-
             if kwargs.get("quiver") and not kwargs.get("xaxis_ticks"):
                 pad = 0.05
                 h_pad = 0.05
 
             rightmost = x0
             width = x_len
-            bottommost = y0 - pad
-            height = 0.05 + h_pad
-
+            bottommost = y0 - pad * scale_h
+            height = (0.05 + h_pad) * scale_h
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         return cax
@@ -132,42 +135,47 @@ def get_cax(
         fig_x_len = pos.x1 - pos.x0
         fig_y_len = pos.y1 - pos.y0
         cax = _create_cax(pos.y0, pos.x0, pos.y1, pos.x1, fig_x_len, fig_y_len, axes)
+        return cax
 
-    elif subplots:
+    # subplots branch
+    if isinstance(axes, plt.Axes):
         nrows, ncols = 1, 1
+    elif axes.ndim == 2:
+        nrows, ncols = axes.shape
+    elif axes.ndim == 1:
+        last_ax = fig.axes[-1]
+        nrows = last_ax.get_subplotspec().rowspan.stop
+        ncols = last_ax.get_subplotspec().colspan.stop
+    else:
+        raise ValueError("axes must be a single Axes or a 1D/2D array of Axes.")
 
-        if isinstance(axes, plt.Axes):
-            nrows, ncols = 1, 1
+    axes = np.reshape(axes, (nrows, ncols))
+    right_axes = axes[:, -1]  # all rows, last column
+    bottom_axes = axes[-1, :]  # last row, all columns
 
-        elif axes.ndim == 2:
-            nrows, ncols = axes.shape
-        elif axes.ndim == 1:
-            # Need to ask figure
-            last_ax = fig.axes[-1]
-            nrows = last_ax.get_subplotspec().rowspan.stop
-            ncols = last_ax.get_subplotspec().colspan.stop
+    top_right_ax = right_axes[0].get_position()
+    bot_right_ax = right_axes[-1].get_position()
+    left_bot_ax = bottom_axes[0].get_position()
+    right_bot_ax = bottom_axes[-1].get_position()
 
-        axes = np.reshape(axes, (nrows, ncols))
-        right_axes = axes[:, -1]  # All rows, last column
-        bottom_axes = axes[-1, :]  # Last row, all columns
+    # Vertical colorbar: full grid height, to the right of the last column.
+    fig_y_len = top_right_ax.y1 - bot_right_ax.y0
 
-        top_right_ax = right_axes[0].get_position()
-        bot_right_ax = right_axes[-1].get_position()
-        left_bot_ax = bottom_axes[0].get_position()
-        right_bot_ax = bottom_axes[-1].get_position()
+    # Horizontal colorbar: width of a single axis, centered under the grid.
+    single_ax_x_len = right_bot_ax.x1 - right_bot_ax.x0
+    grid_left = left_bot_ax.x0
+    grid_right = right_bot_ax.x1
+    horiz_x0 = 0.5 * (grid_left + grid_right) - 0.5 * single_ax_x_len
 
-        fig_x_len = right_bot_ax.x1 - left_bot_ax.x0
-        fig_y_len = top_right_ax.y1 - bot_right_ax.y0
-
-        cax = _create_cax(
-            bot_right_ax.y0,
-            left_bot_ax.x0,
-            top_right_ax.y1,
-            right_bot_ax.x1,
-            fig_x_len,
-            fig_y_len,
-            axes[-1, -1],
-        )
+    cax = _create_cax(
+        bot_right_ax.y0,  # y0 (shared)
+        horiz_x0,  # x0 for horizontal centering
+        top_right_ax.y1,  # y1
+        right_bot_ax.x1,  # x1 for vertical positioning
+        single_ax_x_len,  # x_len: one axis width (horizontal)
+        fig_y_len,  # y_len: full grid height (vertical)
+        axes[-1, -1],
+    )
 
     return cax
 
@@ -324,15 +332,21 @@ def get_label(
     cbar_label: str = None,
     format: bool = True,
 ) -> str:
+    name = cbar_label or long_name
+    name = escape_matplotlib_label(str(name))
+
+    if not units:
+        return name
 
     if format:
         units = get_units(units)
 
+    if not units or str(units).strip() in {"", "dimensionless", "1"}:
+        return name
+
     units = escape_matplotlib_label(units)
 
-    name = cbar_label or long_name
-    label = str(name) + "\n" + rf"[${units}$]"
-    return label
+    return rf"{name} [${units}$]"
 
 
 def plot_quiver(
@@ -542,7 +556,7 @@ def _add_cartopy_features(
 
 def _get_projection(
     projection: str, central_longitude: float = None, central_latitude: float = None
-):
+) -> dict:
     proj_cls = getattr(ccrs, projection)
     _cargs = get_fsig(proj_cls)
     cargs = {}
@@ -555,23 +569,234 @@ def _get_projection(
     return {"projection": proj_cls(**cargs)}
 
 
-def _get_projection(
-    projection: str,
+def _resolve_map_aspect(
+    da: xr.DataArray = None,
+    extent: tuple = None,
+    x: str = None,
+    y: str = None,
+    dim: str = None,
+):
+    """Resolve lon/lat plot aspect.
+
+    Priority: explicit map_aspect, then extent, then coordinate spans,
+    then grid shape.
+    """
+
+    if extent is not None:
+        lon_min, lon_max, lat_min, lat_max = extent
+        lon_min %= 360
+        lon_max %= 360
+
+        lon_min, lon_max = sorted((lon_min, lon_max))
+        return (lon_max - lon_min) / (lat_max - lat_min)
+    if da is not None:
+        if x in da.coords and y in da.coords:
+            x = da[x].values
+            y = da[y].values
+            return (x.max() - x.min()) / (y.max() - y.min())
+        spatial = [d for d in da.dims if d != dim]
+        return da.sizes[spatial[-1]] / da.sizes[spatial[-2]]
+    raise ValueError("Provide map_aspect, extent, or da to infer aspect.")
+
+
+def _facet_figsize(
+    col_wrap: int = 1,
+    panel_width: float = 5.0,
+    cbar_pad_in: float = 0.8,
+    da: xr.DataArray = None,
+    x: str = None,
+    y: str = None,
+    dim: str = None,
+):
+    extent = (
+        float(da[x].min()),
+        float(da[x].max()),
+        float(da[y].min()),
+        float(da[y].max()),
+    )
+
+    n_facets = da.sizes[dim] if dim else 1
+    aspect = _resolve_map_aspect(
+        da=da,
+        extent=extent,
+        x=x,
+        y=y,
+        dim=dim,
+    )
+    nrows = int(np.ceil(n_facets / col_wrap))
+    panel_height = panel_width / aspect
+    width = col_wrap * panel_width
+    height = nrows * panel_height + cbar_pad_in
+    return width, height
+
+
+def _faceted(
+    da: xr.DataArray,
+    *,
+    # Spatial configuration
+    x: str = None,
+    y: str = None,
+    col: str = None,
+    row: str = None,
+    col_wrap: int = None,
+    projection: str = None,
     central_longitude: float = None,
     central_latitude: float = None,
-):
-    proj = getattr(ccrs, projection)
-    sig = get_fsig(proj)
+    global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
+    figsize: tuple[float, float] = None,
+    # Plot appearance
+    method: str = "default",
+    cmap: str | LinearSegmentedColormap | ListedColormap = None,
+    norm: Any = None,
+    vmin: float = None,
+    vmax: float = None,
+    units: str = None,
+    levels: int | list = None,
+    extend: str = None,
+    cyclic: bool = False,
+    robust: bool = False,
+    rasterized: bool = False,
+    title: str = "",
+    orientation: str = None,
+    add_colorbar: bool = True,
+    drawedges: bool = False,
+    cbar_label: str = None,
+    # Map features
+    gridlines: bool = False,
+    coastlines: bool = True,
+    borders: bool = True,
+    states: bool = True,
+    ocean: bool = True,
+    land: bool = True,
+    lakes: bool = False,
+    rivers: bool = False,
+    p_values: xr.DataArray = None,
+    p_value_kwargs: dict = None,
+    u_component: xr.DataArray = None,
+    v_component: xr.DataArray = None,
+    quiver_kwargs: dict = None,
+    **kwargs,
+) -> MapPlot:
 
-    cargs = {}
+    if not x or not y:
+        spatial = [d for d in da.dims if d not in (col, row)]
+        x, y = spatial
 
-    if central_longitude is not None and "central_longitude" in sig:
-        cargs["central_longitude"] = central_longitude
+    long_name = da.attrs.get("long_name", "").title()
+    units = units or da.attrs.get("units", da.name)
 
-    if central_latitude is not None and "central_latitude" in sig:
-        cargs["central_latitude"] = central_latitude
+    projection = _get_projection(projection, central_longitude, central_latitude)
+    transform = ccrs.PlateCarree()
+    orientation = orientation or "horizontal"
 
-    return proj(**cargs)
+    dim = col or row
+    col_wrap = col_wrap or int(np.ceil(np.sqrt(len(da[dim]))))
+
+    # we want all possible args
+    plot, pargs = _plot_method(da, method)
+    all_args = dict(locals())
+    all_args.update(kwargs)
+
+    pkwargs = {k: v for k, v in all_args.items() if k in pargs}
+    pkwargs.update(
+        {
+            "zorder": 1,
+            "transform": transform,
+            "rasterized": rasterized,
+            "col": col,
+            "row": row,
+            "col_wrap": col_wrap,
+            "subplot_kws": projection,
+        }
+    )
+
+    pkwargs.pop("kwargs")
+    pkwargs.pop("figsize")
+
+    cbar_kwargs = {
+        "shrink": 0.5,
+        "orientation": orientation,
+        "fraction": 0.05,
+        "pad": 0.06,
+        "label": get_label(f"{long_name}\n", units, cbar_label),
+    }
+
+    figsize = _facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
+
+    fg = plot(figsize=figsize, cbar_kwargs=cbar_kwargs, **pkwargs)
+    mappable = fg._mappables[-1]
+    if hasattr(fg, "cbar") and fg.cbar is not None:
+        fg.cbar.remove()
+
+    for ax, name_dict in zip(fg.axs.flat, fg.name_dicts.flat):
+        if name_dict is None:
+            continue
+
+        _add_cartopy_features(
+            ax,
+            global_extent,
+            set_extent,
+            coastlines,
+            states,
+            borders,
+            lakes,
+            rivers,
+            ocean,
+            land,
+        )
+
+        if gridlines:
+            gl = ax.gridlines(
+                crs=ccrs.PlateCarree(),
+                draw_labels=True,
+                linewidth=0.5,
+                color="gray",
+                alpha=0.5,
+                linestyle="--",
+                zorder=1,
+            )
+            gl.top_labels = False
+            gl.right_labels = False
+            gl.bottom_labels = True
+            gl.left_labels = True
+
+        if p_values is not None:
+            p_value_kwargs = p_value_kwargs or {}
+            plot_pvalues(
+                data=p_values.sel(name_dict),
+                ax=ax,
+                **p_value_kwargs,
+            )
+
+        if (u_component is not None) and (v_component is not None):
+            quiver_kwargs = quiver_kwargs or {}
+            quiver_kwargs["xaxis_ticks"] = gridlines
+
+            plot_quiver(
+                u=u_component.sel(name_dict),
+                v=v_component.sel(name_dict),
+                ax=ax,
+                **quiver_kwargs,
+            )
+
+    if col_wrap == 1:
+        orientation = "horizontal"
+
+    cax = get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
+    cb = fg.fig.colorbar(
+        mappable,
+        cax=cax,
+        orientation=orientation,
+        extend=extend,
+        drawedges=drawedges,
+    )
+
+    cb.set_label(get_label(f"{long_name}\n", units, cbar_label))
+
+    # fg.fig.subplots_adjust(wspace=0.02, hspace=0.15)
+    # plt.tight_layout(h_pad=0.5, w_pad=0.15)
+    return MapPlot(Figure=fg.fig, Axes=fg.axs, Artist=fg)
 
 
 def mapplot(
@@ -580,7 +805,9 @@ def mapplot(
     # Spatial configuration
     x: str = None,
     y: str = None,
-    ax: cgeo.GeoAxes = None,
+    col: str = None,
+    row: str = None,
+    col_wrap: int = None,
     projection: Literal[
         "PlateCarree",
         "Mercator",
@@ -613,7 +840,7 @@ def mapplot(
     robust: bool = False,
     rasterized: bool = False,
     title: str = "",
-    orientation: Literal["vertical", "horizontal"] = "vertical",
+    orientation: Literal["vertical", "horizontal"] = None,
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
@@ -645,9 +872,10 @@ def mapplot(
     x, y : str, optional
         Coordinate names passed to the selected xarray plotting method when
         supported.
-    ax : cartopy.mpl.geoaxes.GeoAxes, optional
-        Existing Cartopy axis. If omitted, a new figure and projected axis are
-        created.
+    col, row : str, optional
+        Faceting coordinate names passed to the selected xarray plotting method when supported.
+    col_wrap : int, optional
+        Number of columns used when wrapping faceted subplots. Passed to the selected xarray plotting method when supported.
     projection : str, default "PlateCarree"
         Cartopy projection used when creating a new axis.
     central_longitude, central_latitude : float, optional
@@ -715,7 +943,7 @@ def mapplot(
     Returns
     -------
     MapPlot
-        Container with ``fig``, ``ax``, and ``artist`` attributes.
+        Container with ``Figure``, ``Axes``, and ``Artist`` attributes.
 
     Notes
     -----
@@ -728,14 +956,17 @@ def mapplot(
 
     da = da.squeeze()
 
-    long_name = da.attrs.get("long_name", "").capitalize()
-    units = units or da.attrs.get("units", da.name)
+    if da.ndim == 3:
+        return _faceted(**locals())
+    elif da.ndim > 3:
+        raise ValueError("DataArray must be 2D or 3D after squeezing.")
 
-    if da.ndim > 2:
-        raise ValueError("DataArray has more than 2 dimensions.")
+    long_name = da.attrs.get("long_name", "").title()
+    units = units or da.attrs.get("units", da.name)
 
     projection = _get_projection(projection, central_longitude, central_latitude)
     fig, ax = plt.subplots(subplot_kw=projection, figsize=figsize)
+    transform = ccrs.PlateCarree()
 
     ax = _add_cartopy_features(
         ax,
@@ -750,26 +981,26 @@ def mapplot(
         land,
     )
 
-    transform = ccrs.PlateCarree()
-
     # we want all possible args
     plot, pargs = _plot_method(da, method)
     all_args = dict(locals())
     all_args.update(kwargs)
 
     pkwargs = {k: v for k, v in all_args.items() if k in pargs}
-    pkwargs["ax"] = ax
-    pkwargs["add_colorbar"] = False
-    pkwargs["zorder"] = 1
-    pkwargs["transform"] = transform
-    pkwargs["rasterized"] = rasterized
-    del pkwargs["extend"]
-    del pkwargs["kwargs"]
-    del pkwargs["figsize"]
-    del pkwargs["rasterized"]
+    pkwargs.update(
+        {
+            "ax": ax,
+            "add_colorbar": False,
+            "zorder": 1,
+            "transform": transform,
+            "rasterized": rasterized,
+        }
+    )
 
-    artist = plot(**pkwargs, extend=extend)
+    for k in ("col", "row", "col_wrap", "figsize", "kwargs"):
+        pkwargs.pop(k)
 
+    artist = plot(**pkwargs)
     if method in ["contour", "contourf"]:
         if hasattr(artist, "set_edgecolor"):
             artist.set_edgecolor("face")
@@ -814,7 +1045,8 @@ def mapplot(
         )
 
     if add_colorbar:
-        cbar_label = get_label(long_name, units, cbar_label)
+        cbar_label = get_label(f"{long_name}\n", units, cbar_label)
+        orientation = orientation or "vertical"
 
         ax = plot_cbar(
             fig,
@@ -826,7 +1058,7 @@ def mapplot(
             cbar_label=cbar_label,
         )
 
-    return MapPlot(fig, ax, artist)
+    return MapPlot(Figure=fig, Axes=ax, Artist=artist)
 
 
 def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error):
@@ -920,12 +1152,12 @@ def _mapplot(
     fname = session_tmp_dir / f"{i:06d}.png"
 
     plot = mapplot(**{k: v for k, v in local_kwargs.items() if k in get_fsig(mapplot)})
-    plot.ax.set_title(title)
+    plot.Axes.set_title(title)
 
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
 
-    plot.fig.clear()
-    plt.close(plot.fig)
+    plot.Figure.clear()
+    plt.close(plot.Figure)
 
     return None
 
@@ -1148,7 +1380,6 @@ def animate(
     da = args.pop("da")
     u_component = args.pop("u_component")
     v_component = args.pop("v_component")
-    facet_dim = args.pop("faceted_dim")
 
     da, u_component, v_component = _validate_animation_inputs(
         dim, da, u_component, v_component
