@@ -356,10 +356,13 @@ def _get_cax(
         # fraction grows on larger figures. Scale the short dimension by
         # ref / size. Leave the long dimension (y_len, x_len) unscaled since it
         # tracks the axes extent.
-        ref = 5  # reference size
+
+        ref_width = 5
+        ref_height = 4.8
+
         fig_w, fig_h = fig.get_size_inches()
-        scale_w = ref / fig_w
-        scale_h = ref / fig_h
+        scale_w = ref_width / fig_w
+        scale_h = ref_height / fig_h
 
         # if not subplots:
         #     scale_w = 1.0
@@ -632,21 +635,14 @@ def _facet_figsize(
 
 def _faceted(
     da: xr.DataArray,
-    *,
-    # Spatial configuration
     x: str = None,
     y: str = None,
     col: str = None,
     row: str = None,
     col_wrap: int = None,
-    projection: str = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] = None,
     figsize: tuple[float, float] = None,
-    # Plot appearance
-    method: str = "default",
+    method: str = None,
+    projection: str = None,
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -654,7 +650,6 @@ def _faceted(
     units: str = None,
     levels: int | list = None,
     extend: str = None,
-    cyclic: bool = False,
     robust: bool = False,
     rasterized: bool = False,
     title: str = "",
@@ -662,7 +657,10 @@ def _faceted(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    # Map features
+    central_longitude: float = None,
+    central_latitude: float = None,
+    global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -676,6 +674,7 @@ def _faceted(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
+    cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
 
@@ -803,12 +802,15 @@ def _faceted(
 def mapplot(
     da: xr.DataArray,
     *,
-    # Spatial configuration
     x: str = None,
     y: str = None,
     col: str = None,
     row: str = None,
     col_wrap: int = None,
+    figsize: tuple[float, float] = None,
+    method: Literal[
+        "default", "pcolormesh", "contourf", "contour", "imshow"
+    ] = "default",
     projection: Literal[
         "PlateCarree",
         "Mercator",
@@ -821,15 +823,6 @@ def mapplot(
         "NorthPolarStereo",
         "SouthPolarStereo",
     ] = "PlateCarree",
-    central_longitude: float = None,
-    central_latitude: float = None,
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] = None,
-    figsize: tuple[float, float] = None,
-    # Plot appearance
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
-    ] = "default",
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -837,7 +830,6 @@ def mapplot(
     units: str = None,
     levels: int | list = None,
     extend: str = None,
-    cyclic: bool = False,
     robust: bool = False,
     rasterized: bool = False,
     title: str = "",
@@ -845,7 +837,10 @@ def mapplot(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    # Map features
+    central_longitude: float = None,
+    central_latitude: float = None,
+    global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -859,6 +854,7 @@ def mapplot(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
+    cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
     """
@@ -868,75 +864,110 @@ def mapplot(
     ----------
     da : xarray.DataArray
         Scalar field to plot. After ``squeeze()``, the array must be
-        two-dimensional and must contain longitude-latitude coordinates
+        2D or 3D and must contain longitude-latitude coordinates
         compatible with a ``cartopy.crs.PlateCarree()`` data transform.
+
     x, y : str, optional
         Coordinate names passed to the selected xarray plotting method when
         supported.
+
     col, row : str, optional
-        Faceting coordinate names passed to the selected xarray plotting method when supported.
+        Faceting coordinate names passed to the selected xarray plotting method
+        when supported.
+
     col_wrap : int, optional
-        Number of columns used when wrapping faceted subplots. Passed to the selected xarray plotting method when supported.
-    projection : str, default "PlateCarree"
-        Cartopy projection used when creating a new axis.
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection
-        constructor when supported.
-    global_extent : bool, default False
-        If True, set the map extent to the full globe.
-    set_extent : tuple of float, optional
-        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in
-        degrees.
+        Number of columns used when wrapping faceted subplots. Passed to the
+        selected xarray plotting method when supported.
+
     figsize : tuple of float, optional
         Figure size in inches used when creating a new figure.
+
     method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
         Xarray plotting method used for the scalar field.
+
+    projection : str, default "PlateCarree"
+        Cartopy projection used when creating a new axis.
+
     cmap : str or matplotlib colormap, optional
         Colormap used for the scalar field.
+
     norm : Any, optional
         Matplotlib normalization object.
+
     vmin, vmax : float, optional
         Lower and upper scalar color limits.
+
     units : str, optional
         Units used for colorbar labeling. If omitted, inferred from
         ``da.attrs["units"]`` or ``da.name``.
+
     levels : int or sequence of float, optional
         Contour levels for contour-based methods.
+
     extend : {"neither", "both", "min", "max"}, optional
         Colorbar extension behavior.
-    cyclic : bool, default False
-        If True, append a cyclic longitude point before plotting. The longitude
-        dimension is assumed to be named ``"lon"``.
+
     robust : bool, default False
         Whether to request percentile-based color scaling when supported by
         xarray.
+
     rasterized : bool, default False
         Whether dense scalar artists should be rasterized when supported.
+
     title : str, optional
         Plot title.
-    orientation : {"vertical", "horizontal"}, default "vertical"
+
+    orientation : {"vertical", "horizontal"}, optional
         Colorbar orientation.
+
     add_colorbar : bool, default True
         Whether to add a colorbar when a new axis is created.
+
     drawedges : bool, default False
         Whether to draw edges between colorbar intervals.
+
     cbar_label : str, optional
         Explicit colorbar label. If omitted, a label is inferred from metadata.
+
+    central_longitude, central_latitude : float, optional
+        Projection-center arguments passed to the Cartopy projection constructor
+        when supported.
+
+    global_extent : bool, default False
+        If True, set the map extent to the full globe.
+
+    set_extent : tuple of float, optional
+        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
+
     gridlines : bool, default False
         Whether to draw labeled longitude and latitude gridlines.
-    coastlines, borders, states, lakes, rivers : bool
-        Switches controlling Cartopy geographic feature overlays.
-    ocean, land : bool
+
+    coastlines, borders, states : bool, default True
+        Switches controlling common Cartopy geographic feature overlays.
+
+    ocean, land : bool, default True
         Switches controlling ocean and land background features.
+
+    lakes, rivers : bool, default False
+        Switches controlling optional Cartopy inland water feature overlays.
+
     p_values : xarray.DataArray, optional
         Pointwise p-value field. Values below the selected significance level
         are plotted as markers.
+
     p_value_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_pvalues``.
+
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays.
+
     quiver_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_quiver``.
+
+    cyclic : bool, default False
+        If True, append a cyclic longitude point before plotting. The longitude
+        dimension is assumed to be named ``"lon"``.
+
     **kwargs
         Additional keyword arguments forwarded to the selected xarray plotting
         method after signature filtering.
@@ -959,6 +990,7 @@ def mapplot(
 
     if da.ndim == 3:
         return _faceted(**locals())
+
     elif da.ndim > 3:
         raise ValueError("DataArray must be 2D or 3D after squeezing.")
 
@@ -1153,7 +1185,12 @@ def _mapplot_wrapper(
     fname = session_tmp_dir / f"{i:06d}.png"
 
     plot = mapplot(**{k: v for k, v in local_kwargs.items() if k in get_fsig(mapplot)})
-    plot.Axes.set_title(title)
+
+    faceted = local_kwargs.get("col") or local_kwargs.get("row")
+    if faceted is None:
+        plot.Axes.set_title(title)
+    else:
+        plot.Figure.suptitle(title)
 
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
 
@@ -1204,17 +1241,17 @@ def _validate_animation_inputs(
 
 def animate(
     da: xr.DataArray,
-    # Animation control will be popped from args
     dim: str = "time",
     *,
-    indices: tuple | list | np.ndarray = None,
-    outfile: Path = None,
-    quality: Literal["low", "medium", "high"] = "medium",
-    fps: int = 1,
-    parallel: bool = True,
-    # Spatial configuration
     x: str = None,
     y: str = None,
+    col: str = None,
+    row: str = None,
+    col_wrap: int = None,
+    figsize: tuple[float, float] = None,
+    method: Literal[
+        "default", "pcolormesh", "contourf", "contour", "imshow"
+    ] = "default",
     projection: Literal[
         "PlateCarree",
         "Mercator",
@@ -1227,15 +1264,6 @@ def animate(
         "NorthPolarStereo",
         "SouthPolarStereo",
     ] = "PlateCarree",
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] = None,
-    figsize: tuple[float, float] = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
-    # Plot appearance
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
-    ] = "default",
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -1243,15 +1271,17 @@ def animate(
     units: str = None,
     levels: int | list = None,
     extend: str = None,
-    cyclic: bool = False,
-    rasterized: bool = False,
     robust: bool = False,
+    rasterized: bool = False,
     title: str = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    # Map features
+    central_longitude: float = None,
+    central_latitude: float = None,
+    global_extent: bool = False,
+    set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -1263,6 +1293,12 @@ def animate(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
+    cyclic: bool = False,
+    indices: tuple | list | np.ndarray = None,
+    outfile: Path = None,
+    quality: Literal["low", "medium", "high"] = "medium",
+    fps: int = 1,
+    parallel: bool = True,
     **kwargs,
 ):
     """
@@ -1273,86 +1309,124 @@ def animate(
     da : xarray.DataArray
         Scalar field to animate. The animation dimension must be present in
         ``da.dims``.
+
     dim : str, default "time"
         Dimension used for animation frames.
-    indices : tuple of int, list of int, or numpy.ndarray, optional
-        Positional indices along ``dim`` to render. If omitted, all positions
-        are rendered.
-    outfile : str or pathlib.Path, optional
-        Output path for the MP4 animation. If omitted, a temporary output path
-        is used.
-    quality : {"low", "medium", "high"}, default "medium"
-        Frame-resolution preset used during PNG rendering.
-    fps : int, default 1
-        Frames per second passed to ffmpeg.
-    parallel : bool, default True
-        Whether to render frames with multiprocessing.
+
     x, y : str, optional
         Coordinate names passed to the selected xarray plotting method when
         supported.
-    projection : str, default "PlateCarree"
-        Cartopy projection used for each frame.
-    global_extent : bool, default False
-        If True, set each map extent to the full globe.
-    set_extent : tuple of float, optional
-        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in
-        degrees.
+
+    col, row : str, optional
+        Faceting coordinate names passed to the selected xarray plotting method
+        when supported.
+
+    col_wrap : int, optional
+        Number of columns used when wrapping faceted subplots. Passed to the
+        selected xarray plotting method when supported.
+
     figsize : tuple of float, optional
         Figure size in inches for each rendered frame.
-    faceted : bool, default False
-        If True, render a faceted map for each animation frame.
-    faceted_dim : str, optional
-        Faceting dimension used within each frame when ``faceted=True``.
-    shape : tuple of int, optional
-        Facet grid shape as ``(nrows, ncols)`` when ``faceted=True``.
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection
-        constructor when supported.
+
     method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
         Xarray plotting method used for the scalar field.
+
+    projection : str, default "PlateCarree"
+        Cartopy projection used for each frame.
+
     cmap : str or matplotlib colormap, optional
         Colormap used for the scalar field.
+
     norm : Any, optional
         Matplotlib normalization object.
+
     vmin, vmax : float, optional
         Lower and upper scalar color limits. Fixed limits are recommended for
         temporal comparisons.
+
     units : str, optional
         Units used for colorbar labeling. If omitted, inferred from
         ``da.attrs["units"]`` or ``da.name``.
+
     levels : int or sequence of float, optional
         Contour levels for contour-based methods.
+
     extend : {"neither", "both", "min", "max"}, optional
         Colorbar extension behavior.
-    cyclic : bool, default False
-        If True, append a cyclic longitude point before plotting each frame.
-        The longitude dimension is assumed to be named ``"lon"``.
-    rasterized : bool, default False
-        Whether dense scalar artists should be rasterized when supported.
+
     robust : bool, default False
         Whether to request percentile-based color scaling when supported by
         xarray.
+
+    rasterized : bool, default False
+        Whether dense scalar artists should be rasterized when supported.
+
     title : str, optional
         Base title passed to frame plotting routines.
+
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation for non-faceted frames.
+
     add_colorbar : bool, default True
         Whether to add a colorbar.
+
     drawedges : bool, default False
         Whether to draw edges between colorbar intervals.
+
     cbar_label : str, optional
         Explicit colorbar label. If omitted, a label is inferred from metadata.
+
+    central_longitude, central_latitude : float, optional
+        Projection-center arguments passed to the Cartopy projection constructor
+        when supported.
+
+    global_extent : bool, default False
+        If True, set each map extent to the full globe.
+
+    set_extent : tuple of float, optional
+        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in
+        degrees.
+
     gridlines : bool, default False
         Whether to draw labeled longitude and latitude gridlines.
-    coastlines, borders, states, lakes, rivers : bool
-        Switches controlling Cartopy geographic feature overlays.
-    ocean, land : bool
+
+    coastlines, borders, states : bool, default True
+        Switches controlling common Cartopy geographic feature overlays.
+
+    ocean, land : bool, default True
         Switches controlling ocean and land background features.
+
+    lakes, rivers : bool, default False
+        Switches controlling optional Cartopy inland water feature overlays.
+
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays. Both must
         contain ``dim`` and align with ``da`` along that dimension.
+
     quiver_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_quiver``.
+
+    cyclic : bool, default False
+        If True, append a cyclic longitude point before plotting each frame.
+        The longitude dimension is assumed to be named ``"lon"``.
+
+    indices : tuple of int, list of int, or numpy.ndarray, optional
+        Positional indices along ``dim`` to render. If omitted, all positions
+        are rendered.
+
+    outfile : str or pathlib.Path, optional
+        Output path for the MP4 animation. If omitted, a temporary output path
+        is used.
+
+    quality : {"low", "medium", "high"}, default "medium"
+        Frame-resolution preset used during PNG rendering.
+
+    fps : int, default 1
+        Frames per second passed to ffmpeg.
+
+    parallel : bool, default True
+        Whether to render frames with multiprocessing.
+
     **kwargs
         Additional keyword arguments forwarded to the selected xarray plotting
         method after signature filtering.
@@ -1378,6 +1452,7 @@ def animate(
     quality = args.pop("quality")
     parallel = args.pop("parallel")
     indices = args.pop("indices")
+    title = args.pop("title")
     da = args.pop("da")
     u_component = args.pop("u_component")
     v_component = args.pop("v_component")
