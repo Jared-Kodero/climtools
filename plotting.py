@@ -44,7 +44,274 @@ class MapPlot:
         return _repr
 
 
-def get_cax(
+def plot_quiver(
+    u: xr.DataArray,
+    v: xr.DataArray,
+    ax: plt.Axes | cgeo.GeoAxes = None,
+    subsample: int = 1,
+    **kwargs,
+):
+    """
+    Plot quiver arrows on a Cartopy axis.
+
+    Parameters
+    ----------
+    u : xarray.DataArray
+        The u-component of the vector field.
+    v : xarray.DataArray
+        The v-component of the vector field.
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
+        The axis to plot on. If None, the current axis is used.
+    subsample : int, optional
+        The subsample size for plotting points to reduce overplotting. Default is 1.
+
+    **kwargs
+        Additional keyword arguments for the quiver plot.
+
+    Returns
+    -------
+    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis with the quiver plot.
+
+    """
+
+    # pop quiver key from kwargs,
+    units = kwargs.pop("units", None)
+    if units is None:
+        u_units = u.attrs.get("units", "")
+        v_units = v.attrs.get("units", "")
+        assert u_units == v_units, "units of u and v components must match"
+        units = u_units
+
+    if ax is None:
+        ax = plt.gca()
+
+    transform = _check_cartopy_axis(ax)
+
+    u = u[::subsample, ::subsample]
+    v = v[::subsample, ::subsample]
+
+    lon = u.lon
+    lat = u.lat
+
+    # Detect if coordinates are already 2D
+    if lon.ndim == 2 and lat.ndim == 2:
+        lon2d, lat2d = lon.values, lat.values
+    else:
+        lon2d, lat2d = np.meshgrid(lon.values, lat.values)
+
+    xaxis_ticks = kwargs.pop("xaxis_ticks")
+    U = kwargs.pop("U", None)
+
+    Q = ax.quiver(
+        lon2d, lat2d, u.values, v.values, transform=transform, angles="xy", **kwargs
+    )
+
+    if not U:
+        speed = (u**2 + v**2) ** 0.5
+        U = np.round(speed.mean(skipna=True).values)
+        U = int(U)
+
+    cax = _get_cax(
+        axes=ax,
+        orientation="horizontal",
+        quiver=True,
+        xaxis_ticks=xaxis_ticks,
+    )
+    # bbox = cax.get_position()
+
+    label = _get_label(U, units)
+
+    ax.quiverkey(
+        Q,
+        # X=0.1,
+        # Y=bbox.y0 + 0.5 * bbox.height,
+        X=0.90,
+        Y=0.94,
+        U=U,
+        label=label,
+        labelpos="E",
+        coordinates="figure",
+        fontproperties={"size": 14},
+    )
+
+    cax.set_frame_on(False)
+    cax.set_xticks([])
+    cax.set_yticks([])
+
+    return ax
+
+
+def plot_cbar(
+    fig: plt.Figure,
+    ax: plt.Axes | cgeo.GeoAxes,
+    artist: Artist,
+    orientation: str = "vertical",
+    drawedges: bool = False,
+    extend: str = None,
+    cbar_label: str = "",
+):
+    """
+    Add a colorbar to a Cartopy axis.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        The figure to add the colorbar to.
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis to add the colorbar to.
+    artist : matplotlib.artist.Artist
+        The artist to create a colorbar for.
+    orientation : str, optional
+        The orientation of the colorbar. Default is "vertical".
+    drawedges : bool, optional
+        Whether to draw edges on the colorbar. Default is False.
+    extend : str, optional
+        How to handle the colorbar extensions. Default is None.
+    cbar_label : str, optional
+        The label for the colorbar. Default is "".
+
+    Returns
+    -------
+    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis with the colorbar.
+
+    """
+    cax = _get_cax(fig=fig, axes=ax, orientation=orientation)
+
+    cb = plt.colorbar(
+        artist,
+        cax=cax,
+        ax=ax,
+        orientation=orientation,
+        drawedges=drawedges,
+        extend=extend,
+    )
+
+    cb.set_label(cbar_label)
+    return ax
+
+
+def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
+    """
+    Add a cyclic point to a DataArray along the specified longitude dimension.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The input DataArray or Dataset to which a cyclic point will be added.
+    lon : str, optional
+        The name of the longitude dimension in the DataArray. Default is 'lon'.
+
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        The DataArray or Dataset with a cyclic point added.
+
+    """
+
+    dataset = False
+
+    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
+        raise ValueError(
+            "Input object must be a DataArray or a Dataset with only one data variable."
+        )
+
+    if isinstance(obj, xr.Dataset):
+        obj = list(obj.data_vars.values())[0]
+        dataset = True
+
+    if lon not in obj.dims:
+        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
+
+    attrs = obj.attrs
+    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[lon])
+    coords = {dim: obj.coords[dim] for dim in obj.dims}
+    coords[lon] = cyclic_dim
+
+    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
+
+    if dataset:
+        new_obj = new_obj.to_dataset(name=obj.name)
+
+    return new_obj
+
+
+def plot_pvalues(
+    data: xr.DataArray,
+    ax: plt.Axes | cgeo.GeoAxes = None,
+    level: float = 0.05,
+    color: str = "grey",
+    alpha: float = 0.3,
+    marker: str = None,
+    edgecolors: str = None,
+    subsample: int = 1,
+    s: float = 0.25,
+):
+    """
+    Plot p-values on a Cartopy axis.
+
+    Parameters
+    ----------
+    ax : cartopy.mpl.geoaxes.GeoAxesSubplot`
+        The Cartopy axis to plot on.
+    data : xarray.DataArray
+        The data array containing p-values.
+    level : float, optional
+        The significance level to use for plotting. Points with p-values below this level will be plotted
+    color : str, optional
+        Color of the points to plot. Default is "grey".
+    alpha : float, optional
+        Alpha transparency of the points. Default is 0.05.
+    subsample : int, optional
+        subsample size for plotting points to reduce overplotting. Default is 1 (plot all points).
+    marker : str, optional
+        Marker style for the points. Default is None (default marker).
+    edgecolors : str, optional
+        Edge color for the points. Default is None.
+    s : float, optional
+        Size of the points to plot. Default is 1.
+    """
+
+    if ax is None:
+        ax = plt.gca()
+
+    transform = _check_cartopy_axis(ax)
+
+    if "lon" not in data.dims or "lat" not in data.dims:
+        raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
+
+    data = data.isel(lat=slice(None, None, subsample), lon=slice(None, None, subsample))
+    p_values = data.to_dataframe(name="p_values").reset_index()
+    p_values = p_values.query("p_values < @level")
+    p_values = p_values.dropna()
+
+    if edgecolors is None:
+        edgecolors = color
+
+    ax.scatter(
+        p_values["lon"],
+        p_values["lat"],
+        transform=transform,
+        color=color,
+        alpha=alpha,
+        s=s,
+        marker=marker,
+        edgecolors=edgecolors,
+    )
+    return ax
+
+
+def _check_cartopy_axis(ax):
+
+    transform = None
+    if isinstance(ax, cgeo.GeoAxes):
+        transform = ccrs.PlateCarree()
+
+    return transform
+
+
+def _get_cax(
     *,
     fig: plt.Figure = None,
     axes: plt.Axes = None,
@@ -89,7 +356,7 @@ def get_cax(
         # fraction grows on larger figures. Scale the short dimension by
         # ref / size. Leave the long dimension (y_len, x_len) unscaled since it
         # tracks the axes extent.
-        ref = 5.0
+        ref = 5  # reference size
         fig_w, fig_h = fig.get_size_inches()
         scale_w = ref / fig_w
         scale_h = ref / fig_h
@@ -180,126 +447,7 @@ def get_cax(
     return cax
 
 
-def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
-    """
-    Add a cyclic point to a DataArray along the specified longitude dimension.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input DataArray or Dataset to which a cyclic point will be added.
-    lon : str, optional
-        The name of the longitude dimension in the DataArray. Default is 'lon'.
-
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The DataArray or Dataset with a cyclic point added.
-
-    """
-
-    dataset = False
-
-    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
-        raise ValueError(
-            "Input object must be a DataArray or a Dataset with only one data variable."
-        )
-
-    if isinstance(obj, xr.Dataset):
-        obj = list(obj.data_vars.values())[0]
-        dataset = True
-
-    if lon not in obj.dims:
-        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
-
-    attrs = obj.attrs
-    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[lon])
-    coords = {dim: obj.coords[dim] for dim in obj.dims}
-    coords[lon] = cyclic_dim
-
-    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
-
-    if dataset:
-        new_obj = new_obj.to_dataset(name=obj.name)
-
-    return new_obj
-
-
-def _check_cartopy_axis(ax):
-
-    transform = None
-    if isinstance(ax, cgeo.GeoAxes):
-        transform = ccrs.PlateCarree()
-
-    return transform
-
-
-def plot_pvalues(
-    data: xr.DataArray,
-    ax: plt.Axes | cgeo.GeoAxes = None,
-    level: float = 0.05,
-    color: str = "grey",
-    alpha: float = 0.3,
-    marker: str = None,
-    edgecolors: str = None,
-    subsample: int = 1,
-    s: float = 0.25,
-):
-    """
-    Plot p-values on a Cartopy axis.
-
-    Parameters
-    ----------
-    ax : cartopy.mpl.geoaxes.GeoAxesSubplot`
-        The Cartopy axis to plot on.
-    data : xarray.DataArray
-        The data array containing p-values.
-    level : float, optional
-        The significance level to use for plotting. Points with p-values below this level will be plotted
-    color : str, optional
-        Color of the points to plot. Default is "grey".
-    alpha : float, optional
-        Alpha transparency of the points. Default is 0.05.
-    subsample : int, optional
-        subsample size for plotting points to reduce overplotting. Default is 1 (plot all points).
-    marker : str, optional
-        Marker style for the points. Default is None (default marker).
-    edgecolors : str, optional
-        Edge color for the points. Default is None.
-    s : float, optional
-        Size of the points to plot. Default is 1.
-    """
-
-    if ax is None:
-        ax = plt.gca()
-
-    transform = _check_cartopy_axis(ax)
-
-    if "lon" not in data.dims or "lat" not in data.dims:
-        raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
-
-    data = data.isel(lat=slice(None, None, subsample), lon=slice(None, None, subsample))
-    p_values = data.to_dataframe(name="p_values").reset_index()
-    p_values = p_values.query("p_values < @level")
-    p_values = p_values.dropna()
-
-    if edgecolors is None:
-        edgecolors = color
-
-    ax.scatter(
-        p_values["lon"],
-        p_values["lat"],
-        transform=transform,
-        color=color,
-        alpha=alpha,
-        s=s,
-        marker=marker,
-        edgecolors=edgecolors,
-    )
-    return ax
-
-
-def get_units(units: str):
+def _get_units(units: str):
     try:
         u = metpy_units(units)
         return f"{u.units:~^P}"
@@ -307,7 +455,7 @@ def get_units(units: str):
         return units
 
 
-def escape_matplotlib_label(text: str) -> str:
+def _escape_chars(text: str) -> str:
     """
     Escape special characters in a string for use in Matplotlib labels.
     """
@@ -326,175 +474,27 @@ def escape_matplotlib_label(text: str) -> str:
     return "".join(escape_map.get(char, char) for char in text)
 
 
-def get_label(
+def _get_label(
     long_name: str,
     units: str,
     cbar_label: str = None,
     format: bool = True,
 ) -> str:
     name = cbar_label or long_name
-    name = escape_matplotlib_label(str(name))
+    name = _escape_chars(str(name))
 
     if not units:
         return name
 
     if format:
-        units = get_units(units)
+        units = _get_units(units)
 
     if not units or str(units).strip() in {"", "dimensionless", "1"}:
         return name
 
-    units = escape_matplotlib_label(units)
+    units = _escape_chars(units)
 
     return rf"{name} [${units}$]"
-
-
-def plot_quiver(
-    u: xr.DataArray,
-    v: xr.DataArray,
-    ax: plt.Axes | cgeo.GeoAxes = None,
-    subsample: int = 1,
-    **kwargs,
-):
-    """
-    Plot quiver arrows on a Cartopy axis.
-
-    Parameters
-    ----------
-    u : xarray.DataArray
-        The u-component of the vector field.
-    v : xarray.DataArray
-        The v-component of the vector field.
-    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
-        The axis to plot on. If None, the current axis is used.
-    subsample : int, optional
-        The subsample size for plotting points to reduce overplotting. Default is 1.
-
-    **kwargs
-        Additional keyword arguments for the quiver plot.
-
-    Returns
-    -------
-    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
-        The axis with the quiver plot.
-
-    """
-
-    # pop quiver key from kwargs,
-    units = kwargs.pop("units", None)
-    if units is None:
-        u_units = u.attrs.get("units", "")
-        v_units = v.attrs.get("units", "")
-        assert u_units == v_units, "units of u and v components must match"
-        units = u_units
-
-    if ax is None:
-        ax = plt.gca()
-
-    transform = _check_cartopy_axis(ax)
-
-    u = u[::subsample, ::subsample]
-    v = v[::subsample, ::subsample]
-
-    lon = u.lon
-    lat = u.lat
-
-    # Detect if coordinates are already 2D
-    if lon.ndim == 2 and lat.ndim == 2:
-        lon2d, lat2d = lon.values, lat.values
-    else:
-        lon2d, lat2d = np.meshgrid(lon.values, lat.values)
-
-    xaxis_ticks = kwargs.pop("xaxis_ticks")
-    U = kwargs.pop("U", None)
-
-    Q = ax.quiver(
-        lon2d, lat2d, u.values, v.values, transform=transform, angles="xy", **kwargs
-    )
-
-    if not U:
-        speed = (u**2 + v**2) ** 0.5
-        U = np.round(speed.mean(skipna=True).values)
-        U = int(U)
-
-    cax = get_cax(
-        axes=ax,
-        orientation="horizontal",
-        quiver=True,
-        xaxis_ticks=xaxis_ticks,
-    )
-    # bbox = cax.get_position()
-
-    label = get_label(U, units)
-
-    ax.quiverkey(
-        Q,
-        # X=0.1,
-        # Y=bbox.y0 + 0.5 * bbox.height,
-        X=0.90,
-        Y=0.94,
-        U=U,
-        label=label,
-        labelpos="E",
-        coordinates="figure",
-        fontproperties={"size": 14},
-    )
-
-    cax.set_frame_on(False)
-    cax.set_xticks([])
-    cax.set_yticks([])
-
-    return ax
-
-
-def plot_cbar(
-    fig: plt.Figure,
-    ax: plt.Axes | cgeo.GeoAxes,
-    artist: Artist,
-    orientation: str = "vertical",
-    drawedges: bool = False,
-    extend: str = None,
-    cbar_label: str = "",
-):
-    """
-    Add a colorbar to a Cartopy axis.
-
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-        The figure to add the colorbar to.
-    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
-        The axis to add the colorbar to.
-    artist : matplotlib.artist.Artist
-        The artist to create a colorbar for.
-    orientation : str, optional
-        The orientation of the colorbar. Default is "vertical".
-    drawedges : bool, optional
-        Whether to draw edges on the colorbar. Default is False.
-    extend : str, optional
-        How to handle the colorbar extensions. Default is None.
-    cbar_label : str, optional
-        The label for the colorbar. Default is "".
-
-    Returns
-    -------
-    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
-        The axis with the colorbar.
-
-    """
-    cax = get_cax(fig=fig, axes=ax, orientation=orientation)
-
-    cb = plt.colorbar(
-        artist,
-        cax=cax,
-        ax=ax,
-        orientation=orientation,
-        drawedges=drawedges,
-        extend=extend,
-    )
-
-    cb.set_label(cbar_label)
-    return ax
 
 
 def _plot_method(data: xr.DataArray, method: str):
@@ -719,7 +719,7 @@ def _faceted(
         "orientation": orientation,
         "fraction": 0.05,
         "pad": 0.06,
-        "label": get_label(f"{long_name}\n", units, cbar_label),
+        "label": _get_label(f"{long_name}\n", units, cbar_label),
     }
 
     figsize = _facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
@@ -731,6 +731,7 @@ def _faceted(
 
     for ax, name_dict in zip(fg.axs.flat, fg.name_dicts.flat):
         if name_dict is None:
+            ax.remove()
             continue
 
         _add_cartopy_features(
@@ -783,7 +784,7 @@ def _faceted(
     if col_wrap == 1:
         orientation = "horizontal"
 
-    cax = get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
+    cax = _get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
     cb = fg.fig.colorbar(
         mappable,
         cax=cax,
@@ -792,7 +793,7 @@ def _faceted(
         drawedges=drawedges,
     )
 
-    cb.set_label(get_label(f"{long_name}\n", units, cbar_label))
+    cb.set_label(_get_label(f"{long_name}\n", units, cbar_label))
 
     # fg.fig.subplots_adjust(wspace=0.02, hspace=0.15)
     # plt.tight_layout(h_pad=0.5, w_pad=0.15)
@@ -1045,7 +1046,7 @@ def mapplot(
         )
 
     if add_colorbar:
-        cbar_label = get_label(f"{long_name}\n", units, cbar_label)
+        cbar_label = _get_label(f"{long_name}\n", units, cbar_label)
         orientation = orientation or "vertical"
 
         ax = plot_cbar(
@@ -1061,7 +1062,7 @@ def mapplot(
     return MapPlot(Figure=fig, Axes=ax, Artist=artist)
 
 
-def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error):
+def _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error):
 
     try:
         cmd = [
@@ -1122,7 +1123,7 @@ def ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error
         return None
 
 
-def _mapplot(
+def _mapplot_wrapper(
     i: int,
     dim_value: Any,
     dim: str,
@@ -1389,8 +1390,8 @@ def animate(
     dpi_map = {"low": 300, "medium": 600, "high": 1200}
     dpi = dpi_map.get(quality, 600)
 
-    def _isel_dim(da: xr.DataArray | None, i: int):
-        return None if da is None else da.isel({dim: i})  # .load()
+    def _sel(da: xr.DataArray | None, i: int):
+        return None if da is None else da.isel({dim: i})
 
     if indices is None:
         indices = range(da.sizes[dim])
@@ -1402,9 +1403,9 @@ def animate(
             title,
             dpi,
             session_tmp_dir,
-            _isel_dim(da, i),
-            _isel_dim(u_component, i),
-            _isel_dim(v_component, i),
+            _sel(da, i),
+            _sel(u_component, i),
+            _sel(v_component, i),
             args,
         )
         for i in indices
@@ -1413,7 +1414,7 @@ def animate(
     if parallel:
         processes = min(len(indices), n_cpus // 2)
 
-        delayed_tasks = [delayed(_mapplot)(*task) for task in tasks]
+        delayed_tasks = [delayed(_mapplot_wrapper)(*task) for task in tasks]
 
         if ipykernel:
             # from .xrext import DaskProgressBar
@@ -1440,7 +1441,7 @@ def animate(
             total=len(tasks),
             transient=False,
         ):
-            _mapplot(*task)
+            _mapplot_wrapper(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
 
@@ -1455,4 +1456,4 @@ def animate(
     outfile.parent.mkdir(parents=True, exist_ok=True)
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
-    ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
+    _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)

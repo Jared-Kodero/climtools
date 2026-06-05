@@ -4,7 +4,7 @@ __all__ = [
     "stats",
     "cdo",
     "cmaps",
-    "logexc",
+    "print",
     "theming",
     "xgeo",
 ]
@@ -23,9 +23,6 @@ from . import theming as theming
 from ._cmaps import *
 from .tools import (
     fix_vscode_widget,
-    get_fsig,
-    handle_errors,
-    logexc,
 )
 # from .update import _self_update
 
@@ -36,8 +33,6 @@ if "ipykernel" in sys.modules:
 
 dask.diagnostics.ProgressBar = xgeo.DaskProgressBar
 
-# Set the custom exception handler for the current session
-sys.excepthook = handle_errors
 
 """climtools — utilities for climate data analysis and plotting.
 
