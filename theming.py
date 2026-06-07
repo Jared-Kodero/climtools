@@ -155,6 +155,8 @@ def apply_theme(
         "ytick.minor.visible": True,
         "xtick.minor.visible": True,
         "savefig.dpi": 1200,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.05,
         "text.usetex": latex,
         "svg.fonttype": "none",
     }

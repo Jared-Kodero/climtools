@@ -13,14 +13,13 @@ import sys
 
 import dask
 
-from . import _cmaps, xgeo
 from . import cmaps as cmaps
 from . import pycdo as cdo
 from . import statistics as stats
 from . import theming as theming
+from . import xgeo
 
 # import cmaps as _cmaps --- IGNORE ---
-from ._cmaps import *
 from .tools import (
     fix_vscode_widget,
 )

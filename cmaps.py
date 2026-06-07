@@ -1,2168 +1,550 @@
+"""
+Colormap toolkit for climtools.
 
-'''
-Fancy custom colormap utilities for creating, modifying, and combining matplotlib colormaps.
-'''
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+Each registered colormap is exposed as a module level callable, for example::
 
-from ._cmaps import *
+    from climtools import cmaps
+    cmaps.low_high(r=True)
 
-checksum = "73D32DD0FAD62AD190E56A55415FF6D3607962ACCE9D6F88AE2480915AA01E20"
+Callables are produced on demand by ``__getattr__`` (PEP 562), so the user
+facing access is unchanged while no Python source is generated at import time.
+Editor autocomplete and static type checking are served by the companion stub
+``cmaps.pyi``, which contains only typed signatures and is therefore never
+executed. Regenerate the stub after the set of colormaps changes with::
+
+    python -m climtools.cmaps
+
+or by calling :func:`write_stub`.
+
+Colormap names are drawn from three backends, in this precedence:
+    1. Local IPCC style colormaps stored as plain text RGB tables.
+    2. Built in matplotlib colormaps.
+    3. cmocean colormaps.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from functools import lru_cache
+from pathlib import Path
+
+import cmocean
+import matplotlib as mpl
+import matplotlib.colors as mcolors
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
+
+_file_dir = Path(__file__).resolve().parent
+_src_dir = _file_dir / "data" / "cmaps"
+
+# Backend colormap names resolved once at import. ``build_cm`` consults these.
+_plt_registry = mpl.colormaps  # public matplotlib ColormapRegistry
+_plt_cmap_list = list(_plt_registry)
+_cmocean_cmap_list = list(cmocean.cm.cmapnames)
+
+_Cmap = ListedColormap | LinearSegmentedColormap
 
 
+# ---------------------------------------------------------------------------
+# Colormap construction and modification
+# ---------------------------------------------------------------------------
+def build_cm(name: str) -> _Cmap:
+    """Resolve a colormap by name across the text, matplotlib and cmocean backends."""
+    for candidate in (name, name.lower(), name.capitalize(), name.upper()):
+        cmap_file = _src_dir / f"{candidate}.txt"
+        if cmap_file.exists():
+            return LinearSegmentedColormap.from_list(
+                candidate, np.loadtxt(cmap_file), N=256
+            )
+        if candidate in _plt_cmap_list:
+            return _plt_registry[candidate]
+        if candidate in _cmocean_cmap_list:
+            return getattr(cmocean.cm, candidate)
+    raise KeyError(f"Colormap '{name}' is not valid.")
 
 
+def get_colors(cmap: _Cmap, N: int) -> list[str]:
+    """Sample ``N`` evenly spaced colors from ``cmap`` and return them as hex strings."""
+    return [to_hex(c) for c in cmap(np.linspace(0, 1, N))]
 
-def new(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str = None, save: bool = False):
-    ''' Create a new colormap from a list of colors '''
+
+def add_colors_to_cmap(
+    obj: str | list[str],
+    cmap: _Cmap,
+    idx: int = 256,
+    N: int = 256,
+    gamma: float = 1.0,
+    cmap_name: str | None = None,
+) -> LinearSegmentedColormap:
+    """
+    Insert one or more colors into an existing colormap at a given index.
+
+    Parameters
+    ----------
+    obj : str or list of str
+        Hex codes or CSS4 color names to insert.
+    cmap : ListedColormap or LinearSegmentedColormap
+        Source colormap.
+    idx : int, default 256
+        Insertion position, clamped to ``[0, cmap.N]``.
+    N : int, default 256
+        Retained for signature compatibility. The number of sampled colors is
+        taken from ``cmap.N``.
+    gamma : float, default 1.0
+        Gamma applied when rebuilding the colormap.
+    cmap_name : str, optional
+        Name for the returned colormap.
+    """
+    N = cmap.N
+    idx = max(0, min(idx, N))
+
+    if isinstance(obj, str):
+        objs = [obj]
+    elif isinstance(obj, (list, tuple)):
+        objs = list(obj)
+    else:
+        raise TypeError(
+            "Invalid colors specified. Provide a list of CSS4 names or hex values."
+        )
+
+    colors_to_add = []
+    for color in objs:
+        if not isinstance(color, str):
+            raise TypeError("Color must be a string (hex or named CSS4 color).")
+        if color.startswith("#"):
+            colors_to_add.append(color)
+        elif mcolors.CSS4_COLORS.get(color) is not None:
+            colors_to_add.append(to_hex(mcolors.CSS4_COLORS[color]))
+        else:
+            raise ValueError(
+                f"Invalid color '{color}'. Must be a hex code or a named CSS4 color."
+            )
+
+    colors = [to_hex(tuple(c), keep_alpha=True) for c in cmap(np.linspace(0, 1, N))]
+    new_colors = np.array(colors[:idx] + colors_to_add + colors[idx:])
+    return LinearSegmentedColormap.from_list(cmap_name, new_colors, N, gamma=gamma)
+
+
+def adjust_cmap(
+    cmap: str | _Cmap,
+    N: int = 25,
+    *,
+    split: tuple[float, float] = (0.0, 1.0),
+    add_colors: dict[int, str | list[str]] | None = None,
+    r: bool = False,
+    discrete: bool = False,
+    as_colors: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap | list[str]:
+    """
+    Modify a colormap by slicing, reversal, color insertion and discretization.
+
+    Parameters
+    ----------
+    cmap : str or Colormap
+        Colormap to adjust.
+    N : int, default 25
+        Number of sampled colors, or bins when ``discrete=True``.
+    split : tuple of float, default (0.0, 1.0)
+        Fractional sub range of the colormap to retain. Applied before insertion.
+    add_colors : dict of {int: str or list of str}, optional
+        Insertion positions mapped to one or more colors. A key of ``-1`` maps to
+        the end of the colormap.
+    r : bool, default False
+        Reverse the colormap before other operations.
+    discrete : bool, default False
+        Return a ``ListedColormap`` with ``N`` bins instead of a continuous map.
+    as_colors : bool, default False
+        Return a list of hex colors instead of a colormap.
+    gamma : float, default 1.0
+        Gamma applied when building a continuous colormap.
+    """
+    if not isinstance(split, tuple) or len(split) != 2:
+        raise ValueError("`split` must be a tuple of two floats (start, end).")
+
+    cmap_name = cmap.name
+    if r:
+        cmap = cmap.reversed()
+        cmap_name = f"reversed_{cmap_name}"
+
+    colors = [cmap(value) for value in np.linspace(split[0], split[1], N)]
+
+    if discrete:
+        res = ListedColormap(colors, N=N, name=cmap_name)
+    else:
+        res = LinearSegmentedColormap.from_list(cmap_name, colors, N=N, gamma=gamma)
+
+    if add_colors:
+        if not isinstance(add_colors, dict):
+            raise TypeError("`add_colors` must be a dict[int, str | list[str]].")
+        cmap_name = "added"
+        for k in sorted(add_colors):
+            v = add_colors[k]
+            if k == -1:
+                k = res.N
+            if not isinstance(k, int):
+                raise TypeError("Keys in `add_colors` must be integers.")
+            if not isinstance(v, (list, tuple, str)):
+                raise TypeError("Values in `add_colors` must be str or list[str].")
+            res = add_colors_to_cmap(
+                obj=v, idx=k, cmap=res, N=N, gamma=gamma, cmap_name=cmap_name
+            )
+
+    if as_colors:
+        return get_colors(res, res.N)
+    return res
+
+
+def get_colormap(
+    name: str,
+    N: int,
+    r: bool,
+    split: tuple[float, float],
+    add_colors: dict[int, str | list[str]] | None,
+    discrete: bool,
+    as_colors: bool,
+    gamma: float = 1.0,
+) -> _Cmap | list[str]:
+    """Resolve ``name`` to a colormap and apply the requested adjustments."""
+    return adjust_cmap(
+        cmap=build_cm(name),
+        N=N,
+        split=split,
+        add_colors=add_colors,
+        r=r,
+        discrete=discrete,
+        as_colors=as_colors,
+        gamma=gamma,
+    )
+
+
+def create(
+    colors: list[str],
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+    name: str | None = None,
+    save: bool = False,
+) -> _Cmap:
+    """Create a colormap from a list of hex codes or CSS4 names."""
+
+    def valid(c: str) -> bool:
+        return isinstance(c, str) and (c.startswith("#") or c in mcolors.CSS4_COLORS)
+
+    if not all(map(valid, colors)):
+        raise ValueError("All colors must be valid hex codes or CSS4 names.")
+    if save and not name:
+        raise ValueError("A name must be provided when save=True.")
+    if name is None:
+        name = "custom"
+
+    if discrete:
+        cmap = ListedColormap(colors, N=N, name=name)
+    else:
+        cmap = LinearSegmentedColormap.from_list(name, colors, N=N, gamma=gamma)
+
+    if save:
+        rgb = cmap(np.linspace(0.0, 1.0, 256))[:, :3]
+        _src_dir.mkdir(parents=True, exist_ok=True)
+        np.savetxt(_src_dir / f"{name}.txt", rgb, fmt="%.6f")
+        _registry.cache_clear()
+        list_cmaps.cache_clear()
+        cmap_index.cache_clear()
+
+    return cmap
+
+
+def _concat_cmaps(
+    cmap1: _Cmap,
+    cmap2: _Cmap,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap:
+    """Concatenate two colormaps into a single colormap of ``N`` colors."""
+
+    def _colors(cmap):
+        return [to_hex(cmap(v)) for v in np.linspace(0, 1, N // 2)]
+
+    return create(_colors(cmap1) + _colors(cmap2), N=N, discrete=discrete, gamma=gamma)
+
+
+def add_or_subtract(
+    cmap1: _Cmap,
+    cmap2: _Cmap,
+    operator: str,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap:
+    """Add or subtract two colormaps channel wise in RGBA space."""
+
+    def _colors(cmap):
+        return np.asarray([cmap(v) for v in np.linspace(0, 1, N)], dtype=float)
+
+    c1, c2 = _colors(cmap1), _colors(cmap2)
+    if operator == "+":
+        c = np.clip(c1 + c2, 0.0, 1.0)
+    elif operator == "-":
+        c = np.clip(c1 - c2, 0.0, 1.0)
+    else:
+        raise ValueError("`operator` must be '+' or '-'.")
+
+    return create(
+        [to_hex(tuple(row)) for row in c], N=N, discrete=discrete, gamma=gamma
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _registry() -> dict[str, str]:
+    """
+    Map each public function name to its canonical backend name.
+
+    The public name is the lowercased backend name and must be a valid Python
+    identifier so it can be exposed as an attribute and written into the stub.
+    The first occurrence of a name wins, matching the precedence text, then
+    matplotlib, then cmocean. Reversed (``_r``) and namespaced cmocean entries
+    are excluded.
+    """
+    text_names = [f.stem for f in _src_dir.glob("*.txt")]
+    all_names = text_names + _plt_cmap_list + _cmocean_cmap_list
+
+    mapping: dict[str, str] = {}
+    for name in all_names:
+        if name.endswith("_r") or "cmo" in name.lower():
+            continue
+        key = name.lower()
+        if not key.isidentifier():
+            continue
+        mapping.setdefault(key, name)
+    return dict(sorted(mapping.items()))
+
+
+@lru_cache(maxsize=1)
+def list_cmaps() -> tuple[str, ...]:
+    """Return the sorted tuple of public colormap names."""
+    return tuple(_registry().keys())
+
+
+@lru_cache(maxsize=1)
+def cmap_index() -> frozenset[str]:
+    """Return the set of public colormap names for fast membership tests."""
+    return frozenset(_registry())
+
+
+def available() -> list[str]:
+    """Return the sorted list of registered colormap names."""
+    return list(list_cmaps())
+
+
+# ---------------------------------------------------------------------------
+# Public combination helpers (documented, importable, no recursion)
+# ---------------------------------------------------------------------------
+def new(
+    colors: list[str],
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+    name: str | None = None,
+    save: bool = False,
+) -> _Cmap:
+    """Create a colormap from a list of colors."""
     return create(colors, N=N, discrete=discrete, gamma=gamma, name=name, save=save)
 
 
 def concat(
-cmap1: ListedColormap | LinearSegmentedColormap,
-cmap2: ListedColormap | LinearSegmentedColormap,
-N: int = 32,
-*,
-discrete: bool = False,
-gamma: float = 1.0
-):
-    ''' Concat two colormaps together '''
-    return concat(cmap1, cmap2, N=N, discrete=discrete, gamma=gamma)
+    cmap1: _Cmap,
+    cmap2: _Cmap,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap:
+    """Concatenate two colormaps."""
+    return _concat_cmaps(cmap1, cmap2, N=N, discrete=discrete, gamma=gamma)
 
 
 def add(
-cmap1: ListedColormap | LinearSegmentedColormap,
-cmap2: ListedColormap | LinearSegmentedColormap,
-N: int = 32,
-*,
-discrete: bool = False,
-gamma: float = 1.0
-):
-    ''' Add two colormaps together '''
-    return add_or_subtract(cmap1, cmap2, operator="+", N=N, discrete=discrete, gamma=gamma)
-
+    cmap1: _Cmap,
+    cmap2: _Cmap,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap:
+    """Add two colormaps channel wise."""
+    return add_or_subtract(cmap1, cmap2, "+", N=N, discrete=discrete, gamma=gamma)
 
 
 def subtract(
-cmap1: ListedColormap | LinearSegmentedColormap,
-cmap2: ListedColormap | LinearSegmentedColormap,
-N: int = 32,
-*,
-discrete: bool = False,
-gamma: float = 1.0
-):
-    ''' Subtract two colormaps '''
-    return add_or_subtract(cmap1, cmap2, operator="-", N=N, discrete=discrete, gamma=gamma)
-
-
-
-
-def b2r_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'b2r_div' colormap '''
-
-    return get_colormap("b2r_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def chem_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'chem_div' colormap '''
-
-    return get_colormap("chem_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def chem_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'chem_seq' colormap '''
-
-    return get_colormap("chem_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cryo_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'cryo_div' colormap '''
-
-    return get_colormap("cryo_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cryo_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'cryo_seq' colormap '''
-
-    return get_colormap("cryo_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def low_high(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'low_high' colormap '''
-
-    return get_colormap("low_high", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def misc_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'misc_div' colormap '''
-
-    return get_colormap("misc_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def misc_seq_1(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'misc_seq_1' colormap '''
-
-    return get_colormap("misc_seq_1", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def misc_seq_2(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'misc_seq_2' colormap '''
-
-    return get_colormap("misc_seq_2", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def misc_seq_3(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'misc_seq_3' colormap '''
-
-    return get_colormap("misc_seq_3", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def misc_seq_4(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'misc_seq_4' colormap '''
-
-    return get_colormap("misc_seq_4", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ncl_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'ncl_div' colormap '''
-
-    return get_colormap("ncl_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def prec_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'prec_div' colormap '''
-
-    return get_colormap("prec_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def prec_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'prec_seq' colormap '''
-
-    return get_colormap("prec_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def slev_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'slev_div' colormap '''
-
-    return get_colormap("slev_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def slev_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'slev_seq' colormap '''
-
-    return get_colormap("slev_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def soilmoist_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'soilmoist_div' colormap '''
-
-    return get_colormap("soilmoist_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def temp_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'temp_div' colormap '''
-
-    return get_colormap("temp_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def temp_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'temp_seq' colormap '''
-
-    return get_colormap("temp_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def wind_div(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'wind_div' colormap '''
-
-    return get_colormap("wind_div", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def wind_seq(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'wind_seq' colormap '''
-
-    return get_colormap("wind_seq", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def magma(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'magma' colormap '''
-
-    return get_colormap("magma", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def inferno(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'inferno' colormap '''
-
-    return get_colormap("inferno", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def plasma(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'plasma' colormap '''
-
-    return get_colormap("plasma", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def viridis(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'viridis' colormap '''
-
-    return get_colormap("viridis", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cividis(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'cividis' colormap '''
-
-    return get_colormap("cividis", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def twilight(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'twilight' colormap '''
-
-    return get_colormap("twilight", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def twilight_shifted(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'twilight_shifted' colormap '''
-
-    return get_colormap("twilight_shifted", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def turbo(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'turbo' colormap '''
-
-    return get_colormap("turbo", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def berlin(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'berlin' colormap '''
-
-    return get_colormap("berlin", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def managua(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'managua' colormap '''
-
-    return get_colormap("managua", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def vanimo(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'vanimo' colormap '''
-
-    return get_colormap("vanimo", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def blues(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Blues' colormap '''
-
-    return get_colormap("Blues", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def brbg(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'BrBG' colormap '''
-
-    return get_colormap("BrBG", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def bugn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'BuGn' colormap '''
-
-    return get_colormap("BuGn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def bupu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'BuPu' colormap '''
-
-    return get_colormap("BuPu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cmrmap(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'CMRmap' colormap '''
-
-    return get_colormap("CMRmap", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gnbu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'GnBu' colormap '''
-
-    return get_colormap("GnBu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def greens(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Greens' colormap '''
-
-    return get_colormap("Greens", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def greys(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Greys' colormap '''
-
-    return get_colormap("Greys", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def orrd(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'OrRd' colormap '''
-
-    return get_colormap("OrRd", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def oranges(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Oranges' colormap '''
-
-    return get_colormap("Oranges", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def prgn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PRGn' colormap '''
-
-    return get_colormap("PRGn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def piyg(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PiYG' colormap '''
-
-    return get_colormap("PiYG", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def pubu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PuBu' colormap '''
-
-    return get_colormap("PuBu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def pubugn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PuBuGn' colormap '''
-
-    return get_colormap("PuBuGn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def puor(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PuOr' colormap '''
-
-    return get_colormap("PuOr", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def purd(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'PuRd' colormap '''
-
-    return get_colormap("PuRd", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def purples(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Purples' colormap '''
-
-    return get_colormap("Purples", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rdbu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'RdBu' colormap '''
-
-    return get_colormap("RdBu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rdgy(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'RdGy' colormap '''
-
-    return get_colormap("RdGy", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rdpu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'RdPu' colormap '''
-
-    return get_colormap("RdPu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rdylbu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'RdYlBu' colormap '''
-
-    return get_colormap("RdYlBu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rdylgn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'RdYlGn' colormap '''
-
-    return get_colormap("RdYlGn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def reds(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Reds' colormap '''
-
-    return get_colormap("Reds", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def spectral(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Spectral' colormap '''
-
-    return get_colormap("Spectral", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def wistia(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Wistia' colormap '''
-
-    return get_colormap("Wistia", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ylgn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'YlGn' colormap '''
-
-    return get_colormap("YlGn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ylgnbu(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'YlGnBu' colormap '''
-
-    return get_colormap("YlGnBu", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ylorbr(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'YlOrBr' colormap '''
-
-    return get_colormap("YlOrBr", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ylorrd(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'YlOrRd' colormap '''
-
-    return get_colormap("YlOrRd", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def afmhot(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'afmhot' colormap '''
-
-    return get_colormap("afmhot", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def autumn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'autumn' colormap '''
-
-    return get_colormap("autumn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def binary(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'binary' colormap '''
-
-    return get_colormap("binary", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def bone(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'bone' colormap '''
-
-    return get_colormap("bone", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def brg(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'brg' colormap '''
-
-    return get_colormap("brg", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def bwr(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'bwr' colormap '''
-
-    return get_colormap("bwr", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cool(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'cool' colormap '''
-
-    return get_colormap("cool", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def coolwarm(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'coolwarm' colormap '''
-
-    return get_colormap("coolwarm", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def copper(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'copper' colormap '''
-
-    return get_colormap("copper", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def cubehelix(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'cubehelix' colormap '''
-
-    return get_colormap("cubehelix", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def flag(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'flag' colormap '''
-
-    return get_colormap("flag", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_earth(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_earth' colormap '''
-
-    return get_colormap("gist_earth", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_gray(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_gray' colormap '''
-
-    return get_colormap("gist_gray", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_heat(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_heat' colormap '''
-
-    return get_colormap("gist_heat", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_ncar(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_ncar' colormap '''
-
-    return get_colormap("gist_ncar", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_rainbow(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_rainbow' colormap '''
-
-    return get_colormap("gist_rainbow", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_stern(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_stern' colormap '''
-
-    return get_colormap("gist_stern", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_yarg(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_yarg' colormap '''
-
-    return get_colormap("gist_yarg", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gnuplot(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gnuplot' colormap '''
-
-    return get_colormap("gnuplot", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gnuplot2(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gnuplot2' colormap '''
-
-    return get_colormap("gnuplot2", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gray(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gray' colormap '''
-
-    return get_colormap("gray", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def hot(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'hot' colormap '''
-
-    return get_colormap("hot", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def hsv(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'hsv' colormap '''
-
-    return get_colormap("hsv", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def jet(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'jet' colormap '''
-
-    return get_colormap("jet", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def nipy_spectral(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'nipy_spectral' colormap '''
-
-    return get_colormap("nipy_spectral", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ocean(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'ocean' colormap '''
-
-    return get_colormap("ocean", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def pink(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'pink' colormap '''
-
-    return get_colormap("pink", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def prism(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'prism' colormap '''
-
-    return get_colormap("prism", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rainbow(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'rainbow' colormap '''
-
-    return get_colormap("rainbow", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def seismic(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'seismic' colormap '''
-
-    return get_colormap("seismic", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def spring(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'spring' colormap '''
-
-    return get_colormap("spring", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def summer(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'summer' colormap '''
-
-    return get_colormap("summer", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def terrain(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'terrain' colormap '''
-
-    return get_colormap("terrain", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def winter(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'winter' colormap '''
-
-    return get_colormap("winter", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def accent(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Accent' colormap '''
-
-    return get_colormap("Accent", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def dark2(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Dark2' colormap '''
-
-    return get_colormap("Dark2", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def paired(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Paired' colormap '''
-
-    return get_colormap("Paired", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def pastel1(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Pastel1' colormap '''
-
-    return get_colormap("Pastel1", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def pastel2(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Pastel2' colormap '''
-
-    return get_colormap("Pastel2", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def set1(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Set1' colormap '''
-
-    return get_colormap("Set1", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def set2(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Set2' colormap '''
-
-    return get_colormap("Set2", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def set3(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Set3' colormap '''
-
-    return get_colormap("Set3", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tab10(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tab10' colormap '''
-
-    return get_colormap("tab10", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tab20(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tab20' colormap '''
-
-    return get_colormap("tab20", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tab20b(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tab20b' colormap '''
-
-    return get_colormap("tab20b", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tab20c(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tab20c' colormap '''
-
-    return get_colormap("tab20c", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def grey(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'grey' colormap '''
-
-    return get_colormap("grey", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_grey(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_grey' colormap '''
-
-    return get_colormap("gist_grey", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def gist_yerg(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'gist_yerg' colormap '''
-
-    return get_colormap("gist_yerg", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def grays(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'Grays' colormap '''
-
-    return get_colormap("Grays", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def thermal(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'thermal' colormap '''
-
-    return get_colormap("thermal", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def haline(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'haline' colormap '''
-
-    return get_colormap("haline", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def solar(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'solar' colormap '''
-
-    return get_colormap("solar", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def ice(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'ice' colormap '''
-
-    return get_colormap("ice", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def oxy(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'oxy' colormap '''
-
-    return get_colormap("oxy", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def deep(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'deep' colormap '''
-
-    return get_colormap("deep", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def dense(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'dense' colormap '''
-
-    return get_colormap("dense", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def algae(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'algae' colormap '''
-
-    return get_colormap("algae", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def matter(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'matter' colormap '''
-
-    return get_colormap("matter", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def turbid(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'turbid' colormap '''
-
-    return get_colormap("turbid", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def speed(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'speed' colormap '''
-
-    return get_colormap("speed", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def amp(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'amp' colormap '''
-
-    return get_colormap("amp", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tempo(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tempo' colormap '''
-
-    return get_colormap("tempo", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def rain(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'rain' colormap '''
-
-    return get_colormap("rain", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def phase(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'phase' colormap '''
-
-    return get_colormap("phase", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def topo(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'topo' colormap '''
-
-    return get_colormap("topo", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def balance(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'balance' colormap '''
-
-    return get_colormap("balance", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def delta(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'delta' colormap '''
-
-    return get_colormap("delta", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def curl(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'curl' colormap '''
-
-    return get_colormap("curl", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def diff(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'diff' colormap '''
-
-    return get_colormap("diff", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
-
-
-def tarn(
-    N: int = 32,
-    r: bool = False,
-    split: tuple[float, float] = (0, 1),
-    add_colors: dict[int, str | list[str]] = None,
-    discrete: bool = False,
-    as_colors : bool = False,
-    gamma: float = 1.0
-) -> ListedColormap | LinearSegmentedColormap:
-    ''' Get the 'tarn' colormap '''
-
-    return get_colormap("tarn", N, r, split, add_colors, discrete,as_colors, gamma)
-
-
+    cmap1: _Cmap,
+    cmap2: _Cmap,
+    N: int = 32,
+    *,
+    discrete: bool = False,
+    gamma: float = 1.0,
+) -> _Cmap:
+    """Subtract two colormaps channel wise."""
+    return add_or_subtract(cmap1, cmap2, "-", N=N, discrete=discrete, gamma=gamma)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic per-colormap callables
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=None)
+def _make(public_name: str, source_name: str):
+    def cmap(
+        N: int = 32,
+        r: bool = False,
+        *,
+        split: tuple[float, float] = (0.0, 1.0),
+        add_colors: dict[int, str | list[str]] | None = None,
+        discrete: bool = False,
+        as_colors: bool = False,
+        gamma: float = 1.0,
+    ):
+        return get_colormap(
+            source_name, N, r, split, add_colors, discrete, as_colors, gamma
+        )
+
+    cmap.__name__ = public_name
+    cmap.__qualname__ = public_name
+    cmap.__doc__ = f"Return the '{source_name}' colormap."
+    return cmap
+
+
+_PUBLIC = {
+    "new",
+    "concat",
+    "add",
+    "subtract",
+    "create",
+    "available",
+    "write_stub",
+    "build_cm",
+    "get_colormap",
+    "adjust_cmap",
+    "get_colors",
+    "add_colors_to_cmap",
+    "add_or_subtract",
+    "list_cmaps",
+}
+
+
+def _default_cmap(source_name: str):
+    """Return the colormap for ``source_name`` built with default options."""
+    return get_colormap(source_name, 32, False, (0.0, 1.0), None, False, False, 1.0)
+
+
+def __getattr__(name: str):
+    registry = _registry()
+    if name in registry:
+        return _make(name, registry[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(_PUBLIC | cmap_index())
+
+
+# Subscript access. Attribute access (cmaps.low_high) returns the factory to
+# call; subscript access (cmaps["low_high"]) returns the colormap directly,
+# matching matplotlib.colormaps["viridis"]. Modules do not support __getitem__
+# through a module level function, so the module object is promoted to a
+# ModuleType subclass that defines it. The existing __getattr__ is unaffected.
+import sys as _sys
+from types import ModuleType as _ModuleType
+
+
+class _CmapsModule(_ModuleType):
+    def __getitem__(self, name: str):
+        registry = _registry()
+        if name not in registry:
+            raise KeyError(name)
+        return _default_cmap(registry[name])
+
+    def __contains__(self, name: str) -> bool:
+        return name in cmap_index()
+
+
+_sys.modules[__name__].__class__ = _CmapsModule
+
+
+# ---------------------------------------------------------------------------
+# Type stub generation (cmaps.pyi)
+# ---------------------------------------------------------------------------
+_CMAP_SIGNATURE = (
+    "(N: int = 32, r: bool = False, *, "
+    "split: tuple[float, float] = ..., "
+    "add_colors: dict[int, str | list[str]] | None = None, "
+    "discrete: bool = False, as_colors: bool = False, "
+    "gamma: float = 1.0) -> ListedColormap | LinearSegmentedColormap | list[str]: ..."
+)
+
+_STUB_HEADER = """from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+
+_Cmap = ListedColormap | LinearSegmentedColormap
+
+def new(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str | None = None, save: bool = False) -> _Cmap: ...
+def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str | None = None, save: bool = False) -> _Cmap: ...
+def concat(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
+def add(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
+def subtract(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
+def available() -> list[str]: ...
+def write_stub(force: bool = False) -> bool: ...
+"""
+
+
+def build_stub_text() -> str:
+    """Return the full text of the ``cmaps.pyi`` type stub."""
+    lines = [_STUB_HEADER]
+    for name in list_cmaps():
+        lines.append(f"def {name}{_CMAP_SIGNATURE}")
+    return "\n".join(lines) + "\n"
+
+
+def _src_checksum() -> str:
+    """Checksum the text colormaps and the resolved name set."""
+    h = hashlib.sha256()
+    for f in sorted(_src_dir.glob("*.txt")):
+        h.update(f.read_bytes())
+    h.update(",".join(list_cmaps()).encode("utf-8"))
+    return h.hexdigest()
+
+
+def write_stub(force: bool = False) -> bool:
+    """
+    Write ``cmaps.pyi`` if the colormap set changed or ``force`` is set.
+
+    Returns ``True`` when the file was written. The checksum is stored on the
+    first line so a stale stub is detected without an external sidecar. The file
+    is replaced atomically, which removes the need for lock files.
+    """
+    pyi = _file_dir / "cmaps.pyi"
+    marker = f"# checksum: {_src_checksum()}\n"
+    if not force and pyi.exists():
+        try:
+            if pyi.read_text().startswith(marker):
+                return False
+        except OSError:
+            pass
+    tmp = pyi.with_suffix(".pyi.tmp")
+    tmp.write_text(marker + build_stub_text())
+    os.replace(tmp, pyi)
+    return True
+
+
+# Best effort stub refresh for editor support. Silent if the package directory
+# is read only, as in a standard installed environment.
+try:  # pragma: no cover
+    write_stub()
+except OSError:  # pragma: no cover
+    pass

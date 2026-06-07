@@ -44,11 +44,21 @@ class MapPlot:
         return _repr
 
 
+def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
+    mag = (u**2 + v**2) ** 0.5
+    key_mag = np.round(mag.quantile(0.75, skipna=True).values)
+    key_mag_int = int(key_mag)
+    key_magnitude = key_mag_int if key_mag_int != 0 else np.round(key_mag, 2)
+    return key_magnitude
+
+
 def plot_quiver(
     u: xr.DataArray,
     v: xr.DataArray,
     ax: plt.Axes | cgeo.GeoAxes = None,
     subsample: int = 1,
+    add_key: bool = True,
+    subplots: bool = False,
     **kwargs,
 ):
     """
@@ -100,44 +110,65 @@ def plot_quiver(
     else:
         lon2d, lat2d = np.meshgrid(lon.values, lat.values)
 
-    xaxis_ticks = kwargs.pop("xaxis_ticks")
-    U = kwargs.pop("U", None)
+    key_magnitude = kwargs.pop("key_magnitude", None)
+    if not key_magnitude:
+        key_magnitude = _get_quiver_key_mag(u, v)
 
     Q = ax.quiver(
-        lon2d, lat2d, u.values, v.values, transform=transform, angles="xy", **kwargs
+        lon2d,
+        lat2d,
+        u.values,
+        v.values,
+        transform=transform,
+        angles="xy",
+        **kwargs,
     )
 
-    if not U:
-        speed = (u**2 + v**2) ** 0.5
-        U = np.round(speed.mean(skipna=True).values)
-        U = int(U)
+    if add_key:
+        label = _get_label(key_magnitude, units)
 
-    cax = _get_cax(
-        axes=ax,
-        orientation="horizontal",
-        quiver=True,
-        xaxis_ticks=xaxis_ticks,
-    )
-    # bbox = cax.get_position()
+        fig = ax.get_figure()
 
-    label = _get_label(U, units)
+        cax = _get_cax(fig=fig, axes=ax, orientation="horizontal", subplots=subplots)
+        bbox = cax.get_position()
+        cax.remove()
 
-    ax.quiverkey(
-        Q,
-        # X=0.1,
-        # Y=bbox.y0 + 0.5 * bbox.height,
-        X=0.90,
-        Y=0.94,
-        U=U,
-        label=label,
-        labelpos="E",
-        coordinates="figure",
-        fontproperties={"size": 14},
-    )
+        # Desired quiver-key anchor in axes coordinates.
+        key_x_ax = 0.100
+        key_y_ax = -0.045
 
-    cax.set_frame_on(False)
-    cax.set_xticks([])
-    cax.set_yticks([])
+        # Convert that same point from axes coordinates to figure coordinates.
+        key_x_fig, key_y_fig = fig.transFigure.inverted().transform(
+            ax.transAxes.transform((key_x_ax, key_y_ax))
+        )
+
+        cax = fig.add_axes(
+            [
+                key_x_fig,
+                key_y_fig - 0.5 * bbox.height,
+                bbox.width - key_x_fig,
+                bbox.height,
+            ],
+            zorder=1,
+        )
+
+        qk = ax.quiverkey(
+            Q,
+            X=key_x_ax,
+            Y=key_y_ax,
+            U=key_magnitude,
+            label=label,
+            labelpos="E",
+            coordinates="axes",
+            zorder=4,
+            fontproperties={"size": 10},
+        )
+
+        qk.set_in_layout(True)
+
+        cax.set_frame_on(False)
+        cax.set_xticks([])
+        cax.set_yticks([])
 
     return ax
 
@@ -147,6 +178,7 @@ def plot_cbar(
     ax: plt.Axes | cgeo.GeoAxes,
     artist: Artist,
     orientation: str = "vertical",
+    adjust: bool = True,
     drawedges: bool = False,
     extend: str = None,
     cbar_label: str = "",
@@ -177,7 +209,7 @@ def plot_cbar(
         The axis with the colorbar.
 
     """
-    cax = _get_cax(fig=fig, axes=ax, orientation=orientation)
+    cax = _get_cax(fig=fig, axes=ax, orientation=orientation, adjust=adjust)
 
     cb = plt.colorbar(
         artist,
@@ -246,7 +278,7 @@ def plot_pvalues(
     marker: str = None,
     edgecolors: str = None,
     subsample: int = 1,
-    s: float = 0.25,
+    size: float = 0.25,
 ):
     """
     Plot p-values on a Cartopy axis.
@@ -295,7 +327,7 @@ def plot_pvalues(
         transform=transform,
         color=color,
         alpha=alpha,
-        s=s,
+        s=size,
         marker=marker,
         edgecolors=edgecolors,
     )
@@ -317,6 +349,7 @@ def _get_cax(
     axes: plt.Axes = None,
     subplots: bool = False,
     orientation: Literal["vertical", "horizontal"] = "vertical",
+    adjust: bool = True,
     **kwargs,
 ) -> plt.Axes:
     """
@@ -347,7 +380,8 @@ def _get_cax(
     if axes is None:
         axes = plt.gca()
 
-    plt.tight_layout()
+    if adjust:
+        plt.tight_layout()
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         # Vertical uses y0, y_len, x1. Horizontal uses y0, x0, x_len.
@@ -384,13 +418,6 @@ def _get_cax(
                 pad = 0.15
             elif xticks and xlabel:
                 pad = 0.20
-
-            if kwargs.get("quiver") and kwargs.get("xaxis_ticks"):
-                pad = 0.1
-                h_pad = 0.05
-            if kwargs.get("quiver") and not kwargs.get("xaxis_ticks"):
-                pad = 0.05
-                h_pad = 0.05
 
             rightmost = x0
             width = x_len
@@ -602,6 +629,22 @@ def _resolve_map_aspect(
     raise ValueError("Provide map_aspect, extent, or da to infer aspect.")
 
 
+def _bottom_left_axis(fg):
+    """Return the lowest populated facet in the leftmost column, for any grid shape.
+
+    Handles single-row, single-column, single-facet, and ragged (col_wrap)
+    layouts. fg.axs and fg.name_dicts are coerced to 2D of shape (nrow, ncol);
+    column 0 is the left edge and increasing row index moves downward. Returns
+    None if no facet is populated.
+    """
+    name_dicts = np.atleast_2d(fg.name_dicts)
+    axs = np.atleast_2d(fg.axs)
+    left_rows = [r for r in range(name_dicts.shape[0]) if name_dicts[r, 0] is not None]
+    if not left_rows:
+        return None
+    return axs[left_rows[-1], 0]
+
+
 def _facet_figsize(
     col_wrap: int = 1,
     panel_width: float = 5.0,
@@ -682,6 +725,14 @@ def _faceted(
         spatial = [d for d in da.dims if d not in (col, row)]
         x, y = spatial
 
+    add_quiver = (u_component is not None) and (v_component is not None)
+    quiver_kwargs = quiver_kwargs or {}
+    add_pvalues = p_values is not None
+    p_value_kwargs = p_value_kwargs or {}
+
+    if add_quiver and quiver_kwargs.get("key_magnitude") is None:
+        quiver_kwargs["key_magnitude"] = _get_quiver_key_mag(u_component, v_component)
+
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
 
@@ -725,10 +776,13 @@ def _faceted(
 
     fg = plot(figsize=figsize, cbar_kwargs=cbar_kwargs, **pkwargs)
     mappable = fg._mappables[-1]
+
     if hasattr(fg, "cbar") and fg.cbar is not None:
         fg.cbar.remove()
 
-    for ax, name_dict in zip(fg.axs.flat, fg.name_dicts.flat):
+    key_ax = _bottom_left_axis(fg)
+
+    for i, (ax, name_dict) in enumerate(zip(fg.axs.flat, fg.name_dicts.flat)):
         if name_dict is None:
             ax.remove()
             continue
@@ -761,21 +815,19 @@ def _faceted(
             gl.bottom_labels = True
             gl.left_labels = True
 
-        if p_values is not None:
-            p_value_kwargs = p_value_kwargs or {}
+        if add_pvalues:
             plot_pvalues(
                 data=p_values.sel(name_dict),
                 ax=ax,
                 **p_value_kwargs,
             )
 
-        if (u_component is not None) and (v_component is not None):
-            quiver_kwargs = quiver_kwargs or {}
-            quiver_kwargs["xaxis_ticks"] = gridlines
-
+        if add_quiver:
             plot_quiver(
                 u=u_component.sel(name_dict),
                 v=v_component.sel(name_dict),
+                add_key=(ax is key_ax),
+                subplots=True,
                 ax=ax,
                 **quiver_kwargs,
             )
@@ -794,8 +846,8 @@ def _faceted(
 
     cb.set_label(_get_label(f"{long_name}\n", units, cbar_label))
 
-    # fg.fig.subplots_adjust(wspace=0.02, hspace=0.15)
-    # plt.tight_layout(h_pad=0.5, w_pad=0.15)
+    plt.tight_layout()
+
     return MapPlot(Figure=fg.fig, Axes=fg.axs, Artist=fg)
 
 
@@ -937,7 +989,7 @@ def mapplot(
         If True, set the map extent to the full globe.
 
     set_extent : tuple of float, optional
-        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
+        Geographic extent as a tuple ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
 
     gridlines : bool, default False
         Whether to draw labeled longitude and latitude gridlines.
@@ -956,13 +1008,15 @@ def mapplot(
         are plotted as markers.
 
     p_value_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_pvalues``.
+        Keyword arguments forwarded to ``plot_pvalues``. Options include
+        ``level: float``, ``color: str``, ``alpha: float`` , ``marker: str``, ``edgecolors: str`` , ``subsample:int``, ``size: float``
 
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``.
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int`` etc see
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
@@ -993,6 +1047,11 @@ def mapplot(
 
     elif da.ndim > 3:
         raise ValueError("DataArray must be 2D or 3D after squeezing.")
+
+    add_quiver = (u_component is not None) and (v_component is not None)
+    quiver_kwargs = quiver_kwargs or {}
+    add_pvalues = p_values is not None
+    p_value_kwargs = p_value_kwargs or {}
 
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
@@ -1062,14 +1121,10 @@ def mapplot(
         gl.bottom_labels = True
         gl.left_labels = True
 
-    if p_values is not None:
-        p_value_kwargs = p_value_kwargs or {}
+    if add_pvalues:
         ax = plot_pvalues(data=p_values, ax=ax, **p_value_kwargs)
 
-    if (u_component is not None) and (v_component is not None):
-        quiver_kwargs = quiver_kwargs or {}
-        quiver_kwargs["xaxis_ticks"] = gridlines
-
+    if add_quiver:
         ax = plot_quiver(
             u=u_component,
             v=v_component,
@@ -1089,8 +1144,8 @@ def mapplot(
             drawedges=drawedges,
             extend=extend,
             cbar_label=cbar_label,
+            adjust=False,
         )
-
     return MapPlot(Figure=fig, Axes=ax, Artist=artist)
 
 
@@ -1404,7 +1459,8 @@ def animate(
         contain ``dim`` and align with ``da`` along that dimension.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``.
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``,``scale:int`` etc see
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.
