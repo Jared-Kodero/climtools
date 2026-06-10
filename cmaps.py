@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -33,6 +34,7 @@ import cmocean
 import matplotlib as mpl
 import matplotlib.colors as mcolors
 import numpy as np
+from IPython.display import DisplayHandle, display
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 
 _file_dir = Path(__file__).resolve().parent
@@ -67,6 +69,14 @@ def build_cm(name: str) -> _Cmap:
 def get_colors(cmap: _Cmap, N: int) -> list[str]:
     """Sample ``N`` evenly spaced colors from ``cmap`` and return them as hex strings."""
     return [to_hex(c) for c in cmap(np.linspace(0, 1, N))]
+
+
+_EQ_ATOL = 1e-6  # tolerance consistent with the %.6f text colormap format
+
+
+def _signature(cmap: _Cmap) -> np.ndarray:
+    """Return the 256 point RGB sampling used for colormap equality tests."""
+    return cmap(np.linspace(0.0, 1.0, 256))[:, :3]
 
 
 def add_colors_to_cmap(
@@ -246,13 +256,21 @@ def create(
         cmap = LinearSegmentedColormap.from_list(name, colors, N=N, gamma=gamma)
 
     if save:
+        dup = find_duplicate(cmap)
+        if dup is not None:
+            match_name, is_reversed = dup
+            kind = "reversed " if is_reversed else ""
+            print(
+                f"Creation skipped: identical to existing {kind}colormap {match_name!r}'."
+            )
+            existing = build_cm(match_name)
+            return existing.reversed() if is_reversed else existing
         rgb = cmap(np.linspace(0.0, 1.0, 256))[:, :3]
         _src_dir.mkdir(parents=True, exist_ok=True)
         np.savetxt(_src_dir / f"{name}.txt", rgb, fmt="%.6f")
         _registry.cache_clear()
         list_cmaps.cache_clear()
         cmap_index.cache_clear()
-
     return cmap
 
 
@@ -339,8 +357,31 @@ def cmap_index() -> frozenset[str]:
     return frozenset(_registry())
 
 
-def available() -> list[str]:
-    """Return the sorted list of registered colormap names."""
+def find_duplicate(cmap: _Cmap) -> tuple[str, bool] | None:
+    """
+    Return ``(name, reversed)`` if ``cmap`` matches a registered colormap.
+
+    Matching is evaluated on the 256 point RGB sampling. ``reversed`` is True
+    when the match is against the reversed form. Returns ``None`` otherwise.
+    """
+    target = _signature(cmap)
+    for public_name, source_name in _registry().items():
+        existing = _signature(build_cm(source_name))
+        if np.allclose(target, existing, atol=_EQ_ATOL):
+            return public_name, False
+        if np.allclose(target, existing[::-1], atol=_EQ_ATOL):
+            return public_name, True
+    return None
+
+
+def available(show: bool = True) -> list[str] | DisplayHandle:
+    """List or show available colormaps"""
+    if "ipykernel" in sys.modules and show:
+        for source_name in _registry().values():
+            display(_default_cmap(source_name))
+
+        return
+
     return list(list_cmaps())
 
 
@@ -465,7 +506,7 @@ from types import ModuleType as _ModuleType
 
 
 class _CmapsModule(_ModuleType):
-    def __getitem__(self, name: str):
+    def __getitem__(self, name: str) -> LinearSegmentedColormap | ListedColormap:
         registry = _registry()
         if name not in registry:
             raise KeyError(name)
@@ -490,7 +531,7 @@ _CMAP_SIGNATURE = (
 )
 
 _STUB_HEADER = """from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-
+from IPython.display import DisplayHandle
 _Cmap = ListedColormap | LinearSegmentedColormap
 
 def new(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: float = 1.0, name: str | None = None, save: bool = False) -> _Cmap: ...
@@ -498,7 +539,7 @@ def create(colors: list[str], N: int = 32, *, discrete: bool = False, gamma: flo
 def concat(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
 def add(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
 def subtract(cmap1: _Cmap, cmap2: _Cmap, N: int = 32, *, discrete: bool = False, gamma: float = 1.0) -> _Cmap: ...
-def available() -> list[str]: ...
+def available(show:bool=True) -> list[str] | DisplayHandle: ...
 def write_stub(force: bool = False) -> bool: ...
 """
 

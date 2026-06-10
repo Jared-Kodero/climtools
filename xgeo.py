@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,28 +17,25 @@ import xarray as xr
 import xesmf as xe
 from dask.diagnostics import ProgressBar
 
-from .plotting import (
-    animate,
-    mapplot,
-    plot_cbar,
-    plot_pvalues,
-    plot_quiver,
-)
+from . import calc_stats as calc
+from . import plotting as plot
+from . import theming as theme
 from .tools import n_cpus, tmp
 
 warnings.filterwarnings("ignore")
 
+
 __all__ = [
     "SetupDask",
+    "open_dataset",
+    "open_mfdataset",
     "append_to_netcdf",
-    "mask_data",
-    "calc_local_solar_time",
+    "mask_land",
+    "add_lst",
     "remap",
-    "plot_pvalues",
-    "plot_quiver",
-    "plot_cbar",
-    "mapplot",
-    "animate",
+    "plot",
+    "calc",
+    "theme",
 ]
 
 _script_dir = Path(__file__).resolve().parent
@@ -71,13 +69,22 @@ class DaskProgressBar(ProgressBar):
         self._completed = 0
 
     def _start(self, dsk: Any) -> None:
-        from rich.progress import Progress
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
 
         self._total = len(dsk)
         self._completed = 0
 
         self._progress = Progress(
-            *Progress.get_default_columns(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
             transient=self.transient,
             refresh_per_second=self.refresh_per_second,
         )
@@ -110,14 +117,21 @@ class DaskProgressBar(ProgressBar):
         state: dict[str, Any],
         errored: bool,
     ) -> None:
-        if self._progress is not None and self._task_id is not None:
-            if not errored:
-                self._progress.update(
-                    self._task_id,
-                    completed=self._total,
-                )
+        if self._progress is None or self._task_id is None:
+            return
 
-            self._progress.stop()
+        if not errored:
+            # Force the bar to full and repaint immediately, so a bursty or
+            # late callback feed cannot leave it short of 100 percent.
+            self._completed = self._total
+            self._progress.update(
+                self._task_id,
+                completed=self._total,
+                refresh=True,
+            )
+            self._progress.refresh()
+
+        self._progress.stop()
 
 
 class SetupDask:
@@ -261,7 +275,7 @@ def append_to_netcdf(
             ncvar[:] = da.values
 
 
-def mask_data(
+def mask_land(
     data: xr.DataArray | xr.Dataset,
     mask: xr.DataArray | Path | None = None,
     keep: str = "land",
@@ -326,9 +340,7 @@ def mask_data(
     return new_obj
 
 
-def calc_local_solar_time(
-    data: xr.Dataset | xr.DataArray, *, lon="lon"
-) -> xr.Dataset | xr.DataArray:
+def add_lst(data: xr.Dataset | xr.DataArray, *, lon="lon") -> xr.Dataset | xr.DataArray:
     """
     Calculate the local solar time for the dataset based on the longitude coordinate.
     The local solar time is calculated as the UTC time plus the longitude offset.
@@ -357,7 +369,7 @@ def calc_local_solar_time(
     return data.assign_coords({"lst": lst})
 
 
-def to_lon_180(
+def wrap_longitude_to_180(
     data: xr.Dataset | xr.DataArray, lon: str = "lon"
 ) -> xr.Dataset | xr.DataArray:
     """
@@ -419,9 +431,9 @@ def remap(
     """
     for coord in ("lat", "lon"):
         if coord not in grid_in.dims:
-            raise ValueError(f"Input grid must contain '{coord}' dimension.")
+            raise ValueError(f"Input grid must contain {coord!r} dimension.")
         if coord not in grid_out.dims:
-            raise ValueError(f"Output grid must contain '{coord}' dimension.")
+            raise ValueError(f"Output grid must contain {coord!r} dimension.")
 
     _in = xr.Dataset(
         coords={
@@ -464,4 +476,182 @@ def remap(
     )
 
     out = regridder(grid_in)
+
     return out
+
+
+def sel_transect(
+    data: xr.Dataset | xr.DataArray,
+    lat: float = None,
+    lon: float = None,
+    orientation: float = 0.0,
+    width: float = 1.0,
+    *,
+    snap: bool = True,
+    drop: bool = True,
+):
+    """
+    Select a finite-width transect or coordinate band from an xarray object.
+
+    Modes
+    -----
+    lat and lon given
+        Select a great-circle transect passing through the selected point.
+
+    lat only
+        Select a latitude band centred on `lat`.
+
+    lon only
+        Select a longitude band centred on `lon`.
+
+    Parameters
+    ----------
+    data
+        xarray Dataset or DataArray with 1D 'lat' and 'lon' coordinates.
+    lat, lon
+        Centre latitude and/or longitude in degrees.
+    orientation
+        Transect orientation in degrees, measured clockwise from north.
+        Only used when both `lat` and `lon` are given.
+        0 gives a north-south transect. 90 gives an east-west transect.
+    width
+        Full transect width in grid cells, not degrees.
+    snap
+        If True, snap supplied centre coordinate or coordinates to nearest
+        grid-cell centre.
+    drop
+        Passed to xarray.where.
+
+    Returns
+    -------
+    xarray Dataset or DataArray
+        Input object masked to the selected transect or band.
+    """
+    import numpy as np
+    import xarray as xr
+
+    if "lat" not in data.coords or "lon" not in data.coords:
+        raise ValueError("Input data must contain 'lat' and 'lon' coordinates.")
+
+    if lat is None and lon is None:
+        raise ValueError("At least one of `lat` or `lon` must be provided.")
+
+    if width <= 0:
+        raise ValueError("width must be positive.")
+
+    latc = data["lat"]
+    lonc = data["lon"]
+
+    rectilinear = (
+        latc.ndim == 1 and lonc.ndim == 1 and "lat" in data.dims and "lon" in data.dims
+    )
+
+    if not rectilinear:
+        raise ValueError(
+            "Only rectilinear grids with 1D 'lat' and 'lon' coordinates are supported."
+        )
+
+    if latc.sizes["lat"] < 2:
+        raise ValueError("Latitude coordinate must contain at least two points.")
+
+    if lonc.sizes["lon"] < 2:
+        raise ValueError("Longitude coordinate must contain at least two points.")
+
+    dlat = np.abs(latc.diff("lat")).median("lat")
+    dlon = np.abs(((lonc.diff("lon") + 180.0) % 360.0) - 180.0).median("lon")
+
+    if lat is not None and lon is None:
+        lat0 = float(latc.sel(lat=lat, method="nearest")) if snap else float(lat)
+        half_width_deg = 0.5 * width * dlat
+        mask = np.abs(latc - lat0) <= half_width_deg
+        return data.where(mask, drop=drop)
+
+    if lon is not None and lat is None:
+        if snap:
+            dlon_to_centre = np.abs(((lonc - lon + 180.0) % 360.0) - 180.0)
+            lon0 = float(lonc.isel(lon=dlon_to_centre.argmin("lon")))
+        else:
+            lon0 = float(lon)
+
+        half_width_deg = 0.5 * width * dlon
+        mask = np.abs(((lonc - lon0 + 180.0) % 360.0) - 180.0) <= half_width_deg
+        return data.where(mask, drop=drop)
+
+    if snap:
+        lat0 = float(latc.sel(lat=lat, method="nearest"))
+
+        dlon_to_centre = np.abs(((lonc - lon + 180.0) % 360.0) - 180.0)
+        lon0 = float(lonc.isel(lon=dlon_to_centre.argmin("lon")))
+    else:
+        lat0 = float(lat)
+        lon0 = float(lon)
+
+    phi0 = np.deg2rad(lat0)
+    lam0 = np.deg2rad(lon0)
+    theta = np.deg2rad(orientation % 180.0)
+
+    cross_north_weight = abs(np.sin(theta))
+    cross_east_weight = abs(np.cos(theta))
+
+    cell_width_deg = xr.apply_ufunc(
+        np.sqrt,
+        (cross_north_weight * dlat) ** 2
+        + (cross_east_weight * dlon * np.cos(phi0)) ** 2,
+        dask="allowed",
+    )
+
+    half_width_deg = 0.5 * width * cell_width_deg
+
+    ax = np.cos(phi0) * np.cos(lam0)
+    ay = np.cos(phi0) * np.sin(lam0)
+    az = np.sin(phi0)
+
+    north_x = -np.sin(phi0) * np.cos(lam0)
+    north_y = -np.sin(phi0) * np.sin(lam0)
+    north_z = np.cos(phi0)
+
+    east_x = -np.sin(lam0)
+    east_y = np.cos(lam0)
+    east_z = 0.0
+
+    dx = np.cos(theta) * north_x + np.sin(theta) * east_x
+    dy = np.cos(theta) * north_y + np.sin(theta) * east_y
+    dz = np.cos(theta) * north_z + np.sin(theta) * east_z
+
+    gx = ay * dz - az * dy
+    gy = az * dx - ax * dz
+    gz = ax * dy - ay * dx
+
+    phi = xr.apply_ufunc(np.deg2rad, latc, dask="allowed")
+    lam = xr.apply_ufunc(np.deg2rad, lonc, dask="allowed")
+
+    px = xr.apply_ufunc(np.cos, phi, dask="allowed") * xr.apply_ufunc(
+        np.cos, lam, dask="allowed"
+    )
+    py = xr.apply_ufunc(np.cos, phi, dask="allowed") * xr.apply_ufunc(
+        np.sin, lam, dask="allowed"
+    )
+    pz = xr.apply_ufunc(np.sin, phi, dask="allowed")
+
+    dot_n = gx * px + gy * py + gz * pz
+    dot_n = dot_n.clip(min=-1.0, max=1.0)
+
+    cross_track_deg = xr.apply_ufunc(
+        np.rad2deg,
+        xr.apply_ufunc(np.arcsin, dot_n, dask="allowed"),
+        dask="allowed",
+    )
+
+    mask = np.abs(cross_track_deg) <= half_width_deg
+
+    return data.where(mask, drop=drop)
+
+
+@wraps(xr.open_dataset)
+def open_dataset(*args, **kwargs):
+    return xr.open_dataset(*args, **kwargs)
+
+
+@wraps(xr.open_mfdataset)
+def open_mfdataset(*args, **kwargs):
+    return xr.open_mfdataset(*args, **kwargs)

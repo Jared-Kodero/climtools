@@ -4,7 +4,6 @@ A module for configuring the global matplotlib and seaborn theme for publication
 
 import os
 import platform
-import sys
 import warnings
 from pathlib import Path
 from typing import Literal
@@ -12,13 +11,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-__all__ = ["apply_theme", "reset_theme", "spine_off"]
-
-
-if "ipykernel" in sys.modules:
-    import matplotlib_inline as plt_inline
-
-    plt_inline.backend_inline.set_matplotlib_formats("retina")
+__all__ = ["apply", "reset", "spine_off"]
 
 
 def _install_latex():
@@ -54,7 +47,7 @@ def _install_latex():
     # --- Context management methods ---
 
 
-def reset_theme():
+def reset():
     """Reset matplotlib and seaborn settings to their defaults."""
     sns.reset_defaults()
     plt.rcParams.update(plt.rcParamsDefault)
@@ -71,7 +64,7 @@ def set_interactive_backend():
         matplotlib.use("nbagg")  # fallback
 
 
-def apply_theme(
+def apply(
     *,
     interactive: bool = False,
     font_scale: float = 1.5,

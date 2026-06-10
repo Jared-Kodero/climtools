@@ -1,3 +1,9 @@
+"""
+This module provides functions for calculating trends and correlations in xarray DataArrays and Datasets.
+It includes implementations of the Mann-Kendall trend test, linear regression using polynomial fitting, and correlation tests (Pearson, Spearman, Kendall).
+The functions are designed to handle missing data and can be applied along specified dimensions. Dask is supported for parallelized computations on large datasets.
+"""
+
 import warnings
 from typing import Literal, Union
 
@@ -51,6 +57,70 @@ def _mktrend_test(
         return nan_array
 
 
+def _polyfit(data: xr.DataArray | xr.Dataset, dim: str, data_var=None, scale=1):
+    """
+    Calculate the linear trend for the given xarray Dataset or DataArray using xr.polyfit.
+
+    - data: xr.Dataset
+    - data_var: The variable to calculate the trend test for.
+    - along: dim to calculate the trend test along. also used for sorting the data.
+    - scale: The scale to multiply the slope by i.e convert to per hour, per day, etc.
+
+    Returns: xr.Dataset
+    """
+
+    data.attrs = {}
+    data = data.sortby(dim)
+    data[dim] = (np.arange(1, len(data[dim]) + 1)).astype(np.int32)
+    n = data.sizes[dim]
+
+    if isinstance(data, xr.Dataset):
+        if data_var is None:
+            raise ValueError("Argument 'data_var' is required for xr.Dataset input.")
+        data = data[data_var]
+
+    res = data.polyfit(dim=dim, deg=1, cov=True)
+    slope = res["polyfit_coefficients"].sel(degree=1)
+    slope_variance = res["polyfit_covariance"].sel(cov_i=0, cov_j=0)
+    stderr = slope_variance**0.5
+    t_stat = slope / stderr
+
+    p_values = xr.DataArray(
+        2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2))),
+        coords=slope.coords,
+        dims=slope.dims,
+    )
+
+    mean_val = data.mean(dim=dim)
+    std_val = data.std(dim=dim)
+
+    trends = xr.Dataset()
+    trends["slope"] = slope * scale
+    trends["p_value"] = p_values
+    trends["mean_val"] = mean_val
+    trends["std_val"] = std_val
+
+    # add attributes
+    trends["slope"].attrs = {
+        "long_name": "slope",
+        "description": f"Slope of the linear trend per {scale} units of {dim}",
+    }
+    trends["p_value"].attrs = {
+        "long_name": "p_value",
+        "description": "p-value of the trend significance test",
+    }
+    trends["mean_val"].attrs = {
+        "long_name": "mean_val",
+        "description": f"Mean value along {dim}",
+    }
+    trends["std_val"].attrs = {
+        "long_name": "std_val",
+        "description": f"Standard deviation along {dim}",
+    }
+
+    return trends
+
+
 def _corr_test(
     array_x: np.ndarray,
     array_y: np.ndarray,
@@ -87,13 +157,13 @@ def _corr_test(
     return array
 
 
-def correlate(
+def corr(
     x: xr.DataArray,
     y: xr.DataArray,
     *,
     corr_type: Literal["pearson", "spearman", "kendall"] = "pearson",
     alternative: Literal["two-sided", "less", "greater"] = "two-sided",
-    along: str = None,
+    dim: str = None,
     dask_scheduler: Literal["threads", "processes"] = "threads",
 ) -> xr.Dataset:
     """
@@ -118,7 +188,7 @@ def correlate(
         - "kendall": Kendall τ rank correlation
     alternative : {"two-sided", "less", "greater"}, default "two-sided"
         Defines the alternative hypothesis for the p-value calculation.
-    along : str
+    dim : str
         Dimension along which the correlation is computed (e.g., "time").
         Required for xarray objects.
     dask_scheduler : {"threads", "processes"}, default "threads"
@@ -164,26 +234,26 @@ def correlate(
         )
 
     # if not x[along].equals(y[along]):
-    if not np.array_equal(x[along].values, y[along].values, equal_nan=True):
-        raise ValueError(f"{along} dimension in x and y do not match !")
+    if not np.array_equal(x[dim].values, y[dim].values, equal_nan=True):
+        raise ValueError(f"{dim} dimension in x and y do not match !")
 
     dask_gufunc_kwargs = (
         {"output_sizes": {"stats": 2}} if x.chunks or y.chunks else None
     )
 
     if x.chunks:
-        x = x.chunk({along: -1})
+        x = x.chunk({dim: -1})
     if y.chunks:
-        y = y.chunk({along: -1})
+        y = y.chunk({dim: -1})
 
-    x = x.sortby(along).squeeze(drop=True)
-    y = y.sortby(along).squeeze(drop=True)
+    x = x.sortby(dim).squeeze(drop=True)
+    y = y.sortby(dim).squeeze(drop=True)
 
     result = xr.apply_ufunc(
         _corr_test,
         x,
         y,
-        input_core_dims=[[along], [along]],
+        input_core_dims=[[dim], [dim]],
         output_core_dims=[["stats"]],
         vectorize=True,
         dask="parallelized",
@@ -204,24 +274,28 @@ def correlate(
     return corrs.compute(scheduler=dask_scheduler)
 
 
-def calc_trends(
+def trends(
     data: xr.DataArray,
-    along: str = None,
+    dim: str = None,
     *,
     scale: float = 1,
     dask_scheduler: Literal["threads", "processes"] = "threads",
+    polyfit: bool = False,
 ) -> xr.Dataset:
     """
     Calculate the Mann-Kendall trend test for a given dataset.
     Parameters:
         data ( xr.DataArray): Input dataset.
-        along (str): Dimension along which to calculate the trend test (Required for xarray).
+        dim (str): Dimension along which to calculate the trend test (Required for xarray).
         scale (float, optional): Scaling factor for the slope (e.g., convert to per hour, per day). Default is 1.
         dask_scheduler (str, optional): Dask scheduler type. Default is "processes".
-
+        polyfit (bool, optional): Whether to use polynomial fitting. Default is False.
     Returns:
          xr.Dataset: DataFrame or Dataset containing the trend test results.
     """
+
+    if polyfit:
+        return _polyfit(data, dim=dim, scale=scale)
 
     out_vars = [
         "slope",
@@ -236,13 +310,11 @@ def calc_trends(
     if isinstance(data, xr.Dataset):
         raise ValueError("Argument 'data' must be an xarray.DataArray.")
 
-    if not along:
-        raise ValueError(
-            "Argument 'along' is required for xarray input (e.g., 'time')."
-        )
+    if not dim:
+        raise ValueError("Argument 'dim' is required for xarray input (e.g., 'time').")
     dask_gufunc_kwargs = None
     if data.chunks:
-        data = data.chunk({along: -1})
+        data = data.chunk({dim: -1})
         dask_gufunc_kwargs = {"output_sizes": {"stats": 7}}
 
     data = data.squeeze(drop=True)
@@ -250,7 +322,7 @@ def calc_trends(
     result = xr.apply_ufunc(
         _mktrend_test,
         data,
-        input_core_dims=[[along]],
+        input_core_dims=[[dim]],
         output_core_dims=[["stats"]],
         vectorize=True,
         dask="parallelized",
@@ -267,86 +339,10 @@ def calc_trends(
     return trends.compute(scheduler=dask_scheduler)
 
 
-def period_difference(
-    da: xr.DataArray,
-    period1: tuple[str | pd.Timestamp] = None,
-    period2: tuple[str | pd.Timestamp] = None,
-    *,
-    along: str = "time",
-    stat: Literal["max", "min", "mean", "median", "quantile"] = "mean",
-    quantile: float = 0.95,
-    pct: bool = False,
-) -> xr.Dataset:
-    """
-    Compute the difference between two time periods in a DataArray or Dataset.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        Input data containing the time dimension.
-    period1 : tuple of str
-        (start, end) timestamps for the first period.
-    period2 : tuple of str
-        (start, end) timestamps for the second period.
-    stat : {"max", "min", "mean", "median"}, default "mean"
-        Statistic to compute for each period.
-    quantile : float, default 0.95
-        Quantile to compute if stat is "quantile".
-    along : str, default "time"
-        Name of the time dimension.
-
-    Returns
-    -------
-    xr.Dataset
-        Dataset containing the mean difference between the two periods.
-    """
-    name = da.name if da.name else "change"
-    p1 = da.sel({along: slice(period1[0], period1[1])})
-    p2 = da.sel({along: slice(period2[0], period2[1])})
-
-    sig = calc_significance(p1, p2, along=along, data_var=None)
-    p_values = sig["p_values"]
-
-    # only keep where data is not nan in both periods
-
-    stat_funcs = {
-        "max": lambda x: x.max(dim="time").squeeze(drop=True),
-        "min": lambda x: x.min(dim="time").squeeze(drop=True),
-        "median": lambda x: x.median(dim="time").squeeze(drop=True),
-        "mean": lambda x: x.mean(dim="time").squeeze(drop=True),
-        "quantile": lambda x: x.quantile(quantile, dim="time").squeeze(drop=True),
-    }
-
-    if stat not in stat_funcs:
-        raise ValueError(f"Unknown stat: {stat}")
-
-    func = stat_funcs[stat]
-    p1 = func(p1)
-    p2 = func(p2)
-
-    if pct:
-        change = (p2 - p1) / p1 * 100
-        desc = "percentage change"
-    else:
-        change = p2 - p1
-        desc = "difference"
-
-    p_values = p_values.where(~np.isnan(change), other=np.nan)
-    ds = xr.Dataset()
-    ds["p_values"] = p_values
-    ds[name] = change
-    ds[name].attrs = {
-        "long_name": f"{desc}",
-        "description": f"{desc} mean ({period2[0]}-{period2[1]}) - mean ({period1[0]}-{period1[1]})",
-    }
-
-    return ds
-
-
-def calc_significance(
+def pvalues(
     a: Union[xr.DataArray, xr.Dataset],
     b: Union[xr.DataArray, xr.Dataset],
-    along: str = "time",
+    dim: str = "time",
     *,
     data_var: str = None,
 ) -> xr.Dataset:
@@ -355,7 +351,7 @@ def calc_significance(
     Parameters:
         a (xr.DataArray | xr.Dataset): First dataset.
         b (xr.DataArray | xr.Dataset): Second dataset.
-        along (str): Dimension along which to calculate the significance test, e.g., "time" or a time dimension, if 'a' and 'b' represent two periods, check the temporal dimension.
+        dim (str): Dimension along which to calculate the significance test, e.g., "time" or a time dimension, if 'a' and 'b' represent two periods, check the temporal dimension.
         data_var (str): Variable to calculate the significance for.
         level (float): Significance level for the test, default is 0.05.
 
@@ -385,21 +381,21 @@ def calc_significance(
         a = a[data_var] if isinstance(a, xr.Dataset) else a
         b = b[data_var] if isinstance(b, xr.Dataset) else b
 
-    if a.sizes[along] < 2 or b.sizes[along] < 2:
+    if a.sizes[dim] < 2 or b.sizes[dim] < 2:
         raise ValueError(
-            f"At least two samples required along '{along}' for t-test. Got {a.sizes[along]} and {b.sizes[along]}."
+            f"At least two samples required along '{dim}' for t-test. Got {a.sizes[dim]} and {b.sizes[dim]}."
         )
 
-    if along not in a.dims or along not in b.dims:
-        raise ValueError(f"Dimension '{along}' not found in input datasets.")
+    if dim not in a.dims or dim not in b.dims:
+        raise ValueError(f"Dimension '{dim}' not found in input datasets.")
 
-    a = a.transpose(along, ...)
-    b = b.transpose(along, ...)
+    a = a.transpose(dim, ...)
+    b = b.transpose(dim, ...)
 
     t_stat, p_values = stats.ttest_ind(a, b, axis=0, equal_var=False, nan_policy="omit")
 
-    a = a.mean(dim=along).squeeze(drop=True)
-    b = b.mean(dim=along).squeeze(drop=True)
+    a = a.mean(dim=dim).squeeze(drop=True)
+    b = b.mean(dim=dim).squeeze(drop=True)
 
     p_values = xr.DataArray(data=p_values, coords=a.coords, dims=b.dims)
     t_stats = xr.DataArray(data=t_stat, coords=a.coords, dims=b.dims)
@@ -418,67 +414,3 @@ def calc_significance(
     }
 
     return res
-
-
-def polyfit(data: xr.DataArray | xr.Dataset, along: str, data_var=None, scale=1):
-    """
-    Calculate the linear trend for the given xarray Dataset or DataArray using xr.polyfit.
-
-    - data: xr.Dataset
-    - data_var: The variable to calculate the trend test for.
-    - along: dim to calculate the trend test along. also used for sorting the data.
-    - scale: The scale to multiply the slope by i.e convert to per hour, per day, etc.
-
-    Returns: xr.Dataset
-    """
-
-    data.attrs = {}
-    data = data.sortby(along)
-    data[along] = (np.arange(1, len(data[along]) + 1)).astype(np.int32)
-    n = data.sizes[along]
-
-    if isinstance(data, xr.Dataset):
-        if data_var is None:
-            raise ValueError("Argument 'data_var' is required for xr.Dataset input.")
-        data = data[data_var]
-
-    res = data.polyfit(dim=along, deg=1, cov=True)
-    slope = res["polyfit_coefficients"].sel(degree=1)
-    slope_variance = res["polyfit_covariance"].sel(cov_i=0, cov_j=0)
-    stderr = slope_variance**0.5
-    t_stat = slope / stderr
-
-    p_values = xr.DataArray(
-        2 * (1 - stats.t.cdf(np.abs(t_stat), (n - 2))),
-        coords=slope.coords,
-        dims=slope.dims,
-    )
-
-    mean_val = data.mean(dim=along)
-    std_val = data.std(dim=along)
-
-    trends = xr.Dataset()
-    trends["slope"] = slope * scale
-    trends["p_value"] = p_values
-    trends["mean_val"] = mean_val
-    trends["std_val"] = std_val
-
-    # add attributes
-    trends["slope"].attrs = {
-        "long_name": "slope",
-        "description": f"Slope of the linear trend per {scale} units of {along}",
-    }
-    trends["p_value"].attrs = {
-        "long_name": "p_value",
-        "description": "p-value of the trend significance test",
-    }
-    trends["mean_val"].attrs = {
-        "long_name": "mean_val",
-        "description": f"Mean value along {along}",
-    }
-    trends["std_val"].attrs = {
-        "long_name": "std_val",
-        "description": f"Standard deviation along {along}",
-    }
-
-    return trends

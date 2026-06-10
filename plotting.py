@@ -2,12 +2,14 @@
 Cartopy-based plotting utilities for xarray DataArrays, including faceted map plots with customizable features and styling.
 """
 
+from __future__ import annotations
+
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,45 +22,65 @@ import pandas as pd
 import xarray as xr
 from cartopy.util import add_cyclic_point
 from dask import compute, delayed
+from IPython.display import DisplayHandle
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colorbar import Colorbar
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
-from metpy.units import units as metpy_units
+from matplotlib.quiver import Quiver, QuiverKey
 
 from .tools import AttrDict, get_fsig, ipykernel, n_cpus, tmp
 
 
 @dataclass(frozen=True, repr=False)
 class MapPlot:
-    Figure: Figure
-    Axes: Axes | cgeo.GeoAxes | np.ndarray
-    Artist: Artist
+    Figure: Figure | None = None
+    Axes: Axes | cgeo.GeoAxes | np.ndarray | None = None
+    Plot: Artist | xr.plot.facetgrid.FacetGrid | None = None
+    Colorbar: Colorbar | None = None
+    Quiver: Quiver | list[Quiver] | None = None
+    QuiverKey: QuiverKey | list[QuiverKey] | None = None
 
     def __repr__(self) -> str:
-        if isinstance(self.Axes, np.ndarray):
-            ax_repr = f"{self.Axes.size} axes"
+        return _mapplot__repr(self)
+
+
+def _mapplot__repr(obj: MapPlot) -> str:
+    parts = []
+    for f in fields(obj):
+        value = getattr(obj, f.name)
+        if value is None:
+            continue
+        if isinstance(value, (np.ndarray, list)):
+            seq = value.ravel() if isinstance(value, np.ndarray) else value
+            count = value.size if isinstance(value, np.ndarray) else len(value)
+            elem = next((type(x).__name__ for x in seq if x is not None), "object")
+            parts.append(f"{f.name}={count} {elem}(s)")
         else:
-            ax_repr = type(self.Axes).__name__
-        _repr = f"MapPlot(Figure={type(self.Figure).__name__}, Axes={ax_repr}, Artist={type(self.Artist).__name__})"
-        return _repr
+            parts.append(f"{f.name}={type(value).__name__}")
+    return f"{type(obj).__name__}({', '.join(parts)})"
 
 
 def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
     mag = (u**2 + v**2) ** 0.5
     key_mag = np.round(mag.quantile(0.75, skipna=True).values)
     key_mag_int = int(key_mag)
-    key_magnitude = key_mag_int if key_mag_int != 0 else np.round(key_mag, 2)
+    key_magnitude = key_mag_int if key_mag_int != 0 else np.round(key_mag, 3)
     return key_magnitude
 
 
-def plot_quiver(
+def quiver(
     u: xr.DataArray,
     v: xr.DataArray,
+    x: str = "lon",
+    y: str = "lat",
     ax: plt.Axes | cgeo.GeoAxes = None,
     subsample: int = 1,
     add_key: bool = True,
     subplots: bool = False,
+    cax_kwargs: dict = None,
     **kwargs,
 ):
     """
@@ -70,10 +92,18 @@ def plot_quiver(
         The u-component of the vector field.
     v : xarray.DataArray
         The v-component of the vector field.
+    x: str, optional
+        name of x dimension in data. Default is "lon".
+    y: str, optional
+        name of y dimension in data. Default is "lat".
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
         The axis to plot on. If None, the current axis is used.
     subsample : int, optional
         The subsample size for plotting points to reduce overplotting. Default is 1.
+    add_key : bool, optional
+        Whether to add a quiver key. Default is True.
+    cax_kwargs : dict, optional
+        Additional keyword arguments for the colorbar axes when adding a quiver key. Default is None.
 
     **kwargs
         Additional keyword arguments for the quiver plot.
@@ -85,57 +115,70 @@ def plot_quiver(
 
     """
 
-    # pop quiver key from kwargs,
-    units = kwargs.pop("units", None)
-    if units is None:
-        u_units = u.attrs.get("units", "")
-        v_units = v.attrs.get("units", "")
-        assert u_units == v_units, "units of u and v components must match"
-        units = u_units
+    ax = ax or plt.gca()
+    kwargs = _check_cartopy_axis(ax, kwargs)
+    key_magnitude = kwargs.pop("key_magnitude", None)
+    key_units = kwargs.pop("key_units", None)
 
-    if ax is None:
-        ax = plt.gca()
+    if subsample > 1:
+        sel = {x: slice(None, None, subsample), y: slice(None, None, subsample)}
+        u = u.isel(sel)
+        v = v.isel(sel)
 
-    transform = _check_cartopy_axis(ax)
-
-    u = u[::subsample, ::subsample]
-    v = v[::subsample, ::subsample]
-
-    lon = u.lon
-    lat = u.lat
+    x_vals = u.coords[x]
+    y_vals = u.coords[y]
 
     # Detect if coordinates are already 2D
-    if lon.ndim == 2 and lat.ndim == 2:
-        lon2d, lat2d = lon.values, lat.values
+    if x_vals.ndim == 2 and y_vals.ndim == 2:
+        x2d, y2d = x_vals.values, y_vals.values
     else:
-        lon2d, lat2d = np.meshgrid(lon.values, lat.values)
+        x2d, y2d = np.meshgrid(x_vals.values, y_vals.values)
 
-    key_magnitude = kwargs.pop("key_magnitude", None)
-    if not key_magnitude:
-        key_magnitude = _get_quiver_key_mag(u, v)
-
-    Q = ax.quiver(
-        lon2d,
-        lat2d,
+    q = ax.quiver(
+        x2d,
+        y2d,
         u.values,
         v.values,
-        transform=transform,
         angles="xy",
         **kwargs,
     )
 
+    qk = None
+
     if add_key:
-        label = _get_label(key_magnitude, units)
+        # pop quiver key from kwargs,
+        if key_units is None:
+            u_units = u.attrs.get("units", "")
+            v_units = v.attrs.get("units", "")
+            assert u_units == v_units, "units of u and v components must match"
+            key_units = u_units
+
+        if not key_magnitude:
+            key_magnitude = _get_quiver_key_mag(u, v)
+
+        label = _get_label(key_magnitude, key_units)
 
         fig = ax.get_figure()
 
-        cax = _get_cax(fig=fig, axes=ax, orientation="horizontal", subplots=subplots)
+        cax = _get_cax(
+            fig=fig,
+            axes=ax,
+            orientation="horizontal",
+            subplots=subplots,
+            cax_kwargs=cax_kwargs,
+        )
         bbox = cax.get_position()
         cax.remove()
 
         # Desired quiver-key anchor in axes coordinates.
+
         key_x_ax = 0.100
         key_y_ax = -0.045
+
+        if cax_kwargs is not None:
+            key_x_ax, key_y_ax = ax.transAxes.inverted().transform(
+                fig.transFigure.transform((bbox.x0, bbox.y0))
+            )
 
         # Convert that same point from axes coordinates to figure coordinates.
         key_x_fig, key_y_fig = fig.transFigure.inverted().transform(
@@ -153,7 +196,7 @@ def plot_quiver(
         )
 
         qk = ax.quiverkey(
-            Q,
+            q,
             X=key_x_ax,
             Y=key_y_ax,
             U=key_magnitude,
@@ -170,36 +213,48 @@ def plot_quiver(
         cax.set_xticks([])
         cax.set_yticks([])
 
-    return ax
+    return ax, q, qk
 
 
-def plot_cbar(
-    fig: plt.Figure,
+def colorbar(
     ax: plt.Axes | cgeo.GeoAxes,
-    artist: Artist,
+    fig: plt.Figure | None = None,
+    mappable: ScalarMappable | None = None,
     orientation: str = "vertical",
     adjust: bool = True,
+    cax: plt.Axes | None = None,
     drawedges: bool = False,
     extend: str = None,
-    cbar_label: str = "",
+    cbar_label: str = None,
+    ticks: np.ndarray | list = None,
+    tick_labels: list[str] | None = None,
+    cax_kwargs: dict = None,
 ):
     """
     Add a colorbar to a Cartopy axis.
 
     Parameters
     ----------
-    fig : matplotlib.figure.Figure
-        The figure to add the colorbar to.
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
         The axis to add the colorbar to.
-    artist : matplotlib.artist.Artist
-        The artist to create a colorbar for.
+    fig : matplotlib.figure.Figure
+        The figure to add the colorbar to.
+    mappable : matplotlib.cm.ScalarMappable or matplotlib.artist.ColorizingArtist, optional
+        The mappable to create a colorbar for.
+    cax: matplotlib.axes.Axes, optional
+        The axis to use for the colorbar. If None, a new axis will be created.  Default is None.
     orientation : str, optional
         The orientation of the colorbar. Default is "vertical".
+    adjust : bool, optional
+        Whether to call plt.tight_layout() before adding the colorbar. Default is True.
     drawedges : bool, optional
         Whether to draw edges on the colorbar. Default is False.
     extend : str, optional
         How to handle the colorbar extensions. Default is None.
+    ticks : list, optional
+        The ticks for the colorbar. Default is None.
+    tick_labels : list of str, optional
+        The labels for the colorbar ticks. Default is None.
     cbar_label : str, optional
         The label for the colorbar. Default is "".
 
@@ -209,10 +264,18 @@ def plot_cbar(
         The axis with the colorbar.
 
     """
-    cax = _get_cax(fig=fig, axes=ax, orientation=orientation, adjust=adjust)
 
-    cb = plt.colorbar(
-        artist,
+    if cax is None:
+        cax = _get_cax(
+            fig=fig,
+            axes=ax,
+            orientation=orientation,
+            adjust=adjust,
+            cax_kwargs=cax_kwargs,
+        )
+
+    cbar = plt.colorbar(
+        mappable,
         cax=cax,
         ax=ax,
         orientation=orientation,
@@ -220,8 +283,17 @@ def plot_cbar(
         extend=extend,
     )
 
-    cb.set_label(cbar_label)
-    return ax
+    if ticks is not None:
+        cbar.set_ticks(ticks)
+
+    if tick_labels is not None:
+        cbar.ax.set_yticklabels(tick_labels)
+
+    if cbar_label is not None:
+        cbar.set_label(cbar_label)
+
+    plt.sca(ax)
+    return cbar
 
 
 def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
@@ -269,8 +341,10 @@ def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
     return new_obj
 
 
-def plot_pvalues(
+def significance(
     data: xr.DataArray,
+    x: str = "lon",
+    y: str = "lat",
     ax: plt.Axes | cgeo.GeoAxes = None,
     level: float = 0.05,
     color: str = "grey",
@@ -287,6 +361,10 @@ def plot_pvalues(
     ----------
     ax : cartopy.mpl.geoaxes.GeoAxesSubplot`
         The Cartopy axis to plot on.
+    x: str, optional
+        name of x dimension in data. Default is "lon".
+    y: str, optional
+        name of y dimension in data. Default is "lat".
     data : xarray.DataArray
         The data array containing p-values.
     level : float, optional
@@ -305,42 +383,37 @@ def plot_pvalues(
         Size of the points to plot. Default is 1.
     """
 
-    if ax is None:
-        ax = plt.gca()
+    ax = ax or plt.gca()
 
-    transform = _check_cartopy_axis(ax)
+    transform = _check_cartopy_axis(ax, {})
 
-    if "lon" not in data.dims or "lat" not in data.dims:
-        raise ValueError("DataArray must contain 'lon' and 'lat' dimensions.")
+    data = data.isel({y: slice(None, None, subsample), x: slice(None, None, subsample)})
 
-    data = data.isel(lat=slice(None, None, subsample), lon=slice(None, None, subsample))
-    p_values = data.to_dataframe(name="p_values").reset_index()
-    p_values = p_values.query("p_values < @level")
-    p_values = p_values.dropna()
+    pvalues = data.to_dataframe(name="pvalues").reset_index()
+    pvalues = pvalues.query("pvalues < @level")
+    pvalues = pvalues.dropna()
 
     if edgecolors is None:
         edgecolors = color
 
     ax.scatter(
-        p_values["lon"],
-        p_values["lat"],
-        transform=transform,
+        pvalues[x],
+        pvalues[y],
         color=color,
         alpha=alpha,
         s=size,
         marker=marker,
         edgecolors=edgecolors,
+        **transform,
     )
     return ax
 
 
-def _check_cartopy_axis(ax):
-
-    transform = None
+def _check_cartopy_axis(ax, kwargs) -> dict:
     if isinstance(ax, cgeo.GeoAxes):
-        transform = ccrs.PlateCarree()
+        kwargs["transform"] = ccrs.PlateCarree()
 
-    return transform
+    return kwargs
 
 
 def _get_cax(
@@ -350,7 +423,7 @@ def _get_cax(
     subplots: bool = False,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     adjust: bool = True,
-    **kwargs,
+    cax_kwargs: dict = None,
 ) -> plt.Axes:
     """
     Create a new set of axes for a colorbar by stealing space from the current axes.
@@ -365,6 +438,8 @@ def _get_cax(
         If True, position the colorbar relative to a grid of subplots. Requires axes.
     orientation : {"vertical", "horizontal"}, optional
         Colorbar orientation. Default "vertical".
+    cax_kwargs : dict, optional
+        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     Returns
     -------
@@ -382,6 +457,10 @@ def _get_cax(
 
     if adjust:
         plt.tight_layout()
+
+    cax_kwargs = cax_kwargs or {}
+    xticks = cax_kwargs.get("xticks")
+    xlabel = cax_kwargs.get("xlabel")
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         # Vertical uses y0, y_len, x1. Horizontal uses y0, x0, x_len.
@@ -410,19 +489,12 @@ def _get_cax(
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         elif orientation == "horizontal":
-            xticks = len(list(ax.get_xticks())) > 0
-            xlabel = bool(ax.xaxis.label.get_text().strip())
-            pad = 0.10
-            h_pad = 0
-            if (xlabel and not xticks) or (xticks and not xlabel):
-                pad = 0.15
-            elif xticks and xlabel:
-                pad = 0.20
+            y_pad = 0.1 if (xticks or xlabel) else 0.05
 
             rightmost = x0
             width = x_len
-            bottommost = y0 - pad * scale_h
-            height = (0.05 + h_pad) * scale_h
+            bottommost = y0 - y_pad * scale_h
+            height = 0.05 * scale_h
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         return cax
@@ -432,6 +504,7 @@ def _get_cax(
         fig_x_len = pos.x1 - pos.x0
         fig_y_len = pos.y1 - pos.y0
         cax = _create_cax(pos.y0, pos.x0, pos.y1, pos.x1, fig_x_len, fig_y_len, axes)
+        plt.sca(axes)
         return cax
 
     # subplots branch
@@ -477,14 +550,6 @@ def _get_cax(
     return cax
 
 
-def _get_units(units: str):
-    try:
-        u = metpy_units(units)
-        return f"{u.units:~^P}"
-    except Exception:
-        return units
-
-
 def _escape_chars(text: str) -> str:
     """
     Escape special characters in a string for use in Matplotlib labels.
@@ -516,10 +581,7 @@ def _get_label(
     if not units:
         return name
 
-    if format:
-        units = _get_units(units)
-
-    if not units or str(units).strip() in {"", "dimensionless", "1"}:
+    if not units or str(units).strip():
         return name
 
     units = _escape_chars(units)
@@ -713,7 +775,8 @@ def _faceted(
     lakes: bool = False,
     rivers: bool = False,
     p_values: xr.DataArray = None,
-    p_value_kwargs: dict = None,
+    pvalue_kwargs: dict = None,
+    cax_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
@@ -728,7 +791,7 @@ def _faceted(
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
     add_pvalues = p_values is not None
-    p_value_kwargs = p_value_kwargs or {}
+    pvalue_kwargs = pvalue_kwargs or {}
 
     if add_quiver and quiver_kwargs.get("key_magnitude") is None:
         quiver_kwargs["key_magnitude"] = _get_quiver_key_mag(u_component, v_component)
@@ -782,12 +845,14 @@ def _faceted(
 
     key_ax = _bottom_left_axis(fg)
 
+    q_list, qk_list, cb = [], [], None  # initialize to None in case not added
+
     for i, (ax, name_dict) in enumerate(zip(fg.axs.flat, fg.name_dicts.flat)):
         if name_dict is None:
             ax.remove()
             continue
 
-        _add_cartopy_features(
+        ax = _add_cartopy_features(
             ax,
             global_extent,
             set_extent,
@@ -816,14 +881,14 @@ def _faceted(
             gl.left_labels = True
 
         if add_pvalues:
-            plot_pvalues(
+            significance(
                 data=p_values.sel(name_dict),
                 ax=ax,
-                **p_value_kwargs,
+                **pvalue_kwargs,
             )
 
         if add_quiver:
-            plot_quiver(
+            ax, q, qk = quiver(
                 u=u_component.sel(name_dict),
                 v=v_component.sel(name_dict),
                 add_key=(ax is key_ax),
@@ -831,11 +896,19 @@ def _faceted(
                 ax=ax,
                 **quiver_kwargs,
             )
+            q_list.append(q)
+            qk_list.append(qk)
 
     if col_wrap == 1:
         orientation = "horizontal"
 
-    cax = _get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
+    cax = _get_cax(
+        fig=fg.fig,
+        axes=fg.axs,
+        orientation=orientation,
+        subplots=True,
+        cax_kwargs=cax_kwargs,
+    )
     cb = fg.fig.colorbar(
         mappable,
         cax=cax,
@@ -848,10 +921,17 @@ def _faceted(
 
     plt.tight_layout()
 
-    return MapPlot(Figure=fg.fig, Axes=fg.axs, Artist=fg)
+    return MapPlot(
+        Figure=fg.fig,
+        Axes=fg.axs,
+        Plot=fg,
+        Colorbar=cb,
+        Quiver=q_list,
+        QuiverKey=[qk for qk in qk_list if qk is not None][0],
+    )
 
 
-def mapplot(
+def map(
     da: xr.DataArray,
     *,
     x: str = None,
@@ -902,10 +982,11 @@ def mapplot(
     lakes: bool = False,
     rivers: bool = False,
     p_values: xr.DataArray = None,
-    p_value_kwargs: dict = None,
+    pvalue_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
+    cax_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
@@ -1007,7 +1088,7 @@ def mapplot(
         Pointwise p-value field. Values below the selected significance level
         are plotted as markers.
 
-    p_value_kwargs : dict, optional
+    pvalue_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_pvalues``. Options include
         ``level: float``, ``color: str``, ``alpha: float`` , ``marker: str``, ``edgecolors: str`` , ``subsample:int``, ``size: float``
 
@@ -1015,8 +1096,11 @@ def mapplot(
         Zonal and meridional vector components for quiver overlays.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int`` etc see
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+
+    cax_kwargs : dict, optional
+        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
@@ -1051,7 +1135,7 @@ def mapplot(
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
     add_pvalues = p_values is not None
-    p_value_kwargs = p_value_kwargs or {}
+    pvalue_kwargs = pvalue_kwargs or {}
 
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
@@ -1092,15 +1176,15 @@ def mapplot(
     for k in ("col", "row", "col_wrap", "figsize", "kwargs"):
         pkwargs.pop(k)
 
-    artist = plot(**pkwargs)
+    sm = plot(**pkwargs)
     if method in ["contour", "contourf"]:
-        if hasattr(artist, "set_edgecolor"):
-            artist.set_edgecolor("face")
+        if hasattr(sm, "set_edgecolor"):
+            sm.set_edgecolor("face")
 
-        if hasattr(artist, "set_rasterized"):
-            artist.set_rasterized(rasterized)
+        if hasattr(sm, "set_rasterized"):
+            sm.set_rasterized(rasterized)
         else:
-            for c in artist.collections:
+            for c in sm.collections:
                 c.set_rasterized(rasterized)
 
     plt.title(title)
@@ -1116,19 +1200,25 @@ def mapplot(
             zorder=1,
         )
 
+        cax_kwargs["xticks"] = True
+        cax_kwargs["xlabel"] = True
+
         gl.top_labels = False
         gl.right_labels = False
         gl.bottom_labels = True
         gl.left_labels = True
 
+    q, qk, cb = None, None, None  # initialize to None in case not added
+
     if add_pvalues:
-        ax = plot_pvalues(data=p_values, ax=ax, **p_value_kwargs)
+        ax = significance(data=p_values, ax=ax, **pvalue_kwargs)
 
     if add_quiver:
-        ax = plot_quiver(
+        ax, q, qk = quiver(
             u=u_component,
             v=v_component,
             ax=ax,
+            cax_kwargs=cax_kwargs,
             **quiver_kwargs,
         )
 
@@ -1136,20 +1226,23 @@ def mapplot(
         cbar_label = _get_label(f"{long_name}\n", units, cbar_label)
         orientation = orientation or "vertical"
 
-        ax = plot_cbar(
-            fig,
-            ax,
-            artist,
+        cb = colorbar(
+            fig=fig,
+            ax=ax,
+            mappable=sm,
             orientation=orientation,
             drawedges=drawedges,
             extend=extend,
             cbar_label=cbar_label,
             adjust=False,
+            cax_kwargs=cax_kwargs,
         )
-    return MapPlot(Figure=fig, Axes=ax, Artist=artist)
+    return MapPlot(Figure=fig, Axes=ax, Plot=sm, Colorbar=cb, Quiver=q, QuiverKey=qk)
 
 
-def _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, error):
+def _ffmpeg_encode(
+    input_pattern, outfile, fps, session_tmp_dir, user_path, error
+) -> int:
 
     try:
         cmd = [
@@ -1190,27 +1283,10 @@ def _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, erro
     finally:
         shutil.rmtree(session_tmp_dir, ignore_errors=True)
 
-    if error == 0 and user_path:
-        print(f"Animation saved to : {outfile}")
-
-    # optional inline display (Jupyter)
-    if "ipykernel" in sys.modules and error == 0:
-        from IPython.display import Video, display
-
-        return display(
-            Video(
-                outfile,
-                embed=True,
-                html_attributes="controls autoplay loop",
-                width=800,
-                height=600,
-            )
-        )
-    else:
-        return None
+    return error
 
 
-def _mapplot_wrapper(
+def _map_wrapper(
     i: int,
     dim_value: Any,
     dim: str,
@@ -1239,7 +1315,7 @@ def _mapplot_wrapper(
 
     fname = session_tmp_dir / f"{i:06d}.png"
 
-    plot = mapplot(**{k: v for k, v in local_kwargs.items() if k in get_fsig(mapplot)})
+    plot = map(**{k: v for k, v in local_kwargs.items() if k in get_fsig(map)})
 
     faceted = local_kwargs.get("col") or local_kwargs.get("row")
     if faceted is None:
@@ -1294,7 +1370,7 @@ def _validate_animation_inputs(
     return data, u_component, v_component
 
 
-def animate(
+def anim(
     da: xr.DataArray,
     dim: str = "time",
     *,
@@ -1355,7 +1431,7 @@ def animate(
     fps: int = 1,
     parallel: bool = True,
     **kwargs,
-):
+) -> DisplayHandle | None | str:
     """
     Render a map animation from an xarray DataArray and encode it as MP4.
 
@@ -1459,8 +1535,11 @@ def animate(
         contain ``dim`` and align with ``da`` along that dimension.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``,``scale:int`` etc see
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+
+    cax_kwargs : dict, optional
+        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.
@@ -1545,7 +1624,7 @@ def animate(
     if parallel:
         processes = min(len(indices), n_cpus // 2)
 
-        delayed_tasks = [delayed(_mapplot_wrapper)(*task) for task in tasks]
+        delayed_tasks = [delayed(_map_wrapper)(*task) for task in tasks]
 
         if ipykernel:
             # from .xrext import DaskProgressBar
@@ -1572,7 +1651,7 @@ def animate(
             total=len(tasks),
             transient=False,
         ):
-            _mapplot_wrapper(*task)
+            _map_wrapper(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
 
@@ -1587,4 +1666,23 @@ def animate(
     outfile.parent.mkdir(parents=True, exist_ok=True)
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
-    _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
+    error = _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
+
+    if error == 0 and user_path:
+        print(f"Animation saved to : {outfile}")
+
+    # optional inline display (Jupyter)
+    if "ipykernel" in sys.modules and error == 0:
+        from IPython.display import Video, display
+
+        return display(
+            Video(
+                outfile,
+                embed=True,
+                html_attributes="controls autoplay loop",
+                width=800,
+                height=600,
+            )
+        )
+    else:
+        raise RuntimeError("Animation encoding failed")

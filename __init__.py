@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 __all__ = [
-    "stats",
     "cdo",
     "cmaps",
-    "print",
-    "theming",
     "xgeo",
 ]
 
@@ -15,8 +12,6 @@ import dask
 
 from . import cmaps as cmaps
 from . import pycdo as cdo
-from . import statistics as stats
-from . import theming as theming
 from . import xgeo
 
 # import cmaps as _cmaps --- IGNORE ---
@@ -29,8 +24,11 @@ from .tools import (
 
 if "ipykernel" in sys.modules:
     fix_vscode_widget()
+    dask.diagnostics.ProgressBar = xgeo.DaskProgressBar
 
-dask.diagnostics.ProgressBar = xgeo.DaskProgressBar
+    import matplotlib_inline as plt_inline
+
+    plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
 """climtools — utilities for climate data analysis and plotting.
