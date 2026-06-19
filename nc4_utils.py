@@ -158,6 +158,7 @@ def serial_write_netcdf(
     file: Path,
     data: xr.Dataset,
     unlimited_dim: str = None,
+    batch_size: int = 1,
     format: str = "NETCDF4",
     shuffle: bool = True,
     zlib: bool = True,
@@ -166,7 +167,8 @@ def serial_write_netcdf(
     stdout: Any = None,
 ) -> None:
 
-    Path(file).unlink(missing_ok=True)
+    file = Path(file)
+    file.unlink(missing_ok=True)
 
     enc = {
         v: {"zlib": zlib, "complevel": complevel, "shuffle": shuffle}
@@ -174,24 +176,47 @@ def serial_write_netcdf(
     }
 
     dim0 = unlimited_dim if unlimited_dim is not None else next(iter(data.sizes))
-    data0 = data.isel({dim0: slice(0, 1)})
 
-    if data.sizes[dim0] < 1:
+    if dim0 not in data.sizes:
+        raise ValueError(f"{dim0!r} is not a dimension in data.")
+
+    n_items = data.sizes[dim0]
+
+    if n_items < 1:
         raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
 
-    data0.to_netcdf(file, encoding=enc, format=format, unlimited_dims=[dim0])
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}.")
+
+    # First write defines the file, dimensions, variables, attrs, and encodings.
+    # Keep this as a single record.
+    data0 = data.isel({dim0: slice(0, 1)})
+
+    data0.to_netcdf(
+        file,
+        encoding=enc,
+        format=format,
+        unlimited_dims=[dim0],
+    )
+
+    # Append the remaining records in batches.
+    starts = range(1, n_items, batch_size)
 
     if show_progress:
         data_slices = SerialProgressBar(
-            range(1, data.sizes[dim0]), description="Writing NetCDF", stdout=stdout
+            starts,
+            description="Writing NetCDF",
+            stdout=stdout,
         )
     else:
-        data_slices = range(1, data.sizes[dim0])
+        data_slices = starts
 
-    for i in data_slices:
+    for start in data_slices:
+        stop = min(start + batch_size, n_items)
+
         append_to_netcdf(
             file,
-            data.isel({dim0: slice(i, i + 1)}),
+            data.isel({dim0: slice(start, stop)}),
             dim=dim0,
             format=format,
             shuffle=shuffle,
@@ -204,6 +229,7 @@ def parallel_write_netcdf(
     file,
     data,
     unlimited_dim: str = None,
+    batch_size: int = 1,
     format: str = "NETCDF4",
     shuffle: bool = True,
     zlib: bool = True,
@@ -211,7 +237,8 @@ def parallel_write_netcdf(
     show_progress: bool = True,
     stdout: Any = None,
 ):
-    # do parrallel users will have to do is xr.open_mfdataset unitill we figure out parrallel netcdf4 writes
+    # Parallel write by sharding along one dimension.
+    # Users can reconstruct with xr.open_mfdataset until true parallel NetCDF4 writes are supported.
 
     file = Path(file)
 
@@ -228,15 +255,26 @@ def parallel_write_netcdf(
     if n_items < 1:
         raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
 
-    # Internal target size. This avoids adding function arguments.
     target_file_size_gb = 4.0
-    target_file_size_bytes = target_file_size_gb * 1024**3
+    target_file_size_bytes = int(target_file_size_gb * 1024**3)
 
-    total_size_bytes = max(int(data.nbytes), 1)
-    max_workers = max(1, n_cpus // 2)
+    estimated_uncompressed_bytes = max(int(data.nbytes), 1)
 
-    n_files = max(1, math.ceil(total_size_bytes / target_file_size_bytes))
-    n_files = min(n_files, n_items, max_workers)
+    if zlib:
+        compression_level = max(0, min(int(complevel), 9))
+        compression_factor = 4.0 + float(compression_level)
+    else:
+        compression_factor = 1.0
+
+    estimated_output_bytes = math.ceil(
+        estimated_uncompressed_bytes / compression_factor
+    )
+
+    n_files = max(
+        1,
+        math.ceil(estimated_output_bytes / target_file_size_bytes),
+    )
+    n_files = min(n_files, n_items)
 
     chunk_size = math.ceil(n_items / n_files)
 
@@ -245,8 +283,10 @@ def parallel_write_netcdf(
         for start in range(0, n_items, chunk_size)
     ]
 
+    width = max(2, len(str(len(slices))))
+
     output_files = [
-        directory / f"{file.stem}.{i + 1:02d}.nc" for i in range(len(slices))
+        directory / f"{file.stem}.{i + 1:0{width}d}.nc" for i in range(len(slices))
     ]
 
     for output_file in output_files:
@@ -257,6 +297,7 @@ def parallel_write_netcdf(
             output_file,
             data.isel({dim0: slice(start, end)}),
             dim0,
+            batch_size,
             format,
             shuffle,
             zlib,
@@ -267,6 +308,8 @@ def parallel_write_netcdf(
         for output_file, (start, end) in zip(output_files, slices)
     ]
 
+    # Worker count is a concurrency decision.
+    max_workers = max(1, n_cpus // 2)
     n_workers = min(len(tasks), max_workers)
 
     if show_progress:

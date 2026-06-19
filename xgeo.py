@@ -58,13 +58,15 @@ def write_netcdf(
     file: Path,
     data: xr.Dataset,
     unlimited_dim: str = None,
+    *,
+    batch_size: int = 1,
+    parallel: bool = False,
     format: str = "NETCDF4",
     shuffle: bool = True,
     zlib: bool = True,
     complevel: int = 4,
     show_progress: bool = True,
     stdout: Any = None,
-    parallel: bool = False,
 ) -> None:
     """
     Write an xarray Dataset to a NetCDF file using netCDF4 lib bypassing xarray's built-in overhead
@@ -83,6 +85,12 @@ def write_netcdf(
     unlimited_dim : str, optional
         Dimension to define as unlimited and append along. If None, the first
         dataset dimension is used.
+    batch_size : int, optional
+        Number of slices along the unlimited dimension to write in each batch.
+        Default is 1 (write one slice at a time).
+    parallel : bool, optional
+        Whether to enable parallel writing, if true multiple files will be written
+            with a suffix .{n}.nc where n is the part number starting from 1. Default is False.
     format : str, optional
         NetCDF format passed to xarray and netCDF4. Default is "NETCDF4".
     shuffle : bool, optional
@@ -95,9 +103,7 @@ def write_netcdf(
         Whether to display a progress bar while writing. Default is True.
     stdout : file-like, optional
         Stream to write the progress bar to. If None, uses sys.stdout.
-    parallel : bool, optional
-        Whether to enable parallel writing, if true multiple files will be written
-            with a suffix .{n}.nc where n is the part number starting from 1. Default is False.
+
 
     Returns
     -------
@@ -113,6 +119,7 @@ def write_netcdf(
             file=file,
             data=data,
             unlimited_dim=unlimited_dim,
+            batch_size=batch_size,
             format=format,
             shuffle=shuffle,
             zlib=zlib,
@@ -126,6 +133,7 @@ def write_netcdf(
             file=file,
             data=data,
             unlimited_dim=unlimited_dim,
+            batch_size=batch_size,
             format=format,
             shuffle=shuffle,
             zlib=zlib,
