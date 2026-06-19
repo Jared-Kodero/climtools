@@ -47,6 +47,9 @@ class MapPlot:
         return _mapplot__repr(self)
 
 
+pad_quiver_key: list[bool | None] = [None, None]
+
+
 def _mapplot__repr(obj: MapPlot) -> str:
     parts = []
     for f in fields(obj):
@@ -77,10 +80,9 @@ def quiver(
     x: str = "lon",
     y: str = "lat",
     ax: plt.Axes | cgeo.GeoAxes = None,
-    subsample: int = 1,
+    subsample: tuple[int] | list[int] = (1, 1),
     add_key: bool = True,
     subplots: bool = False,
-    cax_kwargs: dict = None,
     **kwargs,
 ):
     """
@@ -98,15 +100,14 @@ def quiver(
         name of y dimension in data. Default is "lat".
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
         The axis to plot on. If None, the current axis is used.
-    subsample : int, optional
-        The subsample size for plotting points to reduce overplotting. Default is 1.
+    subsample : int or tuple of int, optional
+        The subsample size for plotting points to reduce overplotting (x,y)
     add_key : bool, optional
         Whether to add a quiver key. Default is True.
-    cax_kwargs : dict, optional
-        Additional keyword arguments for the colorbar axes when adding a quiver key. Default is None.
 
     **kwargs
-        Additional keyword arguments for the quiver plot.
+        Keyword arguments forwarded. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
 
     Returns
     -------
@@ -120,10 +121,16 @@ def quiver(
     key_magnitude = kwargs.pop("key_magnitude", None)
     key_units = kwargs.pop("key_units", None)
 
-    if subsample > 1:
-        sel = {x: slice(None, None, subsample), y: slice(None, None, subsample)}
-        u = u.isel(sel)
-        v = v.isel(sel)
+    if isinstance(subsample, int):
+        subsample = (subsample, subsample)
+
+    if len(subsample) > 2:
+        raise ValueError("subsample must be a tuple or list with at most 2 elements")
+
+    sel = {x: slice(None, None, subsample[0]), y: slice(None, None, subsample[1])}
+
+    u = u.isel(sel)
+    v = v.isel(sel)
 
     x_vals = u.coords[x]
     y_vals = u.coords[y]
@@ -165,7 +172,7 @@ def quiver(
             axes=ax,
             orientation="horizontal",
             subplots=subplots,
-            cax_kwargs=cax_kwargs,
+            adjust=False,
         )
         bbox = cax.get_position()
         cax.remove()
@@ -175,7 +182,7 @@ def quiver(
         key_x_ax = 0.100
         key_y_ax = -0.045
 
-        if cax_kwargs is not None:
+        if pad_quiver_key != [None, None]:
             key_x_ax, key_y_ax = ax.transAxes.inverted().transform(
                 fig.transFigure.transform((bbox.x0, bbox.y0))
             )
@@ -221,6 +228,7 @@ def colorbar(
     fig: plt.Figure | None = None,
     mappable: ScalarMappable | None = None,
     orientation: str = "vertical",
+    subplots: bool = False,
     adjust: bool = True,
     cax: plt.Axes | None = None,
     drawedges: bool = False,
@@ -228,7 +236,6 @@ def colorbar(
     cbar_label: str = None,
     ticks: np.ndarray | list = None,
     tick_labels: list[str] | None = None,
-    cax_kwargs: dict = None,
 ):
     """
     Add a colorbar to a Cartopy axis.
@@ -245,6 +252,8 @@ def colorbar(
         The axis to use for the colorbar. If None, a new axis will be created.  Default is None.
     orientation : str, optional
         The orientation of the colorbar. Default is "vertical".
+    subplots : bool, optional
+        If True, position the colorbar relative to a grid of subplots. Requires axes.
     adjust : bool, optional
         Whether to call plt.tight_layout() before adding the colorbar. Default is True.
     drawedges : bool, optional
@@ -257,6 +266,8 @@ def colorbar(
         The labels for the colorbar ticks. Default is None.
     cbar_label : str, optional
         The label for the colorbar. Default is "".
+
+
 
     Returns
     -------
@@ -271,7 +282,7 @@ def colorbar(
             axes=ax,
             orientation=orientation,
             adjust=adjust,
-            cax_kwargs=cax_kwargs,
+            subplots=subplots,
         )
 
     cbar = plt.colorbar(
@@ -351,7 +362,7 @@ def significance(
     alpha: float = 0.3,
     marker: str = None,
     edgecolors: str = None,
-    subsample: int = 1,
+    subsample: tuple[int] | list[int] = (1, 1),
     size: float = 0.25,
 ):
     """
@@ -373,8 +384,8 @@ def significance(
         Color of the points to plot. Default is "grey".
     alpha : float, optional
         Alpha transparency of the points. Default is 0.05.
-    subsample : int, optional
-        subsample size for plotting points to reduce overplotting. Default is 1 (plot all points).
+    subsample : int or tuple of int, optional
+        The subsample size for plotting points to reduce overplotting (x,y)
     marker : str, optional
         Marker style for the points. Default is None (default marker).
     edgecolors : str, optional
@@ -387,7 +398,18 @@ def significance(
 
     transform = _check_cartopy_axis(ax, {})
 
-    data = data.isel({y: slice(None, None, subsample), x: slice(None, None, subsample)})
+    if isinstance(subsample, int):
+        subsample = (subsample, subsample)
+
+    if len(subsample) > 2:
+        raise ValueError("subsample must be a tuple or list with at most 2 elements")
+
+    data = data.isel(
+        {
+            x: slice(None, None, subsample[0]),
+            y: slice(None, None, subsample[1]),
+        }
+    )
 
     pvalues = data.to_dataframe(name="pvalues").reset_index()
     pvalues = pvalues.query("pvalues < @level")
@@ -423,7 +445,6 @@ def _get_cax(
     subplots: bool = False,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     adjust: bool = True,
-    cax_kwargs: dict = None,
 ) -> plt.Axes:
     """
     Create a new set of axes for a colorbar by stealing space from the current axes.
@@ -438,8 +459,6 @@ def _get_cax(
         If True, position the colorbar relative to a grid of subplots. Requires axes.
     orientation : {"vertical", "horizontal"}, optional
         Colorbar orientation. Default "vertical".
-    cax_kwargs : dict, optional
-        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     Returns
     -------
@@ -447,20 +466,33 @@ def _get_cax(
         New axes for the colorbar.
     """
 
-    if subplots and axes is None:
-        raise ValueError("If subplots is True, axes and fig must be provided.")
+    def _has_visible_xtick_labels(ax: plt.Axes) -> bool:
+        return any(
+            label.get_visible() and bool(label.get_text().strip())
+            for label in ax.get_xticklabels()
+        )
+
+    def _has_visible_xlabel(ax: plt.Axes) -> bool:
+        label = ax.xaxis.label
+        return label.get_visible() and bool(ax.get_xlabel().strip())
+
+    def _has_subplots(fig=None):
+        axes = [ax for ax in fig.get_axes() if ax.get_label() != "<colorbar>"]
+        return len(axes) > 1
 
     if fig is None:
         fig = plt.gcf()
     if axes is None:
         axes = plt.gca()
 
+    if subplots is False:
+        subplots = _has_subplots(fig)
+
+    if subplots and axes is None:
+        raise ValueError("If subplots is True, axes and fig must be provided.")
+
     if adjust:
         plt.tight_layout()
-
-    cax_kwargs = cax_kwargs or {}
-    xticks = cax_kwargs.get("xticks")
-    xlabel = cax_kwargs.get("xlabel")
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         # Vertical uses y0, y_len, x1. Horizontal uses y0, x0, x_len.
@@ -469,6 +501,9 @@ def _get_cax(
         # fraction grows on larger figures. Scale the short dimension by
         # ref / size. Leave the long dimension (y_len, x_len) unscaled since it
         # tracks the axes extent.
+
+        xticks = pad_quiver_key[0] or _has_visible_xtick_labels(ax)
+        xlabel = pad_quiver_key[1] or _has_visible_xlabel(ax)
 
         ref_width = 5
         ref_height = 4.8
@@ -489,7 +524,12 @@ def _get_cax(
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         elif orientation == "horizontal":
-            y_pad = 0.1 if (xticks or xlabel) else 0.05
+            y_pad = 0.05
+
+            if xticks or xlabel:
+                pad_quiver_key[0] = True
+                pad_quiver_key[1] = True
+                y_pad = 0.1
 
             rightmost = x0
             width = x_len
@@ -578,13 +618,10 @@ def _get_label(
     name = cbar_label or long_name
     name = _escape_chars(str(name))
 
-    if not units:
+    if units is None or not str(units).strip():
         return name
 
-    if not units or str(units).strip():
-        return name
-
-    units = _escape_chars(units)
+    units = _escape_chars(str(units).strip())
 
     return rf"{name} [${units}$]"
 
@@ -776,7 +813,6 @@ def _faceted(
     rivers: bool = False,
     p_values: xr.DataArray = None,
     pvalue_kwargs: dict = None,
-    cax_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
@@ -880,6 +916,10 @@ def _faceted(
             gl.bottom_labels = True
             gl.left_labels = True
 
+            if ax is key_ax:
+                pad_quiver_key[0] = True
+                pad_quiver_key[1] = True
+
         if add_pvalues:
             significance(
                 data=p_values.sel(name_dict),
@@ -902,13 +942,7 @@ def _faceted(
     if col_wrap == 1:
         orientation = "horizontal"
 
-    cax = _get_cax(
-        fig=fg.fig,
-        axes=fg.axs,
-        orientation=orientation,
-        subplots=True,
-        cax_kwargs=cax_kwargs,
-    )
+    cax = _get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
     cb = fg.fig.colorbar(
         mappable,
         cax=cax,
@@ -986,7 +1020,6 @@ def map(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
-    cax_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
@@ -1090,17 +1123,15 @@ def map(
 
     pvalue_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_pvalues``. Options include
-        ``level: float``, ``color: str``, ``alpha: float`` , ``marker: str``, ``edgecolors: str`` , ``subsample:int``, ``size: float``
+        ``level: float``, ``color: str``, ``alpha: float`` , ``marker: str``, ``edgecolors: str`` , ``subsample: tuple[int] | list[int]``, ``size: float``
 
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: tuple[int] | list[int]``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
 
-    cax_kwargs : dict, optional
-        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
@@ -1200,13 +1231,13 @@ def map(
             zorder=1,
         )
 
-        cax_kwargs["xticks"] = True
-        cax_kwargs["xlabel"] = True
-
         gl.top_labels = False
         gl.right_labels = False
         gl.bottom_labels = True
         gl.left_labels = True
+
+        pad_quiver_key[0] = True
+        pad_quiver_key[1] = True
 
     q, qk, cb = None, None, None  # initialize to None in case not added
 
@@ -1218,7 +1249,6 @@ def map(
             u=u_component,
             v=v_component,
             ax=ax,
-            cax_kwargs=cax_kwargs,
             **quiver_kwargs,
         )
 
@@ -1235,7 +1265,6 @@ def map(
             extend=extend,
             cbar_label=cbar_label,
             adjust=False,
-            cax_kwargs=cax_kwargs,
         )
     return MapPlot(Figure=fig, Axes=ax, Plot=sm, Colorbar=cb, Quiver=q, QuiverKey=qk)
 
@@ -1535,11 +1564,8 @@ def anim(
         contain ``dim`` and align with ``da`` along that dimension.
 
     quiver_kwargs : dict, optional
-        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: int``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
+        Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: tuple[int] | list[int]``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
-
-    cax_kwargs : dict, optional
-        Keyword arguments forwarded to the colorbar axes creator. Options include ``xticks: bool``, ``xlabel: bool``, and any arguments accepted by ``_get_cax``.
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.

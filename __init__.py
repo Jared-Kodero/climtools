@@ -11,6 +11,7 @@ import sys
 import dask
 
 from . import cmaps as cmaps
+from . import progress as pg
 from . import pycdo as cdo
 from . import xgeo
 
@@ -24,7 +25,7 @@ from .tools import (
 
 if "ipykernel" in sys.modules:
     fix_vscode_widget()
-    dask.diagnostics.ProgressBar = xgeo.DaskProgressBar
+    dask.diagnostics.ProgressBar = pg.DaskProgressBar
 
     import matplotlib_inline as plt_inline
 

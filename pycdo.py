@@ -648,7 +648,7 @@ def mergetime(
     *,
     as_xarray: bool = False,
     delete_input: bool = False,
-    compression: str = "zip",
+    compression: str = "zip_4",
     datatype: str = "F32",
     n_threads: int | None = None,
 ) -> Path | xr.Dataset:
