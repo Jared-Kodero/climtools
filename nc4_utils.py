@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import shutil
 from pathlib import Path
 from typing import Any, Literal
 
@@ -8,6 +9,7 @@ import cftime
 import dask
 import netCDF4 as nc
 import numpy as np
+import pandas as pd
 import xarray as xr
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
@@ -23,45 +25,71 @@ def is_cftime(da: xr.DataArray) -> bool:
     return values.size > 0 and isinstance(values[0], cftime.datetime)
 
 
-def validate_time_units(
-    units_a: str | None, units_b: str | None, calendar: str | None = None
-) -> bool:
-    """Compare two CF time units strings by meaning, not by text."""
-    if units_a is None or units_b is None or units_a == units_b:
-        return True
-    try:
-        cal = calendar or "standard"
-        probes = cftime.num2date([0.0, 100.0], units_b, cal)
-        mapped = cftime.date2num(probes, units_a, cal)
-        return bool(np.allclose(np.asarray(mapped, dtype=float), [0.0, 100.0]))
-    except Exception:
-        return units_a == units_b
-
-
-def encode_time(
-    da: xr.DataArray, units: str = None, calendar: str = None, dtype: np.dtype = None
-):
+def encode_time(da: xr.DataArray):
     """Encode datetime64/cftime/timedelta64 to numeric CF values."""
-    if np.issubdtype(da.dtype, np.datetime64) or is_cftime(da):
+
+    if np.issubdtype(da.dtype, np.datetime64) and not is_cftime(da):
+        shape = da.shape
+
+        # Flatten so the pandas conversion runs on a 1-D axis, then reshape.
+        # pd.to_datetime does not operate element-wise on >1-D arrays.
+        flat = np.asarray(da.values).reshape(-1)
+
+        df_unix_sec = (
+            (pd.to_datetime(flat) - pd.Timestamp("1970-01-01"))
+            .astype("timedelta64[s]")
+            .astype("int64")
+        )
+
+        da = xr.DataArray(
+            pd.to_datetime(df_unix_sec, unit="s", origin="unix")
+            .to_numpy()
+            .reshape(shape),
+            dims=da.dims,
+            coords=da.coords,
+            attrs=da.attrs,
+        )
+
+        time_encoding = {
+            "dtype": "int64",
+            "units": "seconds since 1970-01-01 00:00:00",
+            "calendar": "proleptic_gregorian",
+        }
+        da.encoding.update(time_encoding)
+
         num, out_units, out_calendar = encode_cf_datetime(
-            da, units=units, calendar=calendar, dtype=dtype
+            da,
+            units=da.encoding["units"],
+            calendar=da.encoding["calendar"],
+            dtype=da.encoding["dtype"],
         )
         encoded = da.copy(data=num)
-        encoded.attrs = {**da.attrs, "units": out_units, "calendar": out_calendar}
+        encoded.attrs.update({"units": out_units, "calendar": out_calendar})
+        encoded.encoding.update({"units": out_units, "calendar": out_calendar})
         return encoded
-    if np.issubdtype(da.dtype, np.timedelta64):
-        num, out_units = encode_cf_timedelta(da, units=units, dtype=dtype)
+
+    elif is_cftime(da):
+        num, out_units, out_calendar = encode_cf_datetime(
+            da,
+            units=da.encoding["units"],
+            calendar=da.encoding["calendar"],
+            dtype=da.encoding["dtype"],
+        )
         encoded = da.copy(data=num)
-        encoded.attrs = {**da.attrs, "units": out_units}
+        encoded.attrs.update({"units": out_units, "calendar": out_calendar})
+        encoded.encoding.update({"units": out_units, "calendar": out_calendar})
+        return encoded
+
+    if np.issubdtype(da.dtype, np.timedelta64):
+        num, out_units = encode_cf_timedelta(
+            da, units=da.encoding["units"], dtype=da.encoding["dtype"]
+        )
+        encoded = da.copy(data=num)
+        encoded.attrs.update({"units": out_units})
+        encoded.encoding.update({"units": out_units})
         return encoded
 
     return da
-
-
-def cast_dtype(arr: np.ndarray, target: np.dtype):
-    if arr.dtype == target:
-        return arr
-    return arr.astype(target)
 
 
 def createVariable(
@@ -73,6 +101,8 @@ def createVariable(
     shuffle: bool = None,
     write_values: bool = False,
 ) -> nc.Variable:
+
+    # we need to use ecoding here
     missing = [d for d in da.dims if d not in ncf.dimensions]
     if missing:
         raise ValueError(
@@ -102,58 +132,6 @@ def createVariable(
     return ncvar
 
 
-def validateVariable(
-    ncf: nc.Dataset, da: xr.DataArray, dim: str, varname: str, exists: bool, enc: dict
-):
-
-    enc_units = enc.get("units")
-    enc_dtype = np.dtype(enc["dtype"]) if enc.get("dtype") is not None else None
-
-    time_like = (
-        np.issubdtype(da.dtype, np.datetime64)
-        or np.issubdtype(da.dtype, np.timedelta64)
-        or is_cftime(da)
-    )
-    if time_like:
-        units = calendar = on_disk_dtype = None
-        if exists:
-            ncv = ncf.variables[varname]
-            a = ncv.ncattrs()
-            units = ncv.getncattr("units") if "units" in a else None
-            calendar = ncv.getncattr("calendar") if "calendar" in a else None
-            on_disk_dtype = ncv.dtype
-
-        # time_encoding applies to the append coordinate only, and only
-        # to define it on first write. The file is authoritative once the
-        # coordinate exists.
-        if varname == dim:
-            enc_calendar = enc.get("calendar")
-
-            if exists:
-                if enc_units is not None and not validate_time_units(
-                    units, enc_units, calendar
-                ):
-                    raise ValueError(
-                        f"time_encoding units {enc_units!r} conflict with units {units!r} already stored for {varname!r} "
-                    )
-                if (
-                    enc_calendar is not None
-                    and calendar is not None
-                    and enc_calendar != calendar
-                ):
-                    raise ValueError(
-                        f"time_encoding calendar {enc_calendar!r} conflicts with calendar {calendar!r} stored for {varname!r} on file"
-                    )
-            else:
-                units = enc_units if units is None else units
-                calendar = enc_calendar if calendar is None else calendar
-                if on_disk_dtype is None:
-                    on_disk_dtype = enc_dtype
-
-        da = encode_time(da, units, calendar, on_disk_dtype)
-    return da
-
-
 def serial_write_netcdf(
     file: Path,
     data: xr.Dataset,
@@ -170,11 +148,6 @@ def serial_write_netcdf(
     file = Path(file)
     file.unlink(missing_ok=True)
 
-    enc = {
-        v: {"zlib": zlib, "complevel": complevel, "shuffle": shuffle}
-        for v in data.data_vars
-    }
-
     dim0 = unlimited_dim if unlimited_dim is not None else next(iter(data.sizes))
 
     if dim0 not in data.sizes:
@@ -188,9 +161,18 @@ def serial_write_netcdf(
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}.")
 
+    for v in set(list(data.data_vars) + list(data.coords) + [dim0]):
+        data[v] = encode_time(data[v])
+
     # First write defines the file, dimensions, variables, attrs, and encodings.
     # Keep this as a single record.
+
     data0 = data.isel({dim0: slice(0, 1)})
+
+    enc = {
+        v: {"zlib": zlib, "complevel": complevel, "shuffle": shuffle}
+        for v in data0.data_vars
+    }
 
     data0.to_netcdf(
         file,
@@ -226,7 +208,7 @@ def serial_write_netcdf(
 
 
 def parallel_write_netcdf(
-    file,
+    path,
     data,
     unlimited_dim: str = None,
     batch_size: int = 1,
@@ -240,10 +222,15 @@ def parallel_write_netcdf(
     # Parallel write by sharding along one dimension.
     # Users can reconstruct with xr.open_mfdataset until true parallel NetCDF4 writes are supported.
 
-    file = Path(file)
+    path = Path(path)
 
-    directory = file.parent / file.stem
-    directory.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+    path.mkdir(parents=True, exist_ok=True)
 
     dim0 = unlimited_dim if unlimited_dim is not None else next(iter(data.sizes))
 
@@ -255,39 +242,29 @@ def parallel_write_netcdf(
     if n_items < 1:
         raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
 
-    target_file_size_gb = 4.0
-    target_file_size_bytes = int(target_file_size_gb * 1024**3)
+    max_workers = max(1, n_cpus // 2)
 
-    estimated_uncompressed_bytes = max(int(data.nbytes), 1)
+    target_file_size_bytes = int(4.0 * 1024**3)
 
-    if zlib:
-        compression_level = max(0, min(int(complevel), 9))
-        compression_factor = 4.0 + float(compression_level)
-    else:
-        compression_factor = 1.0
+    payload_bytes = sum(data[v].nbytes for v in data.data_vars)
+    coord_bytes = sum(data[c].nbytes for c in data.coords)
 
+    compression_ratio = 1.0 if not zlib else complevel
     estimated_output_bytes = math.ceil(
-        estimated_uncompressed_bytes / compression_factor
+        (payload_bytes + coord_bytes) / compression_ratio
     )
 
-    n_files = max(
-        1,
-        math.ceil(estimated_output_bytes / target_file_size_bytes),
-    )
-    n_files = min(n_files, n_items)
+    n_files = math.ceil(estimated_output_bytes / target_file_size_bytes)
+    n_files = max(1, min(n_files, n_items, max_workers))
 
     chunk_size = math.ceil(n_items / n_files)
 
-    slices = [
-        (start, min(start + chunk_size, n_items))
+    chunks = [
+        {dim0: slice(start, min(start + chunk_size, n_items))}
         for start in range(0, n_items, chunk_size)
     ]
 
-    width = max(2, len(str(len(slices))))
-
-    output_files = [
-        directory / f"{file.stem}.{i + 1:0{width}d}.nc" for i in range(len(slices))
-    ]
+    output_files = [path / f"{i}" for i in range(len(chunks))]
 
     for output_file in output_files:
         output_file.unlink(missing_ok=True)
@@ -295,7 +272,7 @@ def parallel_write_netcdf(
     tasks = [
         dask.delayed(serial_write_netcdf)(
             output_file,
-            data.isel({dim0: slice(start, end)}),
+            data.isel(chunk),
             dim0,
             batch_size,
             format,
@@ -305,11 +282,9 @@ def parallel_write_netcdf(
             False,
             stdout,
         )
-        for output_file, (start, end) in zip(output_files, slices)
+        for output_file, chunk in zip(output_files, chunks)
     ]
 
-    # Worker count is a concurrency decision.
-    max_workers = max(1, n_cpus // 2)
     n_workers = min(len(tasks), max_workers)
 
     if show_progress:
@@ -330,7 +305,6 @@ def append_to_netcdf(
     shuffle: bool = None,
     zlib: bool = None,
     complevel: int = None,
-    encoding: dict = None,
 ) -> None:
     """Append a Dataset along an unlimited dimension.
 
@@ -361,8 +335,6 @@ def append_to_netcdf(
         Whether to apply zlib compression to the variable. If None, the default compression settings are used.
     complevel : int, optional
         Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
-    encoding : dict, optional
-        Encoding dict for the coordinate specified by ``unlimited_dim``.
     """
 
     if isinstance(data, xr.DataArray):
@@ -374,8 +346,6 @@ def append_to_netcdf(
         raise ValueError(f"Append dimension {dim!r} not present in the data")
 
     n_new = ds.sizes[dim]
-
-    enc = encoding or dict(data[dim].encoding)
 
     with nc.Dataset(file, mode=mode, format=format) as ncf:
         if dim not in ncf.dimensions:
@@ -392,8 +362,6 @@ def append_to_netcdf(
 
         for varname, da in {**ds.coords, **ds.data_vars}.items():
             exists = varname in ncf.variables
-
-            da = validateVariable(ncf, da, dim, varname, exists, enc)
             # Static variables: write once on creation, then leave untouched.
             if dim not in da.dims:
                 if not exists:
@@ -422,7 +390,9 @@ def append_to_netcdf(
 
             ncvar = ncf.variables[varname]
             arr = da.transpose(*ncvar.dimensions).values
-            arr = cast_dtype(arr, ncvar.dtype)
+
+            if ncvar.dtype != arr.dtype:
+                arr = arr.astype(ncvar.dtype)
 
             index = tuple(
                 slice(offset, offset + n_new) if d == dim else slice(None)
@@ -485,3 +455,43 @@ def write_netcdf_variable(
             )
 
             ncvar[:] = da.values
+
+
+def open_dataset(
+    path: str | Path,
+    *,
+    combine: str = "by_coords",
+    engine: str = "netcdf4",
+    concat_dim: str | None = None,
+    chunks: dict | str = None,
+    parallel: bool = False,
+    **kwargs,
+) -> xr.Dataset:
+    """
+    Open a NetCDF dataset.
+    """
+
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"File or directory not found : {path}")
+
+    if not path.is_dir():
+        return xr.open_dataset(
+            path,
+            engine=engine,
+            chunks=chunks,
+            **kwargs,
+        )
+
+    files = list(path.glob("*"))
+
+    file_ids = sorted([int(f.name) for f in files])
+    files = [path / str(i) for i in file_ids]
+
+    open_kwargs = {"engine": engine, "combine": combine, "parallel": parallel, **kwargs}
+    open_kwargs["chunks"] = "auto" if chunks is None else chunks
+    if concat_dim is not None:
+        open_kwargs["concat_dim"] = concat_dim
+
+    return xr.open_mfdataset(files, **open_kwargs)

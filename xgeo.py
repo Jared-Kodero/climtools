@@ -19,6 +19,7 @@ from . import plotting as plot
 from . import theming as theme
 from .nc4_utils import (
     append_to_netcdf,
+    open_dataset,
     parallel_write_netcdf,
     serial_write_netcdf,
     write_netcdf_variable,
@@ -33,19 +34,20 @@ warnings.filterwarnings("ignore")
 
 
 __all__ = [
-    "SetupDask",
     "DaskProgressBar",
     "SerialProgressBar",
-    "write_netcdf",
-    "append_to_netcdf",
-    "write_netcdf_variable",
-    "sel_transect",
-    "mask_land",
+    "SetupDask",
     "add_lst",
-    "remap",
-    "plot",
+    "append_to_netcdf",
     "calc",
+    "mask_land",
+    "open_dataset",
+    "plot",
+    "remap",
+    "sel_transect",
     "theme",
+    "write_netcdf",
+    "write_netcdf_variable",
 ]
 
 _script_dir = Path(__file__).resolve().parent
@@ -116,7 +118,7 @@ def write_netcdf(
 
     if parallel:
         parallel_write_netcdf(
-            file=file,
+            path=file,
             data=data,
             unlimited_dim=unlimited_dim,
             batch_size=batch_size,
