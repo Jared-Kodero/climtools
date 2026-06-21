@@ -80,7 +80,7 @@ def encode_time(da: xr.DataArray):
         encoded.encoding.update({"units": out_units, "calendar": out_calendar})
         return encoded
 
-    if np.issubdtype(da.dtype, np.timedelta64):
+    elif np.issubdtype(da.dtype, np.timedelta64):
         num, out_units = encode_cf_timedelta(
             da, units=da.encoding["units"], dtype=da.encoding["dtype"]
         )
@@ -292,8 +292,6 @@ def parallel_write_netcdf(
             dask.compute(*tasks, scheduler="processes", num_workers=n_workers)
     else:
         dask.compute(*tasks, scheduler="processes", num_workers=n_workers)
-
-    return output_files
 
 
 def append_to_netcdf(
