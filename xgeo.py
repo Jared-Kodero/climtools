@@ -15,6 +15,7 @@ import xarray as xr
 import xesmf as xe
 
 from . import calc_stats as calc
+from . import cmaps as cmaps
 from . import plotting as plot
 from . import theming as theme
 from .nc4_utils import (
@@ -34,6 +35,7 @@ warnings.filterwarnings("ignore")
 
 
 __all__ = [
+    "cmaps",
     "DaskProgressBar",
     "SerialProgressBar",
     "SetupDask",

@@ -242,7 +242,7 @@ def parallel_write_netcdf(
     if n_items < 1:
         raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
 
-    max_workers = max(1, n_cpus // 2)
+    max_workers = max(1, int(n_cpus * 0.70))  # leave some cores for other tasks
 
     target_file_size_bytes = int(4.0 * 1024**3)
 
