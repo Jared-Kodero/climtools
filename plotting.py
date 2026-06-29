@@ -10,6 +10,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass, fields
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,37 +34,7 @@ from matplotlib.quiver import Quiver, QuiverKey
 
 from .tools import AttrDict, get_fsig, ipykernel, n_cpus, tmp
 
-
-@dataclass(frozen=True, repr=False)
-class MapPlot:
-    Figure: Figure | None = None
-    Axes: Axes | cgeo.GeoAxes | np.ndarray | None = None
-    Plot: Artist | xr.plot.facetgrid.FacetGrid | None = None
-    Colorbar: Colorbar | None = None
-    Quiver: Quiver | list[Quiver] | None = None
-    QuiverKey: QuiverKey | list[QuiverKey] | None = None
-
-    def __repr__(self) -> str:
-        return _mapplot__repr(self)
-
-
 pad_quiver_key: list[bool | None] = [None, None]
-
-
-def _mapplot__repr(obj: MapPlot) -> str:
-    parts = []
-    for f in fields(obj):
-        value = getattr(obj, f.name)
-        if value is None:
-            continue
-        if isinstance(value, (np.ndarray, list)):
-            seq = value.ravel() if isinstance(value, np.ndarray) else value
-            count = value.size if isinstance(value, np.ndarray) else len(value)
-            elem = next((type(x).__name__ for x in seq if x is not None), "object")
-            parts.append(f"{f.name}={count} {elem}(s)")
-        else:
-            parts.append(f"{f.name}={type(value).__name__}")
-    return f"{type(obj).__name__}({', '.join(parts)})"
 
 
 def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
@@ -163,11 +134,12 @@ def quiver(
         if not key_magnitude:
             key_magnitude = _get_quiver_key_mag(u, v)
 
-        label = _get_label(key_magnitude, key_units)
-
+        label = f"{key_magnitude} {key_units}".strip()
         fig = ax.get_figure()
 
-        cax = _get_cax(
+        plt.subplots_adjust()
+
+        cax = get_cax(
             fig=fig,
             axes=ax,
             orientation="horizontal",
@@ -192,10 +164,16 @@ def quiver(
             ax.transAxes.transform((key_x_ax, key_y_ax))
         )
 
+        padx = 0
+        pady = 0
+        if "transform" in kwargs:
+            padx = 0.03 * (bbox.x1 - bbox.x0)  # add a small horizontal offset
+            pady = 0.03 * (bbox.y1 - bbox.y0)  # add a small vertical offset
+
         cax = fig.add_axes(
             [
-                key_x_fig,
-                key_y_fig - 0.5 * bbox.height,
+                key_x_fig + padx,
+                key_y_fig - 0.5 * bbox.height + pady,
                 bbox.width - key_x_fig,
                 bbox.height,
             ],
@@ -204,8 +182,8 @@ def quiver(
 
         qk = ax.quiverkey(
             q,
-            X=key_x_ax,
-            Y=key_y_ax,
+            X=key_x_ax + padx,
+            Y=key_y_ax + pady,
             U=key_magnitude,
             label=label,
             labelpos="E",
@@ -220,6 +198,7 @@ def quiver(
         cax.set_xticks([])
         cax.set_yticks([])
 
+    plt.sca(ax)
     return ax, q, qk
 
 
@@ -269,6 +248,7 @@ def colorbar(
 
 
 
+
     Returns
     -------
     matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
@@ -277,7 +257,7 @@ def colorbar(
     """
 
     if cax is None:
-        cax = _get_cax(
+        cax = get_cax(
             fig=fig,
             axes=ax,
             orientation=orientation,
@@ -411,7 +391,9 @@ def significance(
         }
     )
 
-    pvalues = data.to_dataframe(name="pvalues").reset_index()
+    data.name = "pvalues"
+    data = data.to_dataset()
+    pvalues = data.to_dataframe().reset_index()
     pvalues = pvalues.query("pvalues < @level")
     pvalues = pvalues.dropna()
 
@@ -438,7 +420,7 @@ def _check_cartopy_axis(ax, kwargs) -> dict:
     return kwargs
 
 
-def _get_cax(
+def get_cax(
     *,
     fig: plt.Figure = None,
     axes: plt.Axes = None,
@@ -588,42 +570,6 @@ def _get_cax(
     )
 
     return cax
-
-
-def _escape_chars(text: str) -> str:
-    """
-    Escape special characters in a string for use in Matplotlib labels.
-    """
-    escape_map = {
-        "\\": r"\\",
-        "$": r"\$",
-        "%": r"\%",
-        "_": r"\_",
-        "^": r"\^{}",
-        "{": r"\{",
-        "}": r"\}",
-        "&": r"\&",
-        "#": r"\#",
-    }
-
-    return "".join(escape_map.get(char, char) for char in text)
-
-
-def _get_label(
-    long_name: str,
-    units: str,
-    cbar_label: str = None,
-    format: bool = True,
-) -> str:
-    name = cbar_label or long_name
-    name = _escape_chars(str(name))
-
-    if units is None or not str(units).strip():
-        return name
-
-    units = _escape_chars(str(units).strip())
-
-    return rf"{name} [${units}$]"
 
 
 def _plot_method(data: xr.DataArray, method: str):
@@ -815,10 +761,16 @@ def _faceted(
     pvalue_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
+    colorbar_kwargs: dict = None,
     quiver_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
+
+    if col is None and row is None:
+        raise ValueError(
+            "At least one of 'col' or 'row' must be specified for faceting."
+        )
 
     if not x or not y:
         spatial = [d for d in da.dims if d not in (col, row)]
@@ -863,12 +815,15 @@ def _faceted(
     pkwargs.pop("kwargs")
     pkwargs.pop("figsize")
 
+    if not cbar_label:
+        cbar_label = f"{long_name} [{units}]"
+
     cbar_kwargs = {
         "shrink": 0.5,
         "orientation": orientation,
         "fraction": 0.05,
         "pad": 0.06,
-        "label": _get_label(f"{long_name}\n", units, cbar_label),
+        "label": cbar_label,
     }
 
     figsize = _facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
@@ -942,7 +897,7 @@ def _faceted(
     if col_wrap == 1:
         orientation = "horizontal"
 
-    cax = _get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
+    cax = get_cax(fig=fg.fig, axes=fg.axs, orientation=orientation, subplots=True)
     cb = fg.fig.colorbar(
         mappable,
         cax=cax,
@@ -951,17 +906,26 @@ def _faceted(
         drawedges=drawedges,
     )
 
-    cb.set_label(_get_label(f"{long_name}\n", units, cbar_label))
+    if colorbar_kwargs:
+        if colorbar_kwargs.get("ticks") is not None:
+            cb.set_ticks(colorbar_kwargs["ticks"])
+
+        if colorbar_kwargs.get("tick_labels") is not None:
+            cb.ax.set_yticklabels(colorbar_kwargs["tick_labels"])
+
+    cb.set_label(cbar_label)
 
     plt.tight_layout()
 
+    quiver_key = next((qk for qk in qk_list if qk is not None), None)
+
     return MapPlot(
-        Figure=fg.fig,
-        Axes=fg.axs,
-        Plot=fg,
-        Colorbar=cb,
-        Quiver=q_list,
-        QuiverKey=[qk for qk in qk_list if qk is not None][0],
+        figure=fg.fig,
+        axes=fg.axs,
+        facetgrid=fg,
+        colorbar=cb,
+        quiver=q_list if add_quiver else None,
+        quiver_key=quiver_key,
     )
 
 
@@ -1020,6 +984,7 @@ def map(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
+    colorbar_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> MapPlot:
@@ -1132,6 +1097,9 @@ def map(
         Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: tuple[int] | list[int]``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
 
+    colorbar_kwargs : dict, optional
+        Keyword arguments forwarded to ``plot_colorbar``. Options include ``orientation: str``, ``drawedges: bool``, ``extend: str``, ``ticks: list``, ``tick_labels: list of str``, ``cbar_label: str``, and any arguments accepted by ``plot_colorbar``.
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
@@ -1161,7 +1129,9 @@ def map(
         return _faceted(**locals())
 
     elif da.ndim > 3:
-        raise ValueError("DataArray must be 2D or 3D after squeezing.")
+        raise ValueError(
+            f"Expected a 2D or 3D DataArray after squeezing; got dimensions {da.dims!r}."
+        )
 
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
@@ -1253,8 +1223,12 @@ def map(
         )
 
     if add_colorbar:
-        cbar_label = _get_label(f"{long_name}\n", units, cbar_label)
+        if cbar_label is None:
+            cbar_label = f"{long_name} [{units}]"
+
         orientation = orientation or "vertical"
+        if not colorbar_kwargs:
+            colorbar_kwargs = {}
 
         cb = colorbar(
             fig=fig,
@@ -1265,8 +1239,9 @@ def map(
             extend=extend,
             cbar_label=cbar_label,
             adjust=False,
+            **colorbar_kwargs,
         )
-    return MapPlot(Figure=fig, Axes=ax, Plot=sm, Colorbar=cb, Quiver=q, QuiverKey=qk)
+    return MapPlot(figure=fig, axes=ax, artist=sm, colorbar=cb, quiver=q, quiver_key=qk)
 
 
 def _ffmpeg_encode(
@@ -1452,6 +1427,7 @@ def anim(
     rivers: bool = False,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
+    colorbar_kwargs: dict = None,
     quiver_kwargs: dict = None,
     cyclic: bool = False,
     indices: tuple | list | np.ndarray = None,
@@ -1566,6 +1542,10 @@ def anim(
     quiver_kwargs : dict, optional
         Keyword arguments forwarded to ``plot_quiver``. Options inclued ``subsample: tuple[int] | list[int]``, ``key_magnitude: int|float``, ``scale:int``, ``key_units: str``, and any arguments accepted by ``plot_quiver``.
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+
+    colorbar_kwargs : dict, optional
+        Keyword arguments forwarded to ``plot_colorbar``. Options include ``orientation: str``, ``drawedges: bool``, ``extend: str``, ``ticks: list``, ``tick_labels: list of str``, ``cbar_label: str``, and any arguments accepted by ``plot_colorbar``.
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
 
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.
@@ -1712,3 +1692,49 @@ def anim(
         )
     else:
         raise RuntimeError("Animation encoding failed")
+
+
+@dataclass(frozen=True, repr=False)
+class MapPlot:
+    figure: Figure | None = None
+    axes: Axes | cgeo.GeoAxes | np.ndarray | None = None
+    artist: Artist = None
+    facetgrid: xr.plot.facetgrid.FacetGrid | None = None
+    colorbar: Colorbar | None = None
+    quiver: Quiver | list[Quiver] | None = None
+    quiver_key: QuiverKey | list[QuiverKey] | None = None
+
+    @wraps(significance)
+    def add_pvalues(self, pvalues: xr.DataArray, **kwargs):
+        return significance(pvalues, ax=self.Axes, **kwargs)
+
+    @wraps(quiver)
+    def add_quiver(self, u: xr.DataArray, v: xr.DataArray, **kwargs):
+        return quiver(u, v, ax=self.Axes, **kwargs)
+
+    @wraps(colorbar)
+    def add_colorbar(self, mappable: Artist, **kwargs):
+        return colorbar(fig=self.Figure, ax=self.Axes, mappable=mappable, **kwargs)
+
+    @wraps(xr.DataArray.plot.contour)
+    def add_contour(self, da: xr.DataArray, **kwargs):
+        return da.plot.contour(ax=self.Axes, **kwargs)
+
+    def __repr__(self) -> str:
+        return _mapplot__repr(self)
+
+
+def _mapplot__repr(obj: MapPlot) -> str:
+    parts = []
+    for f in fields(obj):
+        value = getattr(obj, f.name)
+        if value is None:
+            continue
+        if isinstance(value, (np.ndarray, list)):
+            seq = value.ravel() if isinstance(value, np.ndarray) else value
+            count = value.size if isinstance(value, np.ndarray) else len(value)
+            elem = next((type(x).__name__ for x in seq if x is not None), "object")
+            parts.append(f"{f.name}={count} {elem}(s)")
+        else:
+            parts.append(f"{f.name}={type(value).__name__}")
+    return f"{type(obj).__name__}({', '.join(parts)})"

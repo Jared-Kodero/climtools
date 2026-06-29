@@ -218,6 +218,7 @@ def parallel_write_netcdf(
     complevel: int = 4,
     show_progress: bool = True,
     stdout: Any = None,
+    n_files: int = None,
 ):
     # Parallel write by sharding along one dimension.
     # Users can reconstruct with xr.open_mfdataset until true parallel NetCDF4 writes are supported.
@@ -242,19 +243,21 @@ def parallel_write_netcdf(
     if n_items < 1:
         raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
 
-    max_workers = max(1, int(n_cpus * 0.70))  # leave some cores for other tasks
+    max_workers = max(1, n_cpus)
 
-    target_file_size_bytes = int(4.0 * 1024**3)
+    if n_files is None:
+        target_file_size_bytes = int(4.0 * 1024**3)
 
-    payload_bytes = sum(data[v].nbytes for v in data.data_vars)
-    coord_bytes = sum(data[c].nbytes for c in data.coords)
+        payload_bytes = sum(data[v].nbytes for v in data.data_vars)
+        coord_bytes = sum(data[c].nbytes for c in data.coords)
 
-    compression_ratio = 1.0 if not zlib else complevel
-    estimated_output_bytes = math.ceil(
-        (payload_bytes + coord_bytes) / compression_ratio
-    )
+        compression_ratio = 1.0 if not zlib else complevel
+        estimated_output_bytes = math.ceil(
+            (payload_bytes + coord_bytes) / compression_ratio
+        )
 
-    n_files = math.ceil(estimated_output_bytes / target_file_size_bytes)
+        n_files = math.ceil(estimated_output_bytes / target_file_size_bytes)
+
     n_files = max(1, min(n_files, n_items, max_workers))
 
     chunk_size = math.ceil(n_items / n_files)

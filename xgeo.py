@@ -71,6 +71,7 @@ def write_netcdf(
     complevel: int = 4,
     show_progress: bool = True,
     stdout: Any = None,
+    n_files: int = None,
 ) -> None:
     """
     Write an xarray Dataset to a NetCDF file using netCDF4 lib bypassing xarray's built-in overhead
@@ -107,6 +108,8 @@ def write_netcdf(
         Whether to display a progress bar while writing. Default is True.
     stdout : file-like, optional
         Stream to write the progress bar to. If None, uses sys.stdout.
+    n_files : int, optional
+        Number of files to split the output into when parallel is True.
 
 
     Returns
@@ -130,6 +133,7 @@ def write_netcdf(
             complevel=complevel,
             show_progress=show_progress,
             stdout=stdout,
+            n_files=n_files,
         )
 
     else:
