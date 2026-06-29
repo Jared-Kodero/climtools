@@ -19,9 +19,9 @@ from . import xgeo
 from .tools import (
     fix_vscode_widget,
 )
-# from .update import _self_update
+# # from .update import _self_update
 
-# _self_update()
+# # _self_update()
 
 if "ipykernel" in sys.modules:
     fix_vscode_widget()
