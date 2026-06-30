@@ -4,6 +4,7 @@ __all__ = [
     "cdo",
     "cmaps",
     "xgeo",
+    "n_cpus",
 ]
 
 import sys
@@ -18,10 +19,11 @@ from . import xgeo
 # import cmaps as _cmaps --- IGNORE ---
 from .tools import (
     fix_vscode_widget,
+    n_cpus,
 )
-# # from .update import _self_update
+# from .update import _self_update
 
-# # _self_update()
+# _self_update()
 
 if "ipykernel" in sys.modules:
     fix_vscode_widget()

@@ -78,7 +78,7 @@ def apply(
     context: Literal["paper", "notebook", "talk", "poster"] = "paper",
     style: str = "ticks",
     spine: bool = True,
-    **kwargs,
+    rc: dict = None,
 ):
     """
     Configure the global matplotlib and seaborn theme for publication-quality plots.
@@ -117,7 +117,7 @@ def apply(
         Seaborn style to use. Options include "darkgrid", "whitegrid", "dark", "white", and "ticks". Default is "ticks".
     spine: bool, default False
         If True, top and left spines are removed.
-    kwargs
+    rc : dict, optional
         Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
 
     """
@@ -173,7 +173,8 @@ def apply(
     if fig_size:
         _rc["figure.figsize"] = fig_size
 
-    _rc.update(kwargs)
+    if rc:
+        _rc.update(rc)
 
     sns.set_theme(
         style=style,

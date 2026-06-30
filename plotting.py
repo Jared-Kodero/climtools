@@ -333,7 +333,8 @@ def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
 
 
 def significance(
-    data: xr.DataArray,
+    data: xr.DataArray | xr.Dataset,
+    name: str = "pvalues",
     x: str = "lon",
     y: str = "lat",
     ax: plt.Axes | cgeo.GeoAxes = None,
@@ -391,10 +392,15 @@ def significance(
         }
     )
 
-    data.name = "pvalues"
-    data = data.to_dataset()
+    if isinstance(data, xr.Dataset):
+        if name and name not in data.data_vars:
+            raise ValueError(f"Dataset does not contain a variable named '{name}'")
+        data = data[name]
+    elif isinstance(data, xr.DataArray):
+        data = xr.Dataset({name: data})
+
     pvalues = data.to_dataframe().reset_index()
-    pvalues = pvalues.query("pvalues < @level")
+    pvalues = pvalues.query(f"{name} < @level")
     pvalues = pvalues.dropna()
 
     if edgecolors is None:
