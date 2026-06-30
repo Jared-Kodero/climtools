@@ -167,8 +167,8 @@ def quiver(
         padx = 0
         pady = 0
         if "transform" in kwargs:
-            padx = 0.03 * (bbox.x1 - bbox.x0)  # add a small horizontal offset
-            pady = 0.03 * (bbox.y1 - bbox.y0)  # add a small vertical offset
+            padx = abs(0.03 * (bbox.x1 - bbox.x0))  # add a small horizontal offset
+            pady = abs(0.03 * (bbox.y1 - bbox.y0))  # add a small vertical offset
 
         cax = fig.add_axes(
             [
@@ -1326,14 +1326,14 @@ def _map_wrapper(
 
     faceted = local_kwargs.get("col") or local_kwargs.get("row")
     if faceted is None:
-        plot.Axes.set_title(title)
+        plot.axes.set_title(title)
     else:
-        plot.Figure.suptitle(title)
+        plot.figure.suptitle(title)
 
     plt.savefig(fname, dpi=dpi, bbox_inches="tight")
 
-    plot.Figure.clear()
-    plt.close(plot.Figure)
+    plot.figure.clear()
+    plt.close(plot.figure)
 
     return None
 

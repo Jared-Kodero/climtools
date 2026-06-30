@@ -25,10 +25,11 @@ from .tools import (
 
 # _self_update()
 
+
+dask.diagnostics.ProgressBar = pg.DaskProgressBar
+
 if "ipykernel" in sys.modules:
     fix_vscode_widget()
-    dask.diagnostics.ProgressBar = pg.DaskProgressBar
-
     import matplotlib_inline as plt_inline
 
     plt_inline.backend_inline.set_matplotlib_formats("retina")
