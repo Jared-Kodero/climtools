@@ -333,8 +333,7 @@ def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
 
 
 def significance(
-    data: xr.DataArray | xr.Dataset,
-    name: str = "pvalues",
+    data: xr.DataArray,
     x: str = "lon",
     y: str = "lat",
     ax: plt.Axes | cgeo.GeoAxes = None,
@@ -392,15 +391,13 @@ def significance(
         }
     )
 
-    if isinstance(data, xr.Dataset):
-        if name and name not in data.data_vars:
-            raise ValueError(f"Dataset does not contain a variable named '{name}'")
-        data = data[name]
-    elif isinstance(data, xr.DataArray):
-        data = xr.Dataset({name: data})
+    if isinstance(data, xr.DataArray):
+        data = xr.Dataset({"p_value": data})
+    else:
+        raise ValueError(f"data must be a xr.DataArray object, got {type(data)}")
 
     pvalues = data.to_dataframe().reset_index()
-    pvalues = pvalues.query(f"{name} < @level")
+    pvalues = pvalues.query("p_value < @level")
     pvalues = pvalues.dropna()
 
     if edgecolors is None:
@@ -763,7 +760,7 @@ def _faceted(
     land: bool = True,
     lakes: bool = False,
     rivers: bool = False,
-    p_values: xr.DataArray = None,
+    p_value: xr.DataArray = None,
     pvalue_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
@@ -784,7 +781,7 @@ def _faceted(
 
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
-    add_pvalues = p_values is not None
+    add_pvalues = p_value is not None
     pvalue_kwargs = pvalue_kwargs or {}
 
     if add_quiver and quiver_kwargs.get("key_magnitude") is None:
@@ -883,7 +880,7 @@ def _faceted(
 
         if add_pvalues:
             significance(
-                data=p_values.sel(name_dict),
+                data=p_value.sel(name_dict),
                 ax=ax,
                 **pvalue_kwargs,
             )
@@ -985,7 +982,7 @@ def map(
     land: bool = True,
     lakes: bool = False,
     rivers: bool = False,
-    p_values: xr.DataArray = None,
+    p_value: xr.DataArray = None,
     pvalue_kwargs: dict = None,
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
@@ -1088,7 +1085,7 @@ def map(
     lakes, rivers : bool, default False
         Switches controlling optional Cartopy inland water feature overlays.
 
-    p_values : xarray.DataArray, optional
+    p_value : xarray.DataArray, optional
         Pointwise p-value field. Values below the selected significance level
         are plotted as markers.
 
@@ -1141,7 +1138,7 @@ def map(
 
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
-    add_pvalues = p_values is not None
+    add_pvalues = p_value is not None
     pvalue_kwargs = pvalue_kwargs or {}
 
     long_name = da.attrs.get("long_name", "").title()
@@ -1218,7 +1215,7 @@ def map(
     q, qk, cb = None, None, None  # initialize to None in case not added
 
     if add_pvalues:
-        ax = significance(data=p_values, ax=ax, **pvalue_kwargs)
+        ax = significance(data=p_value, ax=ax, **pvalue_kwargs)
 
     if add_quiver:
         ax, q, qk = quiver(

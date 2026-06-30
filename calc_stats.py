@@ -339,13 +339,13 @@ def trends(
     return trends.compute(scheduler=dask_scheduler)
 
 
-def pvalues(
+def significance(
     a: Union[xr.DataArray, xr.Dataset],
     b: Union[xr.DataArray, xr.Dataset],
     dim: str = "time",
     *,
     data_var: str = None,
-) -> xr.Dataset:
+) -> xr.DataArray:
     """
     Calculate the significance of the difference between two datasets.
     Parameters:
@@ -357,10 +357,8 @@ def pvalues(
 
 
     Returns:
-        xr.Dataset: Dataset containing the significance test results.
+        xr.DataArray: DataArray containing the P-values of the significance test for the difference between the two datasets.
     """
-
-    res = xr.Dataset()
 
     dims_a = list(a.dims)
     dims_b = list(b.dims)
@@ -392,25 +390,16 @@ def pvalues(
     a = a.transpose(dim, ...)
     b = b.transpose(dim, ...)
 
-    t_stat, p_values = stats.ttest_ind(a, b, axis=0, equal_var=False, nan_policy="omit")
+    _, p_value = stats.ttest_ind(a, b, axis=0, equal_var=False, nan_policy="omit")
 
     a = a.mean(dim=dim).squeeze(drop=True)
     b = b.mean(dim=dim).squeeze(drop=True)
 
-    p_values = xr.DataArray(data=p_values, coords=a.coords, dims=b.dims)
-    t_stats = xr.DataArray(data=t_stat, coords=a.coords, dims=b.dims)
+    p_value = xr.DataArray(data=p_value, coords=a.coords, dims=b.dims)
 
-    res["p_values"] = p_values
-
-    res["p_values"].attrs = {
+    p_value.attrs = {
         "long_name": "p_value",
         "description": "p-value of the significance test",
     }
 
-    res["t_stats"] = t_stats
-    res["t_stats"].attrs = {
-        "long_name": "t_stat",
-        "description": "t-statistic of the significance test",
-    }
-
-    return res
+    return p_value
