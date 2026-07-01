@@ -167,8 +167,8 @@ def quiver(
         padx = 0
         pady = 0
         if "transform" in kwargs:
-            padx = abs(0.03 * (bbox.x1 - bbox.x0))  # add a small horizontal offset
-            pady = abs(0.03 * (bbox.y1 - bbox.y0))  # add a small vertical offset
+            padx = abs(0.05 * (bbox.x1 - bbox.x0))  # add a small horizontal offset
+            pady = abs(0.05 * (bbox.y1 - bbox.y0))  # add a small vertical offset
 
         cax = fig.add_axes(
             [
