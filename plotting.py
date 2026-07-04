@@ -1377,7 +1377,7 @@ def _validate_animation_inputs(
     return data, u_component, v_component
 
 
-def anim(
+def animate(
     da: xr.DataArray,
     dim: str = "time",
     *,
