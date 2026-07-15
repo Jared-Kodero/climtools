@@ -371,7 +371,7 @@ def significance(
     size: float = 0.25,
 ):
     """
-    Plot p-values on a Cartopy axis.
+    Plot significance levels on a Cartopy axis.
 
     Parameters
     ----------
@@ -804,8 +804,7 @@ def _faceted(
         )
 
     if not x or not y:
-        spatial = [d for d in da.dims if d not in (col, row)]
-        x, y = spatial
+        x, y = _get_lon_lat(da)
 
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
@@ -1444,7 +1443,7 @@ def animate(
     col_wrap: int = None,
     figsize: tuple[float, float] = None,
     method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
+        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
     ] = "default",
     projection: Literal[
         "PlateCarree",
@@ -1769,31 +1768,6 @@ class Mapplot:
     chainable overlays through the ``add`` namespace. Faceted plots are handled
     transparently: each overlay is drawn on every populated facet after selecting
     the matching slice from the overlay field.
-
-    Examples
-    --------
-    >>> (
-    ...     xg.plot.map(
-    ...         departure,
-    ...         method="pcolormesh",
-    ...         col="lag_hours",
-    ...         col_wrap=3,
-    ...         cmap="RdBu_r",
-    ...         levels=levels,
-    ...         extend="both",
-    ...     )
-    ...     .add.contour(
-    ...         height,
-    ...         method="contour",
-    ...         levels=line_levels,
-    ...         colors="black",
-    ...         linewidths=0.7,
-    ...         clabel=True,
-    ...         clabel_fmt="%1.0f",
-    ...     )
-    ...     .add.quiver(u, v)
-    ...     .add.pvalues(p_value, level=0.05)
-    ... )
     """
 
     def __init__(self, primitives: dict):
@@ -1805,7 +1779,7 @@ class Mapplot:
         self.quiver: Quiver | list[Quiver] | None = primitives["quiver"]
         self.quiver_key: QuiverKey | list[QuiverKey] | None = primitives["quiver_key"]
         self.layers: list[dict] = []
-        self.add = _Adder(self)
+        self.add = Adder(self)
 
     def _iter_axes(self):
         """Yield ``(axis, selector)`` pairs for each populated map axis."""
@@ -1829,8 +1803,8 @@ class Mapplot:
         return _map_repr(self)
 
 
-class _Adder:
-    """Typed overlay namespace exposed as ``mapplot.add``."""
+class Adder:
+    """Add layers to mapplot"""
 
     __slots__ = ("_map",)
 
@@ -1847,6 +1821,8 @@ class _Adder:
         self,
         da: xr.DataArray,
         *,
+        x: str = None,
+        y: str = None,
         method: Literal["contour", "contourf"] = "contour",
         levels: int | list = None,
         colors: str | list = None,
@@ -1866,8 +1842,6 @@ class _Adder:
         clabel_inline: bool = True,
         clabel_colors: str = None,
         clabel_kwargs: dict = None,
-        x: str = None,
-        y: str = None,
         **kwargs,
     ) -> Mapplot:
         """Add a line or filled-contour overlay and return the parent map.
@@ -2070,7 +2044,7 @@ class _Adder:
         )
         return self._map
 
-    def pvalues(
+    def significance(
         self,
         pvalues: xr.DataArray,
         *,
@@ -2226,7 +2200,7 @@ def map(
     col_wrap: int = None,
     figsize: tuple[float, float] = None,
     method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
+        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
     ] = "default",
     projection: Literal[
         "PlateCarree",
