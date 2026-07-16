@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import math
-import shutil
 from pathlib import Path
 from typing import Any, Literal
 
 import cftime
-import dask
 import netCDF4 as nc
 import numpy as np
 import pandas as pd
 import xarray as xr
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
-from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus
+from .progress import SerialProgressBar
 
 
 def is_cftime(da: xr.DataArray) -> bool:
@@ -50,18 +46,11 @@ def encode_time(da: xr.DataArray):
             attrs=da.attrs,
         )
 
-        time_encoding = {
-            "dtype": "int64",
-            "units": "seconds since 1970-01-01 00:00:00",
-            "calendar": "proleptic_gregorian",
-        }
-        da.encoding.update(time_encoding)
-
         num, out_units, out_calendar = encode_cf_datetime(
             da,
-            units=da.encoding["units"],
-            calendar=da.encoding["calendar"],
-            dtype=da.encoding["dtype"],
+            units="seconds since 1970-01-01 00:00:00",
+            calendar="proleptic_gregorian",
+            dtype="int64",
         )
         encoded = da.copy(data=num)
         encoded.attrs.update({"units": out_units, "calendar": out_calendar})
@@ -205,96 +194,6 @@ def serial_write_netcdf(
             zlib=zlib,
             complevel=complevel,
         )
-
-
-def parallel_write_netcdf(
-    path,
-    data,
-    unlimited_dim: str = None,
-    batch_size: int = 1,
-    format: str = "NETCDF4",
-    shuffle: bool = True,
-    zlib: bool = True,
-    complevel: int = 4,
-    show_progress: bool = True,
-    stdout: Any = None,
-    n_files: int = None,
-):
-    # Parallel write by sharding along one dimension.
-    # Users can reconstruct with xr.open_mfdataset until true parallel NetCDF4 writes are supported.
-
-    path = Path(path)
-
-    if path.exists():
-        if path.is_file():
-            path.unlink()
-        elif path.is_dir():
-            shutil.rmtree(path)
-
-    path.mkdir(parents=True, exist_ok=True)
-
-    dim0 = unlimited_dim if unlimited_dim is not None else next(iter(data.sizes))
-
-    if dim0 not in data.sizes:
-        raise ValueError(f"{dim0!r} is not a dimension in data.")
-
-    n_items = data.sizes[dim0]
-
-    if n_items < 1:
-        raise ValueError(f"Cannot write an empty dimension: {dim0!r}.")
-
-    max_workers = max(1, n_cpus)
-
-    if n_files is None:
-        target_file_size_bytes = int(4.0 * 1024**3)
-
-        payload_bytes = sum(data[v].nbytes for v in data.data_vars)
-        coord_bytes = sum(data[c].nbytes for c in data.coords)
-
-        compression_ratio = 1.0 if not zlib else complevel
-        estimated_output_bytes = math.ceil(
-            (payload_bytes + coord_bytes) / compression_ratio
-        )
-
-        n_files = math.ceil(estimated_output_bytes / target_file_size_bytes)
-
-    n_files = max(1, min(n_files, n_items, max_workers))
-
-    chunk_size = math.ceil(n_items / n_files)
-
-    chunks = [
-        {dim0: slice(start, min(start + chunk_size, n_items))}
-        for start in range(0, n_items, chunk_size)
-    ]
-
-    output_files = [path / f"{i}" for i in range(len(chunks))]
-
-    for output_file in output_files:
-        output_file.unlink(missing_ok=True)
-
-    tasks = [
-        dask.delayed(serial_write_netcdf)(
-            output_file,
-            data.isel(chunk),
-            dim0,
-            batch_size,
-            format,
-            shuffle,
-            zlib,
-            complevel,
-            False,
-            stdout,
-        )
-        for output_file, chunk in zip(output_files, chunks)
-    ]
-
-    n_workers = min(len(tasks), max_workers)
-
-    if show_progress:
-        with DaskProgressBar(description="Writing NetCDF", stdout=stdout):
-            dask.compute(*tasks, scheduler="processes", num_workers=n_workers)
-    else:
-        dask.compute(*tasks, scheduler="processes", num_workers=n_workers)
 
 
 def append_to_netcdf(
@@ -456,43 +355,3 @@ def write_netcdf_variable(
             )
 
             ncvar[:] = da.values
-
-
-def open_dataset(
-    path: str | Path,
-    *,
-    combine: str = "by_coords",
-    engine: str = "netcdf4",
-    concat_dim: str | None = None,
-    chunks: dict | str = None,
-    parallel: bool = False,
-    **kwargs,
-) -> xr.Dataset:
-    """
-    Open a NetCDF dataset.
-    """
-
-    path = Path(path)
-
-    if not path.exists():
-        raise FileNotFoundError(f"File or directory not found : {path}")
-
-    if not path.is_dir():
-        return xr.open_dataset(
-            path,
-            engine=engine,
-            chunks=chunks,
-            **kwargs,
-        )
-
-    files = list(path.glob("*"))
-
-    file_ids = sorted([int(f.name) for f in files])
-    files = [path / str(i) for i in file_ids]
-
-    open_kwargs = {"engine": engine, "combine": combine, "parallel": parallel, **kwargs}
-    open_kwargs["chunks"] = "auto" if chunks is None else chunks
-    if concat_dim is not None:
-        open_kwargs["concat_dim"] = concat_dim
-
-    return xr.open_mfdataset(files, **open_kwargs)

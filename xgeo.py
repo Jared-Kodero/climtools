@@ -20,11 +20,10 @@ from . import plotting as plot
 from . import theming as theme
 from .nc4_utils import (
     append_to_netcdf,
-    open_dataset,
-    parallel_write_netcdf,
     serial_write_netcdf,
     write_netcdf_variable,
 )
+from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
 from .xgeo_utils import sel_transect_latlon, sel_transect_xy
@@ -43,8 +42,8 @@ __all__ = [
     "append_to_netcdf",
     "calc",
     "mask_land",
-    "open_dataset",
     "plot",
+    "preprocess_era5",
     "remap",
     "sel_transect",
     "theme",
@@ -64,14 +63,12 @@ def write_netcdf(
     unlimited_dim: str = None,
     *,
     batch_size: int = 1,
-    parallel: bool = False,
     format: str = "NETCDF4",
     shuffle: bool = True,
     zlib: bool = True,
     complevel: int = 4,
     show_progress: bool = True,
     stdout: Any = None,
-    n_files: int = None,
 ) -> None:
     """
     Write an xarray Dataset to a NetCDF file using netCDF4 lib bypassing xarray's built-in overhead
@@ -93,9 +90,6 @@ def write_netcdf(
     batch_size : int, optional
         Number of slices along the unlimited dimension to write in each batch.
         Default is 1 (write one slice at a time).
-    parallel : bool, optional
-        Whether to enable parallel writing, if true multiple files will be written
-            with a suffix .{n}.nc where n is the part number starting from 1. Default is False.
     format : str, optional
         NetCDF format passed to xarray and netCDF4. Default is "NETCDF4".
     shuffle : bool, optional
@@ -108,8 +102,6 @@ def write_netcdf(
         Whether to display a progress bar while writing. Default is True.
     stdout : file-like, optional
         Stream to write the progress bar to. If None, uses sys.stdout.
-    n_files : int, optional
-        Number of files to split the output into when parallel is True.
 
 
     Returns
@@ -121,22 +113,6 @@ def write_netcdf(
     if not isinstance(data, xr.Dataset):
         raise TypeError("data must be an xarray.Dataset, got %s." % type(data))
 
-    if parallel:
-        parallel_write_netcdf(
-            path=file,
-            data=data,
-            unlimited_dim=unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
-            n_files=n_files,
-        )
-
-    else:
         return serial_write_netcdf(
             file=file,
             data=data,
