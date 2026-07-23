@@ -1,5 +1,6 @@
 """
-Cartopy-based plotting utilities for xarray DataArrays, including faceted map plots with customizable features and styling.
+Cartopy-based plotting utilities for xarray DataArrays, including faceted map
+plots with customizable features and styling.
 """
 
 from __future__ import annotations
@@ -10,18 +11,18 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes as cgeo
+import dask
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
 from cartopy.util import add_cyclic_point
 from cf_xarray import *
-from dask import compute, delayed
 from IPython.display import DisplayHandle
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -31,15 +32,17 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.quiver import Quiver, QuiverKey
 
-from .tools import AttrDict, get_fsig, ipykernel, n_cpus, tmp
+from .progress import DaskProgressBar, SerialProgressBar
+from .tools import AttrDict, get_fsig, n_cpus, tmp
+from .xgeo_utils import to_lon180
 
 pad_quiver_key: list[bool | None] = [None, None]
 
 
 def _get_lon_lat(
     da: xr.DataArray | xr.Dataset,
-) -> tuple[xr.DataArray, xr.DataArray]:
-    """Return longitude and latitude coordinates."""
+) -> tuple[str, str]:
+    """Return the longitude and latitude coordinate names."""
     ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
 
     if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
@@ -48,15 +51,106 @@ def _get_lon_lat(
     lon = ds.cf["longitude"]
     lat = ds.cf["latitude"]
 
-    return lon, lat
+    if lon.name is None or lat.name is None:
+        raise ValueError(
+            "Could not determine longitude and latitude coordinate names, specify x and y"
+        )
+
+    return lon.name, lat.name
 
 
 def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
+    """Return a reference quiver-key magnitude from the 75th percentile speed."""
     mag = (u**2 + v**2) ** 0.5
     key_mag = np.round(mag.quantile(0.75, skipna=True).values)
     key_mag_int = int(key_mag)
     key_magnitude = key_mag_int if key_mag_int != 0 else np.round(key_mag, 3)
     return key_magnitude
+
+
+def _check_cartopy_axis(ax, kwargs) -> dict:
+    """Inject a ``PlateCarree`` data transform when ``ax`` is a GeoAxes."""
+    if isinstance(ax, cgeo.GeoAxes):
+        kwargs["transform"] = ccrs.PlateCarree()
+
+    return kwargs
+
+
+def _add_contour_labels(
+    ax: plt.Axes | cgeo.GeoAxes,
+    artist: Any,
+    *,
+    fmt: str = "%1.0f",
+    fontsize: float = 8,
+    inline: bool = True,
+    colors: str | None = None,
+    kwargs: dict | None = None,
+) -> Any:
+    """Label the line contours of ``artist`` on ``ax``.
+
+    Single point of definition for the ``Axes.clabel`` call shared by the
+    single-axis renderer, the faceted renderer, and the :class:`Adder` contour
+    overlay. Each contour set is labelled exactly once, from its own artist.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        Axis on which the contour artist is drawn.
+    artist : Any
+        Contour set returned by a ``contour`` plotting call.
+    fmt : str, default "%1.0f"
+        Contour-label format.
+    fontsize : float, default 8
+        Contour-label font size.
+    inline : bool, default True
+        Draw contour labels inline.
+    colors : str, optional
+        Contour-label color.
+    kwargs : dict, optional
+        Additional arguments forwarded to ``Axes.clabel``.
+
+    Returns
+    -------
+    list of matplotlib.text.Text
+        The label artists created by ``Axes.clabel``.
+    """
+    return ax.clabel(
+        artist,
+        fmt=fmt,
+        fontsize=fontsize,
+        inline=inline,
+        colors=colors,
+        **(kwargs or {}),
+    )
+
+
+def _add_gridlines(ax: cgeo.GeoAxes):
+    """Add labeled longitude/latitude gridlines with the shared module style.
+
+    Parameters
+    ----------
+    ax : cartopy.mpl.geoaxes.GeoAxes
+        Axis to which gridlines are added.
+
+    Returns
+    -------
+    cartopy.mpl.gridliner.Gridliner
+        The gridliner instance.
+    """
+    gl = ax.gridlines(
+        crs=ccrs.PlateCarree(),
+        draw_labels=True,
+        linewidth=0.5,
+        color="gray",
+        alpha=0.5,
+        linestyle="--",
+        zorder=1,
+    )
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.bottom_labels = True
+    gl.left_labels = True
+    return gl
 
 
 def quiver(
@@ -79,17 +173,18 @@ def quiver(
         The u-component of the vector field.
     v : xarray.DataArray
         The v-component of the vector field.
-    x: str, optional
-        name of x dimension in data. Default is "lon".
-    y: str, optional
-        name of y dimension in data. Default is "lat".
+    x : str, optional
+        Name of the x dimension in the data. Default is "lon".
+    y : str, optional
+        Name of the y dimension in the data. Default is "lat".
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
         The axis to plot on. If None, the current axis is used.
     subsample : int or tuple of int, optional
-        The subsample size for plotting points to reduce overplotting (x,y)
+        The subsample stride for plotting points to reduce overplotting (x, y).
     add_key : bool, optional
         Whether to add a quiver key. Default is True.
-
+    subplots : bool, optional
+        Whether the axis belongs to a grid of subplots. Default is False.
     **kwargs
         Additional keyword arguments. Accepted keys are
         ``key_magnitude: int | float`` (reference arrow length) and
@@ -100,9 +195,10 @@ def quiver(
 
     Returns
     -------
-    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
-        The axis with the quiver plot.
-
+    tuple
+        ``(ax, quiver, quiver_key)`` where ``ax`` is the axis, ``quiver`` is the
+        ``matplotlib.quiver.Quiver`` artist and ``quiver_key`` is the
+        ``matplotlib.quiver.QuiverKey`` or None when ``add_key`` is False.
     """
 
     ax = ax or plt.gca()
@@ -147,7 +243,6 @@ def quiver(
     qk = None
 
     if add_key:
-        # pop quiver key from kwargs,
         if key_units is None:
             u_units = u.attrs.get("units", "")
             v_units = v.attrs.get("units", "")
@@ -173,7 +268,6 @@ def quiver(
         cax.remove()
 
         # Desired quiver-key anchor in axes coordinates.
-
         key_x_ax = 0.100
         key_y_ax = -0.045
 
@@ -190,8 +284,6 @@ def quiver(
         padx = 0
         pady = 0
         if "transform" in kwargs:
-            # padx = abs(0.05 * (bbox.x1 - bbox.x0))  # add a small horizontal offset
-            # pady = abs(0.05 * (bbox.y1 - bbox.y0))  # add a small vertical offset
             padx = 0.05 * bbox.width
             pady = 0.05 * bbox.height
 
@@ -231,7 +323,7 @@ def colorbar(
     ax: plt.Axes | cgeo.GeoAxes,
     fig: plt.Figure | None = None,
     mappable: ScalarMappable | None = None,
-    orientation: str = "vertical",
+    orientation: Literal["vertical", "horizontal"] = "vertical",
     subplots: bool = False,
     adjust: bool = True,
     cax: plt.Axes | None = None,
@@ -240,7 +332,7 @@ def colorbar(
     cbar_label: str = None,
     ticks: np.ndarray | list = None,
     tick_labels: list[str] | None = None,
-):
+) -> Colorbar:
     """
     Add a colorbar to a Cartopy axis.
 
@@ -248,37 +340,35 @@ def colorbar(
     ----------
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
         The axis to add the colorbar to.
-    fig : matplotlib.figure.Figure
-        The figure to add the colorbar to.
-    mappable : matplotlib.cm.ScalarMappable or matplotlib.artist.ColorizingArtist, optional
+    fig : matplotlib.figure.Figure, optional
+        The figure to add the colorbar to. Defaults to the current figure.
+    mappable : matplotlib.cm.ScalarMappable, optional
         The mappable to create a colorbar for.
-    cax: matplotlib.axes.Axes, optional
-        The axis to use for the colorbar. If None, a new axis will be created.  Default is None.
-    orientation : str, optional
+    orientation : {"vertical", "horizontal"}, optional
         The orientation of the colorbar. Default is "vertical".
     subplots : bool, optional
-        If True, position the colorbar relative to a grid of subplots. Requires axes.
+        If True, position the colorbar relative to a grid of subplots.
     adjust : bool, optional
-        Whether to call plt.tight_layout() before adding the colorbar. Default is True.
+        Whether to call ``plt.tight_layout()`` before adding the colorbar.
+        Default is True.
+    cax : matplotlib.axes.Axes, optional
+        The axis to use for the colorbar. If None, a new axis is created.
     drawedges : bool, optional
         Whether to draw edges on the colorbar. Default is False.
-    extend : str, optional
+    extend : {"neither", "both", "min", "max"}, optional
         How to handle the colorbar extensions. Default is None.
-    ticks : list, optional
-        The ticks for the colorbar. Default is None.
-    tick_labels : list of str, optional
-        The labels for the colorbar ticks. Default is None.
     cbar_label : str, optional
-        The label for the colorbar. Default is "".
-
-
-
+        The label for the colorbar. Default is None.
+    ticks : sequence, optional
+        The tick positions for the colorbar. Default is None.
+    tick_labels : sequence of str, optional
+        The labels for the colorbar ticks, placed on the axis matching
+        ``orientation``. Default is None.
 
     Returns
     -------
-    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
-        The axis with the colorbar.
-
+    matplotlib.colorbar.Colorbar
+        The colorbar instance.
     """
 
     if cax is None:
@@ -303,7 +393,10 @@ def colorbar(
         cbar.set_ticks(ticks)
 
     if tick_labels is not None:
-        cbar.ax.set_yticklabels(tick_labels)
+        if orientation == "horizontal":
+            cbar.ax.set_xticklabels(tick_labels)
+        else:
+            cbar.ax.set_yticklabels(tick_labels)
 
     if cbar_label is not None:
         cbar.set_label(cbar_label)
@@ -321,13 +414,12 @@ def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
     obj : xarray.DataArray or xarray.Dataset
         The input DataArray or Dataset to which a cyclic point will be added.
     lon : str, optional
-        The name of the longitude dimension in the DataArray. Default is 'lon'.
+        The name of the longitude dimension. Default is "lon".
 
     Returns
     -------
     xarray.DataArray or xarray.Dataset
-        The DataArray or Dataset with a cyclic point added.
-
+        The object with a cyclic point added.
     """
 
     dataset = False
@@ -371,32 +463,38 @@ def significance(
     size: float = 0.25,
 ):
     """
-    Plot significance levels on a Cartopy axis.
+    Plot pointwise significance markers on a Cartopy axis.
 
     Parameters
     ----------
-    ax : cartopy.mpl.geoaxes.GeoAxesSubplot`
-        The Cartopy axis to plot on.
-    x: str, optional
-        name of x dimension in data. Default is "lon".
-    y: str, optional
-        name of y dimension in data. Default is "lat".
     data : xarray.DataArray
         The data array containing p-values.
+    x : str, optional
+        Name of the x dimension in the data. Default is "lon".
+    y : str, optional
+        Name of the y dimension in the data. Default is "lat".
+    ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes, optional
+        The axis to plot on. If None, the current axis is used.
     level : float, optional
-        The significance level to use for plotting. Points with p-values below this level will be plotted
+        The significance level. Points with p-values below this level are
+        plotted. Default is 0.05.
     color : str, optional
         Color of the points to plot. Default is "grey".
     alpha : float, optional
-        Alpha transparency of the points. Default is 0.05.
-    subsample : int or tuple of int, optional
-        The subsample size for plotting points to reduce overplotting (x,y)
+        Alpha transparency of the points. Default is 0.3.
     marker : str, optional
         Marker style for the points. Default is None (default marker).
     edgecolors : str, optional
-        Edge color for the points. Default is None.
-    s : float, optional
-        Size of the points to plot. Default is 1.
+        Edge color for the points. Default is None (falls back to ``color``).
+    subsample : int or tuple of int, optional
+        The subsample stride for plotting points to reduce overplotting (x, y).
+    size : float, optional
+        Size of the points to plot. Default is 0.25.
+
+    Returns
+    -------
+    matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
+        The axis with the significance markers.
     """
 
     ax = ax or plt.gca()
@@ -444,13 +542,6 @@ def significance(
     return ax
 
 
-def _check_cartopy_axis(ax, kwargs) -> dict:
-    if isinstance(ax, cgeo.GeoAxes):
-        kwargs["transform"] = ccrs.PlateCarree()
-
-    return kwargs
-
-
 def get_cax(
     *,
     fig: plt.Figure = None,
@@ -460,18 +551,21 @@ def get_cax(
     adjust: bool = True,
 ) -> plt.Axes:
     """
-    Create a new set of axes for a colorbar by stealing space from the current axes.
+    Create a new set of axes for a colorbar by stealing space from ``axes``.
 
     Parameters
     ----------
     fig : matplotlib.figure.Figure, optional
-        Figure to which the colorbar axes are added. Defaults to the current figure.
+        Figure to which the colorbar axes are added. Defaults to the current
+        figure.
     axes : matplotlib.axes.Axes or numpy.ndarray of Axes, optional
         Axes from which space is taken. Defaults to the current axes.
     subplots : bool, optional
-        If True, position the colorbar relative to a grid of subplots. Requires axes.
+        If True, position the colorbar relative to a grid of subplots.
     orientation : {"vertical", "horizontal"}, optional
         Colorbar orientation. Default "vertical".
+    adjust : bool, optional
+        Whether to call ``plt.tight_layout()`` first. Default is True.
 
     Returns
     -------
@@ -524,10 +618,6 @@ def get_cax(
         fig_w, fig_h = fig.get_size_inches()
         scale_w = ref_width / fig_w
         scale_h = ref_height / fig_h
-
-        # if not subplots:
-        #     scale_w = 1.0
-        #     scale_h = 1.0
 
         if orientation == "vertical":
             bottommost = y0
@@ -660,21 +750,6 @@ def _add_cartopy_features(
     return ax
 
 
-def _get_projection(
-    projection: str, central_longitude: float = None, central_latitude: float = None
-) -> dict:
-    proj_cls = getattr(ccrs, projection)
-    _cargs = get_fsig(proj_cls)
-    cargs = {}
-
-    if central_longitude is not None and "central_longitude" in _cargs:
-        cargs["central_longitude"] = central_longitude
-    if central_latitude is not None and "central_latitude" in _cargs:
-        cargs["central_latitude"] = central_latitude
-
-    return {"projection": proj_cls(**cargs)}
-
-
 def _resolve_map_aspect(
     da: xr.DataArray = None,
     extent: tuple = None,
@@ -684,8 +759,7 @@ def _resolve_map_aspect(
 ):
     """Resolve lon/lat plot aspect.
 
-    Priority: explicit map_aspect, then extent, then coordinate spans,
-    then grid shape.
+    Priority: extent, then coordinate spans, then grid shape.
     """
 
     if extent is not None:
@@ -709,9 +783,9 @@ def _bottom_left_axis(fg):
     """Return the lowest populated facet in the leftmost column, for any grid shape.
 
     Handles single-row, single-column, single-facet, and ragged (col_wrap)
-    layouts. fg.axs and fg.name_dicts are coerced to 2D of shape (nrow, ncol);
-    column 0 is the left edge and increasing row index moves downward. Returns
-    None if no facet is populated.
+    layouts. ``fg.axs`` and ``fg.name_dicts`` are coerced to 2D of shape
+    (nrow, ncol); column 0 is the left edge and increasing row index moves
+    downward. Returns None if no facet is populated.
     """
     name_dicts = np.atleast_2d(fg.name_dicts)
     axs = np.atleast_2d(fg.axs)
@@ -752,6 +826,86 @@ def _facet_figsize(
     return width, height
 
 
+def _get_projection(
+    projection: str,
+    longitude: xr.DataArray,
+    latitude: xr.DataArray,
+) -> tuple[Callable, str]:
+    lon_w = float(longitude.min().values)
+    lon_e = float(longitude.max().values)
+    lat_s = float(latitude.min().values)
+    lat_n = float(latitude.max().values)
+
+    lon_c = 0.5 * (lon_w + lon_e)
+    lat_c = 0.5 * (lat_s + lat_n)
+
+    true_scale_latitude = None
+    standard_parallels = None
+    cutoff = None
+
+    if not projection:
+        d_lon = lon_e - lon_w
+        d_lat = lat_n - lat_s
+
+        # Priority:
+        # 1. Near-global domains
+        # 2. Very wide domains
+        # 3. Polar domains
+        # 4. Equatorial or cross-equatorial domains
+        # 5. Midlatitude regional domains
+        if d_lon >= 300.0 and d_lat >= 120.0:
+            projection = "Robinson"
+
+        elif d_lon >= 300.0:
+            projection = "PlateCarree"
+
+        elif abs(lat_c) >= 70.0 or lat_n >= 85.0 or lat_s <= -85.0:
+            if lat_c >= 0.0:
+                projection = "NorthPolarStereo"
+                true_scale_latitude = float(np.clip(lat_c, 60.0, 89.0))
+            else:
+                projection = "SouthPolarStereo"
+                true_scale_latitude = float(np.clip(lat_c, -89.0, -60.0))
+
+        elif abs(lat_c) <= 25.0 or lat_s * lat_n < 0.0:
+            projection = "PlateCarree"
+
+        else:
+            projection = "LambertConformal"
+
+            # One-sixth rule; use the tangent case for a thin domain.
+            if d_lat < 1.0:
+                standard_parallels = (lat_c,)
+            else:
+                standard_parallels = (
+                    lat_s + d_lat / 6.0,
+                    lat_n - d_lat / 6.0,
+                )
+
+            cutoff = -30.0 if lat_c >= 0.0 else 30.0
+
+    proj_cls: ccrs.Projection = getattr(ccrs, projection)
+    available_args = get_fsig(proj_cls)
+    cargs = {}
+
+    if "central_longitude" in available_args:
+        cargs["central_longitude"] = lon_c
+
+    if "central_latitude" in available_args:
+        cargs["central_latitude"] = lat_c
+
+    if "cutoff" in available_args and cutoff is not None:
+        cargs["cutoff"] = cutoff
+
+    if "standard_parallels" in available_args and standard_parallels is not None:
+        cargs["standard_parallels"] = standard_parallels
+
+    if "true_scale_latitude" in available_args and true_scale_latitude is not None:
+        cargs["true_scale_latitude"] = true_scale_latitude
+
+    return proj_cls(**cargs), projection
+
+
 def _faceted(
     da: xr.DataArray,
     x: str = None,
@@ -761,7 +915,7 @@ def _faceted(
     col_wrap: int = None,
     figsize: tuple[float, float] = None,
     method: str = None,
-    projection: str = None,
+    ccrs_proj: str = None,
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -776,8 +930,6 @@ def _faceted(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
@@ -793,6 +945,12 @@ def _faceted(
     u_component: xr.DataArray = None,
     v_component: xr.DataArray = None,
     colorbar_kwargs: dict = None,
+    clabel: bool = False,
+    clabel_fmt: str = "%1.0f",
+    clabel_fontsize: float = 8,
+    clabel_inline: bool = True,
+    clabel_colors: str = None,
+    clabel_kwargs: dict = None,
     quiver_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
@@ -817,7 +975,7 @@ def _faceted(
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
 
-    projection = _get_projection(projection, central_longitude, central_latitude)
+    proj_obj, proj_name = _get_projection(ccrs_proj, da[x], da[y])
     transform = ccrs.PlateCarree()
     orientation = orientation or "horizontal"
 
@@ -829,6 +987,9 @@ def _faceted(
     all_args = dict(locals())
     all_args.update(kwargs)
 
+    for k in ("proj_name", "proj_obj"):
+        all_args.pop(k)
+
     pkwargs = {k: v for k, v in all_args.items() if k in pargs}
     pkwargs.update(
         {
@@ -838,15 +999,15 @@ def _faceted(
             "col": col,
             "row": row,
             "col_wrap": col_wrap,
-            "subplot_kws": projection,
+            "subplot_kws": {"projection": proj_obj},
         }
     )
 
-    pkwargs.pop("kwargs")
-    pkwargs.pop("figsize")
+    pkwargs.pop("kwargs", None)
+    pkwargs.pop("figsize", None)
 
     if not cbar_label:
-        cbar_label = f"{long_name} [{units}]"
+        cbar_label = f"{long_name}\n[{units}]"
 
     cbar_kwargs = {
         "shrink": 0.5,
@@ -859,19 +1020,41 @@ def _faceted(
     figsize = _facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
 
     fg = plot(figsize=figsize, cbar_kwargs=cbar_kwargs, **pkwargs)
-    mappable = fg._mappables[-1]
+
+    # One contour set per populated facet; label each from its own artist.
+    facet_mappables = list(fg._mappables)
+    mappable = facet_mappables[-1]
 
     if hasattr(fg, "cbar") and fg.cbar is not None:
         fg.cbar.remove()
 
     key_ax = _bottom_left_axis(fg)
 
-    q_list, qk_list, cb = [], [], None  # initialize to None in case not added
+    q_list, qk_list, cb = [], [], None  # initialize in case not added
+    populated = -1
 
-    for i, (ax, name_dict) in enumerate(zip(fg.axs.flat, fg.name_dicts.flat)):
+    for ax, name_dict in zip(fg.axs.flat, fg.name_dicts.flat):
         if name_dict is None:
             ax.remove()
             continue
+
+        populated += 1
+
+        if clabel and method == "contour":
+            facet_mappable = (
+                facet_mappables[populated]
+                if populated < len(facet_mappables)
+                else mappable
+            )
+            _add_contour_labels(
+                ax,
+                facet_mappable,
+                fmt=clabel_fmt,
+                fontsize=clabel_fontsize,
+                inline=clabel_inline,
+                colors=clabel_colors,
+                kwargs=clabel_kwargs,
+            )
 
         ax = _add_cartopy_features(
             ax,
@@ -887,20 +1070,7 @@ def _faceted(
         )
 
         if gridlines:
-            gl = ax.gridlines(
-                crs=ccrs.PlateCarree(),
-                draw_labels=True,
-                linewidth=0.5,
-                color="gray",
-                alpha=0.5,
-                linestyle="--",
-                zorder=1,
-            )
-            gl.top_labels = False
-            gl.right_labels = False
-            gl.bottom_labels = True
-            gl.left_labels = True
-
+            _add_gridlines(ax)
             if ax is key_ax:
                 pad_quiver_key[0] = True
                 pad_quiver_key[1] = True
@@ -941,7 +1111,10 @@ def _faceted(
             cb.set_ticks(colorbar_kwargs["ticks"])
 
         if colorbar_kwargs.get("tick_labels") is not None:
-            cb.ax.set_yticklabels(colorbar_kwargs["tick_labels"])
+            if orientation == "horizontal":
+                cb.ax.set_xticklabels(colorbar_kwargs["tick_labels"])
+            else:
+                cb.ax.set_yticklabels(colorbar_kwargs["tick_labels"])
 
     cb.set_label(cbar_label)
 
@@ -957,6 +1130,7 @@ def _faceted(
         "colorbar": cb,
         "quiver": q_list if add_quiver else None,
         "quiver_key": quiver_key,
+        "projection": proj_name,
     }
 
 
@@ -970,7 +1144,7 @@ def _cartplot(
     col_wrap: int = None,
     figsize: tuple[float, float] = None,
     method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow"
+        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
     ] = "default",
     projection: Literal[
         "PlateCarree",
@@ -983,7 +1157,7 @@ def _cartplot(
         "Stereographic",
         "NorthPolarStereo",
         "SouthPolarStereo",
-    ] = "PlateCarree",
+    ] = None,
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -998,8 +1172,6 @@ def _cartplot(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
@@ -1016,6 +1188,12 @@ def _cartplot(
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
     colorbar_kwargs: dict = None,
+    clabel: bool = False,
+    clabel_fmt: str = "%1.0f",
+    clabel_fontsize: float = 8,
+    clabel_inline: bool = True,
+    clabel_colors: str = None,
+    clabel_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> dict:
@@ -1025,114 +1203,79 @@ def _cartplot(
     This is the renderer behind :func:`map`. It draws a two-dimensional or
     faceted (three-dimensional) xarray DataArray on a Cartopy map and returns a
     dictionary of matplotlib and xarray artists. Callers normally use
-    :func:`map`, which wraps the returned artists in a :class:`Map`, rather than
-    calling this function directly.
+    :func:`map`, which wraps the returned artists in a :class:`Mapplot`, rather
+    than calling this function directly.
 
     Parameters
     ----------
     da : xarray.DataArray
-        Scalar field to plot. After ``squeeze()``, the array must be
-        2D or 3D and must contain longitude-latitude coordinates
-        compatible with a ``cartopy.crs.PlateCarree()`` data transform.
-
+        Scalar field to plot. After ``squeeze()`` the array must be 2D or 3D
+        and must contain longitude-latitude coordinates compatible with a
+        ``cartopy.crs.PlateCarree()`` data transform.
     x, y : str, optional
         Coordinate names passed to the selected xarray plotting method when
         supported.
-
     col, row : str, optional
         Faceting coordinate names passed to the selected xarray plotting method
         when supported.
-
     col_wrap : int, optional
-        Number of columns used when wrapping faceted subplots. Passed to the
-        selected xarray plotting method when supported.
-
+        Number of columns used when wrapping faceted subplots.
     figsize : tuple of float, optional
         Figure size in inches used when creating a new figure.
-
-    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+    method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}, default "default"
         Xarray plotting method used for the scalar field.
-
     projection : str, default "PlateCarree"
         Cartopy projection used when creating a new axis.
-
     cmap : str or matplotlib colormap, optional
         Colormap used for the scalar field.
-
-    norm : Any, optional
-        Matplotlib normalization object.
-
+    norm : matplotlib normalization, optional
+        Normalization applied to the field.
     vmin, vmax : float, optional
         Lower and upper scalar color limits.
-
     units : str, optional
         Units used for colorbar labeling. If omitted, inferred from
         ``da.attrs["units"]`` or ``da.name``.
-
     levels : int or sequence of float, optional
         Contour levels for contour-based methods.
-
     extend : {"neither", "both", "min", "max"}, optional
         Colorbar extension behavior.
-
     robust : bool, default False
-        Whether to request percentile-based color scaling when supported by
-        xarray.
-
+        Whether to request percentile-based color scaling when supported.
     rasterized : bool, default False
         Whether dense scalar artists should be rasterized when supported.
-
     title : str, optional
         Plot title.
-
     orientation : {"vertical", "horizontal"}, optional
         Colorbar orientation.
-
     add_colorbar : bool, default True
         Whether to add a colorbar when a new axis is created.
-
     drawedges : bool, default False
         Whether to draw edges between colorbar intervals.
-
     cbar_label : str, optional
         Explicit colorbar label. If omitted, a label is inferred from metadata.
-
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection constructor
-        when supported.
-
     global_extent : bool, default False
         If True, set the map extent to the full globe.
-
     set_extent : tuple of float, optional
-        Geographic extent as a tuple ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
-
+        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
     gridlines : bool, default False
         Whether to draw labeled longitude and latitude gridlines.
-
     coastlines, borders, states : bool, default True
         Switches controlling common Cartopy geographic feature overlays.
-
     ocean, land : bool, default True
         Switches controlling ocean and land background features.
-
     lakes, rivers : bool, default False
         Switches controlling optional Cartopy inland water feature overlays.
-
     p_value : xarray.DataArray, optional
         Pointwise p-value field. Values below the selected significance level
         are plotted as markers.
-
     pvalue_kwargs : dict, optional
         Keyword arguments forwarded to :func:`significance`. Accepted keys are
         ``level: float`` (significance threshold), ``color: str``,
         ``alpha: float``, ``marker: str``, ``edgecolors: str``,
         ``subsample: int | tuple[int, int]``, ``size: float`` (marker size),
         ``x: str`` and ``y: str`` (coordinate names).
-
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays.
-
     quiver_kwargs : dict, optional
         Keyword arguments forwarded to :func:`quiver`. Accepted keys are
         ``subsample: int | tuple[int, int]``, ``key_magnitude: int | float``
@@ -1141,7 +1284,6 @@ def _cartplot(
         ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
         ``color: str`` and ``width: float``. See
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
-
     colorbar_kwargs : dict, optional
         Keyword arguments forwarded to :func:`colorbar`. Accepted keys are
         ``ticks: sequence`` and ``tick_labels: sequence of str``. The
@@ -1149,11 +1291,21 @@ def _cartplot(
         through the top-level ``orientation``, ``drawedges``, ``extend`` and
         ``cbar_label`` arguments and must not be repeated here. See
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
-
+    clabel : bool, default False
+        Label line contours. Ignored for ``method="contourf"``.
+    clabel_fmt : str, default "%1.0f"
+        Contour-label format.
+    clabel_fontsize : float, default 8
+        Contour-label font size.
+    clabel_inline : bool, default True
+        Draw contour labels inline.
+    clabel_colors : str, optional
+        Contour-label color.
+    clabel_kwargs : dict, optional
+        Additional arguments forwarded to ``Axes.clabel``.
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
         dimension is assumed to be named ``"lon"``.
-
     **kwargs
         Additional keyword arguments forwarded to the selected xarray plotting
         method after signature filtering.
@@ -1162,7 +1314,8 @@ def _cartplot(
     -------
     dict
         Mapping with keys ``figure``, ``axes``, ``artist``, ``facetgrid``,
-        ``colorbar``, ``quiver`` and ``quiver_key``.
+        ``colorbar``, ``quiver``, ``quiver_key``, ``method``, ``base_artists`` and
+        ``contour_labels``.
 
     Notes
     -----
@@ -1170,15 +1323,24 @@ def _cartplot(
     transform. The display projection is controlled by ``projection``.
     """
 
+    if not x or not y:
+        x, y = _get_lon_lat(da)
+
     if cyclic:
-        da = make_cyclic(da, lon="lon")
+        da = make_cyclic(da, lon=x)
+
+    da = to_lon180(da, lon=x)
 
     da = da.squeeze()
 
     if da.ndim == 3:
-        return _faceted(**locals())
+        # Only ``da`` is mutated above, so every other local is a valid
+        # ``_faceted`` parameter. Drop the collected ``**kwargs`` dict and
+        # re-spread it so user-supplied plotting keywords are forwarded intact.
+        faceted_args = {k: v for k, v in locals().items() if k != "kwargs"}
+        return _faceted(**faceted_args, **kwargs)
 
-    elif da.ndim > 3:
+    if da.ndim > 3:
         raise ValueError(
             f"Expected a 2D or 3D DataArray after squeezing; got dimensions {da.dims!r}."
         )
@@ -1191,8 +1353,8 @@ def _cartplot(
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
 
-    projection = _get_projection(projection, central_longitude, central_latitude)
-    fig, ax = plt.subplots(subplot_kw=projection, figsize=figsize)
+    proj_obj, proj_name = _get_projection(projection, da[x], da[y])
+    fig, ax = plt.subplots(subplot_kw={"projection": proj_obj}, figsize=figsize)
     transform = ccrs.PlateCarree()
 
     ax = _add_cartopy_features(
@@ -1224,42 +1386,39 @@ def _cartplot(
         }
     )
 
-    for k in ("col", "row", "col_wrap", "figsize", "kwargs"):
-        pkwargs.pop(k)
+    for k in ("col", "row", "col_wrap", "figsize", "kwargs", "proj_name", "proj_obj"):
+        pkwargs.pop(k, None)
 
-    sm = plot(**pkwargs)
+    mp = plot(**pkwargs)
     if method in ["contour", "contourf"]:
-        if hasattr(sm, "set_edgecolor"):
-            sm.set_edgecolor("face")
+        if hasattr(mp, "set_edgecolor"):
+            mp.set_edgecolor("face")
 
-        if hasattr(sm, "set_rasterized"):
-            sm.set_rasterized(rasterized)
+        if hasattr(mp, "set_rasterized"):
+            mp.set_rasterized(rasterized)
         else:
-            for c in sm.collections:
+            for c in mp.collections:
                 c.set_rasterized(rasterized)
+
+    if clabel and method == "contour":
+        _add_contour_labels(
+            ax,
+            mp,
+            fmt=clabel_fmt,
+            fontsize=clabel_fontsize,
+            inline=clabel_inline,
+            colors=clabel_colors,
+            kwargs=clabel_kwargs,
+        )
 
     plt.title(title)
 
     if gridlines:
-        gl = ax.gridlines(
-            crs=ccrs.PlateCarree(),
-            draw_labels=True,
-            linewidth=0.5,
-            color="gray",
-            alpha=0.5,
-            linestyle="--",
-            zorder=1,
-        )
-
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.bottom_labels = True
-        gl.left_labels = True
-
+        _add_gridlines(ax)
         pad_quiver_key[0] = True
         pad_quiver_key[1] = True
 
-    q, qk, cb = None, None, None  # initialize to None in case not added
+    q, qk, cb = None, None, None  # initialize in case not added
 
     if add_pvalues:
         ax = significance(data=p_value, ax=ax, **pvalue_kwargs)
@@ -1274,16 +1433,15 @@ def _cartplot(
 
     if add_colorbar:
         if cbar_label is None:
-            cbar_label = f"{long_name} [{units}]"
+            cbar_label = f"{long_name}\n[{units}]"
 
         orientation = orientation or "vertical"
-        if not colorbar_kwargs:
-            colorbar_kwargs = {}
+        colorbar_kwargs = colorbar_kwargs or {}
 
         cb = colorbar(
             fig=fig,
             ax=ax,
-            mappable=sm,
+            mappable=mp,
             orientation=orientation,
             drawedges=drawedges,
             extend=extend,
@@ -1294,11 +1452,12 @@ def _cartplot(
     return {
         "figure": fig,
         "axes": ax,
-        "artist": sm,
+        "artist": mp,
         "facetgrid": None,
         "colorbar": cb,
         "quiver": q,
         "quiver_key": qk,
+        "projection": proj_name,
     }
 
 
@@ -1361,7 +1520,8 @@ def _map_wrapper(
     args: dict,
 ):
 
-    # if dim values is numpy datetime,the string representation is too long, so we shorten it to the date only
+    # if dim value is numpy datetime, the string representation is too long,
+    # so we shorten it to the date only
     if np.issubdtype(type(dim_value), np.datetime64):
         dim_value = pd.to_datetime(dim_value).strftime("%Y-%m-%d %H:%M")
 
@@ -1456,7 +1616,7 @@ def animate(
         "Stereographic",
         "NorthPolarStereo",
         "SouthPolarStereo",
-    ] = "PlateCarree",
+    ] = None,
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -1471,8 +1631,6 @@ def animate(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
@@ -1494,7 +1652,7 @@ def animate(
     fps: int = 1,
     parallel: bool = True,
     **kwargs,
-) -> DisplayHandle | None | str:
+) -> DisplayHandle | None:
     """
     Render a map animation from an xarray DataArray and encode it as MP4.
 
@@ -1503,100 +1661,72 @@ def animate(
     da : xarray.DataArray
         Scalar field to animate. The animation dimension must be present in
         ``da.dims``.
-
     dim : str, default "time"
         Dimension used for animation frames.
-
     x, y : str, optional
         Coordinate names passed to the selected xarray plotting method when
         supported.
-
     col, row : str, optional
         Faceting coordinate names passed to the selected xarray plotting method
         when supported.
-
     col_wrap : int, optional
-        Number of columns used when wrapping faceted subplots. Passed to the
-        selected xarray plotting method when supported.
-
+        Number of columns used when wrapping faceted subplots.
     figsize : tuple of float, optional
         Figure size in inches for each rendered frame.
-
-    method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
+    method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}, default "default"
         Xarray plotting method used for the scalar field.
-
     projection : str, default "PlateCarree"
         Cartopy projection used for each frame.
-
     cmap : str or matplotlib colormap, optional
         Colormap used for the scalar field.
-
-    norm : Any, optional
-        Matplotlib normalization object.
-
+    norm : matplotlib normalization, optional
+        Normalization applied to the field.
     vmin, vmax : float, optional
         Lower and upper scalar color limits. Fixed limits are recommended for
         temporal comparisons.
-
     units : str, optional
         Units used for colorbar labeling. If omitted, inferred from
         ``da.attrs["units"]`` or ``da.name``.
-
     levels : int or sequence of float, optional
         Contour levels for contour-based methods.
-
     extend : {"neither", "both", "min", "max"}, optional
         Colorbar extension behavior.
-
     robust : bool, default False
-        Whether to request percentile-based color scaling when supported by
-        xarray.
-
+        Whether to request percentile-based color scaling when supported.
     rasterized : bool, default False
         Whether dense scalar artists should be rasterized when supported.
-
     title : str, optional
         Base title passed to frame plotting routines.
-
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation for non-faceted frames.
-
     add_colorbar : bool, default True
         Whether to add a colorbar.
-
     drawedges : bool, default False
         Whether to draw edges between colorbar intervals.
-
     cbar_label : str, optional
-        Explicit colorbar label. If omitted, a label is inferred from metadata.
-
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection constructor
-        when supported.
-
+        Explicit colorbar label. If omitted, a label is inferred from metadata..
     global_extent : bool, default False
         If True, set each map extent to the full globe.
-
     set_extent : tuple of float, optional
-        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in
-        degrees.
-
+        Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
     gridlines : bool, default False
         Whether to draw labeled longitude and latitude gridlines.
-
     coastlines, borders, states : bool, default True
         Switches controlling common Cartopy geographic feature overlays.
-
     ocean, land : bool, default True
         Switches controlling ocean and land background features.
-
     lakes, rivers : bool, default False
         Switches controlling optional Cartopy inland water feature overlays.
-
     u_component, v_component : xarray.DataArray, optional
         Zonal and meridional vector components for quiver overlays. Both must
         contain ``dim`` and align with ``da`` along that dimension.
-
+    colorbar_kwargs : dict, optional
+        Keyword arguments forwarded to :func:`colorbar`. Accepted keys are
+        ``ticks: sequence`` and ``tick_labels: sequence of str``. The
+        orientation, edges, extension and label of the base colorbar are set
+        through the top-level ``orientation``, ``drawedges``, ``extend`` and
+        ``cbar_label`` arguments and must not be repeated here. See
+        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
     quiver_kwargs : dict, optional
         Keyword arguments forwarded to :func:`quiver`. Accepted keys are
         ``subsample: int | tuple[int, int]``, ``key_magnitude: int | float``
@@ -1605,44 +1735,31 @@ def animate(
         ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
         ``color: str`` and ``width: float``. See
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
-
-    colorbar_kwargs : dict, optional
-        Keyword arguments forwarded to :func:`colorbar`. Accepted keys are
-        ``ticks: sequence`` and ``tick_labels: sequence of str``. The
-        orientation, edges, extension and label of the base colorbar are set
-        through the top-level ``orientation``, ``drawedges``, ``extend`` and
-        ``cbar_label`` arguments and must not be repeated here. See
-        https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
-
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.
         The longitude dimension is assumed to be named ``"lon"``.
-
     indices : tuple of int, list of int, or numpy.ndarray, optional
         Positional indices along ``dim`` to render. If omitted, all positions
         are rendered.
-
     outfile : str or pathlib.Path, optional
         Output path for the MP4 animation. If omitted, a temporary output path
         is used.
-
     quality : {"low", "medium", "high"}, default "medium"
         Frame-resolution preset used during PNG rendering.
-
     fps : int, default 1
         Frames per second passed to ffmpeg.
-
     parallel : bool, default True
         Whether to render frames with multiprocessing.
-
     **kwargs
         Additional keyword arguments forwarded to the selected xarray plotting
         method after signature filtering.
 
     Returns
     -------
-    None
-        Temporary PNG frames are rendered, encoded with ffmpeg, and removed.
+    IPython.display.DisplayHandle or None
+        Inside a Jupyter kernel, the encoded MP4 is embedded and its display
+        handle is returned. Otherwise the MP4 is written to ``outfile`` and a
+        ``RuntimeError`` is raised if encoding fails.
 
     Notes
     -----
@@ -1653,7 +1770,7 @@ def animate(
 
     args = AttrDict(locals())
 
-    # pop the above from args
+    # pop non-plotting controls from args
     outfile = args.pop("outfile")
     fps = args.pop("fps")
     dim = args.pop("dim")
@@ -1697,33 +1814,14 @@ def animate(
     if parallel:
         processes = min(len(indices), n_cpus // 2)
 
-        delayed_tasks = [delayed(_map_wrapper)(*task) for task in tasks]
+        delayed_tasks = [dask.delayed(_map_wrapper)(*task) for task in tasks]
 
-        if ipykernel:
-            # from .xrext import DaskProgressBar
-            from dask.diagnostics import ProgressBar
-
-            with ProgressBar():
-                compute(
-                    *delayed_tasks,
-                    scheduler="processes",
-                    num_workers=processes,
-                )
-        else:
-            compute(
-                *delayed_tasks,
-                scheduler="processes",
-                num_workers=processes,
-            )
+        with DaskProgressBar():
+            dask.compute(*delayed_tasks, scheduler="processes", num_workers=processes)
 
     else:
-        from rich.progress import track
-
-        for task in track(
-            tasks,
-            total=len(tasks),
-            transient=False,
-        ):
+        tasks = SerialProgressBar(tasks, total=len(tasks))
+        for task in tasks:
             _map_wrapper(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
@@ -1731,7 +1829,6 @@ def animate(
     user_path = False
     if not outfile:
         outfile = Path(tmp / f"{uuid.uuid4().hex}/{uuid.uuid4().hex}.mp4")
-
     else:
         outfile = Path(outfile)
         user_path = True
@@ -1757,32 +1854,65 @@ def animate(
                 height=600,
             )
         )
-    else:
-        raise RuntimeError("Animation encoding failed")
+
+    raise RuntimeError("Animation encoding failed")
 
 
 class Mapplot:
-    """Composable Cartopy map for xarray DataArrays.
+    """Composable Cartopy map returned by :func:`map`.
 
-    A :class:`Mapplot` stores the artists of a base scalar field and exposes
-    chainable overlays through the ``add`` namespace. Faceted plots are handled
-    transparently: each overlay is drawn on every populated facet after selecting
-    the matching slice from the overlay field.
+    ``Mapplot`` stores the base figure and artists and exposes chainable
+    overlay methods through :attr:`add`. Scalar overlays, scatter points,
+    vectors, significance markers, and additional colorbars are applied to
+    every populated facet automatically.
+
+    Parameters
+    ----------
+    primitives : dict
+        Renderer output produced by :func:`_cartplot`.
+
+    Attributes
+    ----------
+    figure : matplotlib.figure.Figure
+        Figure containing the map.
+    axes : matplotlib.axes.Axes, cartopy.mpl.geoaxes.GeoAxes or numpy.ndarray
+        Single map axis or faceted array of map axes.
+    artist : matplotlib.artist.Artist
+        Base plotting artist.
+    facetgrid : xarray.plot.FacetGrid or None
+        Xarray facet grid for faceted maps.
+    colorbar : matplotlib.colorbar.Colorbar or None
+        Colorbar attached to the base field or most recently assigned
+        colorbar.
+    layers : list of dict
+        Overlay records in call order.
+    add : Adder
+        Namespace containing the chainable overlay methods.
+
+    Notes
+    -----
+    Every registered line-contour set is promoted above all other artists
+    after each overlay call. Consequently, a contour base may be followed
+    by ``contourf``, ``pcolormesh``, ``imshow``, ``scatter``, ``quiver``, or
+    significance layers without hiding the contour lines.
     """
 
     def __init__(self, primitives: dict):
+        """Initialize a composable map from renderer primitives."""
         self.figure: Figure | None = primitives["figure"]
         self.axes: Axes | cgeo.GeoAxes | np.ndarray | None = primitives["axes"]
+        self.projection: str | None = primitives["projection"]
         self.artist: Artist | None = primitives["artist"]
         self.facetgrid: xr.plot.facetgrid.FacetGrid | None = primitives["facetgrid"]
         self.colorbar: Colorbar | None = primitives["colorbar"]
         self.quiver: Quiver | list[Quiver] | None = primitives["quiver"]
         self.quiver_key: QuiverKey | list[QuiverKey] | None = primitives["quiver_key"]
         self.layers: list[dict] = []
+
         self.add = Adder(self)
 
     def _iter_axes(self):
-        """Yield ``(axis, selector)`` pairs for each populated map axis."""
+        """Yield ``(axis, selector)`` pairs for populated map axes."""
         if self.facetgrid is None:
             yield self.axes, {}
             return
@@ -1796,15 +1926,16 @@ class Mapplot:
 
     @staticmethod
     def _select(da: xr.DataArray, selector: dict) -> xr.DataArray:
-        """Select the facet slice of an overlay field."""
+        """Return the facet slice of an overlay field."""
         return da.sel(selector).squeeze() if selector else da.squeeze()
 
     def __repr__(self) -> str:
+        """Return a compact summary of the stored artists and overlays."""
         return _map_repr(self)
 
 
 class Adder:
-    """Add layers to mapplot"""
+    """Add overlay layers to a :class:`Mapplot`."""
 
     __slots__ = ("_map",)
 
@@ -1851,6 +1982,8 @@ class Adder:
         da : xarray.DataArray
             Field to contour. For a faceted base map, the field must contain
             the corresponding facet coordinates.
+        x, y : str, optional
+            Horizontal coordinate names.
         method : {"contour", "contourf"}, default "contour"
             Draw line contours or filled contours.
         levels : int or sequence of float, optional
@@ -1887,15 +2020,21 @@ class Adder:
             Contour-label color.
         clabel_kwargs : dict, optional
             Additional arguments forwarded to ``Axes.clabel``.
-        x, y : str, optional
-            Horizontal coordinate names.
         **kwargs
             Additional arguments forwarded to the selected xarray contour
             plotting method. Facet-layout arguments are ignored because the
             overlay inherits the base map layout.
+
+        Returns
+        -------
+        Mapplot
+            The parent map, to allow chaining.
         """
         if method not in ("contour", "contourf"):
             raise ValueError("method must be 'contour' or 'contourf'.")
+
+        if not x or not y:
+            x, y = _get_lon_lat(da)
 
         self._drop_facet_kwargs(kwargs)
 
@@ -1934,13 +2073,14 @@ class Adder:
 
             if clabel and method == "contour":
                 labels.append(
-                    ax.clabel(
+                    _add_contour_labels(
+                        ax,
                         artist,
                         fmt=clabel_fmt,
                         fontsize=clabel_fontsize,
                         inline=clabel_inline,
                         colors=clabel_colors,
-                        **(clabel_kwargs or {}),
+                        kwargs=clabel_kwargs,
                     )
                 )
 
@@ -1990,10 +2130,16 @@ class Adder:
         width : float, optional
             Arrow-shaft width.
         **kwargs
-            Additional arguments forwarded to ``quiver``. Facet-layout
+            Additional arguments forwarded to :func:`quiver`. Facet-layout
             arguments are ignored because the overlay inherits the base map
             layout.
+
+        Returns
+        -------
+        Mapplot
+            The parent map, to allow chaining.
         """
+
         subplots = self._map.facetgrid is not None
         key_ax = _bottom_left_axis(self._map.facetgrid) if subplots else self._map.axes
 
@@ -2080,6 +2226,11 @@ class Adder:
             Marker size.
         x, y : str, default "lon", "lat"
             Horizontal coordinate names.
+
+        Returns
+        -------
+        Mapplot
+            The parent map, to allow chaining.
         """
         artists = []
 
@@ -2137,6 +2288,11 @@ class Adder:
             Explicit tick positions.
         tick_labels : sequence of str, optional
             Explicit tick labels.
+
+        Returns
+        -------
+        Mapplot
+            The parent map, to allow chaining.
         """
         if mappable is None:
             mappable = self._map.artist
@@ -2166,6 +2322,10 @@ class Adder:
 
 def _map_repr(obj: Mapplot) -> str:
     parts = []
+
+    if obj.projection is not None:
+        parts.append(f"projection={obj.projection}")
+
     for name in (
         "figure",
         "axes",
@@ -2178,15 +2338,21 @@ def _map_repr(obj: Mapplot) -> str:
         value = getattr(obj, name)
         if value is None:
             continue
+
         if isinstance(value, (np.ndarray, list)):
             seq = value.ravel().tolist() if isinstance(value, np.ndarray) else value
             count = value.size if isinstance(value, np.ndarray) else len(value)
-            elem = next((type(x).__name__ for x in seq if x is not None), "object")
+            elem = next(
+                (type(x).__name__ for x in seq if x is not None),
+                "object",
+            )
             parts.append(f"{name}={count} {elem}(s)")
         else:
             parts.append(f"{name}={type(value).__name__}")
+
     if obj.layers:
         parts.append(f"layers={len(obj.layers)}")
+
     return f"Map({', '.join(parts)})"
 
 
@@ -2213,7 +2379,7 @@ def map(
         "Stereographic",
         "NorthPolarStereo",
         "SouthPolarStereo",
-    ] = "PlateCarree",
+    ] = None,
     cmap: str | LinearSegmentedColormap | ListedColormap = None,
     norm: Any = None,
     vmin: float = None,
@@ -2228,8 +2394,6 @@ def map(
     add_colorbar: bool = True,
     drawedges: bool = False,
     cbar_label: str = None,
-    central_longitude: float = None,
-    central_latitude: float = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
     gridlines: bool = False,
@@ -2246,19 +2410,25 @@ def map(
     v_component: xr.DataArray = None,
     quiver_kwargs: dict = None,
     colorbar_kwargs: dict = None,
+    clabel: bool = False,
+    clabel_fmt: str = "%1.0f",
+    clabel_fontsize: float = 8,
+    clabel_inline: bool = True,
+    clabel_colors: str = None,
+    clabel_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
 ) -> Mapplot:
     """
-    Draw a scalar field on a Cartopy map and return a composable :class:`Map`.
+    Draw a scalar field on a Cartopy map and return a composable :class:`Mapplot`.
 
     This is the public entry point. It renders a two-dimensional or faceted
-    (three-dimensional) DataArray as the base layer and returns a :class:`Map`
-    whose ``add_contour``, ``add_quiver``, ``add_pvalues`` and ``add_colorbar``
-    methods add overlays. The full parameter list is declared explicitly so
-    that editors expose every option. The class is named ``Map`` to avoid
-    shadowing the builtin inside this module; this callable is exposed as
-    ``climtools.plot.map``.
+    (three-dimensional) DataArray as the base layer and returns a
+    :class:`Mapplot` whose ``add.contour``, ``add.quiver``, ``add.significance``
+    and ``add.colorbar`` methods add overlays. The full parameter list is
+    declared explicitly so that editors expose every option. The class is named
+    ``Mapplot`` to avoid shadowing the builtin inside this module; this callable
+    is exposed as ``climtools.plot.map``.
 
     Parameters
     ----------
@@ -2305,8 +2475,6 @@ def map(
         Whether to draw edges between colorbar intervals.
     cbar_label : str, optional
         Explicit colorbar label. If omitted, a label is inferred from metadata.
-    central_longitude, central_latitude : float, optional
-        Projection-center arguments passed to the Cartopy projection.
     global_extent : bool, default False
         If True, set the map extent to the full globe.
     set_extent : tuple of float, optional
@@ -2344,6 +2512,18 @@ def map(
         through the top-level ``orientation``, ``drawedges``, ``extend`` and
         ``cbar_label`` arguments and must not be repeated here. See
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
+    clabel : bool, default False
+        Label line contours. Ignored for ``method="contourf"``.
+    clabel_fmt : str, default "%1.0f"
+        Contour-label format.
+    clabel_fontsize : float, default 8
+        Contour-label font size.
+    clabel_inline : bool, default True
+        Draw contour labels inline.
+    clabel_colors : str, optional
+        Contour-label color.
+    clabel_kwargs : dict, optional
+        Additional arguments forwarded to ``Axes.clabel``.
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting. The longitude
         dimension is assumed to be named ``"lon"``.

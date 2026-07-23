@@ -211,3 +211,30 @@ def sel_transect_latlon(
     mask = np.abs(cross_track_deg) <= half_width_deg
 
     return data.where(mask, drop=drop)
+
+
+def to_lon180(
+    data: xr.Dataset | xr.DataArray, lon: str = "lon"
+) -> xr.Dataset | xr.DataArray:
+    """
+    Standardize longitude coordinates to [-180, 180).
+
+    Parameters
+    ----------
+    data : xr.Dataset or xr.DataArray
+        The input dataset or data array containing a longitude coordinate.
+    lon : str, default 'lon'
+        The name of the longitude coordinate in the dataset.
+
+    Returns
+    -------
+    xr.Dataset or xr.DataArray
+        The dataset or data array with standardized longitude coordinates.
+    """
+    if lon not in data.coords:
+        raise ValueError(f"Dataset must contain {lon!r} coordinate.")
+
+    data = data.copy()
+    data[lon] = (data[lon] + 180) % 360 - 180
+    data = data.sortby(lon)
+    return data

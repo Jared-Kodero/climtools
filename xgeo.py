@@ -17,7 +17,6 @@ import xesmf as xe
 from . import calc_stats as calc
 from . import cmaps as cmaps
 from . import plotting as plot
-from . import theming as theme
 from .nc4_utils import (
     append_to_netcdf,
     serial_write_netcdf,
@@ -35,6 +34,7 @@ warnings.filterwarnings("ignore")
 
 __all__ = [
     "cmaps",
+    "n_cpus",
     "DaskProgressBar",
     "SerialProgressBar",
     "SetupDask",
@@ -46,7 +46,6 @@ __all__ = [
     "preprocess_era5",
     "remap",
     "sel_transect",
-    "theme",
     "write_netcdf",
     "write_netcdf_variable",
 ]
@@ -58,8 +57,8 @@ _dask_cluster = None  # global variable to hold the Dask cluster instance
 
 
 def write_netcdf(
-    file: Path,
     data: xr.Dataset,
+    file: Path,
     unlimited_dim: str = None,
     *,
     batch_size: int = 1,
@@ -80,10 +79,10 @@ def write_netcdf(
 
     Parameters
     ----------
-    file : Path
-        Output NetCDF file path.
     data : xr.Dataset
         Dataset to write to NetCDF.
+    file : Path
+        Output NetCDF file path.
     unlimited_dim : str, optional
         Dimension to define as unlimited and append along. If None, the first
         dataset dimension is used.
@@ -113,18 +112,18 @@ def write_netcdf(
     if not isinstance(data, xr.Dataset):
         raise TypeError("data must be an xarray.Dataset, got %s." % type(data))
 
-        return serial_write_netcdf(
-            file=file,
-            data=data,
-            unlimited_dim=unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
-        )
+    return serial_write_netcdf(
+        file=file,
+        data=data,
+        unlimited_dim=unlimited_dim,
+        batch_size=batch_size,
+        format=format,
+        shuffle=shuffle,
+        zlib=zlib,
+        complevel=complevel,
+        show_progress=show_progress,
+        stdout=stdout,
+    )
 
 
 def mask_land(
@@ -220,33 +219,6 @@ def add_lst(data: xr.Dataset | xr.DataArray, *, lon="lon") -> xr.Dataset | xr.Da
     lst.attributes["standard_name"] = "local_solar_time"
 
     return data.assign_coords({"lst": lst})
-
-
-def to_lon180(
-    data: xr.Dataset | xr.DataArray, lon: str = "lon"
-) -> xr.Dataset | xr.DataArray:
-    """
-    Standardize longitude coordinates to [-180, 180).
-
-    Parameters
-    ----------
-    data : xr.Dataset or xr.DataArray
-        The input dataset or data array containing a longitude coordinate.
-    lon : str, default 'lon'
-        The name of the longitude coordinate in the dataset.
-
-    Returns
-    -------
-    xr.Dataset or xr.DataArray
-        The dataset or data array with standardized longitude coordinates.
-    """
-    if lon not in data:
-        raise ValueError(f"Dataset must contain {lon!r} coordinate.")
-
-    data = data.copy()
-    data[lon] = (data[lon] + 180) % 360 - 180
-    data = data.sortby(lon)
-    return data
 
 
 def remap(

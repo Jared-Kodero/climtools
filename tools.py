@@ -5,6 +5,7 @@ import inspect
 import os
 import socket
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,71 @@ class AttrDict(dict):
     __delattr__ = dict.__delitem__
 
 
+@contextmanager
+def redirect_streams(
+    stdout: Path | None = None,
+    stderr: Path | None = None,
+):
+    """
+    Temporarily redirect standard output and standard error to files.
+
+    Each specified file is opened in append mode. If ``stdout`` and
+    ``stderr`` refer to the same path, both streams share a single file
+    handle. Any stream whose path is ``None`` remains unchanged.
+
+    The original streams are restored and all opened files are closed when
+    the context exits, including when an exception is raised.
+
+    Parameters
+    ----------
+    stdout : Path or None, optional
+        File path to which ``sys.stdout`` is redirected.
+    stderr : Path or None, optional
+        File path to which ``sys.stderr`` is redirected.
+
+    Yields
+    ------
+    tuple[TextIO | None, TextIO | None]
+        The opened output and error file handles, respectively.
+    """
+
+    org_stdout = sys.stdout
+    org_stderr = sys.stderr
+
+    out_file = None
+    err_file = None
+
+    try:
+        if stdout == stderr and stdout is not None:
+            out_file = open(stdout, "a")
+            err_file = out_file
+
+        else:
+            if stdout:
+                out_file = open(stdout, "a")
+
+            if stderr:
+                err_file = open(stderr, "a")
+
+        if out_file:
+            sys.stdout = out_file
+
+        if err_file:
+            sys.stderr = err_file
+
+        yield out_file, err_file
+
+    finally:
+        sys.stdout = org_stdout
+        sys.stderr = org_stderr
+
+        if out_file:
+            out_file.close()
+
+        if err_file and err_file is not out_file:
+            err_file.close()
+
+
 def get_fsig(func: Callable) -> dict:
     """
     Get the signature of a function as a dictionary.
@@ -48,7 +114,7 @@ def get_fsig(func: Callable) -> dict:
     return params
 
 
-def fix_vscode_widget():
+def fix_widget_css():
 
     css = """
     <style>

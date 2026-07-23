@@ -19,14 +19,14 @@ class DaskProgressBar(ProgressBar):
 
     def __init__(
         self,
-        description: str = "",
+        description: str = None,
         transient: bool = False,
         refresh_per_second: int = 10,
         step_pct: int = 10,
         stdout: Any = None,
     ) -> None:
         super().__init__()
-        self.description = description
+
         self.transient = transient
         self.refresh_per_second = refresh_per_second
 
@@ -34,6 +34,7 @@ class DaskProgressBar(ProgressBar):
         self._task_id = None
         self._total = 0
         self._completed = 0
+        self.description = description + ":" if description else ""
         self._isatty = sys.stdout.isatty()
         self._interactive = "ipykernel" in sys.modules or self._isatty
         self.step_pct = step_pct  # new kwarg, e.g. step_pct: int = 10
@@ -44,6 +45,7 @@ class DaskProgressBar(ProgressBar):
         self._logging_true = logging.getLogger().hasHandlers()
         self._start_time = datetime.datetime.now()
         self._elapsed = None
+        self.step_pct = 1 if self._isatty else step_pct
 
     def _interactive_start(self, dsk) -> bool:
         from rich.progress import (
@@ -81,12 +83,12 @@ class DaskProgressBar(ProgressBar):
             return
         with self._lock:
             if not self._wrote_header:
-                self.description = self.description or "Progress"
+                self.description = self.description or ""
                 dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 prefix = "" if not self._logging_true else f"{dt} - PROGRESS - INFO - "
 
                 print(
-                    f"{prefix}{self.description} : ",
+                    f"{prefix}{self.description}",
                     end=" ",
                     file=self._stream,
                     flush=True,
@@ -190,10 +192,8 @@ class SerialProgressBar:
         stdout: Any = None,
     ) -> None:
         self.iterable = iterable
-        self.description = description
         self.transient = transient
         self.refresh_per_second = refresh_per_second
-        self.step_pct = step_pct
 
         if total is not None:
             self._total = total
@@ -206,6 +206,7 @@ class SerialProgressBar:
         self._progress = None
         self._task_id = None
 
+        self.description = description + ":" if description else ""
         self._isatty = sys.stdout.isatty()
         self._interactive = "ipykernel" in sys.modules or self._isatty
         self._stream = stdout or sys.stdout
@@ -216,6 +217,7 @@ class SerialProgressBar:
         self._started = False
         self._start_time = datetime.datetime.now()
         self._elapsed = None
+        self.step_pct = 1 if self._isatty else step_pct
 
     def _interactive_start(self) -> None:
         from rich.progress import (
@@ -246,11 +248,11 @@ class SerialProgressBar:
             return
         with self._lock:
             if not self._wrote_header:
-                self.description = self.description or "Progress"
+                self.description = self.description or ""
                 dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 prefix = "" if not self._logging_true else f"{dt} - PROGRESS - INFO - "
                 print(
-                    f"{prefix}{self.description} : ",
+                    f"{prefix}{self.description}",
                     end=" ",
                     file=self._stream,
                     flush=True,

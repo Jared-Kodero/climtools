@@ -176,7 +176,7 @@ def serial_write_netcdf(
     if show_progress:
         data_slices = SerialProgressBar(
             starts,
-            description="Writing NetCDF",
+            description="Writing NetCDF file",
             stdout=stdout,
         )
     else:

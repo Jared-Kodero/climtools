@@ -5,6 +5,10 @@ __all__ = [
     "cmaps",
     "xgeo",
     "n_cpus",
+    "theme",
+    "redirect_streams",
+    "SerialProgressBar",
+    "DaskProgressBar",
 ]
 
 import sys
@@ -14,13 +18,12 @@ import dask
 from . import cmaps as cmaps
 from . import progress as pg
 from . import pycdo as cdo
+from . import theming as theme
 from . import xgeo
 
 # import cmaps as _cmaps --- IGNORE ---
-from .tools import (
-    fix_vscode_widget,
-    n_cpus,
-)
+from .progress import DaskProgressBar, SerialProgressBar
+from .tools import fix_widget_css, n_cpus, redirect_streams
 # from .update import _self_update
 
 # _self_update()
@@ -29,7 +32,7 @@ from .tools import (
 dask.diagnostics.ProgressBar = pg.DaskProgressBar
 
 if "ipykernel" in sys.modules:
-    fix_vscode_widget()
+    fix_widget_css()
     import matplotlib_inline as plt_inline
 
     plt_inline.backend_inline.set_matplotlib_formats("retina")

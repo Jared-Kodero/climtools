@@ -72,6 +72,9 @@ def preprocess_era5(ds: xr.Dataset) -> xr.Dataset:
     if "pressure_level" in ds.dims:
         ds = ds.rename({"pressure_level": "plev"})
 
+    if "level" in ds.dims:
+        ds = ds.rename({"level": "plev"})
+
     if "latitude" in ds.dims and "longitude" in ds.dims:
         ds = ds.rename({"latitude": "lat", "longitude": "lon"})
 
