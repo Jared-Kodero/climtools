@@ -39,7 +39,7 @@ from .xgeo_utils import to_lon180
 pad_quiver_key: list[bool | None] = [None, None]
 
 
-def _get_lon_lat(
+def get_spatial_dims(
     da: xr.DataArray | xr.Dataset,
 ) -> tuple[str, str]:
     """Return the longitude and latitude coordinate names."""
@@ -59,7 +59,7 @@ def _get_lon_lat(
     return lon.name, lat.name
 
 
-def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
+def get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
     """Return a reference quiver-key magnitude from the 75th percentile speed."""
     mag = (u**2 + v**2) ** 0.5
     key_mag = np.round(mag.quantile(0.75, skipna=True).values)
@@ -68,7 +68,7 @@ def _get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
     return key_magnitude
 
 
-def _check_cartopy_axis(ax, kwargs) -> dict:
+def is_geoaxes(ax, kwargs) -> dict:
     """Inject a ``PlateCarree`` data transform when ``ax`` is a GeoAxes."""
     if isinstance(ax, cgeo.GeoAxes):
         kwargs["transform"] = ccrs.PlateCarree()
@@ -76,7 +76,7 @@ def _check_cartopy_axis(ax, kwargs) -> dict:
     return kwargs
 
 
-def _add_contour_labels(
+def add_contour_labels(
     ax: plt.Axes | cgeo.GeoAxes,
     artist: Any,
     *,
@@ -124,7 +124,7 @@ def _add_contour_labels(
     )
 
 
-def _add_gridlines(ax: cgeo.GeoAxes):
+def add_gridlines(ax: cgeo.GeoAxes):
     """Add labeled longitude/latitude gridlines with the shared module style.
 
     Parameters
@@ -202,7 +202,7 @@ def quiver(
     """
 
     ax = ax or plt.gca()
-    kwargs = _check_cartopy_axis(ax, kwargs)
+    kwargs = is_geoaxes(ax, kwargs)
     key_magnitude = kwargs.pop("key_magnitude", None)
     key_units = kwargs.pop("key_units", None)
 
@@ -215,7 +215,7 @@ def quiver(
     if (x not in u.coords or y not in u.coords) or (
         x not in v.coords or y not in v.coords
     ):
-        x, y = _get_lon_lat(u)
+        x, y = get_spatial_dims(u)
 
     sel = {x: slice(None, None, subsample[0]), y: slice(None, None, subsample[1])}
 
@@ -250,7 +250,7 @@ def quiver(
             key_units = u_units
 
         if not key_magnitude:
-            key_magnitude = _get_quiver_key_mag(u, v)
+            key_magnitude = get_quiver_key_mag(u, v)
 
         label = f"{key_magnitude} {key_units}".strip()
         fig = ax.get_figure()
@@ -499,13 +499,13 @@ def significance(
 
     ax = ax or plt.gca()
 
-    transform = _check_cartopy_axis(ax, {})
+    transform = is_geoaxes(ax, {})
 
     if isinstance(subsample, int):
         subsample = (subsample, subsample)
 
     if x not in data.coords or y not in data.coords:
-        x, y = _get_lon_lat(data)
+        x, y = get_spatial_dims(data)
 
     if len(subsample) > 2:
         raise ValueError("subsample must be a tuple or list with at most 2 elements")
@@ -693,7 +693,7 @@ def get_cax(
     return cax
 
 
-def _plot_method(data: xr.DataArray, method: str):
+def get_plot_method(data: xr.DataArray, method: str):
     default = data.plot
 
     methords = ["pcolormesh", "contourf", "contour", "imshow"]
@@ -711,7 +711,7 @@ def _plot_method(data: xr.DataArray, method: str):
     return func, pargs
 
 
-def _add_cartopy_features(
+def add_map_features(
     ax: plt.Axes | cgeo.GeoAxes,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] = None,
@@ -750,7 +750,7 @@ def _add_cartopy_features(
     return ax
 
 
-def _resolve_map_aspect(
+def get_map_aspect(
     da: xr.DataArray = None,
     extent: tuple = None,
     x: str = None,
@@ -779,7 +779,7 @@ def _resolve_map_aspect(
     raise ValueError("Provide map_aspect, extent, or da to infer aspect.")
 
 
-def _bottom_left_axis(fg):
+def get_bottom_left_axis(fg):
     """Return the lowest populated facet in the leftmost column, for any grid shape.
 
     Handles single-row, single-column, single-facet, and ragged (col_wrap)
@@ -795,7 +795,7 @@ def _bottom_left_axis(fg):
     return axs[left_rows[-1], 0]
 
 
-def _facet_figsize(
+def get_facet_figsize(
     col_wrap: int = 1,
     panel_width: float = 5.0,
     cbar_pad_in: float = 0.8,
@@ -812,7 +812,7 @@ def _facet_figsize(
     )
 
     n_facets = da.sizes[dim] if dim else 1
-    aspect = _resolve_map_aspect(
+    aspect = get_map_aspect(
         da=da,
         extent=extent,
         x=x,
@@ -826,7 +826,7 @@ def _facet_figsize(
     return width, height
 
 
-def _get_projection(
+def get_projection(
     projection: str,
     longitude: xr.DataArray,
     latitude: xr.DataArray,
@@ -906,7 +906,7 @@ def _get_projection(
     return proj_cls(**cargs), projection
 
 
-def _faceted(
+def faceted_plot(
     da: xr.DataArray,
     x: str = None,
     y: str = None,
@@ -962,7 +962,7 @@ def _faceted(
         )
 
     if not x or not y:
-        x, y = _get_lon_lat(da)
+        x, y = get_spatial_dims(da)
 
     add_quiver = (u_component is not None) and (v_component is not None)
     quiver_kwargs = quiver_kwargs or {}
@@ -970,12 +970,12 @@ def _faceted(
     pvalue_kwargs = pvalue_kwargs or {}
 
     if add_quiver and quiver_kwargs.get("key_magnitude") is None:
-        quiver_kwargs["key_magnitude"] = _get_quiver_key_mag(u_component, v_component)
+        quiver_kwargs["key_magnitude"] = get_quiver_key_mag(u_component, v_component)
 
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
 
-    proj_obj, proj_name = _get_projection(ccrs_proj, da[x], da[y])
+    proj_obj, proj_name = get_projection(ccrs_proj, da[x], da[y])
     transform = ccrs.PlateCarree()
     orientation = orientation or "horizontal"
 
@@ -983,7 +983,7 @@ def _faceted(
     col_wrap = col_wrap or int(np.ceil(np.sqrt(len(da[dim]))))
 
     # we want all possible args
-    plot, pargs = _plot_method(da, method)
+    plot, pargs = get_plot_method(da, method)
     all_args = dict(locals())
     all_args.update(kwargs)
 
@@ -1017,7 +1017,7 @@ def _faceted(
         "label": cbar_label,
     }
 
-    figsize = _facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
+    figsize = get_facet_figsize(col_wrap=col_wrap, da=da, x=x, y=y, dim=dim)
 
     fg = plot(figsize=figsize, cbar_kwargs=cbar_kwargs, **pkwargs)
 
@@ -1028,7 +1028,7 @@ def _faceted(
     if hasattr(fg, "cbar") and fg.cbar is not None:
         fg.cbar.remove()
 
-    key_ax = _bottom_left_axis(fg)
+    key_ax = get_bottom_left_axis(fg)
 
     q_list, qk_list, cb = [], [], None  # initialize in case not added
     populated = -1
@@ -1046,7 +1046,7 @@ def _faceted(
                 if populated < len(facet_mappables)
                 else mappable
             )
-            _add_contour_labels(
+            add_contour_labels(
                 ax,
                 facet_mappable,
                 fmt=clabel_fmt,
@@ -1056,7 +1056,7 @@ def _faceted(
                 kwargs=clabel_kwargs,
             )
 
-        ax = _add_cartopy_features(
+        ax = add_map_features(
             ax,
             global_extent,
             set_extent,
@@ -1070,7 +1070,7 @@ def _faceted(
         )
 
         if gridlines:
-            _add_gridlines(ax)
+            add_gridlines(ax)
             if ax is key_ax:
                 pad_quiver_key[0] = True
                 pad_quiver_key[1] = True
@@ -1324,7 +1324,7 @@ def geoplot(
     """
 
     if not x or not y:
-        x, y = _get_lon_lat(da)
+        x, y = get_spatial_dims(da)
 
     if cyclic:
         da = make_cyclic(da, lon=x)
@@ -1338,7 +1338,7 @@ def geoplot(
         # ``_faceted`` parameter. Drop the collected ``**kwargs`` dict and
         # re-spread it so user-supplied plotting keywords are forwarded intact.
         faceted_args = {k: v for k, v in locals().items() if k != "kwargs"}
-        return _faceted(**faceted_args, **kwargs)
+        return faceted_plot(**faceted_args, **kwargs)
 
     if da.ndim > 3:
         raise ValueError(
@@ -1353,11 +1353,11 @@ def geoplot(
     long_name = da.attrs.get("long_name", "").title()
     units = units or da.attrs.get("units", da.name)
 
-    proj_obj, proj_name = _get_projection(projection, da[x], da[y])
+    proj_obj, proj_name = get_projection(projection, da[x], da[y])
     fig, ax = plt.subplots(subplot_kw={"projection": proj_obj}, figsize=figsize)
     transform = ccrs.PlateCarree()
 
-    ax = _add_cartopy_features(
+    ax = add_map_features(
         ax,
         global_extent,
         set_extent,
@@ -1371,7 +1371,7 @@ def geoplot(
     )
 
     # we want all possible args
-    plot, pargs = _plot_method(da, method)
+    plot, pargs = get_plot_method(da, method)
     all_args = dict(locals())
     all_args.update(kwargs)
 
@@ -1401,7 +1401,7 @@ def geoplot(
                 c.set_rasterized(rasterized)
 
     if clabel and method == "contour":
-        _add_contour_labels(
+        add_contour_labels(
             ax,
             mp,
             fmt=clabel_fmt,
@@ -1414,7 +1414,7 @@ def geoplot(
     plt.title(title)
 
     if gridlines:
-        _add_gridlines(ax)
+        add_gridlines(ax)
         pad_quiver_key[0] = True
         pad_quiver_key[1] = True
 
@@ -1461,9 +1461,7 @@ def geoplot(
     }
 
 
-def _ffmpeg_encode(
-    input_pattern, outfile, fps, session_tmp_dir, user_path, error
-) -> int:
+def ffmpeg(input_pattern, outfile, fps, session_tmp_dir, user_path, error) -> int:
 
     try:
         cmd = [
@@ -1507,7 +1505,7 @@ def _ffmpeg_encode(
     return error
 
 
-def _map_wrapper(
+def geoplot_dispatch(
     i: int,
     dim_value: Any,
     dim: str,
@@ -1645,6 +1643,12 @@ def animate(
     v_component: xr.DataArray = None,
     colorbar_kwargs: dict = None,
     quiver_kwargs: dict = None,
+    clabel: bool = False,
+    clabel_fmt: str = "%1.0f",
+    clabel_fontsize: float = 8,
+    clabel_inline: bool = True,
+    clabel_colors: str = None,
+    clabel_kwargs: dict = None,
     cyclic: bool = False,
     indices: tuple | list | np.ndarray = None,
     outfile: Path = None,
@@ -1735,6 +1739,17 @@ def animate(
         ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
         ``color: str`` and ``width: float``. See
         https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+    clabel : bool, default False
+        Label line contours. Ignored for ``method="contourf"``.
+    clabel_fmt : str, default "%1.0f"
+        Contour-label format.
+    clabel_fontsize : float, default 8
+        Contour-label font size.
+    clabel_inline : bool, default True
+        Draw contour labels inline.
+    clabel_colors : str, optional
+        Contour-label color.
+    clabel_kwargs : dict, optional
     cyclic : bool, default False
         If True, append a cyclic longitude point before plotting each frame.
         The longitude dimension is assumed to be named ``"lon"``.
@@ -1814,7 +1829,7 @@ def animate(
     if parallel:
         processes = min(len(indices), n_cpus // 2)
 
-        delayed_tasks = [dask.delayed(_map_wrapper)(*task) for task in tasks]
+        delayed_tasks = [dask.delayed(geoplot_dispatch)(*task) for task in tasks]
 
         with DaskProgressBar():
             dask.compute(*delayed_tasks, scheduler="processes", num_workers=processes)
@@ -1822,7 +1837,7 @@ def animate(
     else:
         tasks = SerialProgressBar(tasks, total=len(tasks))
         for task in tasks:
-            _map_wrapper(*task)
+            geoplot_dispatch(*task)
 
     # ---- ffmpeg encode (MP4 only) ----
 
@@ -1836,7 +1851,7 @@ def animate(
     outfile.parent.mkdir(parents=True, exist_ok=True)
     input_pattern = str(Path(session_tmp_dir) / "%06d.png")
 
-    error = _ffmpeg_encode(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
+    error = ffmpeg(input_pattern, outfile, fps, session_tmp_dir, user_path, 0)
 
     if error == 0 and user_path:
         print(f"Animation saved to : {outfile}")
@@ -1925,13 +1940,13 @@ class Geoplot:
                 yield ax, selector
 
     @staticmethod
-    def _select(da: xr.DataArray, selector: dict) -> xr.DataArray:
+    def sel(da: xr.DataArray, selector: dict) -> xr.DataArray:
         """Return the facet slice of an overlay field."""
         return da.sel(selector).squeeze() if selector else da.squeeze()
 
     def __repr__(self) -> str:
         """Return a compact summary of the stored artists and overlays."""
-        return _map_repr(self)
+        return geo_repr(self)
 
 
 class Adder:
@@ -1943,7 +1958,7 @@ class Adder:
         self._map = Geoplot
 
     @staticmethod
-    def _drop_facet_kwargs(kwargs: dict) -> None:
+    def drop_facet_kwargs(kwargs: dict) -> None:
         """Remove facet options inherited from the base map."""
         for key in ("col", "row", "col_wrap"):
             kwargs.pop(key, None)
@@ -1954,7 +1969,6 @@ class Adder:
         *,
         x: str = None,
         y: str = None,
-        method: Literal["contour", "contourf"] = "contour",
         levels: int | list = None,
         colors: str | list = None,
         cmap: str | LinearSegmentedColormap | ListedColormap = None,
@@ -1984,8 +1998,6 @@ class Adder:
             the corresponding facet coordinates.
         x, y : str, optional
             Horizontal coordinate names.
-        method : {"contour", "contourf"}, default "contour"
-            Draw line contours or filled contours.
         levels : int or sequence of float, optional
             Number of contour levels or explicit contour levels.
         colors : str or sequence of str, optional
@@ -2030,13 +2042,11 @@ class Adder:
         Geoplot
             The parent map, to allow chaining.
         """
-        if method not in ("contour", "contourf"):
-            raise ValueError("method must be 'contour' or 'contourf'.")
 
         if not x or not y:
-            x, y = _get_lon_lat(da)
+            x, y = get_spatial_dims(da)
 
-        self._drop_facet_kwargs(kwargs)
+        self.drop_facet_kwargs(kwargs)
 
         options = {
             "levels": levels,
@@ -2062,8 +2072,8 @@ class Adder:
         transform = ccrs.PlateCarree()
 
         for ax, selector in self._map._iter_axes():
-            field = self._map._select(da, selector)
-            artist = getattr(field.plot, method)(
+            field = self._map.sel(da, selector)
+            artist = getattr(field.plot, "contour")(
                 ax=ax,
                 transform=transform,
                 add_colorbar=False,
@@ -2071,9 +2081,9 @@ class Adder:
             )
             artists.append(artist)
 
-            if clabel and method == "contour":
+            if clabel:
                 labels.append(
-                    _add_contour_labels(
+                    add_contour_labels(
                         ax,
                         artist,
                         fmt=clabel_fmt,
@@ -2086,7 +2096,7 @@ class Adder:
 
         self._map.layers.append(
             {
-                "kind": method,
+                "kind": "contour",
                 "artists": artists,
                 "labels": labels,
             }
@@ -2141,12 +2151,14 @@ class Adder:
         """
 
         subplots = self._map.facetgrid is not None
-        key_ax = _bottom_left_axis(self._map.facetgrid) if subplots else self._map.axes
+        key_ax = (
+            get_bottom_left_axis(self._map.facetgrid) if subplots else self._map.axes
+        )
 
         if key_magnitude is None:
-            key_magnitude = _get_quiver_key_mag(u, v)
+            key_magnitude = get_quiver_key_mag(u, v)
 
-        self._drop_facet_kwargs(kwargs)
+        self.drop_facet_kwargs(kwargs)
 
         options = {
             "scale": scale,
@@ -2162,8 +2174,8 @@ class Adder:
 
         for ax, selector in self._map._iter_axes():
             _, quiver_artist, quiver_key = quiver(
-                u=self._map._select(u, selector),
-                v=self._map._select(v, selector),
+                u=self._map.sel(u, selector),
+                v=self._map.sel(v, selector),
                 x=x,
                 y=y,
                 subsample=subsample,
@@ -2237,7 +2249,7 @@ class Adder:
         for ax, selector in self._map._iter_axes():
             artists.append(
                 significance(
-                    data=self._map._select(pvalues, selector),
+                    data=self._map.sel(pvalues, selector),
                     ax=ax,
                     x=x,
                     y=y,
@@ -2320,7 +2332,7 @@ class Adder:
         return self._map
 
 
-def _map_repr(obj: Geoplot) -> str:
+def geo_repr(obj: Geoplot) -> str:
     parts = []
 
     if obj.projection is not None:
