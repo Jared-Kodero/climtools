@@ -100,16 +100,33 @@ def redirect_streams(
 
 def get_fsig(func: Callable) -> dict:
     """
-    Get the signature of a function as a dictionary.
+    Map the named parameters of ``func`` to their default values.
+
+    Variadic parameters (``*args`` and ``**kwargs``) are excluded: they are not
+    keywords a caller can bind by name, so including them would let the literal
+    names ``args`` and ``kwargs`` pass through keyword filters built from this
+    mapping.
+
+    Parameters
+    ----------
+    func : Callable
+        Function, method or class whose signature is inspected.
+
+    Returns
+    -------
+    dict
+        Parameter name mapped to its default, or to None when the parameter
+        has no default.
     """
-    sig = inspect.signature(func)
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
     params = {}
 
-    for name, param in sig.parameters.items():
-        if param.default is inspect.Parameter.empty:
-            params[name] = None
-        else:
-            params[name] = param.default
+    for name, param in inspect.signature(func).parameters.items():
+        if param.kind in variadic:
+            continue
+        params[name] = (
+            None if param.default is inspect.Parameter.empty else param.default
+        )
 
     return params
 

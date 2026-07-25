@@ -1134,7 +1134,7 @@ def _faceted(
     }
 
 
-def _cartplot(
+def geoplot(
     da: xr.DataArray,
     *,
     x: str = None,
@@ -1203,7 +1203,7 @@ def _cartplot(
     This is the renderer behind :func:`map`. It draws a two-dimensional or
     faceted (three-dimensional) xarray DataArray on a Cartopy map and returns a
     dictionary of matplotlib and xarray artists. Callers normally use
-    :func:`map`, which wraps the returned artists in a :class:`Mapplot`, rather
+    :func:`map`, which wraps the returned artists in a :class:`Geoplot`, rather
     than calling this function directly.
 
     Parameters
@@ -1537,7 +1537,7 @@ def _map_wrapper(
 
     fname = session_tmp_dir / f"{i:06d}.png"
 
-    plot = map(**{k: v for k, v in local_kwargs.items() if k in get_fsig(_cartplot)})
+    plot = geo(**{k: v for k, v in local_kwargs.items() if k in get_fsig(geoplot)})
 
     faceted = local_kwargs.get("col") or local_kwargs.get("row")
     if faceted is None:
@@ -1790,7 +1790,7 @@ def animate(
     dpi_map = {"low": 300, "medium": 600, "high": 1200}
     dpi = dpi_map.get(quality, 600)
 
-    def _sel(da: xr.DataArray | None, i: int):
+    def sel(da: xr.DataArray | None, i: int):
         return None if da is None else da.isel({dim: i})
 
     if indices is None:
@@ -1803,9 +1803,9 @@ def animate(
             title,
             dpi,
             session_tmp_dir,
-            _sel(da, i),
-            _sel(u_component, i),
-            _sel(v_component, i),
+            sel(da, i),
+            sel(u_component, i),
+            sel(v_component, i),
             args,
         )
         for i in indices
@@ -1858,10 +1858,10 @@ def animate(
     raise RuntimeError("Animation encoding failed")
 
 
-class Mapplot:
+class Geoplot:
     """Composable Cartopy map returned by :func:`map`.
 
-    ``Mapplot`` stores the base figure and artists and exposes chainable
+    ``Geoplot`` stores the base figure and artists and exposes chainable
     overlay methods through :attr:`add`. Scalar overlays, scatter points,
     vectors, significance markers, and additional colorbars are applied to
     every populated facet automatically.
@@ -1869,7 +1869,7 @@ class Mapplot:
     Parameters
     ----------
     primitives : dict
-        Renderer output produced by :func:`_cartplot`.
+        Renderer output produced by :func:`geoplot`.
 
     Attributes
     ----------
@@ -1935,12 +1935,12 @@ class Mapplot:
 
 
 class Adder:
-    """Add overlay layers to a :class:`Mapplot`."""
+    """Add overlay layers to a :class:`Geoplot`."""
 
     __slots__ = ("_map",)
 
-    def __init__(self, mapplot: Mapplot):
-        self._map = mapplot
+    def __init__(self, Geoplot: Geoplot):
+        self._map = Geoplot
 
     @staticmethod
     def _drop_facet_kwargs(kwargs: dict) -> None:
@@ -1974,7 +1974,7 @@ class Adder:
         clabel_colors: str = None,
         clabel_kwargs: dict = None,
         **kwargs,
-    ) -> Mapplot:
+    ) -> Geoplot:
         """Add a line or filled-contour overlay and return the parent map.
 
         Parameters
@@ -2027,7 +2027,7 @@ class Adder:
 
         Returns
         -------
-        Mapplot
+        Geoplot
             The parent map, to allow chaining.
         """
         if method not in ("contour", "contourf"):
@@ -2107,7 +2107,7 @@ class Adder:
         color: str = None,
         width: float = None,
         **kwargs,
-    ) -> Mapplot:
+    ) -> Geoplot:
         """Add a vector overlay and return the parent map.
 
         Parameters
@@ -2136,7 +2136,7 @@ class Adder:
 
         Returns
         -------
-        Mapplot
+        Geoplot
             The parent map, to allow chaining.
         """
 
@@ -2203,7 +2203,7 @@ class Adder:
         size: float = 0.25,
         x: str = "lon",
         y: str = "lat",
-    ) -> Mapplot:
+    ) -> Geoplot:
         """Add a pointwise significance overlay and return the parent map.
 
         Parameters
@@ -2229,7 +2229,7 @@ class Adder:
 
         Returns
         -------
-        Mapplot
+        Geoplot
             The parent map, to allow chaining.
         """
         artists = []
@@ -2269,7 +2269,7 @@ class Adder:
         cbar_label: str = None,
         ticks: np.ndarray | list = None,
         tick_labels: list[str] = None,
-    ) -> Mapplot:
+    ) -> Geoplot:
         """Attach a colorbar and return the parent map.
 
         Parameters
@@ -2291,7 +2291,7 @@ class Adder:
 
         Returns
         -------
-        Mapplot
+        Geoplot
             The parent map, to allow chaining.
         """
         if mappable is None:
@@ -2320,7 +2320,7 @@ class Adder:
         return self._map
 
 
-def _map_repr(obj: Mapplot) -> str:
+def _map_repr(obj: Geoplot) -> str:
     parts = []
 
     if obj.projection is not None:
@@ -2356,7 +2356,7 @@ def _map_repr(obj: Mapplot) -> str:
     return f"Map({', '.join(parts)})"
 
 
-def map(
+def geo(
     da: xr.DataArray,
     *,
     x: str = None,
@@ -2418,16 +2418,16 @@ def map(
     clabel_kwargs: dict = None,
     cyclic: bool = False,
     **kwargs,
-) -> Mapplot:
+) -> Geoplot:
     """
-    Draw a scalar field on a Cartopy map and return a composable :class:`Mapplot`.
+    Draw a scalar field on a Cartopy map and return a composable :class:`Geoplot`.
 
     This is the public entry point. It renders a two-dimensional or faceted
     (three-dimensional) DataArray as the base layer and returns a
-    :class:`Mapplot` whose ``add.contour``, ``add.quiver``, ``add.significance``
+    :class:`Geoplot` whose ``add.contour``, ``add.quiver``, ``add.significance``
     and ``add.colorbar`` methods add overlays. The full parameter list is
     declared explicitly so that editors expose every option. The class is named
-    ``Mapplot`` to avoid shadowing the builtin inside this module; this callable
+    ``Geoplot`` to avoid shadowing the builtin inside this module; this callable
     is exposed as ``climtools.plot.map``.
 
     Parameters
@@ -2533,7 +2533,7 @@ def map(
 
     Returns
     -------
-    Mapplot
+    Geoplot
         Composable map holding the base artists, with chainable overlay methods.
 
     Notes
@@ -2544,4 +2544,4 @@ def map(
 
     params = dict(locals())
     extra = params.pop("kwargs")
-    return Mapplot(_cartplot(**params, **extra))
+    return Geoplot(geoplot(**params, **extra))

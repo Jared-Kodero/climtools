@@ -25,34 +25,31 @@ def _mktrend_test(
     array: np.ndarray,
     scale: float = 1,
 ) -> np.ndarray:
-    result_array = None
     nan_array = np.array([np.nan] * 7)
 
     df = pd.DataFrame({"array": array})
     df = df.dropna()
 
     try:
-        if not df.empty or len(df) < 2:
-            result = mk.hamed_rao_modification_test(df["array"])
-            mean_val = df["array"].mean()
-            std_val = df["array"].std()
-
-            trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
-            stats = [
-                result.slope * scale,
-                result.p,
-                trend,
-                mean_val,
-                std_val,
-                result.Tau,
-                result.z,
-            ]
-
-            result_array = np.array(stats)
-
-            return result_array
-        else:
+        if len(df) < 2:
             return nan_array
+
+        result = mk.hamed_rao_modification_test(df["array"])
+        mean_val = df["array"].mean()
+        std_val = df["array"].std()
+
+        trend = {"increasing": 1, "decreasing": -1}.get(result.trend, 0)
+        stats = [
+            result.slope * scale,
+            result.p,
+            trend,
+            mean_val,
+            std_val,
+            result.Tau,
+            result.z,
+        ]
+
+        return np.array(stats)
     except Exception:
         return nan_array
 
@@ -167,41 +164,37 @@ def corr(
     dask_scheduler: Literal["threads", "processes"] = "threads",
 ) -> xr.Dataset:
     """
-    Compute correlation coefficients between two xarray objects.
+    Compute a pointwise correlation between two DataArrays along a dimension.
 
-    This function evaluates the association between two variables over a
-    specified dimension using Pearson, Spearman, or Kendall correlation.
-    When x or y are `xr.Dataset`, a target variable must be specified via
-    `x_var` or `y_var`. The statistical test is applied independently at
-    each grid point across all remaining dimensions.
+    The correlation is evaluated independently at every grid point across the
+    remaining dimensions, using the Pearson, Spearman or Kendall coefficient.
+    Missing values are dropped pairwise before each test.
 
     Parameters
     ----------
     x : xr.DataArray
         First input.
     y : xr.DataArray
-        Second input.
+        Second input. Must match ``x`` in dimensions, shape and the values of
+        ``dim``.
     corr_type : {"pearson", "spearman", "kendall"}, default "pearson"
-        Type of correlation coefficient:
+        Correlation coefficient:
         - "pearson": linear correlation
         - "spearman": rank correlation
-        - "kendall": Kendall τ rank correlation
+        - "kendall": Kendall tau rank correlation
     alternative : {"two-sided", "less", "greater"}, default "two-sided"
-        Defines the alternative hypothesis for the p-value calculation.
+        Alternative hypothesis used for the p-value.
     dim : str
-        Dimension along which the correlation is computed (e.g., "time").
-        Required for xarray objects.
+        Dimension the correlation is computed along, for example "time".
     dask_scheduler : {"threads", "processes"}, default "threads"
-        Scheduler used when computing correlations lazily with Dask.
+        Scheduler used when the inputs are chunked.
 
     Returns
     -------
     xr.Dataset
-        Dataset containing:
-        - "corr": correlation coefficient
-        - "p": p-value associated with the chosen alternative hypothesis
-        Additional attributes describe the correlation type and hypothesis.
-
+        Dataset with:
+        - "corr": the correlation coefficient
+        - "p_value": the p-value of the chosen alternative hypothesis
     """
 
     out_vars = [
@@ -260,7 +253,6 @@ def corr(
         output_dtypes=[np.float32],
         dask_gufunc_kwargs=dask_gufunc_kwargs,
         kwargs={
-            "data_type": "xr",
             "corr_type": corr_type,
             "alternative": alternative,
         },
@@ -283,15 +275,36 @@ def trends(
     polyfit: bool = False,
 ) -> xr.Dataset:
     """
-    Calculate the Mann-Kendall trend test for a given dataset.
-    Parameters:
-        data ( xr.DataArray): Input dataset.
-        dim (str): Dimension along which to calculate the trend test (Required for xarray).
-        scale (float, optional): Scaling factor for the slope (e.g., convert to per hour, per day). Default is 1.
-        dask_scheduler (str, optional): Dask scheduler type. Default is "processes".
-        polyfit (bool, optional): Whether to use polynomial fitting. Default is False.
-    Returns:
-         xr.Dataset: DataFrame or Dataset containing the trend test results.
+    Compute a pointwise trend along a dimension.
+
+    By default the modified Mann-Kendall test (Hamed and Rao) is applied at
+    every grid point, returning the Sen slope together with the trend
+    direction, its p-value and summary statistics. With ``polyfit=True`` an
+    ordinary least squares fit is used instead, returning the slope and its
+    p-value.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        Input field.
+    dim : str
+        Dimension the trend is computed along, for example "time". The data is
+        sorted along this dimension first.
+    scale : float, default 1
+        Multiplier applied to the slope, to convert its time unit, for example
+        to a per-decade rate.
+    dask_scheduler : {"threads", "processes"}, default "threads"
+        Scheduler used when the input is chunked.
+    polyfit : bool, default False
+        Use ordinary least squares instead of the Mann-Kendall test.
+
+    Returns
+    -------
+    xr.Dataset
+        Trend statistics. The Mann-Kendall path returns ``slope``, ``p_value``,
+        ``trend``, ``mean_val``, ``std_val``, ``tau`` and ``z_score``. The
+        ``polyfit`` path returns ``slope``, ``p_value``, ``mean_val`` and
+        ``std_val``.
     """
 
     if polyfit:
@@ -347,17 +360,25 @@ def significance(
     data_var: str = None,
 ) -> xr.DataArray:
     """
-    Calculate the significance of the difference between two datasets.
-    Parameters:
-        a (xr.DataArray | xr.Dataset): First dataset.
-        b (xr.DataArray | xr.Dataset): Second dataset.
-        dim (str): Dimension along which to calculate the significance test, e.g., "time" or a time dimension, if 'a' and 'b' represent two periods, check the temporal dimension.
-        data_var (str): Variable to calculate the significance for.
-        level (float): Significance level for the test, default is 0.05.
+    Test the difference in mean between two datasets with a Welch t-test.
 
+    The two-sample t-test is applied independently at every grid point across
+    the dimensions other than ``dim``, with unequal variances assumed and NaNs
+    omitted.
 
-    Returns:
-        xr.DataArray: DataArray containing the P-values of the significance test for the difference between the two datasets.
+    Parameters
+    ----------
+    a, b : xr.DataArray or xr.Dataset
+        The two samples, for example two periods. They must share dimensions.
+    dim : str, default "time"
+        Sample dimension the test is applied along.
+    data_var : str, optional
+        Variable to test. Required when ``a`` or ``b`` is a Dataset.
+
+    Returns
+    -------
+    xr.DataArray
+        Pointwise p-values of the difference in mean.
     """
 
     dims_a = list(a.dims)

@@ -1,56 +1,72 @@
-from __future__ import annotations
+"""climtools: utilities for climate data analysis and plotting.
 
-__all__ = [
-    "cdo",
-    "cmaps",
-    "xgeo",
-    "n_cpus",
-    "theme",
-    "redirect_streams",
-    "SerialProgressBar",
-    "DaskProgressBar",
-]
+The package collects the routines used repeatedly when exploring and
+publishing gridded climate data with xarray:
+
+- ``plot``      Cartopy map plotting. Entry point :func:`climtools.plotting.geo`.
+- ``xgeo``      Geospatial operations: regridding, masking, transects, local solar time.
+- ``calc``      Trends, correlations and difference-of-means testing.
+- ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib and cmocean.
+- ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
+- ``theme``     Publication styling for matplotlib and seaborn.
+
+Two access patterns are supported and are equivalent::
+
+    from climtools import xgeo as xg
+    xg.plot.geo(da, method="contourf")
+
+    import climtools            # registers the accessor
+    da.xgeo.plot.geo(method="contourf")
+
+Importing the package registers the ``.xgeo`` accessor on ``xarray.DataArray``
+and ``xarray.Dataset``, replaces the dask progress bar with the styled one from
+:mod:`climtools.progress`, and, inside a Jupyter kernel, applies the widget CSS
+fix and switches inline figures to retina resolution.
+
+Regridding requires ``xesmf``, which is imported on first use. The rest of the
+package works without it.
+"""
+
+from __future__ import annotations
 
 import sys
 
-import dask
+import dask.diagnostics
 
+from . import accessors as accessors
+from . import calc_stats as calc
 from . import cmaps as cmaps
-from . import progress as pg
+from . import plotting as plot
 from . import pycdo as cdo
 from . import theming as theme
-from . import xgeo
-
-# import cmaps as _cmaps --- IGNORE ---
+from . import xgeo as xgeo
+from .accessors import *
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import fix_widget_css, n_cpus, redirect_streams
+
+__all__ = [
+    "DaskProgressBar",
+    "SerialProgressBar",
+    "calc",
+    "cdo",
+    "cmaps",
+    "n_cpus",
+    "plot",
+    "redirect_streams",
+    "theme",
+    "xgeo",
+]
+
+
 # from .update import _self_update
 
 # _self_update()
 
-
-dask.diagnostics.ProgressBar = pg.DaskProgressBar
+# Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
+dask.diagnostics.ProgressBar = DaskProgressBar
 
 if "ipykernel" in sys.modules:
-    fix_widget_css()
     import matplotlib_inline as plt_inline
 
+    fix_widget_css()
     plt_inline.backend_inline.set_matplotlib_formats("retina")
-
-
-"""climtools — utilities for climate data analysis and plotting.
-
-This package provides a collection of small helper routines used while
-exploring and plotting climate datasets with xarray. The top-level package
-exposes plotting helpers, statistical/trend utilities, regridding helpers
-that wrap CDO/ESMF calls (when available), and a number of convenience
-file/system utilities.
-
-For a short list of the main exported names see :pydata:`__all__` below or
-inspect the package interactively with ``help(climtools)``.
-
-The package is intended for interactive analysis and reproducible notebooks.
-If you plan to use parts of the package programmatically, import the
-individual modules (for example ``from climtools import plot, trends``) or the
-specific functions you need.
-"""
