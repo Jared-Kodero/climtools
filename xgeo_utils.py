@@ -1,214 +1,257 @@
 from __future__ import annotations
 
+import hashlib
+from typing import Literal
+
+import cartopy.util
 import numpy as np
 import xarray as xr
+from cf_xarray import *
 
 
-def sel_transect_xy(
+def get_spatial_dims(
+    da: xr.DataArray | xr.Dataset,
+) -> tuple[str, str]:
+    """Return the longitude and latitude coordinate names."""
+    ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
+
+    if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
+        ds = ds.cf.guess_coord_axis()
+
+    lon = ds.cf["longitude"]
+    lat = ds.cf["latitude"]
+
+    if lon.name is None or lat.name is None:
+        raise ValueError(
+            "Could not determine longitude and latitude coordinate names, specify x and y"
+        )
+
+    return lon.name, lat.name
+
+
+def add_cyclic_point(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
+    """
+    Add a cyclic point to a DataArray along the specified longitude dimension.
+
+    Parameters
+    ----------
+    obj : xarray.DataArray or xarray.Dataset
+        The input DataArray or Dataset to which a cyclic point will be added.
+    lon : str, optional
+        The name of the longitude dimension. Default is "lon".
+
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        The object with a cyclic point added.
+    """
+
+    dataset = False
+
+    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
+        raise ValueError(
+            "Input object must be a DataArray or a Dataset with only one data variable."
+        )
+
+    if isinstance(obj, xr.Dataset):
+        obj = list(obj.data_vars.values())[0]
+        dataset = True
+
+    if lon not in obj.dims:
+        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
+
+    attrs = obj.attrs
+    cyclic_data, cyclic_dim = cartopy.util.add_cyclic_point(obj.values, coord=obj[lon])
+    coords = {dim: obj.coords[dim] for dim in obj.dims}
+    coords[lon] = cyclic_dim
+
+    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
+
+    if dataset:
+        new_obj = new_obj.to_dataset(name=obj.name)
+
+    return new_obj
+
+
+def sel_transect(
     data: xr.Dataset | xr.DataArray,
-    x: float = None,
-    y: float = None,
+    x: float | None = None,
+    y: float | None = None,
     orientation: float = 0.0,
     width: float = 1.0,
     *,
-    xdim: str = "x",
-    ydim: str = "y",
+    xdim: str = None,
+    ydim: str = None,
+    geometry: Literal["xy", "latlon"] = "latlon",
     snap: bool = True,
     drop: bool = True,
-):
+) -> xr.Dataset | xr.DataArray:
+    """
+    Select cells lying within a transect on a rectilinear xarray grid.
 
-    if x is None and y is None:
-        raise ValueError("At least one value in center_point must be provided.")
+    Parameters
+    ----------
+    data
+        Input Dataset or DataArray.
+    x, y
+        Transect centre. For spherical geometry, x is longitude and y is
+        latitude. Either coordinate may be omitted to select an axis-aligned
+        band.
+    orientation
+        Transect orientation in degrees clockwise from the positive y
+        direction. For spherical geometry, this is clockwise from north.
+    width
+        Transect width in approximate grid-cell units.
+    xdim, ydim
+        Names of the x and y coordinates.
+    geometry
+        ``"xy"`` for planar coordinates or ``"latlon"`` for
+        longitude-latitude coordinates in degrees.
+    snap
+        Snap the supplied centre coordinates to the nearest grid point.
+    drop
+        Drop coordinate locations outside the transect.
+    """
 
-    for name in (xdim, ydim):
-        if name not in data.coords:
-            raise ValueError(f"Input data must contain a '{name}' coordinate.")
+    if xdim not in data.coords or ydim not in data.coords:
+        xdim, ydim = get_spatial_dims(data)
 
     if x is None and y is None:
         raise ValueError("At least one of `x` or `y` must be provided.")
 
     if width <= 0:
-        raise ValueError("width must be positive.")
+        raise ValueError("`width` must be positive.")
+
+    if geometry not in {"xy", "latlon"}:
+        raise ValueError("`geometry` must be either 'xy' or 'latlon'.")
 
     xc = data[xdim]
     yc = data[ydim]
 
-    rectilinear = (
-        xc.ndim == 1 and yc.ndim == 1 and xdim in data.dims and ydim in data.dims
-    )
-    if not rectilinear:
+    if xc.ndim != 1 or yc.ndim != 1 or xc.dims != (xdim,) or yc.dims != (ydim,):
         raise ValueError(
-            "Only rectilinear grids with 1D planar coordinates are supported."
+            "Coordinates must define a rectilinear grid with one-dimensional coordinate variables."
         )
 
-    if xc.sizes[xdim] < 2 or yc.sizes[ydim] < 2:
-        raise ValueError("Each planar coordinate must contain at least two points.")
+    if xc.size < 2 or yc.size < 2:
+        raise ValueError("Each coordinate must contain at least two points.")
 
-    dx = np.abs(xc.diff(xdim)).median(xdim)
+    latlon = geometry == "latlon"
+
+    def longitude_delta(
+        values: xr.DataArray,
+        centre: float,
+    ) -> xr.DataArray:
+        """Signed shortest longitude difference in degrees."""
+        return (values - centre + 180.0) % 360.0 - 180.0
+
+    dx_values = xc.diff(xdim)
+    if latlon:
+        dx_values = longitude_delta(dx_values, 0.0)
+
+    dx = np.abs(dx_values).median(xdim)
     dy = np.abs(yc.diff(ydim)).median(ydim)
 
-    if y is not None and x is None:
-        y0 = float(yc.sel({ydim: y}, method="nearest")) if snap else float(y)
-        half_width = 0.5 * width * dy
-        mask = np.abs(yc - y0) <= half_width
-        return data.where(mask, drop=drop)
-
-    if x is not None and y is None:
-        x0 = float(xc.sel({xdim: x}, method="nearest")) if snap else float(x)
-        half_width = 0.5 * width * dx
-        mask = np.abs(xc - x0) <= half_width
-        return data.where(mask, drop=drop)
-
-    if snap:
+    # Resolve the x-coordinate of the transect centre.
+    if x is None:
+        x0 = None
+    elif not snap:
+        x0 = float(x)
+    elif latlon:
+        distance = np.abs(longitude_delta(xc, x))
+        index = distance.argmin(xdim)
+        x0 = float(xc.isel({xdim: index}))
+    else:
         x0 = float(xc.sel({xdim: x}, method="nearest"))
+
+    # Resolve the y-coordinate of the transect centre.
+    if y is None:
+        y0 = None
+    elif snap:
         y0 = float(yc.sel({ydim: y}, method="nearest"))
     else:
-        x0 = float(x)
         y0 = float(y)
 
-    theta = np.deg2rad(orientation % 180.0)
-    nx = np.cos(theta)
-    ny = -np.sin(theta)
-
-    cross_track = (xc - x0) * nx + (yc - y0) * ny
-    cell_width = np.sqrt((nx * dx) ** 2 + (ny * dy) ** 2)
-    half_width = 0.5 * width * cell_width
-
-    mask = np.abs(cross_track) <= half_width
-    return data.where(mask, drop=drop)
-
-
-def sel_transect_latlon(
-    data: xr.Dataset | xr.DataArray,
-    lat: float = None,
-    lon: float = None,
-    orientation: float = 0.0,
-    width: float = 1.0,
-    *,
-    lat_dim: str = "lat",
-    lon_dim: str = "lon",
-    snap: bool = True,
-    drop: bool = True,
-):
-
-    if lat_dim not in data.coords or lon_dim not in data.coords:
-        raise ValueError(
-            "Input data must contain the specified latitude and longitude coordinates."
-        )
-
-    if lat is None and lon is None:
-        raise ValueError("At least one of `lat` or `lon` must be provided.")
-
-    if width <= 0:
-        raise ValueError("width must be positive.")
-
-    latc = data[lat_dim]
-    lonc = data[lon_dim]
-
-    rectilinear = (
-        latc.ndim == 1
-        and lonc.ndim == 1
-        and lat_dim in data.dims
-        and lon_dim in data.dims
-    )
-
-    if not rectilinear:
-        raise ValueError(
-            "Only rectilinear grids with 1D 'lat' and 'lon' coordinates are supported."
-        )
-
-    if latc.sizes["lat"] < 2:
-        raise ValueError("Latitude coordinate must contain at least two points.")
-
-    if lonc.sizes["lon"] < 2:
-        raise ValueError("Longitude coordinate must contain at least two points.")
-
-    dlat = np.abs(latc.diff("lat")).median("lat")
-    dlon = np.abs(((lonc.diff("lon") + 180.0) % 360.0) - 180.0).median("lon")
-
-    if lat is not None and lon is None:
-        lat0 = float(latc.sel(lat=lat, method="nearest")) if snap else float(lat)
-        half_width_deg = 0.5 * width * dlat
-        mask = np.abs(latc - lat0) <= half_width_deg
+    # Axis-aligned y band.
+    if x0 is None:
+        mask = np.abs(yc - y0) <= 0.5 * width * dy
         return data.where(mask, drop=drop)
 
-    if lon is not None and lat is None:
-        if snap:
-            dlon_to_centre = np.abs(((lonc - lon + 180.0) % 360.0) - 180.0)
-            lon0 = float(lonc.isel(lon=dlon_to_centre.argmin("lon")))
-        else:
-            lon0 = float(lon)
-
-        half_width_deg = 0.5 * width * dlon
-        mask = np.abs(((lonc - lon0 + 180.0) % 360.0) - 180.0) <= half_width_deg
+    # Axis-aligned x or longitude band.
+    if y0 is None:
+        offset = longitude_delta(xc, x0) if latlon else xc - x0
+        mask = np.abs(offset) <= 0.5 * width * dx
         return data.where(mask, drop=drop)
 
-    if snap:
-        lat0 = float(latc.sel(lat=lat, method="nearest"))
-
-        dlon_to_centre = np.abs(((lonc - lon + 180.0) % 360.0) - 180.0)
-        lon0 = float(lonc.isel(lon=dlon_to_centre.argmin("lon")))
-    else:
-        lat0 = float(lat)
-        lon0 = float(lon)
-
-    phi0 = np.deg2rad(lat0)
-    lam0 = np.deg2rad(lon0)
     theta = np.deg2rad(orientation % 180.0)
+
+    if not latlon:
+        # Unit normal to a line oriented clockwise from positive y.
+        normal_x = np.cos(theta)
+        normal_y = -np.sin(theta)
+
+        cross_track = (xc - x0) * normal_x + (yc - y0) * normal_y
+
+        cell_width = np.hypot(
+            normal_x * dx,
+            normal_y * dy,
+        )
+
+        mask = np.abs(cross_track) <= 0.5 * width * cell_width
+        return data.where(mask, drop=drop)
+
+    # Spherical great-circle transect.
+    phi0 = np.deg2rad(y0)
+    lam0 = np.deg2rad(x0)
 
     cross_north_weight = abs(np.sin(theta))
     cross_east_weight = abs(np.cos(theta))
 
-    cell_width_deg = xr.apply_ufunc(
-        np.sqrt,
-        (cross_north_weight * dlat) ** 2
-        + (cross_east_weight * dlon * np.cos(phi0)) ** 2,
-        dask="allowed",
+    cell_width = np.hypot(
+        cross_north_weight * dy,
+        cross_east_weight * dx * np.cos(phi0),
     )
 
-    half_width_deg = 0.5 * width * cell_width_deg
-
-    ax = np.cos(phi0) * np.cos(lam0)
-    ay = np.cos(phi0) * np.sin(lam0)
-    az = np.sin(phi0)
-
-    north_x = -np.sin(phi0) * np.cos(lam0)
-    north_y = -np.sin(phi0) * np.sin(lam0)
-    north_z = np.cos(phi0)
-
-    east_x = -np.sin(lam0)
-    east_y = np.cos(lam0)
-    east_z = 0.0
-
-    dx = np.cos(theta) * north_x + np.sin(theta) * east_x
-    dy = np.cos(theta) * north_y + np.sin(theta) * east_y
-    dz = np.cos(theta) * north_z + np.sin(theta) * east_z
-
-    gx = ay * dz - az * dy
-    gy = az * dx - ax * dz
-    gz = ax * dy - ay * dx
-
-    phi = xr.apply_ufunc(np.deg2rad, latc, dask="allowed")
-    lam = xr.apply_ufunc(np.deg2rad, lonc, dask="allowed")
-
-    px = xr.apply_ufunc(np.cos, phi, dask="allowed") * xr.apply_ufunc(
-        np.cos, lam, dask="allowed"
-    )
-    py = xr.apply_ufunc(np.cos, phi, dask="allowed") * xr.apply_ufunc(
-        np.sin, lam, dask="allowed"
-    )
-    pz = xr.apply_ufunc(np.sin, phi, dask="allowed")
-
-    dot_n = gx * px + gy * py + gz * pz
-    dot_n = dot_n.clip(min=-1.0, max=1.0)
-
-    cross_track_deg = xr.apply_ufunc(
-        np.rad2deg,
-        xr.apply_ufunc(np.arcsin, dot_n, dask="allowed"),
-        dask="allowed",
+    anchor = np.array(
+        [
+            np.cos(phi0) * np.cos(lam0),
+            np.cos(phi0) * np.sin(lam0),
+            np.sin(phi0),
+        ]
     )
 
-    mask = np.abs(cross_track_deg) <= half_width_deg
+    north = np.array(
+        [
+            -np.sin(phi0) * np.cos(lam0),
+            -np.sin(phi0) * np.sin(lam0),
+            np.cos(phi0),
+        ]
+    )
+
+    east = np.array(
+        [
+            -np.sin(lam0),
+            np.cos(lam0),
+            0.0,
+        ]
+    )
+
+    direction = np.cos(theta) * north + np.sin(theta) * east
+    normal = np.cross(anchor, direction)
+
+    phi = np.deg2rad(yc)
+    lam = np.deg2rad(xc)
+
+    point_x = np.cos(phi) * np.cos(lam)
+    point_y = np.cos(phi) * np.sin(lam)
+    point_z = np.sin(phi)
+
+    dot_normal = (normal[0] * point_x + normal[1] * point_y + normal[2] * point_z).clip(
+        min=-1.0, max=1.0
+    )
+
+    cross_track = np.rad2deg(np.arcsin(dot_normal))
+    mask = np.abs(cross_track) <= 0.5 * width * cell_width
 
     return data.where(mask, drop=drop)
 
@@ -238,3 +281,22 @@ def to_lon180(
     data[lon] = (data[lon] + 180) % 360 - 180
     data = data.sortby(lon)
     return data
+
+
+def coord_id(coord: xr.DataArray) -> str:
+    """Return a compact description of a regular coordinate."""
+    dim = coord.dims[0]
+    step = float(coord.diff(dim).mean())
+    mean = float(coord.mean(dim))
+
+    return f"{coord.size}:{float(coord.min()):.8g}:{float(coord.max()):.8g}:{mean:.8g}:{step:.8g}"
+
+
+def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
+    """Return a deterministic hexadecimal identifier for a lat-lon grid."""
+    signature = f"lat-{coord_id(coords['lat'])}_lon-{coord_id(coords['lon'])}"
+
+    return hashlib.blake2b(
+        signature.encode("utf-8"),
+        digest_size=8,
+    ).hexdigest()

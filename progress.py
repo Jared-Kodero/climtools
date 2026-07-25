@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import logging
 import sys
 import threading
 from typing import Any, Iterable, Iterator, Optional
@@ -42,7 +41,6 @@ class DaskProgressBar(ProgressBar):
         self._last_emitted = -1
         self._lock = threading.Lock()
         self._wrote_header = False
-        self._logging_true = logging.getLogger().hasHandlers()
         self._start_time = datetime.datetime.now()
         self._elapsed = None
         self.step_pct = 1 if self._isatty else step_pct
@@ -84,11 +82,9 @@ class DaskProgressBar(ProgressBar):
         with self._lock:
             if not self._wrote_header:
                 self.description = self.description or ""
-                dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                prefix = "" if not self._logging_true else f"{dt} - PROGRESS - INFO - "
 
                 print(
-                    f"{prefix}{self.description}",
+                    f"{self.description}",
                     end=" ",
                     file=self._stream,
                     flush=True,
@@ -213,7 +209,6 @@ class SerialProgressBar:
         self._last_emitted = -1
         self._lock = threading.Lock()
         self._wrote_header = False
-        self._logging_true = logging.getLogger().hasHandlers()
         self._started = False
         self._start_time = datetime.datetime.now()
         self._elapsed = None
@@ -249,10 +244,8 @@ class SerialProgressBar:
         with self._lock:
             if not self._wrote_header:
                 self.description = self.description or ""
-                dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                prefix = "" if not self._logging_true else f"{dt} - PROGRESS - INFO - "
                 print(
-                    f"{prefix}{self.description}",
+                    f"{self.description}",
                     end=" ",
                     file=self._stream,
                     flush=True,

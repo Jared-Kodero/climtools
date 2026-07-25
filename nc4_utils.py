@@ -121,7 +121,7 @@ def createVariable(
     return ncvar
 
 
-def serial_write_netcdf(
+def dataset_to_netcdf(
     file: Path,
     data: xr.Dataset,
     unlimited_dim: str = None,
@@ -301,11 +301,9 @@ def append_to_netcdf(
             ncvar[index] = arr
 
 
-def write_netcdf_variable(
+def dataarray_to_netcdf(
     file: Path,
     da: xr.DataArray,
-    name: str = None,
-    mode: Literal["a", "r+"] = "r+",
     format="NETCDF4",
     shuffle: bool = None,
     zlib: bool = None,
@@ -319,10 +317,6 @@ def write_netcdf_variable(
         Path to a NetCDF4 file opened with read/write access.
     da : xr.DataArray
         DataArray to write. Must have dimensions that already exist in the file.
-    name : str, optional
-        Name of the variable to create in the NetCDF file. If None, uses da.name.
-    mode : {"a", "r+"}, optional
-        File access mode passed to netCDF4.Dataset.
     format : str, optional
         NetCDF format passed to netCDF4.Dataset.
     shuffle : bool, optional
@@ -336,8 +330,13 @@ def write_netcdf_variable(
     if not isinstance(da, xr.DataArray):
         raise ValueError("da must be an xarray.DataArray")
 
-    with nc.Dataset(file, mode=mode, format=format) as ncf:
-        varname = name or da.name
+    if not Path(file).exists():
+        raise FileNotFoundError(f"File {file!r} does not exist!")
+
+    with nc.Dataset(file, mode="r+", format=format) as ncf:
+        varname = da.name
+        if varname is None:
+            raise ValueError("DataArray must have a name.")
 
         # Overwrite values if the variable was created on a previous run.
         if varname in ncf.variables:

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -21,8 +21,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-from cartopy.util import add_cyclic_point
-from cf_xarray import *
 from IPython.display import DisplayHandle
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -34,29 +32,9 @@ from matplotlib.quiver import Quiver, QuiverKey
 
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import AttrDict, get_fsig, n_cpus, tmp
-from .xgeo_utils import to_lon180
+from .xgeo_utils import add_cyclic_point, get_spatial_dims, to_lon180
 
 pad_quiver_key: list[bool | None] = [None, None]
-
-
-def get_spatial_dims(
-    da: xr.DataArray | xr.Dataset,
-) -> tuple[str, str]:
-    """Return the longitude and latitude coordinate names."""
-    ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
-
-    if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
-        ds = ds.cf.guess_coord_axis()
-
-    lon = ds.cf["longitude"]
-    lat = ds.cf["latitude"]
-
-    if lon.name is None or lat.name is None:
-        raise ValueError(
-            "Could not determine longitude and latitude coordinate names, specify x and y"
-        )
-
-    return lon.name, lat.name
 
 
 def get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
@@ -403,50 +381,6 @@ def colorbar(
 
     plt.sca(ax)
     return cbar
-
-
-def make_cyclic(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
-    """
-    Add a cyclic point to a DataArray along the specified longitude dimension.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input DataArray or Dataset to which a cyclic point will be added.
-    lon : str, optional
-        The name of the longitude dimension. Default is "lon".
-
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The object with a cyclic point added.
-    """
-
-    dataset = False
-
-    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
-        raise ValueError(
-            "Input object must be a DataArray or a Dataset with only one data variable."
-        )
-
-    if isinstance(obj, xr.Dataset):
-        obj = list(obj.data_vars.values())[0]
-        dataset = True
-
-    if lon not in obj.dims:
-        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
-
-    attrs = obj.attrs
-    cyclic_data, cyclic_dim = add_cyclic_point(obj.values, coord=obj[lon])
-    coords = {dim: obj.coords[dim] for dim in obj.dims}
-    coords[lon] = cyclic_dim
-
-    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
-
-    if dataset:
-        new_obj = new_obj.to_dataset(name=obj.name)
-
-    return new_obj
 
 
 def significance(
@@ -830,7 +764,7 @@ def get_projection(
     projection: str,
     longitude: xr.DataArray,
     latitude: xr.DataArray,
-) -> tuple[Callable, str]:
+) -> tuple[ccrs.Projection, str]:
     lon_w = float(longitude.min().values)
     lon_e = float(longitude.max().values)
     lat_s = float(latitude.min().values)
@@ -1327,7 +1261,7 @@ def geoplot(
         x, y = get_spatial_dims(da)
 
     if cyclic:
-        da = make_cyclic(da, lon=x)
+        da = add_cyclic_point(da, lon=x)
 
     da = to_lon180(da, lon=x)
 
@@ -2365,7 +2299,7 @@ def geo_repr(obj: Geoplot) -> str:
     if obj.layers:
         parts.append(f"layers={len(obj.layers)}")
 
-    return f"Map({', '.join(parts)})"
+    return f"GeoPlot({', '.join(parts)})"
 
 
 def geo(

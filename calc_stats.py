@@ -65,16 +65,17 @@ def _polyfit(data: xr.DataArray | xr.Dataset, dim: str, data_var=None, scale=1):
 
     Returns: xr.Dataset
     """
-
-    data.attrs = {}
-    data = data.sortby(dim)
-    data[dim] = (np.arange(1, len(data[dim]) + 1)).astype(np.int32)
-    n = data.sizes[dim]
-
     if isinstance(data, xr.Dataset):
         if data_var is None:
             raise ValueError("Argument 'data_var' is required for xr.Dataset input.")
         data = data[data_var]
+
+    data.attrs = {}
+    data = data.sortby(dim)
+    data = data.assign_coords(
+        {dim: (np.arange(1, len(data[dim]) + 1)).astype(np.int32)}
+    )
+    n = data.sizes[dim]
 
     res = data.polyfit(dim=dim, deg=1, cov=True)
     slope = res["polyfit_coefficients"].sel(degree=1)
@@ -352,7 +353,7 @@ def trends(
     return trends.compute(scheduler=dask_scheduler)
 
 
-def significance(
+def pvalues(
     a: Union[xr.DataArray, xr.Dataset],
     b: Union[xr.DataArray, xr.Dataset],
     dim: str = "time",

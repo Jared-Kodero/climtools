@@ -40,15 +40,11 @@ from . import accessors as accessors  # noqa: F401  (registers the .xgeo accesso
 from . import calc_stats as calc
 from . import cmaps as cmaps
 from . import plotting as plot
-from .nc4_utils import (
-    append_to_netcdf,
-    serial_write_netcdf,
-    write_netcdf_variable,
-)
+from .nc4_utils import append_to_netcdf, dataarray_to_netcdf, dataset_to_netcdf
 from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
-from .xgeo_utils import sel_transect_latlon, sel_transect_xy, to_lon180
+from .xgeo_utils import grid_id, sel_transect, to_lon180
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -57,37 +53,32 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 xr.set_options(display_expand_attrs=False)
 
 __all__ = [
-    "SetupDask",
     "DaskProgressBar",
     "SerialProgressBar",
-    "add_lst",
+    "SetupDask",
+    "add_local_solar_time",
     "append_to_netcdf",
     "calc",
     "cmaps",
-    "mask_land",
+    "mask",
     "n_cpus",
     "plot",
     "preprocess_era5",
     "remap",
     "sel_transect",
     "to_lon180",
-    "write_netcdf",
-    "write_netcdf_variable",
+    "to_netcdf",
 ]
-
 _script_dir = Path(__file__).resolve().parent
-_default_mask = _script_dir / "data" / "mask" / "era5_0.25_mask"
 
-#: Cache of remapped land-sea masks, keyed by target grid and mask identity.
-_mask_cache: dict = {}
 
 #: Module-level Dask handles, shared by every :class:`SetupDask` instance.
 _dask_client = None
 _dask_cluster = None
 
 
-def write_netcdf(
-    data: xr.Dataset,
+def to_netcdf(
+    data: xr.Dataset | xr.DataArray,
     file: Path,
     unlimited_dim: str = None,
     *,
@@ -136,21 +127,28 @@ def write_netcdf(
     -------
     None
     """
-    if not isinstance(data, xr.Dataset):
-        raise TypeError(f"data must be an xarray.Dataset, got {type(data)}.")
-
-    return serial_write_netcdf(
-        file=file,
-        data=data,
-        unlimited_dim=unlimited_dim,
-        batch_size=batch_size,
-        format=format,
-        shuffle=shuffle,
-        zlib=zlib,
-        complevel=complevel,
-        show_progress=show_progress,
-        stdout=stdout,
-    )
+    if isinstance(data, xr.Dataset):
+        return dataset_to_netcdf(
+            file=file,
+            data=data,
+            unlimited_dim=unlimited_dim,
+            batch_size=batch_size,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+            show_progress=show_progress,
+            stdout=stdout,
+        )
+    elif isinstance(data, xr.DataArray):
+        return dataarray_to_netcdf(
+            file=file,
+            da=data,
+            format=format,
+            shuffle=format,
+            zlib=zlib,
+            complevel=complevel,
+        )
 
 
 def remap(
@@ -195,40 +193,34 @@ def remap(
         if coord not in grid_out.dims:
             raise ValueError(f"Output grid must contain {coord!r} dimension.")
 
-    _in = xr.Dataset(
+    in_coords = xr.Dataset(
         coords={
             "lat": grid_in["lat"],
             "lon": grid_in["lon"],
         }
     )
 
-    _out = xr.Dataset(
+    out_coords = xr.Dataset(
         coords={
             "lat": grid_out["lat"],
             "lon": grid_out["lon"],
         }
     )
     if parallel:
-        _out["dummy"] = xr.DataArray(
-            np.ones((_out.lat.size, _out.lon.size)),
+        out_coords["dummy"] = xr.DataArray(
+            np.ones((out_coords.lat.size, out_coords.lon.size)),
             dims=("lat", "lon"),
-            coords={"lat": _out.lat, "lon": _out.lon},
+            coords={"lat": out_coords.lat, "lon": out_coords.lon},
         )
 
-        _out = _out.chunk({"lat": "auto", "lon": "auto"})
+        out_coords = out_coords.chunk({"lat": "auto", "lon": "auto"})
 
-    _id = [
-        f"{method}",
-        f"{_in.sizes['lat']}x{_in.sizes['lon']}",
-        f"{_out.sizes['lat']}x{_out.sizes['lon']}",
-    ]
-
-    weight_file = tmp / ("_".join(_id) + ".nc")
+    weight_file = tmp / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
     reuse = weight_file.exists()
 
     regridder = xe.Regridder(
-        _in,
-        _out,
+        in_coords,
+        out_coords,
         method=method,
         parallel=parallel,
         filename=str(weight_file),
@@ -240,55 +232,93 @@ def remap(
     return out
 
 
-def mask_land(
+def mask(
     data: xr.DataArray | xr.Dataset,
-    mask: xr.DataArray | xr.Dataset | str | Path | None = None,
-    keep: Literal["land", "ocean"] = "land",
+    mask: xr.DataArray | xr.Dataset | Path | None = None,
+    data_var: str = "land",
+    valid_value: float | int = 1,
     parallel: bool = False,
 ) -> xr.DataArray | xr.Dataset:
     """
-    Mask an object outside the land or the ocean.
+    Mask grid cells that do not match a specified land-sea mask value.
 
-    The mask is regridded onto the grid of ``data`` with nearest-neighbour
-    interpolation, which preserves its categorical values, and the result is
-    cached so that repeated calls on the same grid do not repeat the
-    regridding.
+    The mask is remapped to the horizontal grid of ``data`` using
+    nearest-neighbour interpolation. This method preserves categorical mask
+    values. The remapped mask is cached so that repeated calls using the same
+    mask and target-grid specification do not repeat the remapping operation.
+
+    Before masking, ``data`` is sorted by increasing latitude and longitude.
+    Consequently, the returned object may have a different coordinate order
+    from the input.
 
     Parameters
     ----------
     data : xarray.DataArray or xarray.Dataset
-        Input object, carrying 'lat' and 'lon' dimensions.
-    mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path or None, optional
-        Land-sea mask, in which 1 marks the retained domain. A DataArray is
-        used as given. A Dataset or a path is opened and the ``keep`` variable
-        is taken from it. Defaults to the ERA5 0.25 degree mask bundled with
-        the package.
-    keep : {"land", "ocean"}, default "land"
-        Name of the mask variable to select, and hence the domain retained.
-        Ignored when ``mask`` is already a DataArray.
+        Object to mask. It must contain one-dimensional ``lat`` and ``lon``
+        coordinates and corresponding dimensions.
+
+    mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path, or None, optional
+        Categorical land-sea mask.
+
+        - If a DataArray is supplied, it is used directly.
+        - If a Dataset is supplied, the variable named by ``data_var`` is used.
+        - If a path is supplied, the Dataset at that path is opened and the
+          variable named by ``data_var`` is used.
+        - If None, the package's default land-sea mask is used.
+
+        The mask must contain ``lat`` and ``lon`` coordinates. By convention,
+        values equal to ``valid_value`` identify cells to retain.
+
+    data_var : str, default "land"
+        Name of the mask variable to extract when ``mask`` is a Dataset or a
+        path to a Dataset. This argument is ignored when ``mask`` is already
+        a DataArray.
+
+    valid_value : float or int, default 1
+        Mask value identifying grid cells to retain. Cells whose remapped mask
+        value differs from ``valid_value`` are replaced with NaN.
+
     parallel : bool, default False
-        Regrid the mask in parallel with Dask.
+        Whether to perform mask remapping in parallel with Dask. This option
+        is passed to :func:`remap`.
 
     Returns
     -------
     xarray.DataArray or xarray.Dataset
-        The input object with cells outside the retained domain set to NaN.
+        A latitude- and longitude-sorted object with cells outside the
+        retained mask category replaced by NaN. The return type matches the
+        type of ``data``.
+
+    Raises
+    ------
+    KeyError
+        If ``mask`` resolves to a Dataset that does not contain ``data_var``.
+
+    TypeError
+        If ``mask`` cannot be resolved to an xarray.DataArray.
+
+    Notes
+    -----
+    The cache key is based on the mask identity, mask-variable name, target
+    coordinate bounds, and target-grid dimensions. The cached object is the
+    remapped categorical mask, not the final Boolean mask, so different
+    ``valid_value`` values may reuse the same cached remapping.
     """
 
     if mask is None:
+        _default_mask = _script_dir / "data" / "mask" / "era5_0.25_mask"
+        print(f"mask is None: Using {_default_mask}")
         mask = _default_mask
-
-    mask_id = str(mask) if isinstance(mask, (str, Path)) else id(mask)
 
     if isinstance(mask, (str, Path)):
         mask = xr.open_dataset(mask)
 
     if isinstance(mask, xr.Dataset):
-        if keep not in mask:
+        if data_var not in mask:
             raise KeyError(
-                f"Mask variable {keep!r} not found; available: {list(mask.data_vars)}."
+                f"Mask variable {data_var!r} not found; available: {list(mask.data_vars)}."
             )
-        mask = mask[keep].load()
+        mask = mask[data_var].load()
 
     if not isinstance(mask, xr.DataArray):
         raise TypeError(f"mask must resolve to an xarray.DataArray, got {type(mask)}.")
@@ -299,29 +329,16 @@ def mask_land(
 
     lon_min, lon_max = float(data.lon.min()), float(data.lon.max())
     lat_min, lat_max = float(data.lat.min()), float(data.lat.max())
-    cache_key = (
-        mask_id,
-        keep,
-        lon_min,
-        lon_max,
-        lat_min,
-        lat_max,
-        data.sizes["lon"],
-        data.sizes["lat"],
+
+    subset_mask = mask.sortby(["lat", "lon"]).sel(
+        lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max)
     )
+    remapped_mask = remap(subset_mask, data, method="nearest_s2d", parallel=parallel)
 
-    if cache_key not in _mask_cache:
-        subset = mask.sortby(["lat", "lon"]).sel(
-            lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max)
-        )
-        _mask_cache[cache_key] = remap(
-            subset, data, method="nearest_s2d", parallel=parallel
-        )
-
-    return data.where(_mask_cache[cache_key] == 1, other=np.nan)
+    return data.where(remapped_mask == valid_value, other=np.nan)
 
 
-def add_lst(
+def add_local_solar_time(
     data: xr.Dataset | xr.DataArray,
     *,
     lon: str = "lon",
@@ -369,92 +386,12 @@ def add_lst(
     offset = offset.round() * pd.Timedelta(hours=1)
 
     lst = data[time] + offset
+    lst.attrs = {}
     lst.attrs["long_name"] = "Local Solar Time"
     lst.attrs["standard_name"] = "local_solar_time"
-    lst.attrs["description"] = (
-        "Mean local solar time on whole-hour longitude zones; "
-        "the equation of time is not applied."
-    )
+    lst.attrs["description"] = "Mean local solar time on whole-hour longitude zones"
 
     return data.assign_coords({name: lst})
-
-
-def sel_transect(
-    data: xr.Dataset | xr.DataArray,
-    anchor_point: tuple[float | None, float | None],
-    geometry: Literal["latlon", "xy"] = "latlon",
-    orientation: float = 0.0,
-    width: float = 1.0,
-    *,
-    x_dim: str = "lon",
-    y_dim: str = "lat",
-    snap: bool = True,
-    drop: bool = True,
-) -> xr.Dataset | xr.DataArray:
-    """
-    Select a finite-width transect band, or a single coordinate band.
-
-    Parameters
-    ----------
-    data : xarray.Dataset or xarray.DataArray
-        Input object on a rectilinear grid with one-dimensional horizontal
-        coordinates.
-    anchor_point : tuple of float or None
-        Point the transect axis passes through, ordered ``(lat, lon)`` when
-        ``geometry="latlon"`` and ``(x, y)`` when ``geometry="xy"``. Passing
-        None for one component selects a band along the other coordinate
-        instead of an oriented transect, in which case ``orientation`` is
-        ignored.
-    geometry : {"latlon", "xy"}, default "latlon"
-        Coordinate geometry. ``"latlon"`` measures the cross-track distance on
-        the sphere; ``"xy"`` measures it in the plane.
-    orientation : float, default 0.0
-        Transect orientation in degrees, measured clockwise from north for
-        ``"latlon"`` and clockwise from ``+y`` for ``"xy"``.
-    width : float, default 1.0
-        Full transect width, in grid cells.
-    x_dim, y_dim : str, default "lon", "lat"
-        Horizontal coordinate names.
-    snap : bool, default True
-        Snap the anchor point to the nearest grid-cell centre.
-    drop : bool, default True
-        Drop the masked cells, as in ``xarray.DataArray.where``.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The input object restricted to the selected band.
-    """
-    if len(anchor_point) != 2:
-        raise ValueError("anchor_point must be a two-element tuple.")
-
-    if geometry == "xy":
-        return sel_transect_xy(
-            data=data,
-            x=anchor_point[0],
-            y=anchor_point[1],
-            orientation=orientation,
-            width=width,
-            xdim=x_dim,
-            ydim=y_dim,
-            snap=snap,
-            drop=drop,
-        )
-
-    if geometry == "latlon":
-        return sel_transect_latlon(
-            data=data,
-            lat=anchor_point[0],
-            lon=anchor_point[1],
-            orientation=orientation,
-            width=width,
-            lon_dim=x_dim,
-            lat_dim=y_dim,
-            snap=snap,
-            drop=drop,
-        )
-
-    raise ValueError("geometry must be either 'latlon' or 'xy'.")
 
 
 class SetupDask:

@@ -70,3 +70,11 @@ if "ipykernel" in sys.modules:
 
     fix_widget_css()
     plt_inline.backend_inline.set_matplotlib_formats("retina")
+
+
+try:
+    modified = fix_xarray()
+    if modified:
+        print("Modified", modified)
+except Exception:
+    ...

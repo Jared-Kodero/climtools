@@ -14,10 +14,14 @@ from IPython.display import HTML, display
 host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
-tmp = Path("/tmp")
+
 n_cpus = int(len(os.sched_getaffinity(0)))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
+
+tmp = Path(f"/tmp/{user}/xgeo")
+tmp.mkdir(parents=True, exist_ok=True)
+
 
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
@@ -135,12 +139,11 @@ def fix_widget_css():
 
     css = """
     <style>
-    /* overwrite hard-coded white background by VS Code for ipywidgets */
+    /* overwrite hard-coded white background */
     .cell-output-ipywidget-background {
         background-color: transparent !important;
     }
 
-    /* map VS Code theme variables to Jupyter widget variables */
     :root {
         --jp-widgets-color: var(--vscode-editor-foreground);
         --jp-widgets-font-size: var(--vscode-editor-font-size);

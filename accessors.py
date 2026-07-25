@@ -10,9 +10,8 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from . import calc_stats as calc
 from . import plotting as plotting
-from . import xgeo
+from . import xgeo, xgeo_utils
 from .plotting import Geoplot
-from .xgeo_utils import to_lon180
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -75,34 +74,82 @@ class GeoBase:
             reuse_weights=reuse_weights,
         )
 
-    def mask_land(
+    def mask(
         self,
         mask: xr.DataArray | xr.Dataset | str | Path | None = None,
-        keep: Literal["land", "ocean"] = "land",
+        data_var: str = "land",
+        valid_value: float | int = 1,
         parallel: bool = False,
     ) -> xr.DataArray | xr.Dataset:
-        """Mask outside the land or the ocean.
+        """
+        Mask grid cells that do not match a specified land-sea mask value.
 
-        See :func:`climtools.xgeo.mask_land` for the full description.
+        The mask is remapped to the horizontal grid of ``data`` using
+        nearest-neighbour interpolation. This method preserves categorical mask
+        values. The remapped mask is cached so that repeated calls using the same
+        mask and target-grid specification do not repeat the remapping operation.
+
+        Before masking, ``data`` is sorted by increasing latitude and longitude.
+        Consequently, the returned object may have a different coordinate order
+        from the input.
 
         Parameters
         ----------
-        mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path or None, optional
-            Land-sea mask. Defaults to the bundled ERA5 0.25 degree mask.
-        keep : {"land", "ocean"}, default "land"
-            Mask variable to select, and hence the domain retained.
+        data : xarray.DataArray or xarray.Dataset
+            Object to mask. It must contain one-dimensional ``lat`` and ``lon``
+            coordinates and corresponding dimensions.
+
+        mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path, or None, optional
+            Categorical land-sea mask.
+
+            - If a DataArray is supplied, it is used directly.
+            - If a Dataset is supplied, the variable named by ``data_var`` is used.
+            - If a path is supplied, the Dataset at that path is opened and the
+            variable named by ``data_var`` is used.
+            - If None, the package's default land-sea mask is used.
+
+            The mask must contain ``lat`` and ``lon`` coordinates. By convention,
+            values equal to ``valid_value`` identify cells to retain.
+
+        data_var : str, default "land"
+            Name of the mask variable to extract when ``mask`` is a Dataset or a
+            path to a Dataset. This argument is ignored when ``mask`` is already
+            a DataArray.
+
+        valid_value : float or int, default 1
+            Mask value identifying grid cells to retain. Cells whose remapped mask
+            value differs from ``valid_value`` are replaced with NaN.
+
         parallel : bool, default False
-            Regrid the mask in parallel with Dask.
+            Whether to perform mask remapping in parallel with Dask. This option
+            is passed to :func:`remap`.
 
         Returns
         -------
         xarray.DataArray or xarray.Dataset
-            The object with cells outside the retained domain set to NaN.
+            A latitude- and longitude-sorted object with cells outside the
+            retained mask category replaced by NaN. The return type matches the
+            type of ``data``.
+
+        Raises
+        ------
+        KeyError
+            If ``mask`` resolves to a Dataset that does not contain ``data_var``.
+
+        TypeError
+            If ``mask`` cannot be resolved to an xarray.DataArray.
+
         """
-        return xgeo.mask_land(self._obj, mask=mask, keep=keep, parallel=parallel)
+        return xgeo.mask(
+            self._obj,
+            mask=mask,
+            data_var=data_var,
+            valid_value=valid_value,
+            parallel=parallel,
+        )
 
     # -- coordinate helpers ----------------------------------------------
-    def add_lst(
+    def add_local_solar_time(
         self,
         *,
         lon: str = "lon",
@@ -128,7 +175,7 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with the local solar time coordinate attached.
         """
-        return xgeo.add_lst(self._obj, lon=lon, time=time, name=name)
+        return xgeo.add_local_solar_time(self._obj, lon=lon, time=time, name=name)
 
     def to_lon180(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
         """Wrap the longitude coordinate to the interval [-180, 180).
@@ -143,9 +190,9 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with wrapped and sorted longitudes.
         """
-        return to_lon180(self._obj, lon=lon)
+        return xgeo_utils.to_lon180(self._obj, lon=lon)
 
-    def cyclic(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
+    def add_cyclic_point(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
         """Append a cyclic longitude point, closing the seam at the date line.
 
         Parameters
@@ -158,59 +205,163 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with one extra longitude point.
         """
-        return plotting.make_cyclic(self._obj, lon=lon)
+        return xgeo_utils.add_cyclic_point(self._obj, lon=lon)
 
     # -- selection --------------------------------------------------------
     def sel_transect(
         self,
-        anchor_point: tuple[float | None, float | None],
-        geometry: Literal["latlon", "xy"] = "latlon",
+        x: float | None = None,
+        y: float | None = None,
         orientation: float = 0.0,
         width: float = 1.0,
         *,
-        x_dim: str = "lon",
-        y_dim: str = "lat",
+        xdim: str = None,
+        ydim: str = None,
+        geometry: Literal["xy", "latlon"] = "latlon",
         snap: bool = True,
         drop: bool = True,
     ) -> xr.Dataset | xr.DataArray:
-        """Select a finite-width transect band, or a single coordinate band.
-
-        See :func:`climtools.xgeo.sel_transect` for the full description.
+        """
+        Select cells lying within a transect on a rectilinear xarray grid.
 
         Parameters
         ----------
-        anchor_point : tuple of float or None
-            Point the transect passes through, ordered ``(lat, lon)`` for
-            ``geometry="latlon"`` and ``(x, y)`` for ``geometry="xy"``. Pass
-            None for one component to select a coordinate band.
-        geometry : {"latlon", "xy"}, default "latlon"
-            Coordinate geometry used for the cross-track distance.
-        orientation : float, default 0.0
-            Transect orientation in degrees, clockwise from north or from +y.
-        width : float, default 1.0
-            Full transect width, in grid cells.
-        x_dim, y_dim : str, default "lon", "lat"
-            Horizontal coordinate names.
-        snap : bool, default True
-            Snap the anchor point to the nearest grid-cell centre.
-        drop : bool, default True
-            Drop the masked cells.
+        data
+            Input Dataset or DataArray.
+        x, y
+            Transect centre. For spherical geometry, x is longitude and y is
+            latitude. Either coordinate may be omitted to select an axis-aligned
+            band.
+        orientation
+            Transect orientation in degrees clockwise from the positive y
+            direction. For spherical geometry, this is clockwise from north.
+        width
+            Transect width in approximate grid-cell units.
+        xdim, ydim
+            Names of the x and y coordinates.
+        geometry
+            ``"xy"`` for planar coordinates or ``"latlon"`` for
+            longitude-latitude coordinates in degrees.
+        snap
+            Snap the supplied centre coordinates to the nearest grid point.
+        drop
+            Drop coordinate locations outside the transect.
+        """
+        return xgeo_utils.sel_transect(
+            self._obj,
+            x=x,
+            y=y,
+            orientation=orientation,
+            width=width,
+            xdim=xdim,
+            ydim=ydim,
+            geometry=geometry,
+            snap=snap,
+            drop=drop,
+        )
+
+    def append_to_netcdf(
+        self,
+        file: Path,
+        dim: str = "time",
+        mode: Literal["a", "r+"] = "r+",
+        format: str = "NETCDF4",
+        shuffle: bool = None,
+        zlib: bool = None,
+        complevel: int = None,
+    ) -> None:
+        """Append a Dataset along an unlimited dimension.
+
+        Variables containing ``dim`` are extended from the current end of the file.
+        Variables without ``dim`` are written only if not already present.
+        datetime64, timedelta64, and cftime variables are encoded to CF numeric
+        values. When the target variable already exists, the new batch is encoded
+        against the units and calendar already stored in the file so the numeric
+        axis stays consistent across appends.
+
+        Parameters
+        ----------
+        file : Path
+            NetCDF4 file with read/write access. ``dim`` must be the unlimited
+            dimension.
+        dim : str, optional
+            Unlimited dimension to append along. Default "time".
+        mode : {"a", "r+"}, optional
+            File access mode passed to netCDF4.Dataset.
+        format : str, optional
+            NetCDF format passed to netCDF4.Dataset.
+        shuffle : bool, optional
+            Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
+        zlib : bool, optional
+            Whether to apply zlib compression to the variable. If None, the default compression settings are used.
+        complevel : int, optional
+            Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
+        """
+
+        return xgeo.append_to_netcdf(
+            data=self._obj,
+            file=Path(file),
+            dim=dim,
+            mode=mode,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+        )
+
+    def to_netcdf(
+        self,
+        file: str | Path,
+        unlimited_dim: str = None,
+        *,
+        batch_size: int = 1,
+        format: str = "NETCDF4",
+        shuffle: bool = True,
+        zlib: bool = True,
+        complevel: int = 4,
+        show_progress: bool = True,
+        stdout: Any = None,
+    ) -> None:
+        """Write the Dataset to NetCDF incrementally using NetCDF4 lib
+
+        See :func:`climtools.xgeo.to_netcdf` for the full description.
+
+        Parameters
+        ----------
+        file : str or pathlib.Path
+            Output path. An existing file is replaced.
+        unlimited_dim : str, optional
+            Dimension made unlimited and appended along.
+        batch_size : int, default 1
+            Number of slices written per append.
+        format : str, default "NETCDF4"
+            NetCDF format.
+        shuffle : bool, default True
+            Apply the HDF5 shuffle filter.
+        zlib : bool, default True
+            Apply zlib compression.
+        complevel : int, default 4
+            Compression level, between 1 and 9.
+        show_progress : bool, default True
+            Display a progress bar while writing.
+        stdout : file-like, optional
+            Stream the progress bar is written to.
 
         Returns
         -------
-        xarray.Dataset or xarray.DataArray
-            The object restricted to the selected band.
+        None
         """
-        return xgeo.sel_transect(
+        return xgeo.to_netcdf(
             self._obj,
-            anchor_point,
-            geometry=geometry,
-            orientation=orientation,
-            width=width,
-            x_dim=x_dim,
-            y_dim=y_dim,
-            snap=snap,
-            drop=drop,
+            Path(file),
+            unlimited_dim,
+            batch_size=batch_size,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+            show_progress=show_progress,
+            stdout=stdout,
         )
 
 
@@ -304,10 +455,6 @@ class PlotAccessor:
 
         Parameters
         ----------
-        da : xarray.DataArray
-            Scalar field to plot. After ``squeeze()`` the array must be 2D or 3D
-            and must contain longitude-latitude coordinates compatible with a
-            ``cartopy.crs.PlateCarree()`` data transform.
         x, y : str, optional
             Coordinate names passed to the selected xarray plotting method.
         col, row : str, optional
@@ -472,6 +619,12 @@ class PlotAccessor:
         v_component: xr.DataArray = None,
         colorbar_kwargs: dict = None,
         quiver_kwargs: dict = None,
+        clabel: bool = False,
+        clabel_fmt: str = "%1.0f",
+        clabel_fontsize: float = 8,
+        clabel_inline: bool = True,
+        clabel_colors: str = None,
+        clabel_kwargs: dict = None,
         cyclic: bool = False,
         indices: tuple | list | np.ndarray = None,
         outfile: Path = None,
@@ -485,9 +638,6 @@ class PlotAccessor:
 
         Parameters
         ----------
-        da : xarray.DataArray
-            Scalar field to animate. The animation dimension must be present in
-            ``da.dims``.
         dim : str, default "time"
             Dimension used for animation frames.
         x, y : str, optional
@@ -562,6 +712,17 @@ class PlotAccessor:
             ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
             ``color: str`` and ``width: float``. See
             https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+        clabel : bool, default False
+            Label line contours. Ignored for ``method="contourf"``.
+        clabel_fmt : str, default "%1.0f"
+            Contour-label format.
+        clabel_fontsize : float, default 8
+            Contour-label font size.
+        clabel_inline : bool, default True
+            Draw contour labels inline.
+        clabel_colors : str, optional
+            Contour-label color.
+        clabel_kwargs : dict, optional
         cyclic : bool, default False
             If True, append a cyclic longitude point before plotting each frame.
             The longitude dimension is assumed to be named ``"lon"``.
@@ -718,57 +879,16 @@ class PlotAccessor:
         )
 
 
-@xr.register_dataarray_accessor("xgeo")
-class DataArrayXGeo(GeoBase):
-    """``.xgeo`` accessor on a ``DataArray``.
+class CalcAccessor:
+    """Calc namespace of the ``.xgeo`` accessor."""
 
-    Adds plotting and the single-field statistics to the shared geospatial
-    operations of :class:`_XGeoBase`.
-    """
+    __slots__ = ("_obj",)
 
-    __slots__ = ()
+    def __init__(self, da: xr.DataArray):
+        self._obj = da
 
-    @property
-    def plot(self) -> PlotAccessor:
-        """Plotting namespace, for example ``da.xgeo.plot.geo(...)``."""
-        return PlotAccessor(self._obj)
-
-    def trends(
-        self,
-        dim: str = "time",
-        *,
-        scale: float = 1,
-        dask_scheduler: Literal["threads", "processes"] = "threads",
-        polyfit: bool = False,
-    ) -> xr.Dataset:
-        """Compute a pointwise trend along ``dim``.
-
-        See :func:`climtools.calc_stats.trends` for the full description.
-
-        Parameters
-        ----------
-        dim : str, default "time"
-            Dimension the trend is computed along.
-        scale : float, default 1
-            Multiplier applied to the slope, to convert its time unit.
-        dask_scheduler : {"threads", "processes"}, default "threads"
-            Scheduler used to evaluate a chunked input.
-        polyfit : bool, default False
-            Use ordinary least squares instead of the modified Mann-Kendall
-            test.
-
-        Returns
-        -------
-        xarray.Dataset
-            Trend statistics, including the slope and its p-value.
-        """
-        return calc.trends(
-            self._obj,
-            dim=dim,
-            scale=scale,
-            dask_scheduler=dask_scheduler,
-            polyfit=polyfit,
-        )
+    def __repr__(self) -> str:
+        return f"<xgeo calc accessor on DataArray {self._obj.name!r}>"
 
     def corr(
         self,
@@ -810,7 +930,7 @@ class DataArrayXGeo(GeoBase):
             dask_scheduler=dask_scheduler,
         )
 
-    def significance(self, other: xr.DataArray, dim: str = "time") -> xr.DataArray:
+    def pvalues(self, other: xr.DataArray, dim: str = "time") -> xr.DataArray:
         """Test the difference in mean between the bound array and ``other``.
 
         See :func:`climtools.calc_stats.significance` for the full description.
@@ -827,15 +947,73 @@ class DataArrayXGeo(GeoBase):
         xarray.DataArray
             Pointwise p-values of a Welch t-test.
         """
-        return calc.significance(self._obj, other, dim=dim)
+        return calc.pvalues(self._obj, other, dim=dim)
+
+    def trends(
+        self,
+        dim: str = "time",
+        *,
+        scale: float = 1,
+        dask_scheduler: Literal["threads", "processes"] = "threads",
+        polyfit: bool = False,
+    ) -> xr.Dataset:
+        """Compute a pointwise trend along ``dim``.
+
+        See :func:`climtools.calc_stats.trends` for the full description.
+
+        Parameters
+        ----------
+        dim : str, default "time"
+            Dimension the trend is computed along.
+        scale : float, default 1
+            Multiplier applied to the slope, to convert its time unit.
+        dask_scheduler : {"threads", "processes"}, default "threads"
+            Scheduler used to evaluate a chunked input.
+        polyfit : bool, default False
+            Use ordinary least squares instead of the modified Mann-Kendall
+            test.
+
+        Returns
+        -------
+        xarray.Dataset
+            Trend statistics, including the slope and its p-value.
+        """
+        return calc.trends(
+            self._obj,
+            dim=dim,
+            scale=scale,
+            dask_scheduler=dask_scheduler,
+            polyfit=polyfit,
+        )
+
+
+@xr.register_dataarray_accessor("xgeo")
+class GeoDataArray(GeoBase):
+    """``.xgeo`` accessor on a ``DataArray``.
+
+    Adds plotting and the single-field statistics to the shared geospatial
+    operations of :class:`GeoBase`.
+    """
+
+    __slots__ = ()
+
+    @property
+    def plot(self) -> PlotAccessor:
+        """Plotting namespace, for example ``da.xgeo.plot.geo(...)``."""
+        return PlotAccessor(self._obj)
+
+    @property
+    def calc(self) -> CalcAccessor:
+        """Calc namespace for example ``da.xgeo.calc.trends(...)``."""
+        return CalcAccessor(self._obj)
 
 
 @xr.register_dataset_accessor("xgeo")
-class DatasetXGeo(GeoBase):
+class GeoDataset(GeoBase):
     """``.xgeo`` accessor on a ``Dataset``.
 
     Adds the ERA5 preprocessor and the incremental NetCDF writer to the shared
-    geospatial operations of :class:`_XGeoBase`.
+    geospatial operations of :class:`GeoBase`.
     """
 
     __slots__ = ()
@@ -853,57 +1031,85 @@ class DatasetXGeo(GeoBase):
         """
         return xgeo.preprocess_era5(self._obj)
 
-    def write_netcdf(
-        self,
-        file: str | Path,
-        unlimited_dim: str = None,
-        *,
-        batch_size: int = 1,
-        format: str = "NETCDF4",
-        shuffle: bool = True,
-        zlib: bool = True,
-        complevel: int = 4,
-        show_progress: bool = True,
-        stdout: Any = None,
-    ) -> None:
-        """Write the Dataset to NetCDF incrementally.
 
-        See :func:`climtools.xgeo.write_netcdf` for the full description.
+def fix_xarray() -> tuple[Path, ...]:
+    """Patch xarray source files so IDEs type ``DataArray.xgeo`` and ``Dataset.xgeo``."""
+    import ast
+    import inspect
+    import shutil
 
-        Parameters
-        ----------
-        file : str or pathlib.Path
-            Output path. An existing file is replaced.
-        unlimited_dim : str, optional
-            Dimension made unlimited and appended along.
-        batch_size : int, default 1
-            Number of slices written per append.
-        format : str, default "NETCDF4"
-            NetCDF format.
-        shuffle : bool, default True
-            Apply the HDF5 shuffle filter.
-        zlib : bool, default True
-            Apply zlib compression.
-        complevel : int, default 4
-            Compression level, between 1 and 9.
-        show_progress : bool, default True
-            Display a progress bar while writing.
-        stdout : file-like, optional
-            Stream the progress bar is written to.
+    if not __package__:
+        raise RuntimeError("The accessor module must be imported as part of a package.")
 
-        Returns
-        -------
-        None
-        """
-        return xgeo.write_netcdf(
-            self._obj,
-            Path(file),
-            unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
+    type_module = f"{__package__}.xgeo_types"
+    targets = (
+        (xr.DataArray, "DataArray", "GeoDataArray"),
+        (xr.Dataset, "Dataset", "GeoDataset"),
+    )
+    changed: list[Path] = []
+
+    for runtime_class, class_name, accessor_type in targets:
+        source_file = inspect.getsourcefile(runtime_class)
+        if source_file is None:
+            raise RuntimeError(f"Cannot locate xarray.{class_name} source.")
+
+        path = Path(source_file).resolve()
+        source = path.read_text(encoding="utf-8")
+        marker = f"# xgeo IDE typing: {class_name}"
+        if marker in source:
+            continue
+
+        tree = ast.parse(source, filename=str(path))
+        node = next(
+            (
+                item
+                for item in tree.body
+                if isinstance(item, ast.ClassDef) and item.name == class_name
+            ),
+            None,
         )
+        if node is None:
+            raise RuntimeError(f"Cannot find {class_name} in {path}.")
+
+        alias = f"_XGeo{accessor_type}"
+        import_block = (
+            f"{marker}\n"
+            "from typing import TYPE_CHECKING as _XGEO_TYPE_CHECKING\n"
+            "if _XGEO_TYPE_CHECKING:\n"
+            f"    from {type_module} import {accessor_type} as {alias}\n\n"
+        )
+
+        first = node.body[0]
+        after_docstring = (
+            first.end_lineno
+            if isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+            else first.lineno - 1
+        )
+        property_block = (
+            "\n"
+            "    if _XGEO_TYPE_CHECKING:\n"
+            "        @property\n"
+            f"        def xgeo(self) -> {alias}:\n"
+            "            ...\n"
+        )
+
+        lines = source.splitlines(keepends=True)
+        for index, block in sorted(
+            ((node.lineno - 1, import_block), (after_docstring, property_block)),
+            reverse=True,
+        ):
+            lines.insert(index, block)
+
+        patched = "".join(lines)
+        compile(patched, str(path), "exec")
+
+        backup = path.with_suffix(path.suffix + ".xgeo.bak")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+
+        path.write_text(patched, encoding="utf-8")
+        changed.append(path)
+
+    return tuple(changed)
