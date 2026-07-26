@@ -30,25 +30,21 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 from hvplot.xarray import *
 
-from . import accessors as accessors  # noqa: F401  (registers the .xgeo accessor)
 from . import calc_stats as calc
-from . import cmaps as cmaps
+from . import cmaps
 from . import plotting as plot
 from .nc4_utils import append_to_netcdf, dataarray_to_netcdf, dataset_to_netcdf
 from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
 from .xgeo_utils import grid_id, sel_transect, to_lon180
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
 
 # Collapse attributes by default in the repr.
 xr.set_options(display_expand_attrs=False)
@@ -81,7 +77,7 @@ _dask_cluster = None
 def to_netcdf(
     data: xr.Dataset | xr.DataArray,
     file: Path,
-    unlimited_dim: str = None,
+    unlimited_dim: str | None = None,
     *,
     batch_size: int = 1,
     format: str = "NETCDF4",
@@ -237,7 +233,7 @@ def mask(
     data: xr.DataArray | xr.Dataset,
     mask: xr.DataArray | xr.Dataset | Path | None = None,
     data_var: str = "land",
-    valid_value: float | int = 1,
+    valid_value: float = 1,
     parallel: bool = False,
 ) -> xr.DataArray | xr.Dataset:
     """

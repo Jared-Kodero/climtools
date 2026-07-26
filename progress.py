@@ -3,7 +3,8 @@ from __future__ import annotations
 import datetime
 import sys
 import threading
-from typing import Any, Iterable, Iterator, Optional
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 from dask.diagnostics import ProgressBar
 
@@ -18,7 +19,7 @@ class DaskProgressBar(ProgressBar):
 
     def __init__(
         self,
-        description: str = None,
+        description: str | None = None,
         transient: bool = False,
         refresh_per_second: int = 10,
         step_pct: int = 10,
@@ -41,7 +42,7 @@ class DaskProgressBar(ProgressBar):
         self._last_emitted = -1
         self._lock = threading.Lock()
         self._wrote_header = False
-        self._start_time = datetime.datetime.now()
+        self._start_time = datetime.datetime.now(tz=None)  # noqa: DTZ005
         self._elapsed = None
         self.step_pct = 1 if self._isatty else step_pct
 
@@ -160,7 +161,7 @@ class DaskProgressBar(ProgressBar):
                             flush=True,
                         )
         else:
-            print("", file=self._stream, flush=True)
+            print(file=self._stream, flush=True)
 
         if self._progress is not None:
             self._progress.stop()
@@ -179,8 +180,8 @@ class SerialProgressBar:
 
     def __init__(
         self,
-        iterable: Optional[Iterable] = None,
-        total: Optional[int] = None,
+        iterable: Iterable | None = None,
+        total: int | None = None,
         description: str = "",
         transient: bool = False,
         refresh_per_second: int = 10,
@@ -324,7 +325,7 @@ class SerialProgressBar:
                             flush=True,
                         )
         else:
-            print("", file=self._stream, flush=True)
+            print(file=self._stream, flush=True)
 
         if self._progress is not None:
             self._progress.stop()

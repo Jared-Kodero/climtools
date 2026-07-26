@@ -1568,7 +1568,7 @@ class Adder:
         y: str | None = None,
         subsample: int | tuple[int, int] | list[int] = (1, 1),
         add_key: bool = True,
-        key_magnitude: int | float | None = None,
+        key_magnitude: float | None = None,
         key_units: str | None = None,
         key_x: float = 0.1,
         key_y: float = -0.045,

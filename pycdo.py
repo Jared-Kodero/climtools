@@ -43,10 +43,11 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Iterable, Iterator, Literal
+from typing import Literal
 
 import xarray as xr
 
@@ -63,16 +64,16 @@ from .tools import n_cpus
 
 
 __all__ = [
-    "run",
-    "remap",
-    "remapbil",
-    "remapbic",
-    "remapnn",
-    "remapdis",
-    "remapcon",
-    "remaplaf",
-    "mergetime",
     "RemapMethod",
+    "mergetime",
+    "remap",
+    "remapbic",
+    "remapbil",
+    "remapcon",
+    "remapdis",
+    "remaplaf",
+    "remapnn",
+    "run",
 ]
 
 os.environ.setdefault("CDO_VERSION_INFO", "false")
@@ -202,8 +203,8 @@ def _write_lonlat_grid(
     if resolution <= 0:
         raise ValueError(f"resolution must be positive, got {resolution}.")
 
-    xsize = int(round((lon_max - lon_min) / resolution)) + 1
-    ysize = int(round((lat_max - lat_min) / resolution)) + 1
+    xsize = round((lon_max - lon_min) / resolution) + 1
+    ysize = round((lat_max - lat_min) / resolution) + 1
 
     lines = [
         "gridtype = lonlat",

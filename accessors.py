@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 import xarray as xr
@@ -9,12 +9,8 @@ from IPython.display import DisplayHandle
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from . import calc_stats as calc
-from . import plotting as plotting
-from . import xgeo, xgeo_utils
+from . import plotting, xgeo, xgeo_utils
 from .plotting import GeoPlot
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
 
 
 class GeoBase:
@@ -78,7 +74,7 @@ class GeoBase:
         self,
         mask: xr.DataArray | xr.Dataset | str | Path | None = None,
         data_var: str = "land",
-        valid_value: float | int = 1,
+        valid_value: float = 1,
         parallel: bool = False,
     ) -> xr.DataArray | xr.Dataset:
         """
@@ -215,8 +211,8 @@ class GeoBase:
         orientation: float = 0.0,
         width: float = 1.0,
         *,
-        xdim: str = None,
-        ydim: str = None,
+        xdim: str | None = None,
+        ydim: str | None = None,
         geometry: Literal["xy", "latlon"] = "latlon",
         snap: bool = True,
         drop: bool = True,
@@ -266,9 +262,9 @@ class GeoBase:
         dim: str = "time",
         mode: Literal["a", "r+"] = "r+",
         format: str = "NETCDF4",
-        shuffle: bool = None,
-        zlib: bool = None,
-        complevel: int = None,
+        shuffle: bool | None = None,
+        zlib: bool | None = None,
+        complevel: int | None = None,
     ) -> None:
         """Append a Dataset along an unlimited dimension.
 
@@ -312,7 +308,7 @@ class GeoBase:
     def to_netcdf(
         self,
         file: str | Path,
-        unlimited_dim: str = None,
+        unlimited_dim: str | None = None,
         *,
         batch_size: int = 1,
         format: str = "NETCDF4",
@@ -382,12 +378,12 @@ class PlotAccessor:
 
     def geo(
         self,
-        x: str = None,
-        y: str = None,
-        col: str = None,
-        row: str = None,
-        col_wrap: int = None,
-        figsize: tuple[float, float] = None,
+        x: str | None = None,
+        y: str | None = None,
+        col: str | None = None,
+        row: str | None = None,
+        col_wrap: int | None = None,
+        figsize: tuple[float, float] | None = None,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -402,23 +398,24 @@ class PlotAccessor:
             "Stereographic",
             "NorthPolarStereo",
             "SouthPolarStereo",
-        ] = None,
+        ]
+        | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap = None,
         norm: Any = None,
-        vmin: float = None,
-        vmax: float = None,
-        units: str = None,
-        levels: int | list = None,
-        extend: str = None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        units: str | None = None,
+        levels: int | list | None = None,
+        extend: str | None = None,
         robust: bool = False,
         rasterized: bool = False,
         title: str = "",
-        orientation: Literal["vertical", "horizontal"] = None,
+        orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
         drawedges: bool = False,
-        cbar_label: str = None,
+        cbar_label: str | None = None,
         global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] = None,
+        set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -428,17 +425,17 @@ class PlotAccessor:
         lakes: bool = False,
         rivers: bool = False,
         p_value: xr.DataArray = None,
-        pvalue_kwargs: dict = None,
+        pvalue_kwargs: dict | None = None,
         u_component: xr.DataArray = None,
         v_component: xr.DataArray = None,
-        quiver_kwargs: dict = None,
-        colorbar_kwargs: dict = None,
+        quiver_kwargs: dict | None = None,
+        colorbar_kwargs: dict | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
         clabel_fontsize: float = 8,
         clabel_inline: bool = True,
-        clabel_colors: str = None,
-        clabel_kwargs: dict = None,
+        clabel_colors: str | None = None,
+        clabel_kwargs: dict | None = None,
         cyclic: bool = False,
         **kwargs,
     ) -> GeoPlot:
@@ -569,12 +566,12 @@ class PlotAccessor:
         self,
         dim: str = "time",
         *,
-        x: str = None,
-        y: str = None,
-        col: str = None,
-        row: str = None,
-        col_wrap: int = None,
-        figsize: tuple[float, float] = None,
+        x: str | None = None,
+        y: str | None = None,
+        col: str | None = None,
+        row: str | None = None,
+        col_wrap: int | None = None,
+        figsize: tuple[float, float] | None = None,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -589,23 +586,24 @@ class PlotAccessor:
             "Stereographic",
             "NorthPolarStereo",
             "SouthPolarStereo",
-        ] = None,
+        ]
+        | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap = None,
         norm: Any = None,
-        vmin: float = None,
-        vmax: float = None,
-        units: str = None,
-        levels: int | list = None,
-        extend: str = None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        units: str | None = None,
+        levels: int | list | None = None,
+        extend: str | None = None,
         robust: bool = False,
         rasterized: bool = False,
-        title: str = None,
+        title: str | None = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
         drawedges: bool = False,
-        cbar_label: str = None,
+        cbar_label: str | None = None,
         global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] = None,
+        set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -616,17 +614,17 @@ class PlotAccessor:
         rivers: bool = False,
         u_component: xr.DataArray = None,
         v_component: xr.DataArray = None,
-        colorbar_kwargs: dict = None,
-        quiver_kwargs: dict = None,
+        colorbar_kwargs: dict | None = None,
+        quiver_kwargs: dict | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
         clabel_fontsize: float = 8,
         clabel_inline: bool = True,
-        clabel_colors: str = None,
-        clabel_kwargs: dict = None,
+        clabel_colors: str | None = None,
+        clabel_kwargs: dict | None = None,
         cyclic: bool = False,
         indices: tuple | list | np.ndarray = None,
-        outfile: Path = None,
+        outfile: Path | str | None = None,
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 1,
         parallel: bool = True,
@@ -771,8 +769,8 @@ class PlotAccessor:
         subsample: int | tuple[int, int] = (1, 1),
         add_key: bool = True,
         subplots: bool = False,
-        key_magnitude: int | float = None,
-        key_units: str = None,
+        key_magnitude: float | None = None,
+        key_units: str | None = None,
         **kwargs,
     ):
         """Draw quiver arrows, using the bound array as the zonal component.
@@ -828,8 +826,8 @@ class PlotAccessor:
         level: float = 0.05,
         color: str = "grey",
         alpha: float = 0.3,
-        marker: str = None,
-        edgecolors: str = None,
+        marker: str | None = None,
+        edgecolors: str | None = None,
         subsample: int | tuple[int, int] = (1, 1),
         size: float = 0.25,
     ):
