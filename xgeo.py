@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 import xarray as xr
+from hvplot.xarray import *
 
 from . import accessors as accessors  # noqa: F401  (registers the .xgeo accessor)
 from . import calc_stats as calc
@@ -145,7 +146,7 @@ def to_netcdf(
             file=file,
             da=data,
             format=format,
-            shuffle=format,
+            shuffle=shuffle,
             zlib=zlib,
             complevel=complevel,
         )

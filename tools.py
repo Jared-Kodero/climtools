@@ -28,9 +28,6 @@ current_dask_cluster = None
 current_dask_client = None
 
 
-user = getpass.getuser()
-
-
 class AttrDict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__

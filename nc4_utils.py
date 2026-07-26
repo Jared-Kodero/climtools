@@ -285,7 +285,7 @@ def append_to_netcdf(
                     zlib=zlib,
                     complevel=complevel,
                     shuffle=shuffle,
-                    write_values=True,
+                    write_values=False,
                 )
 
             ncvar = ncf.variables[varname]

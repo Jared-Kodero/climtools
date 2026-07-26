@@ -39,6 +39,8 @@ from matplotlib.text import Text
 
 from .plot_utils import (
     add_colorbar as _add_colorbar,
+)
+from .plot_utils import (
     add_contour_labels,
     add_cyclic_point,
     add_gridlines,
@@ -891,6 +893,7 @@ class GeoPlot:
             if colorbar_options:
                 unexpected = ", ".join(sorted(colorbar_options))
                 raise TypeError(f"unsupported colorbar_kwargs: {unexpected}")
+
             if cbar_label is None:
                 long_name = str(self.data.attrs.get("long_name", "")).title()
                 inferred_units = units or self.data.attrs.get("units", self.data.name)

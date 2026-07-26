@@ -73,6 +73,8 @@ if "ipykernel" in sys.modules:
 
 
 try:
+    from ._typing import fix_xarray
+
     modified = fix_xarray()
     if modified:
         print("Modified", modified)

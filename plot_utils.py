@@ -770,7 +770,12 @@ def get_cax(
         return label.get_visible() and bool(ax.get_xlabel().strip())
 
     def _has_subplots(fig=None):
-        axes = [ax for ax in fig.get_axes() if ax.get_label() != "<colorbar>"]
+        axes = [
+            ax
+            for ax in fig.get_axes()
+            if ax.get_label() != "<colorbar>"
+            and not ax.get_label().startswith("<quiver-key-")
+        ]
         return len(axes) > 1
 
     if fig is None:
@@ -785,7 +790,11 @@ def get_cax(
         raise ValueError("If subplots is True, axes and fig must be provided.")
 
     if adjust:
-        plt.tight_layout()
+        fig.tight_layout()
+
+    # Cartopy applies the geographic aspect and final active axes position during
+    # a draw. Resolve that geometry before deriving an auxiliary colorbar axis.
+    fig.canvas.draw()
 
     def _create_cax(y0, x0, y1, x1, x_len, y_len, ax):
         # Vertical uses y0, y_len, x1. Horizontal uses y0, x0, x_len.
@@ -1029,7 +1038,10 @@ def plot_default(
     )
     options.update(kwargs)
     options = is_geoaxes(ax, options)
-    options = get_function_inputs(data.plot, options)
+
+    # DataArray.plot is a dispatcher whose method-specific arguments are accepted
+    # through **kwargs. Signature filtering would therefore discard x/y, the
+    # Cartopy transform, add_colorbar=False, and all color-scaling options.
     return data.plot(ax=ax, **options)
 
 
@@ -1445,6 +1457,11 @@ def plot_quiver(
 ) -> tuple[Quiver, QuiverKey | None]:
     """Draw vector arrows and optionally add a quiver key.
 
+    The key uses the same layout strategy as the previous implementation: a
+    temporary horizontal auxiliary axis provides the reserved-region geometry,
+    and a transparent persistent axis keeps that region in the figure layout.
+    ``key_x`` and ``key_y`` remain the actual key anchor in axes coordinates.
+
     Parameters
     ----------
     u, v : xarray.DataArray
@@ -1458,13 +1475,15 @@ def plot_quiver(
     subsample : int or tuple of int, default (1, 1)
         Spatial stride used to thin vectors.
     add_key : bool, default True
-        Add a reference vector key.
+        Add a reference vector key. The key is omitted only when explicitly
+        set to ``False``.
     key_magnitude : int or float, optional
         Reference magnitude. The 75th percentile is used when omitted.
     key_units : str, optional
-        Units appended to the key label.
+        Units appended to the key label. Matching component ``units``
+        attributes are used when omitted.
     key_x, key_y : float, default 0.1, -0.045
-        Quiver-key location in axis coordinates.
+        Quiver-key anchor in axis coordinates.
     scale : float, optional
         Matplotlib quiver scale.
     color : str, optional
@@ -1485,17 +1504,20 @@ def plot_quiver(
     """
     u, v = validate_vector_components(u, v)
     assert u is not None and v is not None
+
     x_stride, y_stride = normalize_subsample(subsample)
     if (x not in u.coords or y not in u.coords) or (
         x not in v.coords or y not in v.coords
     ):
         x, y = get_spatial_dims(u)
+
     selection = {
         x: slice(None, None, x_stride),
         y: slice(None, None, y_stride),
     }
     u_selected = u.isel(selection)
     v_selected = v.isel(selection)
+
     x_values = u_selected.coords[x]
     y_values = u_selected.coords[y]
     if x_values.ndim == 2 and y_values.ndim == 2:
@@ -1503,9 +1525,11 @@ def plot_quiver(
         y2d = np.asarray(y_values.values)
     else:
         x2d, y2d = np.meshgrid(x_values.values, y_values.values)
+
     options = is_defined(scale=scale, color=color, width=width, zorder=zorder)
     options.update(kwargs)
     options = is_geoaxes(ax, options)
+
     quiver = ax.quiver(
         x2d,
         y2d,
@@ -1514,6 +1538,7 @@ def plot_quiver(
         angles="xy",
         **options,
     )
+
     quiver_key: QuiverKey | None = None
     if add_key:
         if key_magnitude is None:
@@ -1528,9 +1553,10 @@ def plot_quiver(
 
         label = f"{key_magnitude} {key_units or ''}".strip()
 
-        plt.subplots_adjust()
-
-        cax = get_cax(
+        # Preserve the previous layout mechanism. The temporary cax supplies the
+        # target size and lower padding; the persistent transparent cax reserves
+        # that region after the temporary one is removed.
+        temporary_cax = get_cax(
             fig=fig,
             axes=ax,
             orientation="horizontal",
@@ -1538,50 +1564,60 @@ def plot_quiver(
             adjust=False,
             pad_bottom=True,
         )
-        bbox = cax.get_position()
-        cax.remove()
+        bbox = temporary_cax.get_position()
+        temporary_cax.remove()
 
-        key_x_ax, key_y_ax = ax.transAxes.inverted().transform(
-            fig.transFigure.transform((bbox.x0, bbox.y0))
-        )
-
-        # Convert that same point from axes coordinates to figure coordinates.
+        # Resolve the actual key anchor from the public arguments. The regression
+        # in the intermediate implementation came from deriving the key anchor
+        # from bbox while positioning cax from key_x/key_y.
+        key_x_ax = float(key_x)
+        key_y_ax = float(key_y)
         key_x_fig, key_y_fig = fig.transFigure.inverted().transform(
-            ax.transAxes.transform((key_x, key_y))
+            ax.transAxes.transform((key_x_ax, key_y_ax))
         )
 
-        padx = 0
-        pady = 0
-        if "transform" in kwargs:
-            padx = 0.05 * bbox.width
-            pady = 0.05 * bbox.height
+        # Match the previous Cartopy offset, but keep figure and axes coordinate
+        # systems separate.
+        padx_fig = 0.0
+        pady_fig = 0.0
+        if isinstance(ax, cgeo.GeoAxes):
+            padx_fig = 0.05 * bbox.width
+            pady_fig = 0.05 * bbox.height
 
-        cax = fig.add_axes(
-            [
-                key_x_fig + padx,
-                key_y_fig - 0.5 * bbox.height + pady,
-                bbox.width - key_x_fig,
-                bbox.height,
-            ],
+        axis_bbox = ax.get_position()
+        padx_ax = padx_fig / max(axis_bbox.width, np.finfo(float).eps)
+        pady_ax = pady_fig / max(axis_bbox.height, np.finfo(float).eps)
+
+        cax_left = key_x_fig + padx_fig
+        cax_bottom = key_y_fig - 0.5 * bbox.height + pady_fig
+        cax_right = bbox.x1
+        cax_width = max(cax_right - cax_left, np.finfo(float).eps)
+
+        key_cax = fig.add_axes(
+            [cax_left, cax_bottom, cax_width, bbox.height],
+            label=f"<quiver-key-{id(quiver)}>",
             zorder=1,
         )
+        key_cax.set_frame_on(False)
+        key_cax.set_xticks([])
+        key_cax.set_yticks([])
+        key_cax.set_in_layout(True)
 
         quiver_key = ax.quiverkey(
             quiver,
-            X=key_x_ax + padx,
-            Y=key_y_ax + pady,
+            X=key_x_ax + padx_ax,
+            Y=key_y_ax + pady_ax,
             U=key_magnitude,
             label=label,
             labelpos="E",
             coordinates="axes",
-            zorder=4,
+            zorder=zorder,
             fontproperties={"size": 10},
         )
+        quiver_key.set_clip_on(False)
+        quiver_key.text.set_clip_on(False)
         quiver_key.set_in_layout(True)
 
-        cax.set_frame_on(False)
-        cax.set_xticks([])
-        cax.set_yticks([])
     plt.sca(ax)
     return quiver, quiver_key
 
