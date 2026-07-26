@@ -69,8 +69,8 @@ def apply(
     interactive: bool = False,
     font_scale: float = 1.5,
     line_width: float = 1.5,
-    font_size: int = None,
-    column_width: Literal["single", "double"] = None,
+    font_size: int | None = None,
+    column_width: Literal["single", "double"] | None = None,
     latex: bool = False,
     palette: Literal[
         "pastel", "deep", "muted", "bright", "dark", "colorblind"
@@ -78,7 +78,7 @@ def apply(
     context: Literal["paper", "notebook", "talk", "poster"] = "paper",
     style: str = "ticks",
     spine: bool = True,
-    rc: dict = None,
+    rc: dict | None = None,
 ):
     """
     Configure the global matplotlib and seaborn theme for publication-quality plots.
@@ -134,7 +134,7 @@ def apply(
     else:
         fig_size = None
 
-    if latex and not latex:
+    if latex:
         warnings.warn("Latex not found. Attempting to install LaTeX...")
         _install_latex()
         latex = False

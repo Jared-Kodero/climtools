@@ -85,9 +85,9 @@ def createVariable(
     ncf: nc.Dataset,
     da: xr.DataArray,
     varname: str,
-    zlib: bool = None,
-    complevel: int = None,
-    shuffle: bool = None,
+    zlib: bool | None = None,
+    complevel: int | None = None,
+    shuffle: bool | None = None,
     write_values: bool = False,
 ) -> nc.Variable:
 
@@ -124,7 +124,7 @@ def createVariable(
 def dataset_to_netcdf(
     file: Path,
     data: xr.Dataset,
-    unlimited_dim: str = None,
+    unlimited_dim: str | None = None,
     batch_size: int = 1,
     format: str = "NETCDF4",
     shuffle: bool = True,
@@ -202,9 +202,9 @@ def append_to_netcdf(
     dim: str = "time",
     mode: Literal["a", "r+"] = "r+",
     format: str = "NETCDF4",
-    shuffle: bool = None,
-    zlib: bool = None,
-    complevel: int = None,
+    shuffle: bool | None = None,
+    zlib: bool | None = None,
+    complevel: int | None = None,
 ) -> None:
     """Append a Dataset along an unlimited dimension.
 
@@ -305,9 +305,9 @@ def dataarray_to_netcdf(
     file: Path,
     da: xr.DataArray,
     format="NETCDF4",
-    shuffle: bool = None,
-    zlib: bool = None,
-    complevel: int = None,
+    shuffle: bool | None = None,
+    zlib: bool | None = None,
+    complevel: int | None = None,
 ) -> None:
     """Write / append a DataArray to a NetCDF file
 
@@ -328,7 +328,7 @@ def dataarray_to_netcdf(
     """
 
     if not isinstance(da, xr.DataArray):
-        raise ValueError("da must be an xarray.DataArray")
+        raise TypeError("da must be an xarray.DataArray")
 
     if not Path(file).exists():
         raise FileNotFoundError(f"File {file!r} does not exist!")

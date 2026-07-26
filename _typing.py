@@ -5,6 +5,7 @@ from pathlib import Path
 import xarray as xr
 
 
+# Dev Used in Dev Mode to test xr integration
 def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     """Patch xarray source so IDEs resolve registered accessors for completion.
 

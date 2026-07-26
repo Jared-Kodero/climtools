@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy import stats
-from scipy.stats import kendalltau, pearsonr, spearmanr
 
 try:
     import pymannkendall as mk
@@ -138,19 +137,17 @@ def _corr_test(
     p_value = np.nan
 
     if corr_type == "pearson":
-        corr, p_value = pearsonr(df["x"], df["y"], alternative=alternative)
+        corr, p_value = stats.pearsonr(df["x"], df["y"], alternative=alternative)
 
     elif corr_type == "spearman":
-        corr, p_value = spearmanr(df["x"], df["y"], alternative=alternative)
+        corr, p_value = stats.spearmanr(df["x"], df["y"], alternative=alternative)
 
     elif corr_type == "kendall":
-        corr, p_value = kendalltau(df["x"], df["y"], alternative=alternative)
+        corr, p_value = stats.kendalltau(df["x"], df["y"], alternative=alternative)
 
     del array_x, array_y, df
 
-    stats = [corr, p_value]
-
-    array = np.array(stats)
+    array = np.array([corr, p_value])
 
     return array
 

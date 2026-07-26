@@ -30,6 +30,7 @@ from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
+from matplotlib.ticker import MaxNLocator
 
 from .tools import get_fsig
 from .xgeo_utils import add_cyclic_point, get_spatial_dims, set_edges_to_nan, to_lon180
@@ -45,6 +46,7 @@ __all__ = [
     "get_projection",
     "get_quiver_key_mag",
     "norm_input",
+    "norm_levels",
     "normalize_subsample",
     "plot_contour",
     "plot_contourf",
@@ -91,6 +93,27 @@ def validate_data(data: xr.DataArray) -> xr.DataArray:
     if data.size == 0:
         raise ValueError("data must contain at least one value")
     return data
+
+
+def norm_levels(
+    vmin: float | None,
+    vmax: float | None,
+    levels: int | Sequence[float] | np.ndarray | None,
+) -> np.ndarray | None:
+    """Normalize the ``levels`` argument for ``matplotlib.pyplot.contourf``.
+
+    Returns explicit, increasing boundaries, or ``None`` to defer to
+    contourf's own autoscaling when no range is available.
+    """
+    if isinstance(levels, (list, tuple, np.ndarray)):
+        return np.asarray(levels)
+    if vmin is None or vmax is None:
+        return None
+    if isinstance(levels, int):
+        return np.linspace(vmin, vmax, levels)
+    if levels is None:
+        return MaxNLocator(nbins=10).tick_values(vmin, vmax)
+    raise TypeError(f"unsupported levels type: {type(levels).__name__}")
 
 
 def validate_facets(

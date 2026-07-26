@@ -33,7 +33,6 @@ import sys
 
 import dask.diagnostics
 
-from . import accessors as accessors
 from . import calc_stats as calc
 from . import cmaps as cmaps
 from . import plotting as plot

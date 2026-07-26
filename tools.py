@@ -5,9 +5,9 @@ import inspect
 import os
 import socket
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
 
 from IPython.display import HTML, display
 
@@ -15,7 +15,7 @@ host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 
-n_cpus = int(len(os.sched_getaffinity(0)))
+n_cpus = len(os.sched_getaffinity(0))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 

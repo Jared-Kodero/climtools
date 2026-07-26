@@ -13,8 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -50,6 +50,7 @@ from .plot_utils import (
     get_projection,
     get_quiver_key_mag,
     norm_input,
+    norm_levels,
     plot_contour,
     plot_contourf,
     plot_default,
@@ -65,7 +66,7 @@ from .plot_utils import (
     validate_vector_components,
 )
 from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus, tmp
+from .tools import n_cpus
 
 __all__ = [
     "Adder",
@@ -346,7 +347,7 @@ class FacetedPlot:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
-        add_grid_bounds: bool = True,
+        add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -733,7 +734,7 @@ class GeoPlot:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
-        add_grid_bounds: bool = True,
+        add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -781,6 +782,10 @@ class GeoPlot:
         self.quiver_key: QuiverKey | None = None
         self.faceted_plot: FacetedPlot | None = None
         self.add = Adder(self)
+
+        if self.method == "contourf":
+            levels = norm_levels(vmin, vmax, levels)
+
         if self.is_faceted:
             facet = FacetedPlot(
                 self.data,
@@ -2012,7 +2017,7 @@ class Animate:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
-        add_grid_bounds: bool = True,
+        add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -2063,7 +2068,12 @@ class Animate:
                     f"frame index {index} is outside [0, {self.data.sizes[dim] - 1}]"
                 )
         if outfile is None:
-            self.outfile = Path(tmp) / uuid.uuid4().hex / f"{uuid.uuid4().hex}.mp4"
+            self.outfile = (
+                Path.cwd()
+                / "animations"
+                / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"  # noqa: DTZ005
+            )
+
             self.user_outfile = False
         else:
             self.outfile = Path(outfile)
@@ -2118,7 +2128,7 @@ class Animate:
         self.display_result: Any | None = None
         self.run()
 
-    def _select(self, data: xr.DataArray | None, index: int) -> xr.DataArray | None:
+    def sel(self, data: xr.DataArray | None, index: int) -> xr.DataArray | None:
         """Select one animation frame from an optional field."""
         return None if data is None else data.isel({self.dim: index})
 
@@ -2140,9 +2150,9 @@ class Animate:
                 self.title,
                 dpi,
                 session_tmp_dir,
-                self._select(self.data, index),
-                self._select(self.u_component, index),
-                self._select(self.v_component, index),
+                self.sel(self.data, index),
+                self.sel(self.u_component, index),
+                self.sel(self.v_component, index),
                 self.geo_options,
             )
             for frame_number, index in enumerate(self.indices)
@@ -2176,6 +2186,28 @@ class Animate:
                 )
             )
         return self.outfile
+
+    def get_outfile(self, da: xr.DataArray):
+        source = self, da.encoding.get("source")
+
+        if source:
+            filename = Path(source).name
+        else:
+            filename = f"{datetime.now():%Y%m%dT%H%M%S}.mp4"  # noqa: DTZ005
+
+        output_dir = Path.cwd() / "animations"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        outfile = output_dir / filename
+        stem = outfile.stem
+        suffix = outfile.suffix
+        index = 1
+
+        while outfile.exists():
+            outfile = output_dir / f"{stem}_{index}{suffix}"
+            index += 1
+
+        self.outfile = outfile
 
     def __repr__(self) -> str:
         """Return a compact representation of animation state."""
@@ -2227,7 +2259,7 @@ def geo(
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
     gridlines: bool = False,
-    add_grid_bounds: bool = True,
+    add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
     states: bool = True,
@@ -2405,7 +2437,7 @@ def animate(
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
     gridlines: bool = False,
-    add_grid_bounds: bool = True,
+    add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
     states: bool = True,

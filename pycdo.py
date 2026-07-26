@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
@@ -98,7 +98,6 @@ _VALID_METHODS: tuple[str, ...] = (
 _EXTRAPOLATING_METHODS: frozenset[str] = frozenset(
     {"remapbil", "remapbic", "remapnn", "remaplaf"}
 )
-_DEFAULT_BBOX: tuple[float, float, float, float] = (-180.0, -90.0, 180.0, 90.0)
 
 _N_CPUS: int = n_cpus
 
@@ -131,7 +130,7 @@ class _TmpDir:
 
 
 @contextmanager
-def _env(**kwargs: str) -> Iterator[None]:
+def _env(**kwargs: str) -> Generator[None]:
     """Temporarily set environment variables, restoring prior values on exit."""
     saved: dict[str, str | None] = {k: os.environ.get(k) for k in kwargs}
     os.environ.update(kwargs)
@@ -520,11 +519,11 @@ def run(
 
 def remap(
     obj: Path | str | xr.DataArray | xr.Dataset,
+    bbox: tuple[float, float, float, float] | None = None,
     outfile: Path | str | None = None,
     *,
     method: RemapMethod = "remapbil",
     resolution: float = 0.25,
-    bbox: tuple[float, float, float, float] = _DEFAULT_BBOX,
     extrapolate: bool = False,
     as_xarray: bool = False,
     compression: str = "zip",
@@ -574,6 +573,7 @@ def remap(
     RuntimeError
         If CDO exits with a non-zero status.
     """
+
     if method not in _VALID_METHODS:
         raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}.")
     if extrapolate and method not in _EXTRAPOLATING_METHODS:

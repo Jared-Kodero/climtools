@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 import cmocean
@@ -440,7 +440,7 @@ def subtract(
 # ---------------------------------------------------------------------------
 # Dynamic per-colormap callables
 # ---------------------------------------------------------------------------
-@lru_cache(maxsize=None)
+@cache
 def _make(public_name: str, source_name: str):
     def cmap(
         N: int = 32,
