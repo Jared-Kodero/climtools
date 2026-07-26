@@ -1032,7 +1032,7 @@ class GeoDataset(GeoBase):
         return xgeo.preprocess_era5(self._obj)
 
 
-def fix_xarray() -> tuple[Path, ...]:
+def fix_xarray() -> tuple[Path, ...]:  # xarray typing hack. Works !!!!
     """Patch xarray source files so IDEs type ``DataArray.xgeo`` and ``Dataset.xgeo``."""
     import ast
     import inspect
