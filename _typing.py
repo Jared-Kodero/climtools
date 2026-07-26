@@ -1,14 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import xarray as xr
-
-from . import plotting as plotting
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
 
 
 def fix_xarray1() -> tuple[Path, ...]:  # xarray typing hack. Works !!!!
