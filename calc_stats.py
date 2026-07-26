@@ -5,7 +5,7 @@ The functions are designed to handle missing data and can be applied along speci
 """
 
 import warnings
-from typing import Literal, Union
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -161,7 +161,7 @@ def corr(
     *,
     corr_type: Literal["pearson", "spearman", "kendall"] = "pearson",
     alternative: Literal["two-sided", "less", "greater"] = "two-sided",
-    dim: str = None,
+    dim: str | None = None,
     dask_scheduler: Literal["threads", "processes"] = "threads",
 ) -> xr.Dataset:
     """
@@ -204,9 +204,9 @@ def corr(
     ]
 
     if isinstance(x, xr.Dataset):
-        raise ValueError("Argument 'x' must be an xarray.DataArray.")
+        raise TypeError("Argument 'x' must be an xarray.DataArray.")
     if isinstance(y, xr.Dataset):
-        raise ValueError("Argument 'y' must be an xarray.DataArray.")
+        raise TypeError("Argument 'y' must be an xarray.DataArray.")
 
     # check data resolution if they don't match, resample
 
@@ -269,7 +269,7 @@ def corr(
 
 def trends(
     data: xr.DataArray,
-    dim: str = None,
+    dim: str | None = None,
     *,
     scale: float = 1,
     dask_scheduler: Literal["threads", "processes"] = "threads",
@@ -322,7 +322,7 @@ def trends(
     ]
 
     if isinstance(data, xr.Dataset):
-        raise ValueError("Argument 'data' must be an xarray.DataArray.")
+        raise TypeError("Argument 'data' must be an xarray.DataArray.")
 
     if not dim:
         raise ValueError("Argument 'dim' is required for xarray input (e.g., 'time').")
@@ -354,11 +354,11 @@ def trends(
 
 
 def pvalues(
-    a: Union[xr.DataArray, xr.Dataset],
-    b: Union[xr.DataArray, xr.Dataset],
+    a: xr.DataArray | xr.Dataset,
+    b: xr.DataArray | xr.Dataset,
     dim: str = "time",
     *,
-    data_var: str = None,
+    data_var: str | None = None,
 ) -> xr.DataArray:
     """
     Test the difference in mean between two datasets with a Welch t-test.
