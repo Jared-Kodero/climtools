@@ -1,5 +1,5 @@
 import operator as op
-from typing import Callable
+from collections.abc import Callable
 
 import pandas as pd
 import xarray as xr
@@ -114,7 +114,7 @@ def preprocess_era5(ds: xr.Dataset) -> xr.Dataset:
         if data_var in ds.coords:
             continue  # Skip coordinate variables
 
-        units = ds[data_var].attrs.get("units", None)
+        units = ds[data_var].attrs.get("units", "")
         long_name = ds[data_var].attrs.get("long_name", data_var)
         standard_name = ds[data_var].attrs.get("standard_name", data_var)
         attribute = attributes.get(data_var, None)

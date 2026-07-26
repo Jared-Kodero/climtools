@@ -23,10 +23,47 @@ def get_spatial_dims(
 
     if lon.name is None or lat.name is None:
         raise ValueError(
-            "Could not determine longitude and latitude coordinate names, specify x and y"
+            "Could not determine longitude and latitude coordinate names, specify x= and y="
         )
 
     return lon.name, lat.name
+
+
+from collections.abc import Sequence
+
+
+def set_edges_to_nan(
+    da: xr.DataArray,
+    dims: str | Sequence[str],
+    width: int = 1,
+) -> xr.DataArray:
+    """Set edge cells along selected dimensions to NaN."""
+    if width < 0:
+        raise ValueError("width must be non-negative")
+
+    if width == 0:
+        return da
+
+    selected_dims = (dims,) if isinstance(dims, str) else tuple(dims)
+
+    missing_dims = set(selected_dims).difference(da.dims)
+    if missing_dims:
+        raise ValueError(f"Dimensions not found in DataArray: {sorted(missing_dims)}")
+
+    interior: dict[str, slice] = {}
+
+    for dim in selected_dims:
+        size = da.sizes[dim]
+
+        if 2 * width >= size:
+            return da.where(False)
+
+        interior[dim] = slice(width, size - width)
+
+    mask = xr.zeros_like(da, dtype=bool)
+    mask[interior] = True
+
+    return da.where(mask)
 
 
 def add_cyclic_point(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):

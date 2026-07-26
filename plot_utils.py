@@ -32,7 +32,7 @@ from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 
 from .tools import get_fsig
-from .xgeo_utils import add_cyclic_point, get_spatial_dims, to_lon180
+from .xgeo_utils import add_cyclic_point, get_spatial_dims, set_edges_to_nan, to_lon180
 
 __all__ = [
     "add_colorbar",
@@ -889,6 +889,57 @@ def get_cax(
     return cax
 
 
+def add_grid_boundary(
+    ax,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    *,
+    transform: ccrs.CRS,
+    linewidth: float = 1.5,
+    color: str = "black",
+    zorder: float = 20,
+) -> None:
+    """Draw the exterior boundary of a 2-D lon-lat grid."""
+
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+
+    if lon.ndim == 1 and lat.ndim == 1:
+        lon, lat = np.meshgrid(lon, lat)
+
+    if lon.shape != lat.shape or lon.ndim != 2:
+        raise ValueError("lon and lat must be matching 1-D or 2-D arrays.")
+
+    boundary_lon = np.concatenate(
+        [
+            lon[0, :],  # northern/southern grid edge
+            lon[1:, -1],  # right edge
+            lon[-1, -2::-1],  # opposite horizontal edge
+            lon[-2:0:-1, 0],  # left edge
+            lon[0, :1],  # close polygon
+        ]
+    )
+
+    boundary_lat = np.concatenate(
+        [
+            lat[0, :],
+            lat[1:, -1],
+            lat[-1, -2::-1],
+            lat[-2:0:-1, 0],
+            lat[0, :1],
+        ]
+    )
+
+    ax.plot(
+        boundary_lon,
+        boundary_lat,
+        color=color,
+        linewidth=linewidth,
+        transform=transform,
+        zorder=zorder,
+    )
+
+
 def add_colorbar(
     fig: Figure,
     ax: AxesType | np.ndarray,
@@ -1445,7 +1496,7 @@ def plot_quiver(
     y: str = "lat",
     subsample: int | tuple[int, int] | list[int] = (1, 1),
     add_key: bool = True,
-    key_magnitude: int | float | None = None,
+    key_magnitude: float | None = None,
     key_units: str | None = None,
     key_x: float = 0.1,
     key_y: float = -0.045,
@@ -1517,6 +1568,9 @@ def plot_quiver(
     }
     u_selected = u.isel(selection)
     v_selected = v.isel(selection)
+
+    u_selected = set_edges_to_nan(u_selected, dims=(x, y))
+    v_selected = set_edges_to_nan(v_selected, dims=(x, y))
 
     x_values = u_selected.coords[x]
     y_values = u_selected.coords[y]

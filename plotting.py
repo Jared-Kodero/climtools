@@ -43,6 +43,7 @@ from .plot_utils import (
 from .plot_utils import (
     add_contour_labels,
     add_cyclic_point,
+    add_grid_boundary,
     add_gridlines,
     add_map_features,
     get_facet_figsize,
@@ -308,6 +309,8 @@ class FacetedPlot:
         Explicit geographic extent.
     gridlines : bool, default False
         Draw labeled gridlines.
+    add_grid_bounds:
+       If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
         Add boundary features.
     ocean, land : bool, default True
@@ -343,6 +346,7 @@ class FacetedPlot:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
+        add_grid_bounds: bool = True,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -401,6 +405,15 @@ class FacetedPlot:
             )
             if gridlines:
                 self.gridliners.append(add_gridlines(self.figure, axis))
+            if add_grid_bounds:
+                add_grid_boundary(
+                    axis,
+                    data[self.x].values,
+                    data[self.y].values,
+                    transform=ccrs.PlateCarree(),
+                    linewidth=1.5,
+                    zorder=4,
+                )
             axis.set_title(self._selector_title(selector))
             self.axis_selectors.append((axis, selector))
 
@@ -609,7 +622,8 @@ class GeoPlot:
         Base colorbar orientation. Defaults to vertical for a single axis and
         horizontal for facets.
     add_colorbar : bool, default True
-        Add a base colorbar.
+        Add a base colorbar for scalar plots other than line contours.
+        Line contours use inline contour labels instead.
     drawedges : bool, default False
         Draw colorbar interval edges.
     cbar_label : str, optional
@@ -620,6 +634,8 @@ class GeoPlot:
         Explicit extent ``(lon_min, lon_max, lat_min, lat_max)``.
     gridlines : bool, default False
         Add labeled gridlines.
+    add_grid_bounds:
+        If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
         Add common boundary features.
     ocean, land : bool, default True
@@ -637,7 +653,7 @@ class GeoPlot:
     colorbar_kwargs : mapping, optional
         Additional base colorbar options.
     clabel : bool, default False
-        Label a line-contour base.
+        Label a line-contour base. Line contours are labeled automatically.
     clabel_fmt : str or mapping, default "%1.0f"
         Base contour-label format.
     clabel_fontsize : float, default 8
@@ -717,6 +733,7 @@ class GeoPlot:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
+        add_grid_bounds: bool = True,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -777,6 +794,7 @@ class GeoPlot:
                 global_extent=global_extent,
                 set_extent=set_extent,
                 gridlines=gridlines,
+                add_grid_bounds=add_grid_bounds,
                 coastlines=coastlines,
                 borders=borders,
                 states=states,
@@ -798,7 +816,7 @@ class GeoPlot:
                 extend=extend,
                 robust=robust,
                 rasterized=rasterized,
-                clabel=clabel,
+                clabel=clabel or method == "contour",
                 clabel_fmt=clabel_fmt,
                 clabel_fontsize=clabel_fontsize,
                 clabel_inline=clabel_inline,
@@ -853,11 +871,17 @@ class GeoPlot:
                 rasterized=rasterized,
                 **kwargs,
             )
-            if (
-                clabel
-                and method == "contour"
-                and isinstance(self.artist, QuadContourSet)
-            ):
+            if add_grid_bounds:
+                add_grid_boundary(
+                    axis,
+                    da[self.x].values,
+                    da[self.y].values,
+                    transform=ccrs.PlateCarree(),
+                    linewidth=1.5,
+                    zorder=4,
+                )
+
+            if method == "contour" and isinstance(self.artist, QuadContourSet):
                 self.contour_labels = add_contour_labels(
                     self.figure,
                     axis,
@@ -886,7 +910,7 @@ class GeoPlot:
                 v_component,
                 **dict(quiver_kwargs or {}),
             )
-        if add_colorbar:
+        if add_colorbar and method != "contour":
             colorbar_options = dict(colorbar_kwargs or {})
             ticks = colorbar_options.pop("ticks", None)
             tick_labels = colorbar_options.pop("tick_labels", None)
@@ -1903,6 +1927,8 @@ class Animate:
         Base colorbar label.
     global_extent, gridlines : bool, default False
         Map-layout options.
+    add_grid_bounds:
+        If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
         Explicit map extent.
     coastlines, borders, states, ocean, land, lakes, rivers : bool
@@ -1986,6 +2012,7 @@ class Animate:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
+        add_grid_bounds: bool = True,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -2069,6 +2096,7 @@ class Animate:
             "global_extent": global_extent,
             "set_extent": set_extent,
             "gridlines": gridlines,
+            "add_grid_bounds": add_grid_bounds,
             "coastlines": coastlines,
             "borders": borders,
             "states": states,
@@ -2199,6 +2227,7 @@ def geo(
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
     gridlines: bool = False,
+    add_grid_bounds: bool = True,
     coastlines: bool = True,
     borders: bool = True,
     states: bool = True,
@@ -2253,6 +2282,8 @@ def geo(
         Explicit base colorbar label.
     global_extent, gridlines : bool, default False
         Map-layout controls.
+    add_grid_bounds : bool
+        If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
         Explicit geographic extent.
     coastlines, borders, states, ocean, land, lakes, rivers : bool
@@ -2306,6 +2337,7 @@ def geo(
         global_extent=global_extent,
         set_extent=set_extent,
         gridlines=gridlines,
+        add_grid_bounds=add_grid_bounds,
         coastlines=coastlines,
         borders=borders,
         states=states,
@@ -2373,6 +2405,7 @@ def animate(
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
     gridlines: bool = False,
+    add_grid_bounds: bool = True,
     coastlines: bool = True,
     borders: bool = True,
     states: bool = True,
@@ -2423,6 +2456,8 @@ def animate(
         Per-frame colorbar options.
     global_extent, set_extent, gridlines, coastlines, borders, states, ocean, land, lakes, rivers
         Per-frame map-feature options.
+    add_grid_bounds:
+        If True, draw an outline along the outer perimeter of the plotted grid domain.
     u_component, v_component, quiver_kwargs : optional
         Per-frame vector layer.
     clabel, clabel_fmt, clabel_fontsize, clabel_inline, clabel_colors, clabel_kwargs
@@ -2477,6 +2512,7 @@ def animate(
         global_extent=global_extent,
         set_extent=set_extent,
         gridlines=gridlines,
+        add_grid_bounds=add_grid_bounds,
         coastlines=coastlines,
         borders=borders,
         states=states,

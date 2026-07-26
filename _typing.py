@@ -5,361 +5,224 @@ from pathlib import Path
 import xarray as xr
 
 
-def fix_xarray1() -> tuple[Path, ...]:  # xarray typing hack. Works !!!!
-    """Patch xarray source files so IDEs type ``DataArray.xgeo`` and ``Dataset.xgeo``."""
-    import ast
-    import inspect
-    import shutil
+def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
+    """Patch xarray source so IDEs resolve registered accessors for completion.
 
-    if not __package__:
-        raise RuntimeError("The accessor module must be imported as part of a package.")
-
-    type_module = f"{__package__}.xgeo_types"
-    targets = (
-        (xr.DataArray, "DataArray", "GeoDataArray"),
-        (xr.Dataset, "Dataset", "GeoDataset"),
-    )
-    changed: list[Path] = []
-
-    for runtime_class, class_name, accessor_type in targets:
-        source_file = inspect.getsourcefile(runtime_class)
-        if source_file is None:
-            raise RuntimeError(f"Cannot locate xarray.{class_name} source.")
-
-        path = Path(source_file).resolve()
-        source = path.read_text(encoding="utf-8")
-        marker = f"# xgeo IDE typing: {class_name}"
-        if marker in source:
-            continue
-
-        tree = ast.parse(source, filename=str(path))
-        node = next(
-            (
-                item
-                for item in tree.body
-                if isinstance(item, ast.ClassDef) and item.name == class_name
-            ),
-            None,
-        )
-        if node is None:
-            raise RuntimeError(f"Cannot find {class_name} in {path}.")
-
-        alias = f"_XGeo{accessor_type}"
-        import_block = (
-            f"{marker}\n"
-            "from typing import TYPE_CHECKING as _XGEO_TYPE_CHECKING\n"
-            "if _XGEO_TYPE_CHECKING:\n"
-            f"    from {type_module} import {accessor_type} as {alias}\n\n"
-        )
-
-        first = node.body[0]
-        after_docstring = (
-            first.end_lineno
-            if isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-            else first.lineno - 1
-        )
-        property_block = (
-            "\n"
-            "    if _XGEO_TYPE_CHECKING:\n"
-            "        @property\n"
-            f"        def xgeo(self) -> {alias}:\n"
-            "            ...\n"
-        )
-
-        lines = source.splitlines(keepends=True)
-        for index, block in sorted(
-            ((node.lineno - 1, import_block), (after_docstring, property_block)),
-            reverse=True,
-        ):
-            lines.insert(index, block)
-
-        patched = "".join(lines)
-        compile(patched, str(path), "exec")
-
-        backup = path.with_suffix(path.suffix + ".xgeo.bak")
-        if not backup.exists():
-            shutil.copy2(path, backup)
-
-        path.write_text(patched, encoding="utf-8")
-        changed.append(path)
-
-    return tuple(changed)
-
-
-def fix_xarray() -> tuple[Path, ...]:  # xarray typing hack. Works !!!!
-    """Patch xarray source files so IDEs type registered accessors."""
+    A marker file ``.xgeo_patch`` is written inside the xarray package
+    directory, holding a compact signature of the environment. While it is
+    present and the signature matches, the patch is skipped without importing
+    the optional integrations. Because the marker lives inside the xarray
+    package, a rebuilt environment or a reinstalled xarray removes it and the
+    patch is regenerated. Pass ``force=True`` to bypass the marker.
+    """
     import ast
     import importlib
     import inspect
-    import shutil
+    import json
+    import os
+    import sys
+    from importlib.util import find_spec
+    from pathlib import Path
 
     if not __package__:
         raise RuntimeError("The accessor module must be imported as part of a package.")
 
+    begin = "XGEO_IDE_TYPING BEGIN"
+    end = "XGEO_IDE_TYPING END"
+    guard = "_XGEO_TYPE_CHECKING"
     type_module = f"{__package__}.xgeo_types"
-    targets = (
+
+    targets: tuple[tuple[type, str, str], ...] = (
         (xr.DataArray, "DataArray", "GeoDataArray"),
         (xr.Dataset, "Dataset", "GeoDataset"),
     )
-
-    optional_registrations = (
+    optional: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("metpy.xarray", ("metpy",)),
         ("hvplot.xarray", ("hvplot",)),
         ("cf_xarray", ("cf",)),
         ("pint_xarray", ("pint",)),
         ("rioxarray", ("rio",)),
     )
+    integration_names = tuple(module.partition(".")[0] for module, _ in optional)
 
-    loaded_registrations: list[tuple[str, tuple[str, ...]]] = []
-
-    for registration_module, accessor_names in optional_registrations:
-        try:
-            importlib.import_module(registration_module)
-        except ModuleNotFoundError:
-            continue
-        except Exception as exc:
-            raise RuntimeError(
-                "Failed to import optional xarray integration "
-                + f"{registration_module!r}."
-            ) from exc
-
-        loaded_registrations.append((registration_module, accessor_names))
-
-    registered_types: dict[
-        type,
-        list[tuple[str, str, str]],
-    ] = {runtime_class: [] for runtime_class, _, _ in targets}
-
-    for registration_module, accessor_names in loaded_registrations:
-        package_name = registration_module.partition(".")[0]
-
-        for accessor_name in accessor_names:
-            found = False
-
-            for runtime_class, class_name, _ in targets:
-                accessor_class = getattr(
-                    runtime_class,
-                    accessor_name,
-                    None,
-                )
-                if accessor_class is None:
-                    continue
-
-                found = True
-
-                if not inspect.isclass(accessor_class):
-                    raise RuntimeError(
-                        f"{class_name}.{accessor_name} is registered, "
-                        + f"but {accessor_class!r} is not an accessor class."
-                    )
-
-                accessor_module = accessor_class.__module__
-                accessor_type = accessor_class.__name__
-
-                if accessor_module.partition(".")[0] != package_name:
-                    raise RuntimeError(
-                        f"{class_name}.{accessor_name} resolves to "
-                        + f"{accessor_module}.{accessor_type}, not to an "
-                        + f"accessor owned by {package_name!r}."
-                    )
-
-                if accessor_class.__qualname__ != accessor_type:
-                    raise RuntimeError(
-                        f"{class_name}.{accessor_name} uses nested accessor "
-                        + f"class {accessor_class.__qualname__!r}, which "
-                        + "cannot be imported by the generated "
-                        + "TYPE_CHECKING block."
-                    )
-
-                owner_module = importlib.import_module(accessor_module)
-                imported_class = getattr(
-                    owner_module,
-                    accessor_type,
-                    None,
-                )
-
-                if imported_class is not accessor_class:
-                    raise RuntimeError(
-                        "Cannot re-import the registered accessor class "
-                        + f"{accessor_module}.{accessor_type}."
-                    )
-
-                registered_types[runtime_class].append(
-                    (
-                        accessor_name,
-                        accessor_module,
-                        accessor_type,
-                    )
-                )
-
-            if not found:
-                raise RuntimeError(
-                    f"{registration_module!r} imported successfully but "
-                    + f"did not register the {accessor_name!r} accessor "
-                    + "on DataArray or Dataset."
-                )
-
-    changed: list[Path] = []
-
-    for runtime_class, class_name, accessor_type in targets:
-        source_file = inspect.getsourcefile(runtime_class)
+    # Cheap: xarray is already imported, so locating its source needs no
+    # optional imports.
+    sources: dict[str, Path] = {}
+    for cls, class_name, _ in targets:
+        source_file = inspect.getsourcefile(cls)
         if source_file is None:
             raise RuntimeError(f"Cannot locate xarray.{class_name} source.")
+        sources[class_name] = Path(source_file).resolve()
 
-        path = Path(source_file).resolve()
-        source = path.read_text(encoding="utf-8")
+    if not xr.__file__:
+        raise RuntimeError("Cannot locate the xarray package directory.")
+    marker = Path(xr.__file__).resolve().parent / ".xgeo_patch"
 
-        tree = ast.parse(source, filename=str(path))
+    def stat_of(path) -> list[int] | None:
+        if not path:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return [st.st_size, st.st_mtime_ns]
+
+    def signature() -> dict:
+        integrations: dict[str, dict | None] = {}
+        for name in integration_names:
+            try:
+                spec = find_spec(name)  # locates without executing the module
+            except (ImportError, ValueError):
+                spec = None
+            if spec is None:
+                integrations[name] = None
+            else:
+                integrations[name] = {
+                    "origin": spec.origin,
+                    "stat": stat_of(spec.origin),
+                }
+        return {
+            "schema": 3,
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "files": {label: stat_of(path) for label, path in sources.items()},
+            "integrations": integrations,
+        }
+
+    # --- fast path: marker present in the xarray package and still valid ---
+    if not force:
+        try:
+            recorded = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None
+        if recorded is not None and recorded == signature():
+            return ()
+
+    # --- heavy path: import integrations and rewrite the files ---
+    def discover() -> dict[type, list]:
+        found: dict[type, list] = {cls: [] for cls, _, _ in targets}
+        for module_name, names in optional:
+            top = module_name.partition(".")[0]
+            try:
+                importlib.import_module(module_name)
+            except ModuleNotFoundError as exc:
+                missing = exc.name or ""
+                if missing in {top, module_name} or module_name.startswith(
+                    missing + "."
+                ):
+                    continue
+                raise RuntimeError(
+                    f"{module_name!r} is installed but dependency {missing!r} is missing."
+                ) from exc
+
+            for name in names:
+                registered = False
+                for cls, class_name, _ in targets:
+                    accessor = getattr(cls, name, None)
+                    if accessor is None:
+                        continue
+                    registered = True
+                    if not inspect.isclass(accessor):
+                        raise RuntimeError(
+                            f"{class_name}.{name} is not an accessor class."
+                        )
+                    if accessor.__qualname__ != accessor.__name__:
+                        raise RuntimeError(
+                            f"{class_name}.{name} is a nested class and cannot be imported."
+                        )
+                    found[cls].append((name, accessor.__module__, accessor.__name__))
+                if not registered:
+                    raise RuntimeError(f"{module_name!r} did not register {name!r}.")
+        return found
+
+    def strip(source: str) -> str:
+        out: list[str] = []
+        skipping = False
+        for line in source.splitlines(keepends=True):
+            if begin in line:
+                skipping = True
+                continue
+            if end in line:
+                skipping = False
+                continue
+            if not skipping:
+                out.append(line)
+        return "".join(out)
+
+    def region(tag: str, indent: str, body: list[str]) -> str:
+        return f"{indent}# {begin} {tag}\n" + "".join(body) + f"{indent}# {end} {tag}\n"
+
+    def build(class_name: str, stubs: list) -> tuple[str, str]:
+        alias = {attr: f"_xgeo_{class_name}_{attr}" for attr, _, _ in stubs}
+
+        imports = [
+            f"from typing import TYPE_CHECKING as {guard}\n",
+            f"if {guard}:\n",
+        ]
+        for attr, mod, name in stubs:
+            imports.append(f"    from {mod} import {name} as {alias[attr]}\n")
+
+        props = [f"    if {guard}:\n"]
+        for attr, _, _ in stubs:
+            props.append("        @property\n")
+            props.append(f"        def {attr}(self) -> {alias[attr]}: ...\n")
+
+        return (
+            region(f"imports {class_name}", "", imports),
+            region(f"properties {class_name}", "    ", props),
+        )
+
+    discovered = discover()
+    changed: list[Path] = []
+
+    for cls, class_name, geo_type in targets:
+        path = sources[class_name]
+
+        backup = path.with_suffix(path.suffix + ".xgeo.bak")
+        raw = (backup if backup.exists() else path).read_text(encoding="utf-8")
+        pristine = strip(raw)
+        if not backup.exists():
+            backup.write_text(pristine, encoding="utf-8")
+
+        stubs: list = [("xgeo", type_module, geo_type), *discovered[cls]]
+        for attr, _, _ in stubs:
+            if not attr.isidentifier():
+                raise RuntimeError(f"Accessor name {attr!r} is not a valid identifier.")
+
+        import_region, property_region = build(class_name, stubs)
+
+        tree = ast.parse(pristine, filename=str(path))
         node = next(
             (
-                item
-                for item in tree.body
-                if isinstance(item, ast.ClassDef) and item.name == class_name
+                n
+                for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == class_name
             ),
             None,
         )
         if node is None:
-            raise RuntimeError(f"Cannot find {class_name} in {path}.")
-
-        import_blocks: list[str] = []
-        property_blocks: list[str] = []
-
-        # Preserve the existing legacy patch and add it only if absent.
-        marker = f"# xgeo IDE typing: {class_name}"
-
-        if marker not in source:
-            alias = f"_XGeo{accessor_type}"
-
-            import_blocks.append(
-                "\n".join(
-                    (
-                        marker,
-                        "from typing import " + "TYPE_CHECKING as _XGEO_TYPE_CHECKING",
-                        "if _XGEO_TYPE_CHECKING:",
-                        f"    from {type_module} import "
-                        + f"{accessor_type} as {alias}",
-                        "",
-                        "",
-                    )
-                )
-            )
-
-            property_blocks.append(
-                "\n".join(
-                    (
-                        "",
-                        "    if _XGEO_TYPE_CHECKING:",
-                        "        @property",
-                        f"        def xgeo(self) -> {alias}:",
-                        "            ...",
-                        "",
-                    )
-                )
-            )
-
-        for (
-            accessor_name,
-            accessor_module,
-            registered_type,
-        ) in registered_types[runtime_class]:
-            if not accessor_name.isidentifier():
-                raise RuntimeError(
-                    f"Accessor name {accessor_name!r} is not a valid "
-                    + "Python identifier."
-                )
-
-            import_marker = (
-                "# xgeo IDE typing import: " + f"{class_name}.{accessor_name}"
-            )
-            property_marker = (
-                "# xgeo IDE typing property: " + f"{class_name}.{accessor_name}"
-            )
-
-            has_import = import_marker in source
-            has_property = property_marker in source
-
-            if has_import and has_property:
-                continue
-
-            if has_import != has_property:
-                raise RuntimeError(
-                    "Partial IDE typing patch found for "
-                    + f"{class_name}.{accessor_name} in {path}."
-                )
-
-            alias = f"_XGeo{class_name}_{accessor_name}"
-
-            import_blocks.append(
-                "\n".join(
-                    (
-                        import_marker,
-                        "if _XGEO_TYPE_CHECKING:",
-                        f"    from {accessor_module} import "
-                        + f"{registered_type} as {alias}",
-                        "",
-                        "",
-                    )
-                )
-            )
-
-            property_blocks.append(
-                "\n".join(
-                    (
-                        "",
-                        f"    {property_marker}",
-                        "    if _XGEO_TYPE_CHECKING:",
-                        "        @property",
-                        f"        def {accessor_name}(self) -> {alias}:",
-                        "            ...",
-                        "",
-                    )
-                )
-            )
-
-        if not import_blocks and not property_blocks:
             continue
 
-        first = node.body[0]
-        after_docstring = (
-            first.end_lineno
-            if isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-            else first.lineno - 1
+        head = node.body[0]
+        is_doc = (
+            isinstance(head, ast.Expr)
+            and isinstance(head.value, ast.Constant)
+            and isinstance(head.value.value, str)
         )
+        property_at = head.end_lineno if is_doc else head.lineno - 1
+        import_at = node.lineno - 1
 
-        lines = source.splitlines(keepends=True)
-        insertions = (
-            (
-                node.lineno - 1,
-                "".join(import_blocks),
-            ),
-            (
-                after_docstring,
-                "".join(property_blocks),
-            ),
-        )
-
-        for index, block in sorted(
-            insertions,
-            reverse=True,
-        ):
-            if block:
-                lines.insert(index, block)
-
+        lines = pristine.splitlines(keepends=True)
+        lines.insert(property_at, property_region)  # higher index first
+        lines.insert(import_at, import_region)
         patched = "".join(lines)
+
         compile(patched, str(path), "exec")
+        if patched != path.read_text(encoding="utf-8"):
+            path.write_text(patched, encoding="utf-8")
+            changed.append(path)
 
-        backup = path.with_suffix(path.suffix + ".xgeo.bak")
-        if not backup.exists():
-            shutil.copy2(path, backup)
-
-        path.write_text(
-            patched,
-            encoding="utf-8",
-        )
-        changed.append(path)
-
+    # Recompute after writing so the recorded file stats match the patched state.
+    tmp = marker.with_suffix(marker.suffix + ".tmp")
+    tmp.write_text(json.dumps(signature(), sort_keys=True), encoding="utf-8")
+    tmp.replace(marker)  # atomic
     return tuple(changed)

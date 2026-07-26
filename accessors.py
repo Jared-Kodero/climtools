@@ -417,6 +417,7 @@ class PlotAccessor:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
+        add_grid_bounds: bool = True,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -496,6 +497,8 @@ class PlotAccessor:
             Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
         gridlines : bool, default False
             Whether to draw labeled longitude and latitude gridlines.
+        add_grid_bounds:
+            If True, draw an outline along the outer perimeter of the plotted grid domain.
         coastlines, borders, states : bool, default True
             Switches controlling common Cartopy geographic feature overlays.
         ocean, land : bool, default True
@@ -605,6 +608,7 @@ class PlotAccessor:
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         gridlines: bool = False,
+        add_grid_bounds: bool = True,
         coastlines: bool = True,
         borders: bool = True,
         states: bool = True,
@@ -685,6 +689,8 @@ class PlotAccessor:
             Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
         gridlines : bool, default False
             Whether to draw labeled longitude and latitude gridlines.
+        add_grid_bounds:
+            If True, draw an outline along the outer perimeter of the plotted grid domain.
         coastlines, borders, states : bool, default True
             Switches controlling common Cartopy geographic feature overlays.
         ocean, land : bool, default True
