@@ -38,7 +38,7 @@ from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 
 from .plot_utils import (
-    add_colorbar,
+    add_colorbar as _add_colorbar,
     add_contour_labels,
     add_cyclic_point,
     add_gridlines,
@@ -898,7 +898,7 @@ class GeoPlot:
             resolved_orientation = orientation or (
                 "horizontal" if self.is_faceted else "vertical"
             )
-            self.colorbar = add_colorbar(
+            self.colorbar = _add_colorbar(
                 self.figure,
                 self.axes,
                 self.mappable,
@@ -1755,7 +1755,7 @@ class Adder:
         GeoPlot
             Parent plot.
         """
-        colorbar = add_colorbar(
+        colorbar = _add_colorbar(
             self._plot.figure,
             self._plot.axes,
             mappable or self._plot.mappable,

@@ -52,18 +52,22 @@ plot = t2m.xgeo.plot.geo(method="contourf", cmap=cmaps.temp_div(), gridlines=Tru
 
 ```python
 (
-    t2m.xgeo.plot.geo(method="contourf", cmap=cmaps.temp_div(), levels=21)
+    t2m.xgeo.plot.geo(
+        method="contourf", cmap=cmaps.temp_div(), levels=21, gridlines=True
+    )
     .add.contour(z500, colors="k", clabel=True)   # line contours, labelled
     .add.quiver(u10, v10, subsample=4)             # vector overlay
     .add.significance(p_value)                     # stippling where p < 0.05
-    .add.gridlines()
 )
 ```
 
-`add` provides `contour`, `contourf`, `pcolormesh`, `imshow`, `hatch`,
-`scatter`, `quiver`, `significance`, `features`, `gridlines`, `title`, `text`
-and `colorbar`. Every overlay is applied to each populated facet of a faceted
-map, with the overlay field sliced to match each facet.
+`add` provides `default`, `contour`, `contourf`, `pcolormesh`, `imshow`,
+`scatter`, `quiver`, `significance` and `colorbar`. Every overlay is applied to
+each populated facet of a faceted map, with the overlay field sliced to match
+each facet, so an overlaid field must carry the same facet dimension (`col` or
+`row`) as the base field. Gridlines and coastlines, borders, states, ocean,
+land, lakes and rivers are map-layout options set as keyword arguments on
+`plot.geo`, not `add` methods.
 
 Chaining geospatial operations reads in execution order:
 
@@ -92,8 +96,7 @@ t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 
 ## Notes
 
-- The former `plot.map` is deprecated in favour of `plot.geo`; the name `map`
-  shadowed the builtin at the call site. `plot.map` still works and emits a
-  `DeprecationWarning`.
+- The map entry point is `plot.geo`, reached either as the free function
+  `climtools.plot.geo(da, ...)` or as the accessor `da.xgeo.plot.geo(...)`.
 - All input coordinates are interpreted in `PlateCarree`. The display
   projection is chosen with `projection=`, or inferred from the data extent.

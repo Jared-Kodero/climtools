@@ -11,7 +11,7 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from . import calc_stats as calc
 from . import plotting as plotting
 from . import xgeo, xgeo_utils
-from .plotting import Geoplot
+from .plotting import GeoPlot
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -441,17 +441,16 @@ class PlotAccessor:
         clabel_kwargs: dict = None,
         cyclic: bool = False,
         **kwargs,
-    ) -> Geoplot:
+    ) -> GeoPlot:
         """
-        Draw a scalar field on a Cartopy map and return a composable :class:`Geoplot`.
+        Draw a scalar field on a Cartopy map and return a composable :class:`GeoPlot`.
 
         This is the public entry point. It renders a two-dimensional or faceted
         (three-dimensional) DataArray as the base layer and returns a
-        :class:`Geoplot` whose ``add.contour``, ``add.quiver``, ``add.significance``
+        :class:`GeoPlot` whose ``add.contour``, ``add.quiver``, ``add.significance``
         and ``add.colorbar`` methods add overlays. The full parameter list is
-        declared explicitly so that editors expose every option. The class is named
-        ``Geoplot`` to avoid shadowing the builtin inside this module; this callable
-        is exposed as ``climtools.plot.map``.
+        declared explicitly so that editors expose every option. This callable
+        is exposed as ``climtools.plot.geo`` and as ``da.xgeo.plot.geo``.
 
         Parameters
         ----------
@@ -552,7 +551,7 @@ class PlotAccessor:
 
         Returns
         -------
-        Geoplot
+        GeoPlot
             Composable map holding the base artists, with chainable overlay methods.
 
         Notes
