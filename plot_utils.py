@@ -918,9 +918,9 @@ def add_grid_boundary(
     lat: np.ndarray,
     *,
     transform: ccrs.CRS,
-    linewidth: float = 1.5,
+    linewidth: float = 1,
     color: str = "black",
-    zorder: float = 20,
+    zorder: float = 1,
 ) -> None:
     """Draw the exterior boundary of a 2-D lon-lat grid."""
 

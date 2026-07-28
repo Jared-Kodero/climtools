@@ -4,6 +4,7 @@ A module for configuring the global matplotlib and seaborn theme for publication
 
 import os
 import platform
+import shutil
 import warnings
 from pathlib import Path
 from typing import Literal
@@ -45,6 +46,11 @@ def _install_latex():
     return None
 
     # --- Context management methods ---
+
+
+def _latex_available() -> bool:
+    """Return whether a LaTeX executable is available."""
+    return shutil.which("latex") is not None
 
 
 def reset():
@@ -134,7 +140,7 @@ def apply(
     else:
         fig_size = None
 
-    if latex:
+    if latex and not _latex_available():
         warnings.warn("Latex not found. Attempting to install LaTeX...")
         _install_latex()
         latex = False

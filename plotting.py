@@ -84,6 +84,63 @@ ScalarPrimitive = (
 )
 
 
+def colorbar(
+    fig: Figure,
+    ax: AxesType | np.ndarray,
+    mappable: ScalarMappable,
+    *,
+    orientation: Literal["vertical", "horizontal"] = "vertical",
+    subplots: bool = False,
+    adjust: bool = True,
+    cax: Axes | None = None,
+    pad_bottom: bool | None = None,
+    drawedges: bool = False,
+    extend: Literal["neither", "both", "min", "max"] | None = None,
+    label: str | None = None,
+    ticks: Sequence[float] | np.ndarray | None = None,
+    tick_labels: Sequence[str] | None = None,
+) -> Colorbar:
+    """Add a colorbar for a scalar plotting primitive.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Parent figure.
+    ax : matplotlib.axes.Axes or numpy.ndarray
+        Axis or axes associated with ``mappable``.
+    mappable : matplotlib.cm.ScalarMappable
+        Primitive described by the colorbar.
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Colorbar orientation.
+    subplots : bool, default False
+        Position the colorbar relative to a facet grid.
+    adjust : bool, default True
+        Apply tight layout before creating the colorbar axis.
+    cax : matplotlib.axes.Axes, optional
+        Existing colorbar axis.
+    pad_bottom : bool, optional
+        Force additional space below a horizontal colorbar. When omitted, infer
+        the requirement from the target axis labels.
+    drawedges : bool, default False
+        Draw edges between color intervals.
+    extend : {"neither", "both", "min", "max"}, optional
+        Out-of-range extension behavior.
+    label : str, optional
+        Colorbar label.
+    ticks : sequence of float, optional
+        Explicit tick positions.
+    tick_labels : sequence of str, optional
+        Explicit tick labels.
+
+    Returns
+    -------
+    matplotlib.colorbar.Colorbar
+        Created colorbar.
+    """
+
+    return _add_colorbar(**dict(locals()))
+
+
 def create_figure(
     *,
     projection: ccrs.Projection,
@@ -412,8 +469,8 @@ class FacetedPlot:
                     data[self.x].values,
                     data[self.y].values,
                     transform=ccrs.PlateCarree(),
-                    linewidth=1.5,
-                    zorder=4,
+                    linewidth=1,
+                    zorder=1,
                 )
             axis.set_title(self._selector_title(selector))
             self.axis_selectors.append((axis, selector))
@@ -781,6 +838,7 @@ class GeoPlot:
         self.quiver: Quiver | list[Quiver] | None = None
         self.quiver_key: QuiverKey | None = None
         self.faceted_plot: FacetedPlot | None = None
+        self.grid: xr.Dataset = self.data.coords.to_dataset()[[self.x, self.y]]
         self.add = Adder(self)
 
         if self.method == "contourf":
@@ -879,11 +937,11 @@ class GeoPlot:
             if add_grid_bounds:
                 add_grid_boundary(
                     axis,
-                    da[self.x].values,
-                    da[self.y].values,
+                    self.grid[self.x].values,
+                    self.grid[self.y].values,
                     transform=ccrs.PlateCarree(),
-                    linewidth=1.5,
-                    zorder=4,
+                    linewidth=1,
+                    zorder=1,
                 )
 
             if method == "contour" and isinstance(self.artist, QuadContourSet):
@@ -1064,8 +1122,11 @@ class GeoPlot:
     def __repr__(self) -> str:
         """Return a compact representation of stored plot state."""
         axes_count = len(list(self.iter_axes()))
+        _method = f"method={self.method!r}, "
+        if self.method == "default":
+            _method = ""
         return (
-            f"GeoPlot(method={self.method!r}, projection={self.projection!r}, "
+            f"GeoPlot({_method!r}projection={self.projection!r}, "
             f"axes={axes_count}, layers={len(self.layers)}, "
             f"colorbar={self.colorbar is not None})"
         )
@@ -1802,6 +1863,45 @@ class Adder:
         )
         self._plot.colorbar = colorbar
         self._plot.register_layer("colorbar", [colorbar])
+        return self._plot
+
+    def grid_boundary(
+        self,
+        linewidth: float = 1.5,
+        color: str = "black",
+        zorder: float = 1,
+    ) -> None:
+        """Draw the exterior boundary of a two-dimensional longitude-latitude grid.
+
+        Parameters
+        ----------
+        linewidth : float, default 1.5
+            Width of the boundary line, in points.
+        color : str, default "black"
+            Matplotlib-compatible color specification for the boundary line.
+        zorder : float, default 20
+            Drawing order of the boundary. Artists with higher values are drawn
+            above artists with lower values.
+
+        Returns
+        -------
+        None
+        """
+        artists: list[PathCollection] = []
+        for axis, selector in self._plot.iter_axes():
+            artists.append(
+                add_grid_boundary(
+                    axis,
+                    lon=self._plot.grid[self._plot.x].values,
+                    lat=self._plot.grid[self._plot.y].values,
+                    transform=ccrs.PlateCarree(),
+                    linewidth=linewidth,
+                    color=color,
+                    zorder=zorder,
+                )
+            )
+
+            self._plot.register_layer("grid_boundary", artists)
         return self._plot
 
 
