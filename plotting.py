@@ -66,7 +66,7 @@ from .plot_utils import (
     validate_vector_components,
 )
 from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus
+from .tools import n_cpus, tmp
 
 __all__ = [
     "Adder",
@@ -2169,9 +2169,7 @@ class Animate:
                 )
         if outfile is None:
             self.outfile = (
-                Path.cwd()
-                / "animations"
-                / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"  # noqa: DTZ005
+                tmp / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"  # noqa: DTZ005
             )
 
             self.user_outfile = False
