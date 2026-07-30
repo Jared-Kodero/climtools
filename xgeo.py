@@ -29,6 +29,7 @@ package remains usable in environments where ESMF is not installed.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,6 +37,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from hvplot.xarray import *
+from typing_extensions import Self
 
 from . import calc_stats as calc
 from . import cmaps
@@ -66,6 +68,8 @@ __all__ = [
     "to_lon180",
     "to_netcdf",
 ]
+
+
 _script_dir = Path(__file__).resolve().parent
 
 
@@ -447,13 +451,15 @@ class SetupDask:
         Returns
         -------
         dask.distributed.Client
-            The active client. The dashboard is served on port 8787.
+            The active client. The dashboard is served on the port given by
+            ``DASK_DASHBOARD_PORT`` (default 8787).
         """
         global _dask_client, _dask_cluster
 
         if self.client is not None:
             return self.client
 
+        import dask
         from dask.distributed import Client, LocalCluster
 
         if _dask_client is not None and _dask_cluster is not None:
@@ -461,13 +467,18 @@ class SetupDask:
             self.cluster = _dask_cluster
             return self.client
 
+        port = os.environ.get("DASK_DASHBOARD_PORT", "8787")
+        link = f"http://localhost:{port}/status"
+        os.environ["DASK_DISTRIBUTED__DASHBOARD__LINK"] = link
+        dask.config.refresh()
+
         self.cluster = LocalCluster(
             n_workers=self.workers,
             threads_per_worker=self.threads_per_worker,
             memory_limit=self.memory_limit,
             silence_logs=logging.ERROR if self.filter_warnings else logging.WARNING,
             processes=self.processes,
-            dashboard_address=":8787",
+            dashboard_address=f":{port}",
         )
         self.client = Client(self.cluster)
         _dask_client = self.client
@@ -492,7 +503,7 @@ class SetupDask:
         self.client = None
         self.cluster = None
 
-    def __enter__(self) -> SetupDask:
+    def __enter__(self) -> Self:
         self.start()
         return self
 

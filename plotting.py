@@ -1905,67 +1905,7 @@ class Adder:
         return self._plot
 
 
-def _encode_ffmpeg(
-    input_pattern: str,
-    outfile: Path,
-    *,
-    fps: int,
-    session_tmp_dir: Path,
-) -> None:
-    """Encode numbered PNG frames as an H.264 MP4 file.
-
-    Parameters
-    ----------
-    input_pattern : str
-        FFmpeg input pattern, for example ``/tmp/frames/%06d.png``.
-    outfile : pathlib.Path
-        Output MP4 path.
-    fps : int
-        Frames per second.
-    session_tmp_dir : pathlib.Path
-        Temporary frame directory removed after encoding.
-
-    Raises
-    ------
-    RuntimeError
-        If FFmpeg returns a nonzero status.
-    """
-    command = [
-        "ffmpeg",
-        "-y",
-        "-framerate",
-        str(fps),
-        "-i",
-        input_pattern,
-        "-vf",
-        "scale=1920:1080, pad=iw+mod(iw\\,2):ih+mod(ih\\,2), format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "slow",
-        "-crf",
-        "16",
-        "-profile:v",
-        "high",
-        "-tune",
-        "animation",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(outfile),
-    ]
-    try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg executable was not found") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"ffmpeg encoding failed: {exc.stderr.strip()}") from exc
-    finally:
-        shutil.rmtree(session_tmp_dir, ignore_errors=True)
-
-
-def _render_animation_frame(
+def plot_animation_frame(
     frame_number: int,
     frame_value: Any,
     dim: str,
@@ -2230,6 +2170,66 @@ class Animate:
         """Select one animation frame from an optional field."""
         return None if data is None else data.isel({self.dim: index})
 
+    def to_ffmpeg(
+        self,
+        input_pattern: str,
+        outfile: Path,
+        *,
+        fps: int,
+        session_tmp_dir: Path,
+    ) -> None:
+        """Encode numbered PNG frames as an H.264 MP4 file.
+
+        Parameters
+        ----------
+        input_pattern : str
+            FFmpeg input pattern, for example ``/tmp/frames/%06d.png``.
+        outfile : pathlib.Path
+            Output MP4 path.
+        fps : int
+            Frames per second.
+        session_tmp_dir : pathlib.Path
+            Temporary frame directory removed after encoding.
+
+        Raises
+        ------
+        RuntimeError
+            If FFmpeg returns a nonzero status.
+        """
+        command = [
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            input_pattern,
+            "-vf",
+            "scale=1920:1080, pad=iw+mod(iw\\,2):ih+mod(ih\\,2), format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "slow",
+            "-crf",
+            "16",
+            "-profile:v",
+            "high",
+            "-tune",
+            "animation",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(outfile),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg executable was not found") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"ffmpeg encoding failed: {exc.stderr.strip()}") from exc
+        finally:
+            shutil.rmtree(session_tmp_dir, ignore_errors=True)
+
     def run(self) -> Path:
         """Render all frames and encode the animation.
 
@@ -2257,13 +2257,13 @@ class Animate:
         ]
         if self.parallel and len(tasks) > 1:
             workers = max(1, min(len(tasks), max(1, n_cpus // 2)))
-            delayed = [dask.delayed(_render_animation_frame)(*task) for task in tasks]
+            delayed = [dask.delayed(plot_animation_frame)(*task) for task in tasks]
             with DaskProgressBar():
                 dask.compute(*delayed, scheduler="processes", num_workers=workers)
         else:
             for task in SerialProgressBar(tasks, total=len(tasks)):
-                _render_animation_frame(*task)
-        _encode_ffmpeg(
+                plot_animation_frame(*task)
+        self.to_ffmpeg(
             str(session_tmp_dir / "%06d.png"),
             self.outfile,
             fps=self.fps,
