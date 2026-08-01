@@ -42,7 +42,7 @@ class DaskProgressBar(ProgressBar):
         self._last_emitted = -1
         self._lock = threading.Lock()
         self._wrote_header = False
-        self._start_time = datetime.datetime.now(tz=None)  # noqa: DTZ005
+        self._start_time = datetime.datetime.now(tz=None)
         self._elapsed = None
         self.step_pct = 1 if self._isatty else step_pct
 

@@ -2109,7 +2109,7 @@ class Animate:
                 )
         if outfile is None:
             self.outfile = (
-                tmp / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"  # noqa: DTZ005
+                tmp / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
             )
 
             self.user_outfile = False
@@ -2291,7 +2291,7 @@ class Animate:
         if source:
             filename = Path(source).name
         else:
-            filename = f"{datetime.now():%Y%m%dT%H%M%S}.mp4"  # noqa: DTZ005
+            filename = f"{datetime.now():%Y%m%dT%H%M%S}.mp4"
 
         output_dir = Path.cwd() / "animations"
         output_dir.mkdir(parents=True, exist_ok=True)
