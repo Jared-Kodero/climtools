@@ -148,3 +148,7 @@ def fix_widget_css():
     </style>
     """
     display(HTML(css))
+
+
+if "ipykernel" in sys.modules:
+    fix_widget_css()

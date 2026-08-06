@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
+from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
@@ -85,9 +86,9 @@ ScalarPrimitive = (
 
 
 def colorbar(
-    fig: Figure,
-    ax: AxesType | np.ndarray,
     mappable: ScalarMappable,
+    ax: AxesType | np.ndarray,
+    fig: Figure | None = None,
     *,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     subplots: bool = False,
@@ -148,35 +149,28 @@ def create_figure(
     nrows: int = 1,
     ncols: int = 1,
     squeeze: bool = False,
+    w_pad: float = 6 / 72,
+    h_pad: float = 8 / 72,
 ) -> tuple[Figure, np.ndarray]:
-    """Create a Cartopy figure and an array of geographic axes.
-
-    Parameters
-    ----------
-    projection : cartopy.crs.Projection
-        Projection assigned to every subplot.
-    figsize : tuple of float, optional
-        Figure size in inches.
-    nrows, ncols : int, default 1
-        Subplot-grid dimensions.
-    squeeze : bool, default False
-        Forwarded to :func:`matplotlib.pyplot.subplots`. ``False`` is preferred
-        because it guarantees a two-dimensional axis array.
-
-    Returns
-    -------
-    figure : matplotlib.figure.Figure
-        Created figure.
-    axes : numpy.ndarray
-        Array containing the created Cartopy axes.
-    """
+    """Create a Cartopy figure with consistent facet padding."""
     figure, axes = plt.subplots(
         nrows=nrows,
         ncols=ncols,
         figsize=figsize,
         squeeze=squeeze,
         subplot_kw={"projection": projection},
+        layout="compressed",
     )
+
+    layout_engine = figure.get_layout_engine()
+    if layout_engine is not None:
+        layout_engine.set(
+            w_pad=w_pad,
+            h_pad=h_pad,
+            wspace=0.0,
+            hspace=0.0,
+        )
+
     return figure, np.asarray(axes, dtype=object)
 
 
@@ -985,9 +979,10 @@ class GeoPlot:
                 long_name = str(self.data.attrs.get("long_name", "")).title()
                 inferred_units = units or self.data.attrs.get("units", self.data.name)
                 cbar_label = f"{long_name}\n[{inferred_units}]".strip()
-            resolved_orientation = orientation or (
-                "horizontal" if self.is_faceted else "vertical"
-            )
+            resolved_orientation = orientation or "vertical"
+            # (
+            #     "horizontal" if self.is_faceted else "vertical"
+            # )
             self.colorbar = _add_colorbar(
                 self.figure,
                 self.axes,
@@ -1126,7 +1121,7 @@ class GeoPlot:
         if self.method == "default":
             _method = ""
         return (
-            f"GeoPlot({_method!r}projection={self.projection!r}, "
+            f"GeoPlot({_method}projection={self.projection!r}, "
             f"axes={axes_count}, layers={len(self.layers)}, "
             f"colorbar={self.colorbar is not None})"
         )
@@ -2258,6 +2253,8 @@ class Animate:
         if self.parallel and len(tasks) > 1:
             workers = max(1, min(len(tasks), max(1, n_cpus // 2)))
             delayed = [dask.delayed(plot_animation_frame)(*task) for task in tasks]
+
+            Callback.active.clear()
             with DaskProgressBar():
                 dask.compute(*delayed, scheduler="processes", num_workers=workers)
         else:

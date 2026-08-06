@@ -856,7 +856,7 @@ def get_cax(
             rightmost = x0
             width = x_len
             bottommost = y0 - y_pad * scale_h
-            height = 0.05 * scale_h
+            height = 0.04 * scale_h
             cax = fig.add_axes([rightmost, bottommost, width, height])
 
         return cax
@@ -890,22 +890,39 @@ def get_cax(
     left_bot_ax = bottom_axes[0].get_position()
     right_bot_ax = bottom_axes[-1].get_position()
 
-    # Vertical colorbar: full grid height, to the right of the last column.
-    fig_y_len = top_right_ax.y1 - bot_right_ax.y0
-
-    # Horizontal colorbar: width of a single axis, centered under the grid.
-    single_ax_x_len = right_bot_ax.x1 - right_bot_ax.x0
+    grid_bottom = bot_right_ax.y0
+    grid_top = top_right_ax.y1
     grid_left = left_bot_ax.x0
     grid_right = right_bot_ax.x1
-    horiz_x0 = 0.5 * (grid_left + grid_right) - 0.5 * single_ax_x_len
+
+    grid_x_len = grid_right - grid_left
+    grid_y_len = grid_top - grid_bottom
+
+    # Vertical colorbar: use the full grid height for at most two rows.
+    # For larger grids, use 60% of the grid height and center the bar.
+    if nrows > 1:
+        vertical_y_len = 0.5 * grid_y_len
+        vertical_y0 = 0.5 * (grid_bottom + grid_top) - 0.5 * vertical_y_len
+    else:
+        vertical_y_len = grid_y_len
+        vertical_y0 = grid_bottom
+
+    # Horizontal colorbar: use one axis width for at most two columns.
+    # For larger grids, use 50% of the grid width and center the bar.
+    if ncols > 1:
+        horizontal_x_len = 0.5 * grid_x_len
+    else:
+        horizontal_x_len = right_bot_ax.x1 - right_bot_ax.x0
+
+    horizontal_x0 = 0.5 * (grid_left + grid_right) - 0.5 * horizontal_x_len
 
     cax = _create_cax(
-        bot_right_ax.y0,  # y0 (shared)
-        horiz_x0,  # x0 for horizontal centering
-        top_right_ax.y1,  # y1
-        right_bot_ax.x1,  # x1 for vertical positioning
-        single_ax_x_len,  # x_len: one axis width (horizontal)
-        fig_y_len,  # y_len: full grid height (vertical)
+        vertical_y0,
+        horizontal_x0,
+        grid_top,
+        right_bot_ax.x1,
+        horizontal_x_len,
+        vertical_y_len,
         axes[-1, -1],
     )
 
@@ -964,9 +981,9 @@ def add_grid_boundary(
 
 
 def add_colorbar(
-    fig: Figure,
-    ax: AxesType | np.ndarray,
     mappable: ScalarMappable,
+    ax: AxesType | np.ndarray,
+    fig: Figure | None = None,
     *,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     subplots: bool = False,
@@ -983,12 +1000,12 @@ def add_colorbar(
 
     Parameters
     ----------
-    fig : matplotlib.figure.Figure
-        Parent figure.
-    ax : matplotlib.axes.Axes or numpy.ndarray
-        Axis or axes associated with ``mappable``.
     mappable : matplotlib.cm.ScalarMappable
         Primitive described by the colorbar.
+    ax : matplotlib.axes.Axes or numpy.ndarray
+        Axis or axes associated with ``mappable``.
+    fig : matplotlib.figure.Figure
+        Parent figure.
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation.
     subplots : bool, default False
@@ -1025,6 +1042,9 @@ def add_colorbar(
             adjust=adjust,
             pad_bottom=pad_bottom,
         )
+
+    if not fig:
+        fig = plt.gcf()
     colorbar = fig.colorbar(
         mappable,
         cax=cax,
