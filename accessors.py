@@ -384,6 +384,7 @@ class PlotAccessor:
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        interactive: bool = False,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -460,6 +461,8 @@ class PlotAccessor:
             Number of columns used when wrapping faceted subplots.
         figsize : tuple of float, optional
             Figure size in inches used when creating a new figure.
+        interactive : bool, optional
+            If True, configures matplotlib for interactive use in Jupyter notebooks.
         method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
             Xarray plotting method used for the scalar field.
         projection : str, default "PlateCarree"
@@ -559,11 +562,11 @@ class PlotAccessor:
         Input coordinates are plotted with a ``cartopy.crs.PlateCarree()`` transform.
         The display projection is controlled by ``projection``.
         """
-        kws = locals()
-        kws1 = kws.pop("kwargs")
-        _ = kws.pop("self")
+        kwds = locals()
+        opts = kwds.pop("kwargs")
+        _ = kwds.pop("self")
 
-        return plotting.geo(self._obj, **kws, **kws1)
+        return plotting.geo(self._obj, **kwds, **opts)
 
     def animate(
         self,

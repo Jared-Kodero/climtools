@@ -68,6 +68,19 @@ AxesType = Axes | cgeo.GeoAxes
 ScalarArtist = Artist | ScalarMappable | QuadContourSet
 
 
+def interactive_backend(enable=True):
+    """Enable or disable the interactive Matplotlib backend."""
+    import matplotlib
+
+    if enable:
+        try:
+            matplotlib.use("module://ipympl.backend_nbagg")
+        except Exception:
+            matplotlib.use("nbagg")
+    else:
+        matplotlib.use("module://matplotlib_inline.backend_inline")
+
+
 def validate_data(data: xr.DataArray) -> xr.DataArray:
     """Validate a scalar plotting field.
 
@@ -150,6 +163,26 @@ def validate_facets(
         raise ValueError("col_wrap is only valid when row is None")
     if col_wrap is not None and col_wrap < 1:
         raise ValueError("col_wrap must be greater than or equal to 1")
+
+
+def format_crs_coordinates(ax: AxesType) -> str:
+
+    def fmt_str(x: float, y: float) -> str:
+        lon, lat = ccrs.PlateCarree().transform_point(
+            x,
+            y,
+            src_crs=ax.projection,
+        )
+
+        if not np.isfinite(lon) or not np.isfinite(lat):
+            return ""
+
+        longitude = f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}"
+        latitude = f"{abs(lat):.3f}°{'N' if lat >= 0 else 'S'}"
+
+        return f"lat={latitude} lon={longitude}"
+
+    ax.format_coord = fmt_str
 
 
 def validate_vector_components(

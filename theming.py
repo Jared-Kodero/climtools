@@ -12,7 +12,42 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from .plot_utils import interactive_backend
+
 __all__ = ["apply", "reset", "spine_off"]
+
+
+def format_crs_coordinates(ax: AxesType) -> str:
+
+    def fmt_str(x: float, y: float) -> str:
+        lon, lat = ccrs.PlateCarree().transform_point(
+            x,
+            y,
+            src_crs=ax.projection,
+        )
+
+        if not np.isfinite(lon) or not np.isfinite(lat):
+            return ""
+
+        longitude = f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}"
+        latitude = f"{abs(lat):.3f}°{'N' if lat >= 0 else 'S'}"
+
+        return f"lat={latitude} lon={longitude}"
+
+    ax.format_coord = fmt_str
+
+
+def interactive_backend(enable=True):
+    """Enable or disable the interactive Matplotlib backend."""
+    import matplotlib
+
+    if enable:
+        try:
+            matplotlib.use("module://ipympl.backend_nbagg")
+        except Exception:
+            matplotlib.use("nbagg")
+    else:
+        matplotlib.use("module://matplotlib_inline.backend_inline")
 
 
 def _install_latex():
@@ -45,29 +80,12 @@ def _install_latex():
 
     return None
 
-    # --- Context management methods ---
-
-
-def _latex_available() -> bool:
-    """Return whether a LaTeX executable is available."""
-    return shutil.which("latex") is not None
-
 
 def reset():
     """Reset matplotlib and seaborn settings to their defaults."""
     sns.reset_defaults()
     plt.rcParams.update(plt.rcParamsDefault)
     plt.switch_backend("agg")
-
-
-def set_interactive_backend():
-    """Configure matplotlib for interactive use in Jupyter notebooks."""
-    import matplotlib
-
-    try:
-        matplotlib.use("module://ipympl.backend_nbagg")
-    except Exception:
-        matplotlib.use("nbagg")  # fallback
 
 
 def apply(
@@ -129,7 +147,7 @@ def apply(
     """
 
     if interactive:
-        set_interactive_backend()
+        interactive_backend()
 
     if column_width == "single":
         font_scale = 1
@@ -140,7 +158,7 @@ def apply(
     else:
         fig_size = None
 
-    if latex and not _latex_available():
+    if latex and not shutil.which("latex") is not None:
         warnings.warn("Latex not found. Attempting to install LaTeX...")
         _install_latex()
         latex = False

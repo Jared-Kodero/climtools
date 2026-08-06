@@ -47,9 +47,11 @@ from .plot_utils import (
     add_grid_boundary,
     add_gridlines,
     add_map_features,
+    format_crs_coordinates,
     get_facet_figsize,
     get_projection,
     get_quiver_key_mag,
+    interactive_backend,
     norm_input,
     norm_levels,
     plot_contour,
@@ -545,6 +547,7 @@ class FacetedPlot:
         extend: Literal["neither", "both", "min", "max"] | None = None,
         robust: bool = False,
         rasterized: bool = False,
+        interactive: bool = False,
         clabel: bool = False,
         clabel_fmt: str | Mapping[float, str] = "%1.0f",
         clabel_fontsize: float = 8.0,
@@ -610,6 +613,9 @@ class FacetedPlot:
                 rasterized=rasterized,
                 **kwargs,
             )
+
+            if interactive:
+                format_crs_coordinates(axis)
 
             self.artists.append(artist)
             if clabel and method == "contour" and isinstance(artist, QuadContourSet):
@@ -752,6 +758,7 @@ class GeoPlot:
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        interactive: bool = False,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -808,6 +815,9 @@ class GeoPlot:
         cyclic: bool = False,
         **kwargs: Any,
     ) -> None:
+
+        interactive_backend(interactive)
+
         self.data, self.x, self.y, self.col, self.row = norm_input(
             da,
             x=x,
@@ -879,6 +889,7 @@ class GeoPlot:
                 clabel_inline=clabel_inline,
                 clabel_colors=clabel_colors,
                 clabel_kwargs=clabel_kwargs,
+                interactive=interactive,
                 **kwargs,
             )
             self.contour_labels = facet.contour_labels
@@ -928,6 +939,10 @@ class GeoPlot:
                 rasterized=rasterized,
                 **kwargs,
             )
+
+            if interactive:
+                format_crs_coordinates(axis)
+
             if add_grid_bounds:
                 add_grid_boundary(
                     axis,
@@ -997,6 +1012,7 @@ class GeoPlot:
                 ticks=ticks,
                 tick_labels=tick_labels,
             )
+
         self.figure.canvas.draw_idle()
 
     @property
@@ -2321,6 +2337,7 @@ def geo(
     row: str | None = None,
     col_wrap: int | None = None,
     figsize: tuple[float, float] | None = None,
+    interactive: bool = False,
     method: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
     ] = "default",
@@ -2391,6 +2408,8 @@ def geo(
         Maximum number of facet columns.
     figsize : tuple of float, optional
         Figure size in inches.
+    interactive : bool, optional
+        If True, configures matplotlib for interactive use in Jupyter notebooks.
     method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
         Base scalar plotting method.
     projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal", "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo"}, optional
@@ -2437,56 +2456,9 @@ def geo(
     GeoPlot
         Plot container holding the figure, axes, and all primitives.
     """
-    return GeoPlot(
-        da,
-        x=x,
-        y=y,
-        col=col,
-        row=row,
-        col_wrap=col_wrap,
-        figsize=figsize,
-        method=method,
-        projection=projection,
-        cmap=cmap,
-        norm=norm,
-        vmin=vmin,
-        vmax=vmax,
-        units=units,
-        levels=levels,
-        extend=extend,
-        robust=robust,
-        rasterized=rasterized,
-        title=title,
-        orientation=orientation,
-        add_colorbar=add_colorbar,
-        drawedges=drawedges,
-        cbar_label=cbar_label,
-        global_extent=global_extent,
-        set_extent=set_extent,
-        gridlines=gridlines,
-        add_grid_bounds=add_grid_bounds,
-        coastlines=coastlines,
-        borders=borders,
-        states=states,
-        ocean=ocean,
-        land=land,
-        lakes=lakes,
-        rivers=rivers,
-        p_value=p_value,
-        pvalue_kwargs=pvalue_kwargs,
-        u_component=u_component,
-        v_component=v_component,
-        quiver_kwargs=quiver_kwargs,
-        colorbar_kwargs=colorbar_kwargs,
-        clabel=clabel,
-        clabel_fmt=clabel_fmt,
-        clabel_fontsize=clabel_fontsize,
-        clabel_inline=clabel_inline,
-        clabel_colors=clabel_colors,
-        clabel_kwargs=clabel_kwargs,
-        cyclic=cyclic,
-        **kwargs,
-    )
+    kwds = locals()
+    opts = kwds.pop("kwargs")
+    return GeoPlot(**kwds, **opts)
 
 
 def animate(
@@ -2611,58 +2583,6 @@ def animate(
     Animate
         Animation container holding output state.
     """
-    return Animate(
-        da,
-        dim,
-        x=x,
-        y=y,
-        col=col,
-        row=row,
-        col_wrap=col_wrap,
-        figsize=figsize,
-        method=method,
-        projection=projection,
-        cmap=cmap,
-        norm=norm,
-        vmin=vmin,
-        vmax=vmax,
-        units=units,
-        levels=levels,
-        extend=extend,
-        robust=robust,
-        rasterized=rasterized,
-        title=title,
-        orientation=orientation,
-        add_colorbar=add_colorbar,
-        drawedges=drawedges,
-        cbar_label=cbar_label,
-        global_extent=global_extent,
-        set_extent=set_extent,
-        gridlines=gridlines,
-        add_grid_bounds=add_grid_bounds,
-        coastlines=coastlines,
-        borders=borders,
-        states=states,
-        ocean=ocean,
-        land=land,
-        lakes=lakes,
-        rivers=rivers,
-        u_component=u_component,
-        v_component=v_component,
-        colorbar_kwargs=colorbar_kwargs,
-        quiver_kwargs=quiver_kwargs,
-        clabel=clabel,
-        clabel_fmt=clabel_fmt,
-        clabel_fontsize=clabel_fontsize,
-        clabel_inline=clabel_inline,
-        clabel_colors=clabel_colors,
-        clabel_kwargs=clabel_kwargs,
-        cyclic=cyclic,
-        indices=indices,
-        outfile=outfile,
-        quality=quality,
-        fps=fps,
-        parallel=parallel,
-        display_inline=display_inline,
-        **kwargs,
-    )
+    kwds = locals()
+    opts = kwds.pop("kwargs")
+    return Animate(**kwds, **opts)
