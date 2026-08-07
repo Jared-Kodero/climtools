@@ -177,10 +177,7 @@ def format_crs_coordinates(ax: AxesType) -> str:
         if not np.isfinite(lon) or not np.isfinite(lat):
             return ""
 
-        longitude = f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}"
-        latitude = f"{abs(lat):.3f}°{'N' if lat >= 0 else 'S'}"
-
-        return f"lat={latitude} lon={longitude}"
+        return f"lat={lat} lon={lon}"
 
     ax.format_coord = fmt_str
 

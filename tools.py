@@ -26,6 +26,7 @@ tmp.mkdir(parents=True, exist_ok=True)
 script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
 current_dask_client = None
+fix_widget = True
 
 
 class AttrDict(dict):
@@ -134,6 +135,12 @@ def get_fsig(func: Callable) -> dict:
 
 def fix_widget_css() -> None:
     """Merge widget layout fixes and inject dynamic theme-aware styling."""
+
+    global fix_widget
+
+    if not "ipykernel" in sys.modules or fix_widget:
+        return
+
     css = """
     <style>
     /* 1. Force transparent backgrounds on all widget containers */
@@ -173,7 +180,4 @@ def fix_widget_css() -> None:
     </style>
     """
     display(HTML(css))
-
-
-if "ipykernel" in sys.modules:
-    fix_widget_css()
+    fix_widget = False

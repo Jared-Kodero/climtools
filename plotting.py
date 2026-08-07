@@ -69,7 +69,7 @@ from .plot_utils import (
     validate_vector_components,
 )
 from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus, tmp
+from .tools import fix_widget_css, n_cpus, tmp
 
 __all__ = [
     "Adder",
@@ -85,6 +85,8 @@ AxesType = Axes | cgeo.GeoAxes
 ScalarPrimitive = (
     Artist | ScalarMappable | QuadMesh | QuadContourSet | AxesImage | PathCollection
 )
+
+fix_widget_css()
 
 
 def colorbar(
@@ -999,9 +1001,9 @@ class GeoPlot:
             #     "horizontal" if self.is_faceted else "vertical"
             # )
             self.colorbar = _add_colorbar(
-                self.figure,
-                self.axes,
                 self.mappable,
+                self.axes,
+                self.figure,
                 orientation=resolved_orientation,
                 subplots=self.is_faceted,
                 adjust=False,
@@ -1860,9 +1862,9 @@ class Adder:
             Parent plot.
         """
         colorbar = _add_colorbar(
-            self._plot.figure,
-            self._plot.axes,
             mappable or self._plot.mappable,
+            self._plot.axes,
+            self._plot.figure,
             orientation=orientation,
             subplots=self._plot.is_faceted,
             pad_bottom=True if self._plot.quiver_key is not None else None,

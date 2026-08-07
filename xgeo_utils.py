@@ -712,6 +712,8 @@ def center_on_objects(
     if match_radius_km is not None and match_radius_km <= 0.0:
         raise ValueError("match_radius_km must be greater than zero when provided.")
 
+    _dataset_coord = ds.coords
+
     object_data = ds[object_var]
     dims = object_data.dims
     if dims[-2:] != ("lat", "lon"):
@@ -1060,7 +1062,7 @@ def get_relative_time(
     ds: xr.Dataset,
     data_var: str,
     delta_time: int,
-    intensity_edges: tuple[float, ...],
+    intensity_edges: tuple[float, ...] = (1, 2, 5, 10, 20, 50, 100),
     threshold: float = 0.1,
 ) -> xr.Dataset | None:
     """Extract symmetric event windows and compute intensity composites.
@@ -1108,7 +1110,7 @@ def get_relative_time(
 
     label_dims = tuple(field.dims)
     labels = trigger.stack(event=label_dims)
-    labels = labels.where(labels, drop=True).reset_index("event")
+    labels = labels.where(labels, drop=True).reset_index("event").compute()
     if labels.sizes.get("event", 0) == 0:
         return None
 

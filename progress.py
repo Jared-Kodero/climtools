@@ -8,6 +8,10 @@ from typing import Any
 
 from dask.diagnostics import ProgressBar
 
+from .tools import fix_widget_css
+
+fix_widget_css()
+
 
 class DaskProgressBar(ProgressBar):
     """

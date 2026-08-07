@@ -61,15 +61,15 @@ __all__ = [
 
 # _self_update()
 
-# Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
-dask.diagnostics.ProgressBar = DaskProgressBar
 
 if "ipykernel" in sys.modules:
     import matplotlib_inline as plt_inline
 
-    fix_widget_css()
     plt_inline.backend_inline.set_matplotlib_formats("retina")
+    fix_widget_css()
 
+# Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
+dask.diagnostics.ProgressBar = DaskProgressBar
 
 try:
     from ._typing import fix_xarray
