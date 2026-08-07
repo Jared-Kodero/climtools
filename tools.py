@@ -133,51 +133,46 @@ def get_fsig(func: Callable) -> dict:
     return params
 
 
-def fix_widget_css() -> None:
-    """Merge widget layout fixes and inject dynamic theme-aware styling."""
+def apply_widget_css() -> None:
+    """Inject dynamic theme-aware styling for Jupyter widgets."""
 
-    global fix_widget
-
-    if not "ipykernel" in sys.modules or fix_widget:
+    if "ipykernel" not in sys.modules:
         return
 
     css = """
-    <style>
-    /* 1. Force transparent backgrounds on all widget containers */
-    .cell-output-ipywidget-background,
-    .jupyter-widgets,
-    .jupyter-matplotlib,
-    .jupyter-matplotlib-figure,
-    .jupyter-matplotlib-canvas-container,
-    .jupyter-matplotlib-canvas-div {
-        background: transparent !important;
-        background-color: transparent !important;
-    }
+<style>
+/* 1. Force transparent backgrounds on widget containers */
+.cell-output-ipywidget-background,
+.jupyter-widgets {
+    background: transparent !important;
+    background-color: transparent !important;
+}
 
-    /* 2. Map standard Jupyter variables to VS Code editor settings */
-    :root {
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText);
-        --jp-widgets-font-size:
-            var(--vscode-editor-font-size);
-    }
+/* 2. Map standard Jupyter variables to VS Code editor settings */
+:root {
+    --jp-widgets-color:
+        var(--vscode-editor-foreground, CanvasText);
+    --jp-widgets-font-size:
+        var(--vscode-editor-font-size);
+}
 
-    /* 3. Use the active environment foreground color */
-    .jupyter-widgets,
-    .jupyter-matplotlib {
-        color: var(--vscode-editor-foreground, CanvasText) !important;
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText) !important;
-    }
+/* 3. Use the active environment foreground color */
+.jupyter-widgets {
+    color: var(--vscode-editor-foreground, CanvasText) !important;
+    --jp-widgets-color:
+        var(--vscode-editor-foreground, CanvasText) !important;
+}
 
-    /* 4. VS Code theme-class fallbacks */
-    .vscode-dark .jupyter-widgets,
-    .vscode-light .jupyter-widgets {
-        color: var(--vscode-editor-foreground, CanvasText) !important;
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText) !important;
-    }
-    </style>
-    """
+/* 4. VS Code theme-class fallbacks */
+.vscode-dark .jupyter-widgets,
+.vscode-light .jupyter-widgets {
+    color: var(--vscode-editor-foreground, CanvasText) !important;
+    --jp-widgets-color:
+        var(--vscode-editor-foreground, CanvasText) !important;
+}
+</style>
+"""
     display(HTML(css))
-    fix_widget = False
+
+
+apply_widget_css()

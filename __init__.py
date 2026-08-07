@@ -29,8 +29,6 @@ package works without it.
 
 from __future__ import annotations
 
-import sys
-
 import dask.diagnostics
 
 from . import calc_stats as calc
@@ -41,7 +39,7 @@ from . import theming as theme
 from . import xgeo as xgeo
 from .accessors import *
 from .progress import DaskProgressBar, SerialProgressBar
-from .tools import fix_widget_css, n_cpus, redirect_streams
+from .tools import *
 
 __all__ = [
     "DaskProgressBar",
@@ -60,13 +58,6 @@ __all__ = [
 # from .update import _self_update
 
 # _self_update()
-
-
-if "ipykernel" in sys.modules:
-    import matplotlib_inline as plt_inline
-
-    plt_inline.backend_inline.set_matplotlib_formats("retina")
-    fix_widget_css()
 
 # Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
 dask.diagnostics.ProgressBar = DaskProgressBar

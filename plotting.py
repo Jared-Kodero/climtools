@@ -47,6 +47,7 @@ from .plot_utils import (
     add_grid_boundary,
     add_gridlines,
     add_map_features,
+    apply_matplotlib_css,
     format_crs_coordinates,
     get_facet_figsize,
     get_projection,
@@ -63,13 +64,14 @@ from .plot_utils import (
     plot_scatter,
     plot_significance,
     select_facet,
+    set_preview_quality,
     to_lon180,
     validate_animation_inputs,
     validate_data,
     validate_vector_components,
 )
 from .progress import DaskProgressBar, SerialProgressBar
-from .tools import fix_widget_css, n_cpus, tmp
+from .tools import n_cpus, tmp
 
 __all__ = [
     "Adder",
@@ -81,12 +83,12 @@ __all__ = [
     "geo",
 ]
 
+set_preview_quality()
+
 AxesType = Axes | cgeo.GeoAxes
 ScalarPrimitive = (
     Artist | ScalarMappable | QuadMesh | QuadContourSet | AxesImage | PathCollection
 )
-
-fix_widget_css()
 
 
 def colorbar(
@@ -815,8 +817,12 @@ class GeoPlot:
         clabel_colors: str | Sequence[str] | None = None,
         clabel_kwargs: Mapping[str, Any] | None = None,
         cyclic: bool = False,
+        _animated: bool = False,
         **kwargs: Any,
     ) -> None:
+
+        if not _animated:
+            apply_matplotlib_css()
 
         interactive_backend(interactive)
 
@@ -1941,6 +1947,7 @@ def plot_animation_frame(
     options["u_component"] = u
     options["v_component"] = v
     options["title"] = frame_title
+    options["_animated"] = True
     plot = GeoPlot(**options)
     filename = session_tmp_dir / f"{frame_number:06d}.png"
     plot.figure.savefig(filename, dpi=dpi, bbox_inches="tight")

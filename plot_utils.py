@@ -8,6 +8,7 @@ stateful classes defined in :mod:`plotting`.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
@@ -19,6 +20,7 @@ import numpy as np
 import xarray as xr
 from cartopy.mpl.gridliner import Gridliner
 from cf_xarray import *
+from IPython.display import HTML, display
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
@@ -66,6 +68,41 @@ __all__ = [
 
 AxesType = Axes | cgeo.GeoAxes
 ScalarArtist = Artist | ScalarMappable | QuadContourSet
+
+
+def set_preview_quality():
+    """Set Matplotlib preview quality"""
+
+    if "ipykernel" in sys.modules:
+        import matplotlib_inline as plt_inline
+
+        plt_inline.backend_inline.set_matplotlib_formats("retina")
+
+
+def apply_matplotlib_css() -> None:
+    """Inject transparent and theme-aware styling for Matplotlib widgets."""
+
+    if "ipykernel" not in sys.modules:
+        return
+
+    css = """
+<style>
+.jupyter-matplotlib,
+.jupyter-matplotlib-figure,
+.jupyter-matplotlib-canvas-container,
+.jupyter-matplotlib-canvas-div {
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+.jupyter-matplotlib {
+    color: var(--vscode-editor-foreground, CanvasText) !important;
+    --jp-widgets-color:
+        var(--vscode-editor-foreground, CanvasText) !important;
+}
+</style>
+"""
+    display(HTML(css))
 
 
 def interactive_backend(enable=True):
@@ -177,7 +214,7 @@ def format_crs_coordinates(ax: AxesType) -> str:
         if not np.isfinite(lon) or not np.isfinite(lat):
             return ""
 
-        return f"lat={lat} lon={lon}"
+        return f"lat={round(lat, 2)} lon={round(lon, 2)}"
 
     ax.format_coord = fmt_str
 

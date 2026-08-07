@@ -8,9 +8,9 @@ from typing import Any
 
 from dask.diagnostics import ProgressBar
 
-from .tools import fix_widget_css
+from .tools import apply_widget_css
 
-fix_widget_css()
+apply_widget_css()
 
 
 class DaskProgressBar(ProgressBar):
