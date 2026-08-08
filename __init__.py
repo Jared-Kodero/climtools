@@ -59,12 +59,6 @@ __all__ = [
 
 # _self_update()
 
-
-apply_widget_css()
-# Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
-dask.diagnostics.ProgressBar = DaskProgressBar
-set_preview_quality()
-
 try:
     from ._typing import fix_xarray
 
@@ -73,3 +67,10 @@ try:
         print("Modified", modified)
 except Exception:
     ...
+
+
+# Setup
+
+apply_widget_css()
+set_preview_quality()
+dask.diagnostics.ProgressBar = DaskProgressBar
