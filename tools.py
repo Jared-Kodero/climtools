@@ -9,7 +9,8 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
-from IPython.display import HTML, display
+import matplotlib
+from IPython.display import display
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -18,6 +19,8 @@ home = Path.home()
 n_cpus = len(os.sched_getaffinity(0))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
+mpl_default_backend = matplotlib.get_backend()
+mpl_backend_changed = False
 
 tmp = Path(f"/tmp/{user}/xgeo")
 tmp.mkdir(parents=True, exist_ok=True)
@@ -134,64 +137,58 @@ def get_fsig(func: Callable) -> dict:
 
 
 def set_preview_quality():
-    """Set Matplotlib preview quality for the inline backend."""
-
-    if "ipykernel" not in sys.modules:
-        return
-
-    import matplotlib
-    import matplotlib_inline as plt_inline
-
-    # set_matplotlib_formats reinstalls the inline figure formatters, which
-    # would override an active ipympl (widget) backend. Probe the backend
-    # without forcing resolution of the deferred default.
-    backend = matplotlib.rcParams._get_backend_or_none()
-    if backend is not None and "inline" not in backend.lower():
-        return
-
+    if "ipykernel" in sys.modules:
+        import matplotlib_inline as plt_inline
     plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
-def apply_widget_css() -> None:
-    """Inject dynamic theme-aware styling for Jupyter widgets."""
+import json
+import sys
 
+from IPython.display import Javascript
+
+
+def apply_widget_css() -> None:
+    """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
     if "ipykernel" not in sys.modules:
         return
 
     css = """
-<style>
-/* 1. Force transparent backgrounds on widget containers */
-.cell-output-ipywidget-background,
-.jupyter-widgets {
-    background: transparent !important;
-    background-color: transparent !important;
-}
+    /* General Jupyter widget styling */
+    ...
 
-/* 2. Map standard Jupyter variables to VS Code editor settings */
-:root {
-    --jp-widgets-color:
-        var(--vscode-editor-foreground, CanvasText);
-    --jp-widgets-font-size:
-        var(--vscode-editor-font-size);
-}
+    /* Matplotlib/ipympl widget styling */
+    .jupyter-matplotlib,
+    .jupyter-matplotlib-figure,
+    .jupyter-matplotlib-canvas-container,
+    .jupyter-matplotlib-canvas-div {
+        background: transparent !important;
+        background-color: transparent !important;
+    }
 
-/* 3. Use the active environment foreground color */
-.jupyter-widgets {
-    color: var(--vscode-editor-foreground, CanvasText) !important;
-    --jp-widgets-color:
-        var(--vscode-editor-foreground, CanvasText) !important;
-}
+    .jupyter-matplotlib {
+        color: var(--vscode-editor-foreground, CanvasText) !important;
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText) !important;
+    }
+    """
 
-/* 4. VS Code theme-class fallbacks */
-.vscode-dark .jupyter-widgets,
-.vscode-light .jupyter-widgets {
-    color: var(--vscode-editor-foreground, CanvasText) !important;
-    --jp-widgets-color:
-        var(--vscode-editor-foreground, CanvasText) !important;
-}
-</style>
-"""
-    display(HTML(css))
+    display(
+        Javascript(
+            f"""
+            (() => {{
+                const id = "climtools-widget-css";
 
+                let style = document.getElementById(id);
 
-apply_widget_css()
+                if (!style) {{
+                    style = document.createElement("style");
+                    style.id = id;
+                    document.head.appendChild(style);
+                }}
+
+                style.textContent = {json.dumps(css)};
+            }})();
+            """
+        )
+    )

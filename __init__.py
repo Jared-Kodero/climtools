@@ -59,6 +59,8 @@ __all__ = [
 
 # _self_update()
 
+
+apply_widget_css()
 # Route bare ``dask.diagnostics.ProgressBar`` usage through the styled bar.
 dask.diagnostics.ProgressBar = DaskProgressBar
 set_preview_quality()

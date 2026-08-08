@@ -47,7 +47,6 @@ from .plot_utils import (
     add_grid_boundary,
     add_gridlines,
     add_map_features,
-    apply_matplotlib_css,
     fmt_anim_title,
     format_crs_coordinates,
     get_facet_figsize,
@@ -817,16 +816,10 @@ class GeoPlot:
         clabel_colors: str | Sequence[str] | None = None,
         clabel_kwargs: Mapping[str, Any] | None = None,
         cyclic: bool = False,
-        _animated: bool = False,
         **kwargs: Any,
     ) -> None:
 
-        self.interactive = interactive
-        self._animated = _animated
-        interactive_backend(self.interactive)
-
-        if self.interactive and not self._animated:
-            apply_matplotlib_css()
+        interactive_backend(interactive)
 
         self.title = "" if title is None else title
         self.data, self.x, self.y, self.col, self.row = norm_input(
@@ -1152,29 +1145,6 @@ class GeoPlot:
                     artist.set_zorder(zorder)
                 for collection in getattr(artist, "collections", []):
                     collection.set_zorder(zorder)
-
-    def _ipython_display_(self) -> None:
-        """Display the plot appropriately in an IPython frontend.
-
-        Animation frames are rendered off-screen: the figure is written to disk
-        by :func:`plot_animation_frame`, then cleared and closed. Nothing is
-        displayed for them.
-        """
-        from IPython.display import display
-
-        if self._animated:
-            return
-
-        if not self.interactive:
-            display(self.figure)
-            return
-
-        canvas = self.figure.canvas
-        manager = canvas.manager
-        if manager is None:
-            display(canvas)
-        else:
-            manager.show()
 
     def __repr__(self) -> str:
         """Return a compact representation of stored plot state."""
@@ -1987,7 +1957,6 @@ def plot_animation_frame(
     options["u_component"] = u
     options["v_component"] = v
     options["title"] = fmt_title
-    options["_animated"] = True
     plot = GeoPlot(**options)
     filename = session_tmp_dir / f"{frame_number:06d}.png"
     plot.figure.savefig(filename, dpi=dpi, bbox_inches="tight")
