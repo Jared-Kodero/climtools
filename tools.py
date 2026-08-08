@@ -134,12 +134,22 @@ def get_fsig(func: Callable) -> dict:
 
 
 def set_preview_quality():
-    """Set Matplotlib preview quality"""
+    """Set Matplotlib preview quality for the inline backend."""
 
-    if "ipykernel" in sys.modules:
-        import matplotlib_inline as plt_inline
+    if "ipykernel" not in sys.modules:
+        return
 
-        plt_inline.backend_inline.set_matplotlib_formats("retina")
+    import matplotlib
+    import matplotlib_inline as plt_inline
+
+    # set_matplotlib_formats reinstalls the inline figure formatters, which
+    # would override an active ipympl (widget) backend. Probe the backend
+    # without forcing resolution of the deferred default.
+    backend = matplotlib.rcParams._get_backend_or_none()
+    if backend is not None and "inline" not in backend.lower():
+        return
+
+    plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
 def apply_widget_css() -> None:

@@ -822,9 +822,10 @@ class GeoPlot:
     ) -> None:
 
         self.interactive = interactive
+        self._animated = _animated
         interactive_backend(self.interactive)
 
-        if self.interactive and not _animated:
+        if self.interactive and not self._animated:
             apply_matplotlib_css()
 
         self.title = "" if title is None else title
@@ -1153,13 +1154,27 @@ class GeoPlot:
                     collection.set_zorder(zorder)
 
     def _ipython_display_(self) -> None:
-        """Display the plot appropriately in an IPython frontend."""
+        """Display the plot appropriately in an IPython frontend.
+
+        Animation frames are rendered off-screen: the figure is written to disk
+        by :func:`plot_animation_frame`, then cleared and closed. Nothing is
+        displayed for them.
+        """
         from IPython.display import display
 
-        if self.interactive:
-            display(self.figure.canvas)
-        else:
+        if self._animated:
+            return
+
+        if not self.interactive:
             display(self.figure)
+            return
+
+        canvas = self.figure.canvas
+        manager = canvas.manager
+        if manager is None:
+            display(canvas)
+        else:
+            manager.show()
 
     def __repr__(self) -> str:
         """Return a compact representation of stored plot state."""

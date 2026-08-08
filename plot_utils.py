@@ -22,6 +22,7 @@ import pandas as pd
 import xarray as xr
 from cartopy.mpl.gridliner import Gridliner
 from cf_xarray import *
+from IPython import get_ipython
 from IPython.display import HTML, clear_output, display
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -35,6 +36,7 @@ from matplotlib.image import AxesImage
 from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
+from matplotlib_inline.backend_inline import set_matplotlib_formats
 
 from .tools import get_fsig
 from .xgeo_utils import add_cyclic_point, get_spatial_dims, set_edges_to_nan, to_lon180
@@ -99,19 +101,51 @@ def apply_matplotlib_css() -> None:
 
 
 def interactive_backend(enable: bool = True) -> None:
-    """Enable or disable the interactive Matplotlib backend."""
+    """Enable or disable the interactive Matplotlib backend.
 
-    if getattr(interactive_backend, "_enabled", None) != enable:
-        plt.close("all")
+    Inside an IPython kernel the switch is delegated to the ``%matplotlib``
+    magic. Calling :func:`matplotlib.use` alone changes the canvas class but
+    leaves the ``matplotlib_inline`` display hooks installed on the shell, so
+    figures continue to be rendered as static images.
+
+    Parameters
+    ----------
+    enable : bool, default True
+        Select the ``ipympl`` widget backend if True, the inline backend
+        otherwise.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ImportError
+        If ``enable`` is True and ``ipympl`` is not installed.
+    """
+
+    shell = get_ipython()
+
+    plt.close("all")
+    if shell is not None:
         clear_output(wait=True)
 
-    if enable:
-        try:
-            matplotlib.use("module://ipympl.backend_nbagg")
-        except Exception:
-            matplotlib.use("nbagg")
-    else:
-        matplotlib.use("module://matplotlib_inline.backend_inline")
+    if getattr(interactive_backend, "_enabled", None) == enable:
+        return
+
+    if shell is None:
+        matplotlib.use("module://ipympl.backend_nbagg" if enable else "agg")
+        interactive_backend._enabled = enable
+        return
+
+    try:
+        shell.run_line_magic("matplotlib", "widget" if enable else "inline")
+    except (ImportError, KeyError) as error:
+        raise ImportError("interactive=True requires ipympl and ipywidgets") from error
+
+    if not enable:
+        # %matplotlib inline resets the figure formats to png.
+        set_matplotlib_formats("retina")
 
     interactive_backend._enabled = enable
 
