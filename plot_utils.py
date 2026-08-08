@@ -15,12 +15,14 @@ from typing import Any, Literal
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.mpl.geoaxes as cgeo
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import xarray as xr
 from cartopy.mpl.gridliner import Gridliner
 from cf_xarray import *
-from IPython.display import HTML, display
+from IPython.display import HTML, clear_output, display
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
@@ -70,15 +72,6 @@ AxesType = Axes | cgeo.GeoAxes
 ScalarArtist = Artist | ScalarMappable | QuadContourSet
 
 
-def set_preview_quality():
-    """Set Matplotlib preview quality"""
-
-    if "ipykernel" in sys.modules:
-        import matplotlib_inline as plt_inline
-
-        plt_inline.backend_inline.set_matplotlib_formats("retina")
-
-
 def apply_matplotlib_css() -> None:
     """Inject transparent and theme-aware styling for Matplotlib widgets."""
 
@@ -105,9 +98,12 @@ def apply_matplotlib_css() -> None:
     display(HTML(css))
 
 
-def interactive_backend(enable=True):
+def interactive_backend(enable: bool = True) -> None:
     """Enable or disable the interactive Matplotlib backend."""
-    import matplotlib
+
+    if getattr(interactive_backend, "_enabled", None) != enable:
+        plt.close("all")
+        clear_output(wait=True)
 
     if enable:
         try:
@@ -116,6 +112,8 @@ def interactive_backend(enable=True):
             matplotlib.use("nbagg")
     else:
         matplotlib.use("module://matplotlib_inline.backend_inline")
+
+    interactive_backend._enabled = enable
 
 
 def validate_data(data: xr.DataArray) -> xr.DataArray:
@@ -1045,6 +1043,41 @@ def add_grid_boundary(
         transform=transform,
         zorder=zorder,
     )
+
+
+def fmt_anim_title(
+    title: str,
+    dim: str,
+    frame_number: int,
+    frame_value: Any,
+    total_frames: int,
+    frame_id: bool,
+) -> dict:
+    """Format Animation Title"""
+    if np.issubdtype(np.asarray(frame_value).dtype, np.datetime64):
+        frame_value = pd.to_datetime(frame_value).strftime("%Y-%m-%d %H:%M")
+
+    # 1. Determine the labels before the colon
+    idx_label = "index"
+    dim_label = str(dim)
+    max_label_width = max(len(idx_label), len(dim_label))
+    frame_title = f"{dim_label:<{max_label_width}}: {frame_value}"
+
+    if frame_id:
+        max_id = max(total_frames - 1, 0)
+        id_width = len(str(max_id))
+        index_padded = f"{frame_number:0{id_width}d}"
+
+        frame_title = f"{idx_label:<{max_label_width}}: {index_padded}\n{frame_title}"
+
+    if title:
+        frame_title = f"{title}\n{frame_title}"
+
+    return {
+        "label": frame_title,
+        "loc": "left",
+        "fontfamily": "monospace",
+    }
 
 
 def add_colorbar(

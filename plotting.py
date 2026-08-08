@@ -48,6 +48,7 @@ from .plot_utils import (
     add_gridlines,
     add_map_features,
     apply_matplotlib_css,
+    fmt_anim_title,
     format_crs_coordinates,
     get_facet_figsize,
     get_projection,
@@ -64,7 +65,6 @@ from .plot_utils import (
     plot_scatter,
     plot_significance,
     select_facet,
-    set_preview_quality,
     to_lon180,
     validate_animation_inputs,
     validate_data,
@@ -83,7 +83,6 @@ __all__ = [
     "geo",
 ]
 
-set_preview_quality()
 
 AxesType = Axes | cgeo.GeoAxes
 ScalarPrimitive = (
@@ -159,14 +158,15 @@ def create_figure(
     h_pad: float = 8 / 72,
 ) -> tuple[Figure, np.ndarray]:
     """Create a Cartopy figure with consistent facet padding."""
-    figure, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=figsize,
-        squeeze=squeeze,
-        subplot_kw={"projection": projection},
-        layout="compressed",
-    )
+    with plt.ioff():
+        figure, axes = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            figsize=figsize,
+            squeeze=squeeze,
+            subplot_kw={"projection": projection},
+            layout="compressed",
+        )
 
     layout_engine = figure.get_layout_engine()
     if layout_engine is not None:
@@ -678,8 +678,8 @@ class GeoPlot:
         Use percentile-based limits where supported.
     rasterized : bool, default False
         Rasterize dense scalar primitives.
-    title : str, default ""
-        Axis title or facet-figure title.
+    title : str | Dict, default None
+        Plot title. if dict provide options accepted by plt.title or figure.suptitle
     orientation : {"vertical", "horizontal"}, optional
         Base colorbar orientation. Defaults to vertical for a single axis and
         horizontal for facets.
@@ -788,7 +788,7 @@ class GeoPlot:
         extend: Literal["neither", "both", "min", "max"] | None = None,
         robust: bool = False,
         rasterized: bool = False,
-        title: str = "",
+        title: str | dict | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -821,11 +821,13 @@ class GeoPlot:
         **kwargs: Any,
     ) -> None:
 
-        if not _animated:
+        self.interactive = interactive
+        interactive_backend(self.interactive)
+
+        if self.interactive and not _animated:
             apply_matplotlib_css()
 
-        interactive_backend(interactive)
-
+        self.title = "" if title is None else title
         self.data, self.x, self.y, self.col, self.row = norm_input(
             da,
             x=x,
@@ -903,8 +905,13 @@ class GeoPlot:
             self.contour_labels = facet.contour_labels
             self.map_features = facet.map_features
             self.gridliners = facet.gridliners
-            if title:
-                self.figure.suptitle(title)
+
+            if isinstance(self.title, dict):
+                title_options = dict(self.title)
+                label = title_options.pop("label", "")
+                self.figure.suptitle(label, **title_options)
+            else:
+                self.figure.suptitle(self.title)
         else:
             self.figure, axes_array = create_figure(
                 projection=self.projection_object,
@@ -972,7 +979,14 @@ class GeoPlot:
                     colors=clabel_colors,
                     kwargs=clabel_kwargs,
                 )
-            axis.set_title(title)
+
+            if isinstance(self.title, dict):
+                title_options = dict(self.title)
+                label = title_options.pop("label", "")
+                axis.set_title(label, **title_options)
+            else:
+                axis.set_title(self.title)
+
         self.layers.append(
             {
                 "kind": method,
@@ -1137,6 +1151,15 @@ class GeoPlot:
                     artist.set_zorder(zorder)
                 for collection in getattr(artist, "collections", []):
                     collection.set_zorder(zorder)
+
+    def _ipython_display_(self) -> None:
+        """Display the plot appropriately in an IPython frontend."""
+        from IPython.display import display
+
+        if self.interactive:
+            display(self.figure.canvas)
+        else:
+            display(self.figure)
 
     def __repr__(self) -> str:
         """Return a compact representation of stored plot state."""
@@ -1934,19 +1957,21 @@ def plot_animation_frame(
     data: xr.DataArray,
     u: xr.DataArray | None,
     v: xr.DataArray | None,
+    frame_id: bool,
+    total_frames: int,
     geo_options: Mapping[str, Any],
 ) -> None:
     """Render one animation frame to a numbered PNG file."""
-    if np.issubdtype(np.asarray(frame_value).dtype, np.datetime64):
-        frame_value = pd.to_datetime(frame_value).strftime("%Y-%m-%d %H:%M")
-    frame_title = f"{dim}: {frame_value}"
-    if title:
-        frame_title = f"{title}\n{frame_title}"
+
+    fmt_title = fmt_anim_title(
+        title, dim, frame_number, frame_value, total_frames, frame_id
+    )
+
     options = dict(geo_options)
     options["da"] = data
     options["u_component"] = u
     options["v_component"] = v
-    options["title"] = frame_title
+    options["title"] = fmt_title
     options["_animated"] = True
     plot = GeoPlot(**options)
     filename = session_tmp_dir / f"{frame_number:06d}.png"
@@ -2018,6 +2043,8 @@ class Animate:
         Encoded frames per second.
     parallel : bool, default True
         Render frames using the Dask process scheduler.
+    frame_id: bool default False
+        If True add frame id to title
     display_inline : bool, default True
         Display the encoded MP4 in an active Jupyter kernel.
     **kwargs
@@ -2101,6 +2128,7 @@ class Animate:
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 1,
         parallel: bool = True,
+        frame_id: bool = False,
         display_inline: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -2139,6 +2167,8 @@ class Animate:
         self.outfile.parent.mkdir(parents=True, exist_ok=True)
         self.quality = quality
         self.title = title or ""
+        self.frame_id = frame_id
+
         self.geo_options: dict[str, Any] = {
             "x": x,
             "y": y,
@@ -2271,6 +2301,8 @@ class Animate:
                 self.sel(self.data, index),
                 self.sel(self.u_component, index),
                 self.sel(self.v_component, index),
+                self.frame_id,
+                len(self.indices),
                 self.geo_options,
             )
             for frame_number, index in enumerate(self.indices)
@@ -2372,7 +2404,7 @@ def geo(
     extend: Literal["neither", "both", "min", "max"] | None = None,
     robust: bool = False,
     rasterized: bool = False,
-    title: str = "",
+    title: str | dict | None = None,
     orientation: Literal["vertical", "horizontal"] | None = None,
     add_colorbar: bool = True,
     drawedges: bool = False,
@@ -2427,8 +2459,8 @@ def geo(
         Base scalar and colorbar configuration.
     robust, rasterized : bool, default False
         Base scalar rendering options.
-    title : str, default ""
-        Plot title.
+    title : str | Dict, default None
+        Plot title. if dict provide options accepted by plt.title or figure.suptitle
     orientation : {"vertical", "horizontal"}, optional
         Base colorbar orientation.
     add_colorbar, drawedges : bool
@@ -2537,6 +2569,7 @@ def animate(
     quality: Literal["low", "medium", "high"] = "medium",
     fps: int = 1,
     parallel: bool = True,
+    frame_id: bool = False,
     display_inline: bool = True,
     **kwargs: Any,
 ) -> Animate:
@@ -2582,6 +2615,8 @@ def animate(
         Frames per second.
     parallel : bool, default True
         Render frames using Dask processes.
+    frame_id: bool default False
+        If True add frame id to title
     display_inline : bool, default True
         Display the MP4 in Jupyter.
     **kwargs

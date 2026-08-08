@@ -133,6 +133,15 @@ def get_fsig(func: Callable) -> dict:
     return params
 
 
+def set_preview_quality():
+    """Set Matplotlib preview quality"""
+
+    if "ipykernel" in sys.modules:
+        import matplotlib_inline as plt_inline
+
+        plt_inline.backend_inline.set_matplotlib_formats("retina")
+
+
 def apply_widget_css() -> None:
     """Inject dynamic theme-aware styling for Jupyter widgets."""
 

@@ -410,7 +410,7 @@ class PlotAccessor:
         extend: str | None = None,
         robust: bool = False,
         rasterized: bool = False,
-        title: str = "",
+        title: str | dict | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -484,8 +484,8 @@ class PlotAccessor:
             Whether to request percentile-based color scaling.
         rasterized : bool, default False
             Whether dense scalar artists should be rasterized.
-        title : str, optional
-            Plot title for single-axis plots.
+        title : str | Dict, default None
+            Plot title. if dict provide options accepted by plt.title or figure.suptitle
         orientation : {"vertical", "horizontal"}, optional
             Colorbar orientation.
         add_colorbar : bool, default True
@@ -635,6 +635,7 @@ class PlotAccessor:
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 1,
         parallel: bool = True,
+        frame_id: bool = False,
         **kwargs,
     ) -> DisplayHandle | None:
         """
@@ -744,6 +745,8 @@ class PlotAccessor:
             Frames per second passed to ffmpeg.
         parallel : bool, default True
             Whether to render frames with multiprocessing.
+        frame_id: bool default False
+            If True add frame id to title
         **kwargs
             Additional keyword arguments forwarded to the selected xarray plotting
             method after signature filtering.
