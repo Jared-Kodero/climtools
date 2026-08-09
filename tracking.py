@@ -403,7 +403,8 @@ def run_pyflextrkr(
 
             stamp = np.datetime_as_string(base_time_ns, unit="s")
             stamp = stamp.replace("-", "").replace(":", "").replace("T", "_")
-            cloudid_file = tracking_outpath / f"cloudid_{stamp}.nc"
+            cloudid_filebase = pyflex_config["cloudid_filebase"]
+            cloudid_file = tracking_outpath / f"{cloudid_filebase}{stamp}.nc"
             with xr.open_dataset(
                 cloudid_file,
                 mask_and_scale=False,
@@ -471,7 +472,7 @@ def _build_track_mask(
         invalid = set(reference_data) - set(group_dims)
         if invalid:
             raise ValueError(
-                "reference_data may select only non-time leading dimensions; invalid keys: {sorted(invalid)!r}."
+                f"reference_data may select only non-time leading dimensions; invalid keys: {sorted(invalid)!r}."
             )
         reference_field = field.sel(reference_data, drop=True)
 
@@ -523,8 +524,13 @@ def _track_metadata(
     lat = np.asarray(ds["lat"].values, dtype=np.float64)
     lon = np.asarray(ds["lon"].values, dtype=np.float64)
 
+    # PyFLEXTRKR assigns non-contiguous track identifiers, so allocating a
+    # contiguous range up to the largest identifier pads the track dimension
+    # with entries that are absent from the mask and stay all-NaN.
     max_track = int(labels.max(initial=0))
-    track_ids = np.arange(1, max_track + 1, dtype=np.int64)
+    track_ids = np.unique(labels[labels > 0]).astype(np.int64)
+    track_position = np.full(max_track + 1, -1, dtype=np.int64)
+    track_position[track_ids] = np.arange(track_ids.size, dtype=np.int64)
     group_shape = tuple(ordered_field.sizes[dim] for dim in group_dims)
     ntime = ordered_field.sizes["time"]
     ntrack = track_ids.size
@@ -542,7 +548,7 @@ def _track_metadata(
             present = np.unique(labels_at_time)
             present = present[present > 0]
             for track_id in present:
-                track_index = int(track_id) - 1
+                track_index = int(track_position[track_id])
                 iy, ix = np.where(labels_at_time == track_id)
                 feature_values = group_values[time_index, iy, ix]
                 finite = np.isfinite(feature_values)
@@ -1144,7 +1150,16 @@ def get_relative_time(
         track_time=tracked.track_time,
     )
 
-    weights = np.cos(np.deg2rad(events["peak_lat"])).assign_coords(peak=events["peak"])
+    # Only tracks with a complete window contribute to the numerator, so the
+    # denominator must be restricted to the same set. Leaving the weights of
+    # excluded tracks in place scales the composite down by the fraction of
+    # tracks retained.
+    weights = (
+        np.cos(np.deg2rad(events["peak_lat"]))
+        .where(complete_da)
+        .assign_coords(peak=events["peak"])
+    )
+    contributing = weights.notnull()
     sample_dims = (*group_dims, "track")
     track_vars = [
         name
@@ -1157,6 +1172,7 @@ def get_relative_time(
     if group_dims:
         composite_source = composite_source.stack(sample=sample_dims)
         weights = weights.stack(sample=sample_dims)
+        contributing = contributing.stack(sample=sample_dims)
         composite_source = composite_source.assign_coords(
             peak=events["peak"].stack(sample=sample_dims)
         )
@@ -1180,7 +1196,7 @@ def get_relative_time(
         ).sum(dim=reduce_dim)
         composite = numerator / denominator
         composite["n_tracks"] = (
-            xr.ones_like(weights, dtype=np.int32)
+            contributing.astype(np.int32)
             .assign_coords(peak=composite_source["peak"])
             .groupby_bins("peak", bins=bins, labels=bin_labels)
             .sum(dim=reduce_dim)
@@ -1192,7 +1208,7 @@ def get_relative_time(
         denominator = weights.sum(dim=reduce_dim)
         composite = numerator / denominator
         composite["n_tracks"] = (
-            xr.ones_like(weights, dtype=np.int32).sum(dim=reduce_dim).astype(np.int32)
+            contributing.astype(np.int32).sum(dim=reduce_dim).astype(np.int32)
         )
 
     composite = composite.rename(

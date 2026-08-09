@@ -75,8 +75,8 @@ Chaining geospatial operations reads in execution order:
 (
     ds.t2m
     .xgeo.remap(target_grid, method="conservative")
-    .xgeo.mask_land(keep="land")
-    .xgeo.add_lst()
+    .xgeo.mask(valid_value=1)
+    .xgeo.add_local_solar_time()
     .mean("time")
     .xgeo.plot.geo(method="pcolormesh", cmap=cmaps.temp_seq())
 )

@@ -741,6 +741,9 @@ def get_projection(
     projection_name : str
         Resolved projection class name.
     """
+    if isinstance(projection, ccrs.Projection):
+        return projection, type(projection).__name__
+
     lon_w = float(longitude.min())
     lon_e = float(longitude.max())
     lat_s = float(latitude.min())
@@ -776,7 +779,15 @@ def get_projection(
                     lat_n - d_lat / 6.0,
                 )
             cutoff = -30.0 if lat_c >= 0.0 else 30.0
-    projection_class = getattr(ccrs, projection)
+    projection_class = getattr(ccrs, projection, None)
+    known = isinstance(projection_class, type) and issubclass(
+        projection_class, ccrs.Projection
+    )
+    if not known:
+        raise ValueError(
+            f"Unknown projection {projection!r}. Pass a Cartopy projection name "
+            "or a cartopy.crs.Projection instance."
+        )
     accepted = get_fsig(projection_class)
     options: dict[str, Any] = {}
     if "central_longitude" in accepted:

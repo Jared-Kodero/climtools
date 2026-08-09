@@ -154,8 +154,8 @@ class GeoBase:
     ) -> xr.Dataset | xr.DataArray:
         """Add mean local solar time as a coordinate.
 
-        See :func:`climtools.xgeo.add_lst` for the full description, including
-        the approximation used.
+        See :func:`climtools.xgeo.add_local_solar_time` for the full
+        description, including the approximation used.
 
         Parameters
         ----------

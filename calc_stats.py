@@ -69,6 +69,9 @@ def _polyfit(data: xr.DataArray | xr.Dataset, dim: str, data_var=None, scale=1):
             raise ValueError("Argument 'data_var' is required for xr.Dataset input.")
         data = data[data_var]
 
+    # `ds[var]` shares the underlying Variable, so clearing attrs in place
+    # strips them from the caller's object.
+    data = data.copy(deep=False)
     data.attrs = {}
     data = data.sortby(dim)
     data = data.assign_coords(

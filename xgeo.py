@@ -4,23 +4,23 @@ Geospatial operations on xarray objects.
 This module is the working namespace of the package. It re-exports the
 plotting entry points, the statistical routines and the NetCDF writers, and
 adds the operations that act directly on gridded data: regridding
-(:func:`remap`), land-sea masking (:func:`mask_land`), transect selection
-(:func:`sel_transect`), local solar time (:func:`add_lst`) and a Dask cluster
-helper (:class:`SetupDask`).
+(:func:`remap`), land-sea masking (:func:`mask`), transect selection
+(:func:`sel_transect`), local solar time (:func:`add_local_solar_time`) and a
+Dask cluster helper (:class:`SetupDask`).
 
 Typical use::
 
     from climtools import xgeo as xg
 
     da = xg.remap(da, target_grid, method="conservative")
-    da = xg.mask_land(da, keep="land")
+    da = xg.mask(da, valid_value=1)
     xg.plot.geo(da.mean("time"), method="contourf")
 
 Every function here is also reachable as a method on the ``.xgeo`` accessor,
 which is registered on both ``DataArray`` and ``Dataset`` when the package is
 imported::
 
-    da.xgeo.remap(target_grid).xgeo.mask_land().xgeo.plot.field()
+    da.xgeo.remap(target_grid).xgeo.mask().xgeo.plot.geo()
 
 Regridding requires ``xesmf``. It is imported on first use, so the rest of the
 package remains usable in environments where ESMF is not installed.
