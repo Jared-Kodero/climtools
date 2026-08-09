@@ -158,10 +158,10 @@ def _corr_test(
 def corr(
     x: xr.DataArray,
     y: xr.DataArray,
+    dim: str | None,
     *,
     corr_type: Literal["pearson", "spearman", "kendall"] = "pearson",
     alternative: Literal["two-sided", "less", "greater"] = "two-sided",
-    dim: str | None = None,
     dask_scheduler: Literal["threads", "processes"] = "threads",
 ) -> xr.Dataset:
     """

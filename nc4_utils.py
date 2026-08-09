@@ -60,9 +60,9 @@ def encode_time(da: xr.DataArray):
     elif is_cftime(da):
         num, out_units, out_calendar = encode_cf_datetime(
             da,
-            units=da.encoding["units"],
-            calendar=da.encoding["calendar"],
-            dtype=da.encoding["dtype"],
+            units=da.encoding.get("units"),
+            calendar=da.encoding.get("calendar"),
+            dtype=da.encoding.get("dtype"),
         )
         encoded = da.copy(data=num)
         encoded.attrs.update({"units": out_units, "calendar": out_calendar})
@@ -71,7 +71,7 @@ def encode_time(da: xr.DataArray):
 
     elif np.issubdtype(da.dtype, np.timedelta64):
         num, out_units = encode_cf_timedelta(
-            da, units=da.encoding["units"], dtype=da.encoding["dtype"]
+            da, units=da.encoding.get("units"), dtype=da.encoding.get("dtype")
         )
         encoded = da.copy(data=num)
         encoded.attrs.update({"units": out_units})
