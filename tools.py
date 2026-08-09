@@ -142,16 +142,14 @@ def set_preview_quality():
     plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
-import json
-import sys
-
-from IPython.display import Javascript
-
-
 def apply_widget_css() -> None:
     """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
     if "ipykernel" not in sys.modules:
         return
+
+    import json
+
+    from IPython.display import Javascript
 
     css = """
     /* General Jupyter widget styling */

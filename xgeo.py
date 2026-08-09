@@ -46,9 +46,8 @@ from .nc4_utils import append_to_netcdf, dataarray_to_netcdf, dataset_to_netcdf
 from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
+from .tracking import get_relative_time, track_feature
 from .xgeo_utils import (
-    center_on_objects,
-    get_relative_time,
     grid_id,
     sel_transect,
     to_lon180,
@@ -64,7 +63,6 @@ __all__ = [
     "add_local_solar_time",
     "append_to_netcdf",
     "calc",
-    "center_on_objects",
     "cmaps",
     "get_relative_time",
     "mask",
@@ -75,6 +73,7 @@ __all__ = [
     "sel_transect",
     "to_lon180",
     "to_netcdf",
+    "track_feature",
 ]
 
 
