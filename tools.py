@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import matplotlib
-from IPython.display import display
 
 host = socket.gethostname()
 user = getpass.getuser()
@@ -137,19 +136,23 @@ def get_fsig(func: Callable) -> dict:
 
 
 def set_preview_quality():
-    if "ipykernel" in sys.modules:
-        import matplotlib_inline as plt_inline
+    if "ipykernel" not in sys.modules:
+        return
+
+    import matplotlib_inline as plt_inline
+
     plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
 def apply_widget_css() -> None:
     """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
+
     if "ipykernel" not in sys.modules:
         return
 
     import json
 
-    from IPython.display import Javascript
+    from IPython.display import Javascript, display
 
     css = """
     /* General Jupyter widget styling */

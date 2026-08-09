@@ -55,9 +55,9 @@ __all__ = [
 ]
 
 
-# # from .update import _self_update
+# from .update import _self_update
 
-# # _self_update()
+# _self_update()
 
 try:
     from ._typing import fix_xarray
