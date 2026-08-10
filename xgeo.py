@@ -46,7 +46,6 @@ from .nc4_utils import append_to_netcdf, dataarray_to_netcdf, dataset_to_netcdf
 from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
-from .tracking import get_relative_time, track_feature
 from .xgeo_utils import (
     grid_id,
     sel_transect,
@@ -64,7 +63,6 @@ __all__ = [
     "append_to_netcdf",
     "calc",
     "cmaps",
-    "get_relative_time",
     "mask",
     "n_cpus",
     "plot",
@@ -73,7 +71,6 @@ __all__ = [
     "sel_transect",
     "to_lon180",
     "to_netcdf",
-    "track_feature",
 ]
 
 
