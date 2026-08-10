@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Callable, Generator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,9 +15,18 @@ from typing import Any, Literal
 import numpy as np
 import xarray as xr
 import yaml
+from scipy.ndimage import map_coordinates
 
 _EARTH_RADIUS_KM = 6371.0
 _TRACKING_LOG = "tracking.log"
+
+# PyFLEXTRKR parallelises across input files. Writing one file per time step is
+# the documented input layout and is what allows Step 1 (identify features) and
+# Step 2 (link pairs) to use more than one worker. Set to False to restore the
+# previous single-file behaviour if a reference comparison requires it.
+_ONE_FILE_PER_TIME = True
+
+_LOGGER = logging.getLogger(__name__)
 
 comparators: dict[str, Callable[[Any, Any], Any]] = {
     ">": operator.gt,
@@ -36,6 +46,27 @@ class TrackedFeatures:
     peak_lon: xr.DataArray
     peak: xr.DataArray
     track_time: xr.DataArray
+
+
+def cpu_count() -> int:
+    """Number of CPUs this process is actually allowed to run on (Linux)."""
+    return max(1, len(os.sched_getaffinity(0)))
+
+
+def _available_bytes() -> int:
+    """Physically available memory in bytes, or 0 if it cannot be determined."""
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_AVPHYS_PAGES"))
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def _scratch_root() -> str | None:
+    """Prefer tmpfs so the PyFLEXTRKR round trip never touches physical disk."""
+    shm = Path("/dev/shm")
+    if shm.is_dir() and os.access(shm, os.W_OK):
+        return str(shm)
+    return None
 
 
 @contextmanager
@@ -79,7 +110,10 @@ def tracker_env() -> Generator[Path]:
         )
 
     try:
-        with tempfile.TemporaryDirectory(prefix="pyflextrkr_") as temporary_directory:
+        with tempfile.TemporaryDirectory(
+            prefix="pyflextrkr_",
+            dir=_scratch_root(),
+        ) as temporary_directory:
             work = Path(temporary_directory)
 
             with log_path.open("a", encoding="utf-8", buffering=1) as log_stream:
@@ -154,8 +188,31 @@ def tracker_env() -> Generator[Path]:
         os.close(stderr_fd)
 
 
-def _tracking_capacity(
+def _read_feature_numbers(
     cloudid_files: Sequence[str | Path],
+) -> tuple[list[np.ndarray], dict[str, int]]:
+    """Read every cloudid feature mask exactly once.
+
+    The masks are needed twice, first to size the PyFLEXTRKR allocations and
+    again to map track numbers back onto the native grid. Reading them once and
+    caching halves the number of netCDF opens.
+    """
+    labels: list[np.ndarray] = []
+    position: dict[str, int] = {}
+    for index, filename in enumerate(cloudid_files):
+        with xr.open_dataset(filename, mask_and_scale=False) as feature_ds:
+            labels.append(
+                np.asarray(
+                    feature_ds["feature_number"].squeeze("time", drop=True).values,
+                    dtype=np.int64,
+                )
+            )
+        position[Path(filename).name] = index
+    return labels, position
+
+
+def _tracking_capacity(
+    label_frames: Sequence[np.ndarray],
     overlap_threshold: float,
 ) -> tuple[int, int]:
     """Derive PyFLEXTRKR allocation sizes from identified feature masks."""
@@ -163,13 +220,7 @@ def _tracking_capacity(
     max_links = 0
     previous: np.ndarray | None = None
 
-    for filename in cloudid_files:
-        with xr.open_dataset(filename, mask_and_scale=False) as feature_ds:
-            labels = np.asarray(
-                feature_ds["feature_number"].squeeze("time", drop=True).values,
-                dtype=np.int64,
-            )
-
+    for labels in label_frames:
         positive = labels[labels > 0]
         max_features = max(
             max_features,
@@ -232,8 +283,18 @@ def run_pyflextrkr(
     threshold_operator: str,
     overlap_threshold: float,
     fill_value: int,
+    parallel: bool,
 ) -> xr.DataArray:
-    """Run PyFLEXTRKR for one time-lat-lon field and return track IDs."""
+    """Run PyFLEXTRKR for one time-lat-lon field and return track IDs.
+
+    ``parallel`` selects between serial execution and a Dask ``LocalCluster``
+    sized to the CPUs this process is permitted to use. It is written to the
+    generated configuration as the integer ``run_parallel`` key, alongside the
+    companion ``nprocesses`` key that PyFLEXTRKR requires when
+    ``run_parallel = 1``. The Dask distributed mode (``run_parallel = 2``) is
+    deliberately not offered because it needs a scheduler JSON file supplied at
+    process start, which is not reachable through this in-process API.
+    """
     try:
         from pyflextrkr.ft_utilities import load_config, subset_files_timerange
         from pyflextrkr.gettracks import gettracknumbers
@@ -252,6 +313,8 @@ def run_pyflextrkr(
         raise ValueError("overlap_threshold must be between 0 and 1 inclusive.")
     if fill_value >= 0:
         raise ValueError("fill_value must be negative.")
+    if not isinstance(parallel, (bool, np.bool_)):
+        raise TypeError("parallel must be a bool.")
 
     field = ds[data_var]
     if field.dims != ("time", "lat", "lon"):
@@ -285,6 +348,7 @@ def run_pyflextrkr(
     tracking_field = xr.where(selected, np.float32(1.0), np.float32(0.0))
     tracking_field = tracking_field.where(np.isfinite(field), np.float32(0.0))
     tracking_input = tracking_field.to_dataset(name=data_var)
+    tracking_input = tracking_input.transpose("time", "lat", "lon")
 
     first = times[0].astype("datetime64[m]")
     last = times[-1].astype("datetime64[m]")
@@ -295,19 +359,31 @@ def run_pyflextrkr(
     enddate = np.datetime_as_string(last, unit="m").replace("-", "")
     enddate = enddate.replace(":", "").replace("T", ".")
 
+    def _input_stamp(value: np.datetime64) -> str:
+        stamp = np.datetime_as_string(value, unit="s")
+        return stamp.replace("-", "").replace(":", "").replace("T", ".")
+
     with tracker_env() as work:
         input_path = work / "input"
         input_path.mkdir()
 
-        first_stamp = np.datetime_as_string(times[0], unit="s")
-        first_stamp = first_stamp.replace("-", "").replace(":", "")
-        first_stamp = first_stamp.replace("T", ".")
-        input_file = input_path / f"input_{first_stamp}.nc"
-        tracking_input.transpose("time", "lat", "lon").to_netcdf(input_file)
+        if _ONE_FILE_PER_TIME:
+            for index in range(times.size):
+                stamp = _input_stamp(times[index])
+                tracking_input.isel(time=slice(index, index + 1)).to_netcdf(
+                    input_path / f"input_{stamp}.nc"
+                )
+        else:
+            stamp = _input_stamp(times[0])
+            tracking_input.to_netcdf(input_path / f"input_{stamp}.nc")
 
         config_file = work / "config.yml"
         config = {
-            "run_parallel": 0,
+            # PyFLEXTRKR expects an integer here: 0 serial, 1 Dask LocalCluster,
+            # 2 Dask distributed. The public API of this module takes a bool and
+            # maps it onto the first two values.
+            "run_parallel": int(bool(parallel)),
+            "nprocesses": cpu_count() if parallel else 1,
             "input_format": "netcdf",
             "startdate": startdate,
             "enddate": enddate,
@@ -361,10 +437,8 @@ def run_pyflextrkr(
         if not cloudid_files:
             raise ValueError("PyFLEXTRKR produced no feature-identification files.")
 
-        maxnclouds, nmaxlinks = _tracking_capacity(
-            cloudid_files,
-            overlap_threshold,
-        )
+        label_frames, label_position = _read_feature_numbers(cloudid_files)
+        maxnclouds, nmaxlinks = _tracking_capacity(label_frames, overlap_threshold)
         pyflex_config["maxnclouds"] = maxnclouds
         pyflex_config["nmaxlinks"] = nmaxlinks
 
@@ -375,17 +449,19 @@ def run_pyflextrkr(
             tracknumbers_file,
             mask_and_scale=False,
         ) as track_numbers_ds:
-            track_numbers = (
+            track_numbers = np.asarray(
                 track_numbers_ds["track_numbers"]
                 .squeeze("time", drop=True)
                 .load()
-                .astype(np.int64)
+                .values,
+                dtype=np.int64,
             )
             basetimes = (
                 track_numbers_ds["basetimes"].load().values.astype("datetime64[ns]")
             )
 
         tracking_outpath = Path(pyflex_config["tracking_outpath"])
+        cloudid_filebase = pyflex_config["cloudid_filebase"]
         source_index = {
             int(value.astype(np.int64)): index
             for index, value in enumerate(times.astype("datetime64[ns]"))
@@ -403,21 +479,22 @@ def run_pyflextrkr(
 
             stamp = np.datetime_as_string(base_time_ns, unit="s")
             stamp = stamp.replace("-", "").replace(":", "").replace("T", "_")
-            cloudid_filebase = pyflex_config["cloudid_filebase"]
-            cloudid_file = tracking_outpath / f"{cloudid_filebase}{stamp}.nc"
-            with xr.open_dataset(
-                cloudid_file,
-                mask_and_scale=False,
-            ) as cloudid_ds:
-                feature_number = np.asarray(
-                    cloudid_ds["feature_number"].squeeze("time", drop=True).values,
-                    dtype=np.int64,
-                )
+            cloudid_name = f"{cloudid_filebase}{stamp}.nc"
 
-            file_tracks = np.asarray(
-                track_numbers.isel(nfiles=file_index).values,
-                dtype=np.int64,
-            )
+            cached = label_position.get(cloudid_name)
+            if cached is not None:
+                feature_number = label_frames[cached]
+            else:
+                with xr.open_dataset(
+                    tracking_outpath / cloudid_name,
+                    mask_and_scale=False,
+                ) as cloudid_ds:
+                    feature_number = np.asarray(
+                        cloudid_ds["feature_number"].squeeze("time", drop=True).values,
+                        dtype=np.int64,
+                    )
+
+            file_tracks = np.asarray(track_numbers[file_index], dtype=np.int64).ravel()
             file_tracks = np.where(file_tracks > 0, file_tracks, 0)
             lookup = np.zeros(file_tracks.size + 1, dtype=np.int64)
             lookup[1:] = file_tracks
@@ -456,6 +533,7 @@ def _build_track_mask(
     reference_data: dict[str, Any] | None,
     overlap_threshold: float,
     fill_value: int,
+    parallel: bool,
 ) -> xr.DataArray:
     field = ds[data_var]
     _, group_dims = _tracking_dimensions(field)
@@ -491,6 +569,7 @@ def _build_track_mask(
             threshold_operator,
             overlap_threshold,
             fill_value,
+            parallel,
         )
         canonical_mask[index + (slice(None), slice(None), slice(None))] = np.asarray(
             mask_slice.values,
@@ -506,6 +585,48 @@ def _build_track_mask(
     if reference_data is not None:
         mask, _ = xr.broadcast(mask, field)
     return mask.transpose(*field.dims)
+
+
+def _frame_extrema(
+    values_2d: np.ndarray,
+    labels_2d: np.ndarray,
+    center_on: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Locate the extremum of every labelled feature in a single frame.
+
+    A single sort over the labelled pixels replaces one full-frame scan per
+    feature. The flat pixel index is the last sort key, so ties are broken by
+    the first occurrence in C order, matching ``numpy.argmax``.
+    """
+    flat_labels = labels_2d.ravel()
+    flat_index = np.flatnonzero(flat_labels > 0)
+    if flat_index.size == 0:
+        empty_int = np.empty(0, dtype=np.int64)
+        return empty_int, empty_int, empty_int, np.empty(0, dtype=np.float64)
+
+    label = flat_labels[flat_index]
+    value = values_2d.ravel()[flat_index]
+
+    sign = -1.0 if center_on == "max" else 1.0
+    key = np.where(np.isfinite(value), sign * value, np.inf)
+
+    order = np.lexsort((flat_index, key, label))
+    label = label[order]
+    flat_index = flat_index[order]
+    value = value[order]
+
+    head = np.flatnonzero(np.r_[True, label[1:] != label[:-1]])
+    label = label[head]
+    flat_index = flat_index[head]
+    value = value[head]
+
+    keep = np.isfinite(value)
+    label = label[keep]
+    flat_index = flat_index[keep]
+    value = value[keep]
+
+    nx = labels_2d.shape[1]
+    return label, flat_index // nx, flat_index % nx, value
 
 
 def _track_metadata(
@@ -544,29 +665,18 @@ def _track_metadata(
         group_values = values[group_index]
         group_labels = labels[group_index]
         for time_index in range(ntime):
-            labels_at_time = group_labels[time_index]
-            present = np.unique(labels_at_time)
-            present = present[present > 0]
-            for track_id in present:
-                track_index = int(track_position[track_id])
-                iy, ix = np.where(labels_at_time == track_id)
-                feature_values = group_values[time_index, iy, ix]
-                finite = np.isfinite(feature_values)
-                if not np.any(finite):
-                    continue
-
-                iy = iy[finite]
-                ix = ix[finite]
-                feature_values = feature_values[finite]
-                local_index = int(
-                    np.argmax(feature_values)
-                    if center_on == "max"
-                    else np.argmin(feature_values)
-                )
-                output_index = (*group_index, time_index, track_index)
-                center_lat_values[output_index] = lat[iy[local_index]]
-                center_lon_values[output_index] = lon[ix[local_index]]
-                center_value_values[output_index] = feature_values[local_index]
+            label, iy, ix, value = _frame_extrema(
+                group_values[time_index],
+                group_labels[time_index],
+                center_on,
+            )
+            if label.size == 0:
+                continue
+            track_index = track_position[label]
+            output_index = (*group_index, time_index, track_index)
+            center_lat_values[output_index] = lat[iy]
+            center_lon_values[output_index] = lon[ix]
+            center_value_values[output_index] = value
 
     center_dims = (*group_dims, "time", "track")
     center_coords: dict[str, Any] = {
@@ -594,48 +704,55 @@ def _track_metadata(
     ).transpose(*leading_dims, "track")
 
     peak_shape = (*group_shape, ntrack)
-    peak_lat_values = np.full(peak_shape, np.nan, dtype=np.float64)
-    peak_lon_values = np.full(peak_shape, np.nan, dtype=np.float64)
-    peak_values = np.full(peak_shape, np.nan, dtype=np.float64)
-    track_time_values = np.full(
-        (*peak_shape, 3),
-        np.datetime64("NaT"),
-        dtype="datetime64[ns]",
-    )
     time_values = np.asarray(ds["time"].values).astype("datetime64[ns]")
 
-    for group_index in np.ndindex(*group_shape):
-        for track_index in range(ntrack):
-            track_values = center_value_values[group_index + (slice(None), track_index)]
-            valid = np.flatnonzero(np.isfinite(track_values))
-            if valid.size == 0:
-                continue
+    if ntrack == 0:
+        peak_lat_values = np.full(peak_shape, np.nan, dtype=np.float64)
+        peak_lon_values = np.full(peak_shape, np.nan, dtype=np.float64)
+        peak_values = np.full(peak_shape, np.nan, dtype=np.float64)
+        track_time_values = np.full(
+            (*peak_shape, 3),
+            np.datetime64("NaT"),
+            dtype="datetime64[ns]",
+        )
+    else:
+        # Fully vectorised replacement for the per-track lifetime loop. Filling
+        # the invalid entries with a signed infinity leaves argmax and argmin
+        # selecting the same index the compacted search would have returned.
+        finite = np.isfinite(center_value_values)
+        any_valid = finite.any(axis=-2)
+        first_index = np.argmax(finite, axis=-2)
+        last_index = finite.shape[-2] - 1 - np.argmax(finite[..., ::-1, :], axis=-2)
 
-            start_index = int(valid[0])
-            end_index = int(valid[-1])
-            valid_values = track_values[valid]
-            extrema_index = int(
-                np.argmax(valid_values)
-                if center_on == "max"
-                else np.argmin(valid_values)
-            )
-            peak_time_index = int(valid[extrema_index])
-            output_index = (*group_index, track_index)
+        sentinel = -np.inf if center_on == "max" else np.inf
+        filled = np.where(finite, center_value_values, sentinel)
+        peak_index = (
+            np.argmax(filled, axis=-2)
+            if center_on == "max"
+            else np.argmin(filled, axis=-2)
+        )
 
-            peak_lat_values[output_index] = center_lat_values[
-                group_index + (peak_time_index, track_index)
-            ]
-            peak_lon_values[output_index] = center_lon_values[
-                group_index + (peak_time_index, track_index)
-            ]
-            peak_values[output_index] = center_value_values[
-                group_index + (peak_time_index, track_index)
-            ]
-            track_time_values[output_index] = [
-                time_values[start_index],
-                time_values[peak_time_index],
-                time_values[end_index],
-            ]
+        def _gather(source: np.ndarray, index: np.ndarray) -> np.ndarray:
+            return np.take_along_axis(source, index[..., None, :], axis=-2)[..., 0, :]
+
+        peak_lat_values = np.where(
+            any_valid, _gather(center_lat_values, peak_index), np.nan
+        )
+        peak_lon_values = np.where(
+            any_valid, _gather(center_lon_values, peak_index), np.nan
+        )
+        peak_values = np.where(
+            any_valid, _gather(center_value_values, peak_index), np.nan
+        )
+        track_time_values = np.stack(
+            (
+                time_values[first_index],
+                time_values[peak_index],
+                time_values[last_index],
+            ),
+            axis=-1,
+        )
+        track_time_values[~any_valid] = np.datetime64("NaT")
 
     track_dims = (*group_dims, "track")
     track_coords: dict[str, Any] = {
@@ -714,6 +831,7 @@ def _track_features(
     reference_data: dict[str, Any] | None,
     overlap_threshold: float,
     fill_value: int,
+    parallel: bool,
 ) -> TrackedFeatures:
     if threshold_operator not in comparators:
         raise ValueError("threshold_operator must be one of '>', '>=', '<', or '<='.")
@@ -728,8 +846,161 @@ def _track_features(
         reference_data,
         overlap_threshold,
         fill_value,
+        parallel,
     )
     return _track_metadata(ds, data_var, track_mask, center_on)
+
+
+def _subset_tracks(tracked: TrackedFeatures, keep: np.ndarray) -> TrackedFeatures:
+    return TrackedFeatures(
+        track_mask=tracked.track_mask,
+        center_lat=tracked.center_lat.isel(track=keep),
+        center_lon=tracked.center_lon.isel(track=keep),
+        center_value=tracked.center_value.isel(track=keep),
+        peak_lat=tracked.peak_lat.isel(track=keep),
+        peak_lon=tracked.peak_lon.isel(track=keep),
+        peak=tracked.peak.isel(track=keep),
+        track_time=tracked.track_time.isel(track=keep),
+    )
+
+
+def _center_on_tracks(
+    source: xr.Dataset,
+    variable_names: Sequence[str],
+    data_var: str,
+    tracked: TrackedFeatures,
+    leading_dims: tuple[str, ...],
+    offsets: np.ndarray,
+    method: str,
+    output_dtype: str,
+    workers: int,
+) -> dict[str, np.ndarray]:
+    """Interpolate variables onto a feature-centered grid, valid samples only.
+
+    A track occupies only a small fraction of the record, so the dense product
+    of leading dimensions and tracks is mostly empty. This routine visits each
+    leading index once, gathers only the tracks that are actually present at
+    that index, and issues a single ``map_coordinates`` call per variable for
+    the whole group. The membership footprint is obtained by sampling the label
+    field at the nearest source cell rather than by broadcasting a comparison
+    over the full source grid.
+    """
+    lat_source = np.asarray(source["lat"].values, dtype=np.float64)
+    lon_source = np.asarray(source["lon"].values, dtype=np.float64)
+    ny = lat_source.size
+    nx = lon_source.size
+    index_y = np.arange(ny, dtype=np.float64)
+    index_x = np.arange(nx, dtype=np.float64)
+
+    lead_shape = tuple(tracked.center_lat.sizes[dim] for dim in leading_dims)
+    n_lead = int(np.prod(lead_shape)) if lead_shape else 1
+    track_ids = np.asarray(tracked.peak["track"].values, dtype=np.int64)
+    n_track = track_ids.size
+    n_cell = offsets.size
+
+    center_lat = (
+        tracked.center_lat.transpose(*leading_dims, "track")
+        .values.astype(np.float64)
+        .reshape(n_lead, n_track)
+    )
+    center_lon = (
+        tracked.center_lon.transpose(*leading_dims, "track")
+        .values.astype(np.float64)
+        .reshape(n_lead, n_track)
+    )
+    valid = np.isfinite(center_lat) & np.isfinite(center_lon)
+
+    feature_name = f"{data_var}_feature"
+    output_names = [*variable_names, feature_name]
+    itemsize = np.dtype(output_dtype).itemsize
+    required = n_lead * n_track * n_cell * n_cell * itemsize * len(output_names)
+    available = _available_bytes()
+    if available and required > 0.9 * available:
+        raise MemoryError(
+            "The feature-centered output would require about "
+            f"{required / 2**30:.1f} GiB for {len(output_names)} variables of "
+            f"shape {(*lead_shape, n_track, n_cell, n_cell)}, against roughly "
+            f"{available / 2**30:.1f} GiB available. Increase dx_km, reduce "
+            "half_extent_km, restrict 'variables', or subset the tracks."
+        )
+
+    outputs = {
+        name: np.full(
+            (n_lead, n_track, n_cell, n_cell), np.nan, dtype=np.dtype(output_dtype)
+        )
+        for name in output_names
+    }
+
+    source_arrays = {
+        name: np.ascontiguousarray(
+            source[name].transpose(*leading_dims, "lat", "lon").values
+        ).reshape(n_lead, ny, nx)
+        for name in variable_names
+    }
+    label_array = np.ascontiguousarray(
+        tracked.track_mask.transpose(*leading_dims, "lat", "lon").values,
+        dtype=np.int64,
+    ).reshape(n_lead, ny, nx)
+
+    x_km, y_km = np.meshgrid(offsets, offsets)
+    lat_offset_deg = np.rad2deg(y_km / _EARTH_RADIUS_KM)
+    order = 1 if method == "linear" else 0
+
+    lead_indices = np.flatnonzero(valid.any(axis=1))
+
+    def _process(lead: int) -> None:
+        selection = np.flatnonzero(valid[lead])
+        target_lat = center_lat[lead, selection][:, None, None] + lat_offset_deg[None]
+        cos_lat = np.cos(np.deg2rad(target_lat))
+        cos_lat = np.where(np.abs(cos_lat) < 1e-10, 1e-10, cos_lat)
+        target_lon = center_lon[lead, selection][:, None, None] + np.rad2deg(
+            x_km[None] / (_EARTH_RADIUS_KM * cos_lat)
+        )
+
+        inside = (
+            (target_lat >= lat_source[0])
+            & (target_lat <= lat_source[-1])
+            & (target_lon >= lon_source[0])
+            & (target_lon <= lon_source[-1])
+        )
+        shape = target_lat.shape
+
+        fractional_y = np.interp(target_lat.ravel(), lat_source, index_y)
+        fractional_x = np.interp(target_lon.ravel(), lon_source, index_x)
+        coordinates = np.stack((fractional_y, fractional_x))
+
+        for name in variable_names:
+            sampled = map_coordinates(
+                source_arrays[name][lead],
+                coordinates,
+                order=order,
+                mode="nearest",
+                prefilter=False,
+                output=np.float64,
+            ).reshape(shape)
+            sampled[~inside] = np.nan
+            outputs[name][lead, selection] = sampled
+
+        nearest_y = np.clip(np.rint(fractional_y).astype(np.intp), 0, ny - 1)
+        nearest_x = np.clip(np.rint(fractional_x).astype(np.intp), 0, nx - 1)
+        sampled_labels = label_array[lead][nearest_y, nearest_x].reshape(shape)
+        member = (sampled_labels == track_ids[selection][:, None, None]) & inside
+
+        feature = outputs[data_var][lead, selection].copy()
+        feature[~member] = np.nan
+        outputs[feature_name][lead, selection] = feature
+
+    if workers > 1 and lead_indices.size > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_process, lead_indices.tolist()))
+    else:
+        for lead in lead_indices.tolist():
+            _process(int(lead))
+
+    return {
+        name: array.reshape(*lead_shape, n_track, n_cell, n_cell)
+        for name, array in outputs.items()
+    }
 
 
 def track_feature(
@@ -739,6 +1010,7 @@ def track_feature(
     *,
     threshold_operator: Literal[">", ">=", "<", "<="] = ">=",
     overlap_threshold: float = 0.5,
+    parallel: bool = False,
     fill_value: int = -9999,
     center_on: Literal["min", "max"] = "max",
     center_object: bool = True,
@@ -747,6 +1019,8 @@ def track_feature(
     half_extent_km: float | None = None,
     method: str = "linear",
     reference_data: dict[str, Any] | None = None,
+    output_dtype: str = "float32",
+    workers: int | None = None,
 ) -> xr.Dataset:
     """Track threshold-defined features and optionally center fields on them.
 
@@ -773,12 +1047,17 @@ def track_feature(
     overlap_threshold : float, default: 0.5
         Minimum overlap required to associate features between consecutive
         time steps.
+    parallel : bool, default: False
+        If True, PyFLEXTRKR runs on a Dask ``LocalCluster`` with one worker per
+        CPU available to this process. The flag is written to the generated
+        configuration as the integer ``run_parallel`` key, with the companion
+        ``nprocesses`` key. If False, PyFLEXTRKR runs in serial.
     fill_value : int, default: -9999
         Integer fill value used for cells without a tracked feature.
     center_on : {"min", "max"}, default: "max"
         Extremum of ``data_var`` used to define the feature center at each
         time step and the lifetime value reported by ``peak``.
-    center_object : bool, default: False
+    center_object : bool, default: True
         If False, retain selected variables on the native grid and return
         ``track_mask`` containing the integer track ID at each grid cell and
         time. If True, interpolate selected variables to a feature-centered
@@ -797,6 +1076,13 @@ def track_feature(
         Interpolation method used for the feature-centered grid.
     reference_data : dict[str, Any], optional
         Reference data supplied during feature-centered processing.
+    output_dtype : str, default: "float32"
+        Storage type of the feature-centered arrays. Single precision halves
+        the memory footprint of the output. Set to ``"float64"`` to retain the
+        precision of the source fields.
+    workers : int, optional
+        Threads used for the feature-centered interpolation. Defaults to the
+        number of CPUs available to this process.
 
     Returns
     -------
@@ -819,12 +1105,16 @@ def track_feature(
     ``tracking.log``. Only PyFLEXTRKR ``ERROR`` and ``CRITICAL`` records
     propagate to the caller's existing logging handlers.
     """
+    if not isinstance(parallel, (bool, np.bool_)):
+        raise TypeError("parallel must be a bool.")
     if center_object and method not in ("linear", "nearest"):
         raise ValueError("method must be 'linear' or 'nearest'.")
     if center_object and dx_km <= 0.0:
         raise ValueError("dx_km must be greater than zero.")
     if center_object and half_extent_km is not None and half_extent_km <= 0.0:
         raise ValueError("half_extent_km must be greater than zero.")
+    if np.dtype(output_dtype).kind != "f":
+        raise ValueError("output_dtype must be a floating point type.")
 
     field = ds[data_var]
     leading_dims, _ = _tracking_dimensions(field)
@@ -837,7 +1127,10 @@ def track_feature(
         reference_data,
         overlap_threshold,
         fill_value,
+        parallel,
     )
+    _LOGGER.debug("tracking complete: %d tracks", tracked.peak.sizes.get("track", 0))
+
     if tracked.peak.sizes.get("track", 0) == 0:
         raise ValueError("No tracked features identified matching the criteria.")
 
@@ -876,6 +1169,7 @@ def track_feature(
                 "fill_value": fill_value,
                 "center_on": center_on,
                 "center_object": False,
+                "parallel": int(bool(parallel)),
                 "reference_data": (
                     "independent" if reference_data is None else repr(reference_data)
                 ),
@@ -885,6 +1179,8 @@ def track_feature(
         return output
 
     source = source.sortby("lat").sortby("lon")
+    sorted_mask = tracked.track_mask.sortby("lat").sortby("lon")
+
     if half_extent_km is None:
         mean_lat_rad = np.deg2rad(float(source["lat"].mean()))
         lon_span_rad = np.deg2rad(abs(float(source["lon"].max() - source["lon"].min())))
@@ -895,21 +1191,29 @@ def track_feature(
     half_cells = int(np.floor(extent_km / dx_km))
     if half_cells < 1:
         raise ValueError("half_extent_km must be greater than or equal to dx_km.")
-
     offsets = np.arange(-half_cells, half_cells + 1, dtype=np.float64) * dx_km
-    x_km, y_km = np.meshgrid(offsets, offsets)
 
-    valid_track = tracked.center_lat.notnull() & tracked.center_lon.notnull()
-    interpolation_lat = tracked.center_lat.fillna(float(source["lat"].values[0]))
-    interpolation_lon = tracked.center_lon.fillna(float(source["lon"].values[0]))
-    target_lat_values = np.asarray(interpolation_lat.values)[
-        ..., None, None
-    ] + np.rad2deg(y_km / _EARTH_RADIUS_KM)
-    cos_lat = np.cos(np.deg2rad(target_lat_values))
-    cos_lat = np.where(np.abs(cos_lat) < 1e-10, 1e-10, cos_lat)
-    target_lon_values = np.asarray(interpolation_lon.values)[
-        ..., None, None
-    ] + np.rad2deg(x_km / (_EARTH_RADIUS_KM * cos_lat))
+    centering_input = TrackedFeatures(
+        track_mask=sorted_mask,
+        center_lat=tracked.center_lat,
+        center_lon=tracked.center_lon,
+        center_value=tracked.center_value,
+        peak_lat=tracked.peak_lat,
+        peak_lon=tracked.peak_lon,
+        peak=tracked.peak,
+        track_time=tracked.track_time,
+    )
+    arrays = _center_on_tracks(
+        source,
+        variable_names,
+        data_var,
+        centering_input,
+        leading_dims,
+        offsets,
+        method,
+        output_dtype,
+        cpu_count() if workers is None else max(1, int(workers)),
+    )
 
     target_dims = (*leading_dims, "track", "y_km", "x_km")
     target_coords: dict[str, Any] = {
@@ -922,51 +1226,16 @@ def track_feature(
         "y_km": offsets,
         "x_km": offsets,
     }
-    target_lat = xr.DataArray(
-        target_lat_values,
-        dims=target_dims,
-        coords=target_coords,
-    )
-    target_lon = xr.DataArray(
-        target_lon_values,
-        dims=target_dims,
+    centered = xr.Dataset(
+        {name: (target_dims, array) for name, array in arrays.items()},
         coords=target_coords,
     )
 
-    centered = source.interp(
-        lat=target_lat,
-        lon=target_lon,
-        method=method,
-        assume_sorted=True,
-        kwargs={"bounds_error": False, "fill_value": np.nan},
-    ).drop_vars(["lat", "lon"], errors="ignore")
-    centered = centered.where(valid_track)
-
-    labels = tracked.track_mask.sortby("lat").sortby("lon")
-    track_index = xr.DataArray(
-        tracked.peak["track"].values,
-        dims="track",
-        coords={"track": tracked.peak["track"]},
-    )
-    membership = (labels == track_index).transpose(
-        *leading_dims,
-        "track",
-        "lat",
-        "lon",
-    )
-    membership_interp = (
-        membership.astype(np.int8)
-        .interp(
-            lat=target_lat,
-            lon=target_lon,
-            method="nearest",
-            assume_sorted=True,
-            kwargs={"bounds_error": False, "fill_value": 0},
-        )
-        .drop_vars(["lat", "lon"], errors="ignore")
-    )
-    centered[f"{data_var}_feature"] = centered[data_var].where(
-        valid_track & membership_interp.astype(bool)
+    for name in variable_names:
+        centered[name].attrs.update(ds[name].attrs)
+    centered[f"{data_var}_feature"].attrs.update(ds[data_var].attrs)
+    centered[f"{data_var}_feature"].attrs["long_name"] = (
+        f"{data_var} masked to the tracked feature footprint"
     )
 
     centered = centered.assign_coords(track_coordinates)
@@ -987,8 +1256,10 @@ def track_feature(
             "fill_value": fill_value,
             "center_on": center_on,
             "center_object": True,
+            "parallel": int(bool(parallel)),
             "horizontal_spacing_km": dx_km,
             "half_extent_km": half_cells * dx_km,
+            "interpolation_method": method,
             "reference_data": (
                 "independent" if reference_data is None else repr(reference_data)
             ),
@@ -1007,6 +1278,7 @@ def get_relative_time(
     intensity_edges: tuple[float, ...] | None = None,
     threshold_operator: Literal[">", ">=", "<", "<="] = ">=",
     overlap_threshold: float = 0.5,
+    parallel: bool = False,
     fill_value: int = -9999,
     center_on: Literal["min", "max"] = "max",
 ) -> xr.Dataset | None:
@@ -1031,6 +1303,8 @@ def get_relative_time(
     data_var : str
         Name of the variable used to identify, track, and characterize
         features.
+    threshold : float
+        Threshold applied to ``data_var`` to define candidate feature cells.
     delta_time : int
         Number of samples included on either side of each track start. The
         resulting relative-time window spans from ``-delta_time`` to
@@ -1040,13 +1314,14 @@ def get_relative_time(
         intensity. The final bin extends from the last edge to infinity.
         If None, no intensity binning is applied and a single composite is
         calculated across all tracks.
-    threshold : float, default: 0.1
-        Threshold applied to ``data_var`` to define candidate feature cells.
     threshold_operator : {">", ">=", "<", "<="}, default: ">="
         Comparison operator used to construct the threshold mask.
     overlap_threshold : float, default: 0.5
         Minimum spatial overlap required to associate features between
         consecutive time steps.
+    parallel : bool, default: False
+        If True, PyFLEXTRKR runs on a Dask ``LocalCluster`` with one worker per
+        CPU available to this process. If False, PyFLEXTRKR runs in serial.
     fill_value : int, default: -9999
         Integer fill value used for cells or track identifiers without valid
         tracked-feature data.
@@ -1072,6 +1347,8 @@ def get_relative_time(
         Returns ``None`` when no qualifying tracks are available for
         extraction or compositing.
     """
+    if not isinstance(parallel, (bool, np.bool_)):
+        raise TypeError("parallel must be a bool.")
     if delta_time < 1:
         raise ValueError("delta_time must be at least 1.")
     if intensity_edges is not None:
@@ -1098,21 +1375,34 @@ def get_relative_time(
         None,
         overlap_threshold,
         fill_value,
+        parallel,
     )
     if tracked.peak.sizes.get("track", 0) == 0:
         return None
 
-    starts = tracked.track_time.sel(track_phase="start")
-    time_index = ds.get_index("time")
-    start_values = np.asarray(starts.values).astype("datetime64[ns]")
-    center_positions = time_index.get_indexer(start_values.ravel()).reshape(
-        start_values.shape
-    )
+    def _window_positions(current: TrackedFeatures) -> tuple[xr.DataArray, np.ndarray]:
+        starts = current.track_time.sel(track_phase="start")
+        time_index = ds.get_index("time")
+        start_values = np.asarray(starts.values).astype("datetime64[ns]")
+        positions = time_index.get_indexer(start_values.ravel()).reshape(
+            start_values.shape
+        )
+        return starts, positions
+
+    starts, center_positions = _window_positions(tracked)
     complete = (center_positions >= delta_time) & (
         center_positions < ds.sizes["time"] - delta_time
     )
     if not np.any(complete):
         return None
+
+    # Dropping incomplete tracks up front shrinks the track dimension of every
+    # windowed array, which is far cheaper than masking them afterwards. This is
+    # only unambiguous when completeness does not vary across other dimensions.
+    if not group_dims and not complete.all():
+        tracked = _subset_tracks(tracked, np.flatnonzero(complete))
+        starts, center_positions = _window_positions(tracked)
+        complete = np.ones_like(center_positions, dtype=bool)
 
     safe_positions = np.where(complete, center_positions, delta_time)
     position_coords = {dim: starts[dim] for dim in starts.dims}
@@ -1138,10 +1428,11 @@ def get_relative_time(
     window_indices = centers + relative_time
 
     events = ds.isel(time=window_indices).assign_coords(relative_time=relative_time)
-    for name, variable in events.data_vars.items():
-        if "track" in variable.dims:
-            events[name] = variable.where(complete_da)
-    events = events.assign_coords(time=events["time"].where(complete_da))
+    if not bool(complete.all()):
+        for name, variable in events.data_vars.items():
+            if "track" in variable.dims:
+                events[name] = variable.where(complete_da)
+        events = events.assign_coords(time=events["time"].where(complete_da))
     events = events.assign_coords(
         peak=tracked.peak,
         peak_lat=tracked.peak_lat,
@@ -1233,6 +1524,7 @@ def get_relative_time(
             "overlap_threshold": overlap_threshold,
             "fill_value": fill_value,
             "center_on": center_on,
+            "parallel": int(bool(parallel)),
             "tracking_backend": "PyFLEXTRKR generic feature tracking",
         }
     )
