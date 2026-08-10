@@ -183,7 +183,7 @@ def validate_facets(
 
 def enable_interactive_features(ax: AxesType) -> str:
 
-    def fmt_coord_str(x: float, y: float) -> str:
+    def format_coord(x: float, y: float) -> str:
         lon, lat = ccrs.PlateCarree().transform_point(
             x,
             y,
@@ -195,7 +195,7 @@ def enable_interactive_features(ax: AxesType) -> str:
 
         return f"lat={round(lat, 2)} lon={round(lon, 2)}"
 
-    ax.format_coord = fmt_coord_str
+    ax.format_coord = format_coord
 
 
 def validate_vector_components(

@@ -741,7 +741,7 @@ def track_feature(
     overlap_threshold: float = 0.5,
     fill_value: int = -9999,
     center_on: Literal["min", "max"] = "max",
-    center_object: bool = False,
+    center_object: bool = True,
     dx_km: float = 3.0,
     variables: str | Sequence[str] | None = None,
     half_extent_km: float | None = None,
