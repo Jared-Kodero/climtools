@@ -47,8 +47,8 @@ from .plot_utils import (
     add_grid_boundary,
     add_gridlines,
     add_map_features,
+    enable_interactive_features,
     fmt_anim_title,
-    format_crs_coordinates,
     get_facet_figsize,
     get_projection,
     get_quiver_key_mag,
@@ -155,17 +155,18 @@ def create_figure(
     squeeze: bool = False,
     w_pad: float = 6 / 72,
     h_pad: float = 8 / 72,
+    layout: str | None = None,
 ) -> tuple[Figure, np.ndarray]:
     """Create a Cartopy figure with consistent facet padding."""
-    with plt.ioff():
-        figure, axes = plt.subplots(
-            nrows=nrows,
-            ncols=ncols,
-            figsize=figsize,
-            squeeze=squeeze,
-            subplot_kw={"projection": projection},
-            layout="compressed",
-        )
+
+    figure, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=figsize,
+        squeeze=squeeze,
+        subplot_kw={"projection": projection},
+        layout=layout,
+    )
 
     layout_engine = figure.get_layout_engine()
     if layout_engine is not None:
@@ -432,6 +433,7 @@ class FacetedPlot:
             figsize=figsize,
             nrows=self.nrows,
             ncols=self.ncols,
+            layout="compressed",
             squeeze=False,
         )
         self.axis_selectors: list[tuple[AxesType, dict[str, Any]]] = []
@@ -617,9 +619,6 @@ class FacetedPlot:
                 **kwargs,
             )
 
-            if interactive:
-                format_crs_coordinates(axis)
-
             self.artists.append(artist)
             if clabel and method == "contour" and isinstance(artist, QuadContourSet):
                 self.contour_labels.append(
@@ -634,6 +633,7 @@ class FacetedPlot:
                         kwargs=clabel_kwargs,
                     )
                 )
+
         return self.artists
 
 
@@ -949,9 +949,6 @@ class GeoPlot:
                 **kwargs,
             )
 
-            if interactive:
-                format_crs_coordinates(axis)
-
             if add_grid_bounds:
                 add_grid_boundary(
                     axis,
@@ -1014,6 +1011,7 @@ class GeoPlot:
             # (
             #     "horizontal" if self.is_faceted else "vertical"
             # )
+
             self.colorbar = _add_colorbar(
                 self.mappable,
                 self.axes,
@@ -1028,6 +1026,12 @@ class GeoPlot:
                 ticks=ticks,
                 tick_labels=tick_labels,
             )
+
+        self.figure.canvas.draw()
+
+        if interactive:
+            for ax, _ in self.iter_axes():
+                enable_interactive_features(ax)
 
         self.figure.canvas.draw_idle()
 

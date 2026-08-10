@@ -20,6 +20,7 @@ ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 mpl_default_backend = matplotlib.get_backend()
 mpl_backend_changed = False
+widget_css_applied = False
 
 tmp = Path(f"/tmp/{user}/xgeo")
 tmp.mkdir(parents=True, exist_ok=True)
@@ -147,18 +148,18 @@ def set_preview_quality():
 def apply_widget_css() -> None:
     """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
 
-    if "ipykernel" not in sys.modules:
+    global widget_css_applied
+
+    if "ipykernel" not in sys.modules or widget_css_applied:
         return
 
-    import json
-
-    from IPython.display import Javascript, display
+    from IPython.display import HTML, display
 
     css = """
-    /* General Jupyter widget styling */
-    ...
-
-    /* Matplotlib/ipympl widget styling */
+    <style>
+    /* 1. Force transparent backgrounds on all widget containers */
+    .cell-output-ipywidget-background,
+    .jupyter-widgets,
     .jupyter-matplotlib,
     .jupyter-matplotlib-figure,
     .jupyter-matplotlib-canvas-container,
@@ -167,29 +168,30 @@ def apply_widget_css() -> None:
         background-color: transparent !important;
     }
 
+    /* 2. Map standard Jupyter variables to VS Code editor settings */
+    :root {
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText);
+        --jp-widgets-font-size:
+            var(--vscode-editor-font-size);
+    }
+
+    /* 3. Use the active environment foreground color */
+    .jupyter-widgets,
     .jupyter-matplotlib {
         color: var(--vscode-editor-foreground, CanvasText) !important;
         --jp-widgets-color:
             var(--vscode-editor-foreground, CanvasText) !important;
     }
+
+    /* 4. VS Code theme-class fallbacks */
+    .vscode-dark .jupyter-widgets,
+    .vscode-light .jupyter-widgets {
+        color: var(--vscode-editor-foreground, CanvasText) !important;
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText) !important;
+    }
+    </style>
     """
-
-    display(
-        Javascript(
-            f"""
-            (() => {{
-                const id = "climtools-widget-css";
-
-                let style = document.getElementById(id);
-
-                if (!style) {{
-                    style = document.createElement("style");
-                    style.id = id;
-                    document.head.appendChild(style);
-                }}
-
-                style.textContent = {json.dumps(css)};
-            }})();
-            """
-        )
-    )
+    display(HTML(css))
+    widget_css_applied = True

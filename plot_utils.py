@@ -181,9 +181,9 @@ def validate_facets(
         raise ValueError("col_wrap must be greater than or equal to 1")
 
 
-def format_crs_coordinates(ax: AxesType) -> str:
+def enable_interactive_features(ax: AxesType) -> str:
 
-    def fmt_str(x: float, y: float) -> str:
+    def fmt_coord_str(x: float, y: float) -> str:
         lon, lat = ccrs.PlateCarree().transform_point(
             x,
             y,
@@ -195,7 +195,7 @@ def format_crs_coordinates(ax: AxesType) -> str:
 
         return f"lat={round(lat, 2)} lon={round(lon, 2)}"
 
-    ax.format_coord = fmt_str
+    ax.format_coord = fmt_coord_str
 
 
 def validate_vector_components(
@@ -1134,6 +1134,7 @@ def add_colorbar(
             adjust=adjust,
             pad_bottom=pad_bottom,
         )
+        cax.set_label("<colorbar>")
 
     if not fig:
         fig = plt.gcf()
