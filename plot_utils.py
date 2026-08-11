@@ -128,20 +128,78 @@ def norm_levels(
     vmin: float | None,
     vmax: float | None,
     levels: int | Sequence[float] | np.ndarray | None,
-) -> np.ndarray | None:
-    """Normalize the ``levels`` argument for ``matplotlib.pyplot.contourf``.
+    data: xr.DataArray | None = None,
+) -> tuple[float | None, float | None, np.ndarray | None]:
+    """Normalize plotting limits and level boundaries.
 
-    Returns explicit, increasing boundaries, or ``None`` to defer to
-    contourf's own autoscaling when no range is available.
+    Explicit level boundaries are returned unchanged. If either ``vmin`` or
+    ``vmax`` is missing and ``data`` is provided, the missing limits are
+    inferred from the 2nd and 98th percentiles of the data. When both negative
+    and positive values are present, the inferred range is made symmetric
+    about zero.
+
+    Integer ``levels`` values generate evenly spaced boundaries between
+    ``vmin`` and ``vmax``. If ``levels`` is ``None``, suitable boundaries are
+    generated with ``MaxNLocator``.
+
+    Parameters
+    ----------
+    vmin
+        Lower plotting limit.
+    vmax
+        Upper plotting limit.
+    levels
+        Number of levels, explicit level boundaries, or ``None``.
+    data
+        Data used to infer missing plotting limits.
+
+    Returns
+    -------
+    vmin
+        Normalized lower plotting limit.
+    vmax
+        Normalized upper plotting limit.
+    levels
+        Explicit increasing level boundaries, or ``None`` if they cannot be
+        determined.
     """
     if isinstance(levels, (list, tuple, np.ndarray)):
-        return np.asarray(levels)
+        return vmin, vmax, np.asarray(levels)
+
     if vmin is None or vmax is None:
-        return None
+        if data is None:
+            return vmin, vmax, None
+
+        qmin, qmax = data.quantile([0.02, 0.98], skipna=True).compute().values
+
+        qmin = float(qmin)
+        qmax = float(qmax)
+
+        if not np.isfinite(qmin) or not np.isfinite(qmax):
+            return vmin, vmax, None
+
+        has_negative = bool((data < 0).any().compute())
+        has_positive = bool((data > 0).any().compute())
+
+        if has_negative and has_positive:
+            bound = max(abs(qmin), abs(qmax))
+            data_vmin = -bound
+            data_vmax = bound
+        else:
+            data_vmin = qmin
+            data_vmax = qmax
+
+        if vmin is None:
+            vmin = data_vmin
+        if vmax is None:
+            vmax = data_vmax
+
     if isinstance(levels, int):
-        return np.linspace(vmin, vmax, levels)
+        return vmin, vmax, np.linspace(vmin, vmax, levels)
+
     if levels is None:
-        return MaxNLocator(nbins=10).tick_values(vmin, vmax)
+        return vmin, vmax, MaxNLocator(nbins=10).tick_values(vmin, vmax)
+
     raise TypeError(f"unsupported levels type: {type(levels).__name__}")
 
 

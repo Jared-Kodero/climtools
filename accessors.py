@@ -562,11 +562,11 @@ class PlotAccessor:
         Input coordinates are plotted with a ``cartopy.crs.PlateCarree()`` transform.
         The display projection is controlled by ``projection``.
         """
-        kwds = locals()
-        opts = kwds.pop("kwargs")
-        _ = kwds.pop("self")
+        kwargs0 = locals()
+        kwargs1 = kwargs0.pop("kwargs")
+        _ = kwargs0.pop("self")
 
-        return plotting.geo(self._obj, **kwds, **opts)
+        return plotting.geo(self._obj, **kwargs0, **kwargs1)
 
     def animate(
         self,
@@ -635,7 +635,7 @@ class PlotAccessor:
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 1,
         parallel: bool = True,
-        frame_id: bool = False,
+        frame_id: bool = True,
         **kwargs,
     ) -> DisplayHandle | None:
         """
@@ -745,7 +745,7 @@ class PlotAccessor:
             Frames per second passed to ffmpeg.
         parallel : bool, default True
             Whether to render frames with multiprocessing.
-        frame_id: bool default False
+        frame_id: bool default True
             If True add frame id to title
         **kwargs
             Additional keyword arguments forwarded to the selected xarray plotting
@@ -765,11 +765,11 @@ class PlotAccessor:
         because multiple data slices and figures may be active concurrently.
         """
 
-        kws = locals()
-        kws1 = kws.pop("kwargs")
-        _ = kws.pop("self")
+        kwargs0 = locals()
+        kwargs1 = kwargs0.pop("kwargs")
+        _ = kwargs0.pop("self")
 
-        return plotting.animate(self._obj, **kws, **kws1)
+        return plotting.animate(self._obj, **kwargs0, **kwargs1)
 
     def quiver(
         self,

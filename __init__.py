@@ -31,11 +31,11 @@ from __future__ import annotations
 
 import dask.diagnostics
 
+from . import _operator as operator
 from . import calc_stats as calc
 from . import cmaps as cmaps
 from . import plotting as plot
 from . import pycdo as cdo
-from . import theming as theme
 from . import xgeo as xgeo
 from .accessors import *
 from .progress import DaskProgressBar, SerialProgressBar
@@ -48,9 +48,9 @@ __all__ = [
     "cdo",
     "cmaps",
     "n_cpus",
+    "operator",
     "plot",
     "redirect_streams",
-    "theme",
     "xgeo",
 ]
 

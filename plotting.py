@@ -9,14 +9,17 @@ and ``Animate`` renders a sequence of ``GeoPlot`` objects to an MP4 file.
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import cartopy.crs as ccrs
 import cartopy.mpl.geoaxes as cgeo
@@ -24,6 +27,7 @@ import dask
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
@@ -80,6 +84,7 @@ __all__ = [
     "animate",
     "create_figure",
     "geo",
+    "theme",
 ]
 
 
@@ -87,6 +92,230 @@ AxesType = Axes | cgeo.GeoAxes
 ScalarPrimitive = (
     Artist | ScalarMappable | QuadMesh | QuadContourSet | AxesImage | PathCollection
 )
+
+
+class Theme:
+    """Configure matplotlib and seaborn plotting themes."""
+
+    def __init__(
+        self,
+        interactive: bool = False,
+        font_scale: float = 1.5,
+        line_width: float = 1.5,
+        tick_direction: Literal["in", "out"] = "in",
+        font_size: int | None = None,
+        column_width: Literal["single", "double"] | None = None,
+        latex: bool = False,
+        palette: Literal[
+            "pastel", "deep", "muted", "bright", "dark", "colorblind"
+        ] = "colorblind",
+        context: Literal["paper", "notebook", "talk", "poster"] = "paper",
+        style: str = "ticks",
+        spine: bool = True,
+        **kwargs,
+    ) -> None:
+        self._rc_default = dict(plt.rcParamsDefault.copy())
+        self._backend_interactive = False
+        self.interactive = interactive
+        self.font_scale = font_scale
+        self.line_width = line_width
+        self.tick_direction = tick_direction
+        self.font_size = font_size
+        self.column_width = column_width
+        self.latex = latex
+        self.palette = palette
+        self.context = context
+        self.style = style
+        self.spine = spine
+        self.rc = dict(kwargs)
+
+        self.apply()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset matplotlib and seaborn settings to their defaults."""
+        interactive_backend(self._backend_interactive)
+        sns.reset_defaults()
+        plt.rcParams.update(self._rc_default)
+
+    @staticmethod
+    def spine_off(ax=None) -> None:
+        """Remove the top and right axes spines."""
+        ax = plt.gca() if ax is None else ax
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    def apply(self) -> Self:
+        """Apply the configured plotting theme."""
+        interactive_backend(self.interactive)
+
+        font_scale = self.font_scale
+        line_width = self.line_width
+
+        if self.column_width == "single":
+            font_scale = 1
+            line_width = 1
+            fig_size = (4.5, 4)
+        elif self.column_width == "double":
+            fig_size = (7, 4)
+        else:
+            fig_size = None
+
+        latex = self.latex
+
+        if latex and shutil.which("latex") is None:
+            warnings.warn("Latex not found. Attempting to install LaTeX...")
+            self._install_latex()
+            latex = False
+
+        rc: dict[str, object] = {
+            "lines.linewidth": line_width,
+            "xtick.direction": self.tick_direction,
+            "ytick.direction": self.tick_direction,
+            "xtick.bottom": True,
+            "ytick.left": True,
+            "ytick.minor.visible": True,
+            "xtick.minor.visible": True,
+            "savefig.dpi": 1200,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.05,
+            "text.usetex": latex,
+            "svg.fonttype": "none",
+        }
+
+        if self.font_size:
+            rc.update(
+                {
+                    "font.size": self.font_size,
+                    "axes.titlesize": self.font_size + 1,
+                    "axes.labelsize": self.font_size,
+                    "axes.titlepad": self.font_size - 2,
+                    "xtick.labelsize": self.font_size,
+                    "ytick.labelsize": self.font_size,
+                    "legend.fontsize": self.font_size,
+                    "legend.title_fontsize": self.font_size,
+                    "figure.titlesize": self.font_size + 2,
+                    "figure.labelsize": self.font_size,
+                }
+            )
+
+        if fig_size:
+            rc["figure.figsize"] = fig_size
+
+        if self.rc:
+            rc.update(self.rc)
+
+        sns.set_theme(
+            style=self.style,
+            font="sans-serif",
+            context=self.context,
+            font_scale=font_scale,
+            palette=self.palette,
+            rc=rc,
+        )
+
+        if not self.spine:
+            self.spine_off()
+
+        return self
+
+    @staticmethod
+    def _install_latex() -> bool | None:
+        """Install LaTeX on supported Linux systems."""
+        file_dir = Path(__file__).resolve().parent
+        script = file_dir / "data" / "script" / "latex.install"
+        std_out = file_dir / "data" / "script" / "latex.install.out"
+        lock_file = file_dir / "data" / "script" / "latex.lock"
+
+        lock_file.touch()
+
+        if lock_file.exists():
+            return None
+
+        if not script.exists():
+            warnings.warn(
+                "Skipping LaTeX installation: installation script not found. See https://www.tug.org/texlive/"
+            )
+            return False
+
+        if platform.system() != "Linux":
+            warnings.warn("Skipping LaTeX installation: only Linux is supported.")
+            return False
+
+        os.system(f"chmod +x {script}")
+        cmd = f"nohup bash -c {script} > {std_out} 2>&1 &"
+        os.system(cmd)
+
+        return None
+
+
+def theme(
+    interactive: bool = False,
+    font_scale: float = 1.5,
+    line_width: float = 1.5,
+    tick_direction: Literal["in", "out"] = "in",
+    font_size: int | None = None,
+    column_width: Literal["single", "double"] | None = None,
+    latex: bool = False,
+    palette: Literal[
+        "pastel", "deep", "muted", "bright", "dark", "colorblind"
+    ] = "colorblind",
+    context: Literal["paper", "notebook", "talk", "poster"] = "paper",
+    style: str = "ticks",
+    spine: bool = True,
+    **kwargs,
+) -> Theme:
+    """
+    Configure the global matplotlib and seaborn theme for publication-quality plots.
+
+    This function sets figure dimensions, font scaling, line widths, and optionally enables latexrendering,
+    ensuring that visualizations are formatted for either single- or double-column layouts typically required
+    by scientific journals.
+
+    Parameters
+    ----------
+
+    interactive : bool, optional
+        If True, configures matplotlib for interactive use in Jupyter notebooks.
+
+    font_scale : float, optional
+        Scaling factor for fonts. This is passed to `seaborn.set_theme()`. Default is 1.5.
+
+    column_width : "single" or "double". Default is "single".
+        Target layout width:
+        - "single" corresponds to 9 cm (≈ 3.54 inches),
+        - "double" corresponds to 18 cm (≈ 7.09 inches).
+        Used to determine appropriate font and layout scaling. Default is "single". Overidden when `figsize` is set.
+
+    line_width : float, optional
+        Default line width for plot elements. Applied via `matplotlib.rcParams`. Default is 1.5.
+    tick_direction: str
+        Direction of the minor and major ticks
+
+    latex: bool, optional
+        If True, enables latextext rendering for all plot text via `matplotlib.rcParams["text.usetex"]`.
+        Requires a working latexinstallation. Default is False.
+    palette : str, optional
+        Seaborn color palette to use. Default is "colorblind".
+    context : str, optional
+        Sets the context for the plot. Options are "paper", "notebook", "talk", or "poster". Default is "paper".
+        This affects font sizes and other parameters to suit different presentation formats.
+    style : str, optional
+        Seaborn style to use. Options include "darkgrid", "whitegrid", "dark", "white", and "ticks". Default is "ticks".
+    spine: bool, default False
+        If True, top and left spines are removed.
+    kwargs : dict, optional
+        Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
+
+    """
+    kwarg0 = locals()
+    kwarg1 = kwarg0.pop("kwargs")
+    return Theme(**kwarg0, **kwarg1)
 
 
 def colorbar(
@@ -849,8 +1078,8 @@ class GeoPlot:
         self.grid: xr.Dataset = self.data.coords.to_dataset()[[self.x, self.y]]
         self.add = Adder(self)
 
-        if self.method == "contourf":
-            levels = norm_levels(vmin, vmax, levels)
+        # if self.method == "contourf":
+        vmin, vmax, levels = norm_levels(vmin, vmax, levels, self.data)
 
         if self.is_faceted:
             facet = FacetedPlot(
@@ -2485,9 +2714,9 @@ def geo(
     GeoPlot
         Plot container holding the figure, axes, and all primitives.
     """
-    kwds = locals()
-    opts = kwds.pop("kwargs")
-    return GeoPlot(**kwds, **opts)
+    kwargs0 = locals()
+    kwargs1 = kwargs0.pop("kwargs")
+    return GeoPlot(**kwargs0, **kwargs1)
 
 
 def animate(
@@ -2557,7 +2786,7 @@ def animate(
     quality: Literal["low", "medium", "high"] = "medium",
     fps: int = 1,
     parallel: bool = True,
-    frame_id: bool = False,
+    frame_id: bool = True,
     display_inline: bool = True,
     **kwargs: Any,
 ) -> Animate:
@@ -2603,7 +2832,7 @@ def animate(
         Frames per second.
     parallel : bool, default True
         Render frames using Dask processes.
-    frame_id: bool default False
+    frame_id: bool default True
         If True add frame id to title
     display_inline : bool, default True
         Display the MP4 in Jupyter.
@@ -2615,6 +2844,6 @@ def animate(
     Animate
         Animation container holding output state.
     """
-    kwds = locals()
-    opts = kwds.pop("kwargs")
-    return Animate(**kwds, **opts)
+    kwargs0 = locals()
+    kwargs1 = kwargs0.pop("kwargs")
+    return Animate(**kwargs0, **kwargs1)

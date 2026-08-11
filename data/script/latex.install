@@ -83,4 +83,4 @@ source ~/.bashrc
 
 
 
-rm -rf "$SCRIPT_DIR/lock"
+rm -rf "$SCRIPT_DIR/latex.lock"
