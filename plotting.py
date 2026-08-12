@@ -103,7 +103,9 @@ class Theme:
         font_scale: float = 1.5,
         line_width: float = 1.5,
         tick_direction: Literal["in", "out"] = "in",
+        legend_frame: bool = False,
         font_size: int | None = None,
+        font_family: Literal["sans-serif", "serif"] = "sans-serif",
         column_width: Literal["single", "double"] | None = None,
         latex: bool = False,
         palette: Literal[
@@ -111,7 +113,8 @@ class Theme:
         ] = "colorblind",
         context: Literal["paper", "notebook", "talk", "poster"] = "paper",
         style: str = "ticks",
-        spine: bool = True,
+        spine: bool = False,
+        grid: bool = False,
         **kwargs,
     ) -> None:
         self._rc_default = dict(plt.rcParamsDefault.copy())
@@ -121,17 +124,19 @@ class Theme:
         self.line_width = line_width
         self.tick_direction = tick_direction
         self.font_size = font_size
+        self.font_family = font_family
         self.column_width = column_width
         self.latex = latex
         self.palette = palette
         self.context = context
         self.style = style
         self.spine = spine
+        self.grid = grid
+        self.legend_frame = legend_frame
         self.rc = dict(kwargs)
 
-        self.apply()
-
     def __enter__(self) -> Self:
+        self.apply()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -140,17 +145,9 @@ class Theme:
     def reset(self) -> None:
         """Reset matplotlib and seaborn settings to their defaults."""
         interactive_backend(self._backend_interactive)
-        sns.reset_defaults()
         plt.rcParams.update(self._rc_default)
 
-    @staticmethod
-    def spine_off(ax=None) -> None:
-        """Remove the top and right axes spines."""
-        ax = plt.gca() if ax is None else ax
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    def apply(self) -> Self:
+    def apply(self) -> None:
         """Apply the configured plotting theme."""
         interactive_backend(self.interactive)
 
@@ -166,12 +163,10 @@ class Theme:
         else:
             fig_size = None
 
-        latex = self.latex
-
-        if latex and shutil.which("latex") is None:
+        if self.latex and shutil.which("latex") is None:
             warnings.warn("Latex not found. Attempting to install LaTeX...")
             self._install_latex()
-            latex = False
+            self.latex = False
 
         rc: dict[str, object] = {
             "lines.linewidth": line_width,
@@ -184,9 +179,17 @@ class Theme:
             "savefig.dpi": 1200,
             "savefig.bbox": "tight",
             "savefig.pad_inches": 0.05,
-            "text.usetex": latex,
+            "text.usetex": self.latex,
             "svg.fonttype": "none",
+            "font.family": self.font_family,
+            "axes.grid": self.grid,
+            "grid.linestyle": "--",
+            "legend.frameon": self.legend_frame,
         }
+
+        if not self.spine:
+            rc["axes.spines.top"] = False
+            rc["axes.spines.right"] = False
 
         if self.font_size:
             rc.update(
@@ -212,17 +215,12 @@ class Theme:
 
         sns.set_theme(
             style=self.style,
-            font="sans-serif",
+            font=self.font_family,
             context=self.context,
             font_scale=font_scale,
             palette=self.palette,
             rc=rc,
         )
-
-        if not self.spine:
-            self.spine_off()
-
-        return self
 
     @staticmethod
     def _install_latex() -> bool | None:
@@ -259,6 +257,7 @@ def theme(
     font_scale: float = 1.5,
     line_width: float = 1.5,
     tick_direction: Literal["in", "out"] = "in",
+    legend_frame: bool = False,
     font_size: int | None = None,
     column_width: Literal["single", "double"] | None = None,
     latex: bool = False,
@@ -266,52 +265,54 @@ def theme(
         "pastel", "deep", "muted", "bright", "dark", "colorblind"
     ] = "colorblind",
     context: Literal["paper", "notebook", "talk", "poster"] = "paper",
-    style: str = "ticks",
+    style: Literal["white", "dark", "whitegrid", "darkgrid", "ticks"] = "ticks",
     spine: bool = True,
+    grid: bool = False,
     **kwargs,
 ) -> Theme:
-    """
-    Configure the global matplotlib and seaborn theme for publication-quality plots.
+    """Configure global matplotlib and seaborn parameters for publication-quality visualizations.
 
-    This function sets figure dimensions, font scaling, line widths, and optionally enables latexrendering,
-    ensuring that visualizations are formatted for either single- or double-column layouts typically required
-    by scientific journals.
+    This function sets figure dimensions, font scaling, line widths, and optional
+    LaTeX rendering to match single- or double-column journal layout requirements.
 
     Parameters
     ----------
-
     interactive : bool, optional
-        If True, configures matplotlib for interactive use in Jupyter notebooks.
-
+        Configure matplotlib for interactive use in Jupyter environments. Default is False.
     font_scale : float, optional
-        Scaling factor for fonts. This is passed to `seaborn.set_theme()`. Default is 1.5.
-
-    column_width : "single" or "double". Default is "single".
-        Target layout width:
-        - "single" corresponds to 9 cm (≈ 3.54 inches),
-        - "double" corresponds to 18 cm (≈ 7.09 inches).
-        Used to determine appropriate font and layout scaling. Default is "single". Overidden when `figsize` is set.
-
+        Scaling factor for fonts passed to seaborn.set_theme. Default is 1.5.
     line_width : float, optional
-        Default line width for plot elements. Applied via `matplotlib.rcParams`. Default is 1.5.
-    tick_direction: str
-        Direction of the minor and major ticks
-
-    latex: bool, optional
-        If True, enables latextext rendering for all plot text via `matplotlib.rcParams["text.usetex"]`.
-        Requires a working latexinstallation. Default is False.
+        Default line width for plot elements applied via matplotlib rcParams. Default is 1.5.
+    tick_direction : {"in", "out"}, optional
+        Direction of major and minor axis ticks. Default is "in".
+    legend_frame : bool, optional
+        Whether to draw a bounding box frame around legends. Default is False.
+    font_size : int or None, optional
+        Base font size for text elements. Default is None.
+    column_width : {"single", "double"} or None, optional
+        Target layout width. "single" corresponds to 9 cm and "double" corresponds
+        to 18 cm. Overridden when figsize is specified via kwargs. Default is None.
+    latex : bool, optional
+        Enable LaTeX text rendering for all plot text via matplotlib rcParams.
+        Requires a working LaTeX installation. Default is False.
     palette : str, optional
-        Seaborn color palette to use. Default is "colorblind".
-    context : str, optional
-        Sets the context for the plot. Options are "paper", "notebook", "talk", or "poster". Default is "paper".
-        This affects font sizes and other parameters to suit different presentation formats.
+        Seaborn color palette name. Default is "colorblind".
+    context : {"paper", "notebook", "talk", "poster"}, optional
+        Seaborn plotting context affecting font sizes and element scales. Default is "paper".
     style : str, optional
-        Seaborn style to use. Options include "darkgrid", "whitegrid", "dark", "white", and "ticks". Default is "ticks".
-    spine: bool, default False
-        If True, top and left spines are removed.
-    kwargs : dict, optional
-        Additional rc parameters to pass to `seaborn.set_theme()`. These will override the defaults set by this function.
+        Seaborn aesthetic style. Options include "darkgrid", "whitegrid", "dark",
+        "white", and "ticks". Default is "ticks".
+    spine : bool, optional
+        Whether to retain top and right axis spines. Default is True.
+    grid : bool, optional
+        Whether to display background grid lines. Default is False.
+    **kwargs : dict, optional
+        Additional rc parameters passed to seaborn.set_theme to override defaults.
 
+    Returns
+    -------
+    Theme
+        Configured theme object containing updated styling parameters.
     """
     kwarg0 = locals()
     kwarg1 = kwarg0.pop("kwargs")

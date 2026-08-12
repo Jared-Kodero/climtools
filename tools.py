@@ -5,6 +5,7 @@ import inspect
 import os
 import socket
 import sys
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,7 +23,7 @@ mpl_default_backend = matplotlib.get_backend()
 mpl_backend_changed = False
 widget_css_applied = False
 
-tmp = Path(f"/tmp/{user}/xgeo")
+tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
 tmp.mkdir(parents=True, exist_ok=True)
 
 
