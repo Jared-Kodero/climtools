@@ -115,7 +115,7 @@ class Theme:
         style: str = "ticks",
         spine: bool = False,
         grid: bool = False,
-        **kwargs,
+        rc_params: dict | None = None,
     ) -> None:
         self._rc_default = dict(plt.rcParamsDefault.copy())
         self._backend_interactive = False
@@ -133,7 +133,7 @@ class Theme:
         self.spine = spine
         self.grid = grid
         self.legend_frame = legend_frame
-        self.rc = dict(kwargs)
+        self.mpl_rc = rc_params or {}
 
     def __enter__(self) -> Self:
         self.apply()
@@ -147,8 +147,15 @@ class Theme:
         interactive_backend(self._backend_interactive)
         plt.rcParams.update(self._rc_default)
 
-    def apply(self) -> None:
-        """Apply the configured plotting theme."""
+    def apply(self, rc_params: dict | None = None) -> None:
+        """Apply the configured plotting theme.
+
+        Parameters
+        ----------
+        rc_params: dict
+            Matplotlib runtime configuration parameters to apply to ``mpl.rcParams``.
+        """
+
         interactive_backend(self.interactive)
 
         font_scale = self.font_scale
@@ -191,6 +198,9 @@ class Theme:
             rc["axes.spines.top"] = False
             rc["axes.spines.right"] = False
 
+        if fig_size:
+            rc["figure.figsize"] = fig_size
+
         if self.font_size:
             rc.update(
                 {
@@ -207,11 +217,11 @@ class Theme:
                 }
             )
 
-        if fig_size:
-            rc["figure.figsize"] = fig_size
+        if self.mpl_rc:
+            rc.update(self.mpl_rc)
 
-        if self.rc:
-            rc.update(self.rc)
+        if rc_params:
+            rc.update(rc_params)
 
         sns.set_theme(
             style=self.style,
@@ -268,7 +278,7 @@ def theme(
     style: Literal["white", "dark", "whitegrid", "darkgrid", "ticks"] = "ticks",
     spine: bool = True,
     grid: bool = False,
-    **kwargs,
+    rc_params: dict | None = None,
 ) -> Theme:
     """Configure global matplotlib and seaborn parameters for publication-quality visualizations.
 
@@ -306,17 +316,16 @@ def theme(
         Whether to retain top and right axis spines. Default is True.
     grid : bool, optional
         Whether to display background grid lines. Default is False.
-    **kwargs : dict, optional
-        Additional rc parameters passed to seaborn.set_theme to override defaults.
+    rc_params: dict
+            Matplotlib runtime configuration parameters to apply to ``mpl.rcParams``.
 
     Returns
     -------
     Theme
         Configured theme object containing updated styling parameters.
     """
-    kwarg0 = locals()
-    kwarg1 = kwarg0.pop("kwargs")
-    return Theme(**kwarg0, **kwarg1)
+
+    return Theme(**locals())
 
 
 def colorbar(

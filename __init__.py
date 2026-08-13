@@ -29,6 +29,8 @@ package works without it.
 
 from __future__ import annotations
 
+import warnings
+
 import dask.diagnostics
 
 from . import _operator as operator
@@ -38,15 +40,21 @@ from . import plotting as plot
 from . import pycdo as cdo
 from . import xgeo as xgeo
 from .accessors import *
+from .lib_mpi import MPI_RANK, MPI_SIZE, mpi
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import *
 
+warnings.filterwarnings("ignore")
+
 __all__ = [
+    "MPI_RANK",
+    "MPI_SIZE",
     "DaskProgressBar",
     "SerialProgressBar",
     "calc",
     "cdo",
     "cmaps",
+    "lib_mpi",
     "n_cpus",
     "operator",
     "plot",

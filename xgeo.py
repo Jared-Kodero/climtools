@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable, Mapping
+from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,7 +44,11 @@ from typing_extensions import Self
 from . import calc_stats as calc
 from . import cmaps
 from . import plotting as plot
-from .nc4_utils import append_to_netcdf, dataarray_to_netcdf, dataset_to_netcdf
+from .nc4_utils import (
+    append_to_netcdf,
+    to_netcdf_parallel,
+    to_netcdf_serial,
+)
 from .preprocess_era5 import preprocess_era5
 from .progress import DaskProgressBar, SerialProgressBar
 from .tools import n_cpus, tmp
@@ -84,9 +90,11 @@ _dask_cluster = None
 
 def to_netcdf(
     data: xr.Dataset | xr.DataArray,
-    file: Path,
-    unlimited_dim: str | None = None,
+    file: str | PathLike[str],
+    unlimited_dim: str | Iterable[str] | None = None,
+    partition_dim: str | None = None,
     *,
+    parallel: bool = False,
     batch_size: int = 1,
     format: str = "NETCDF4",
     shuffle: bool = True,
@@ -94,29 +102,35 @@ def to_netcdf(
     complevel: int = 4,
     show_progress: bool = True,
     stdout: Any = None,
+    chunks: Mapping[str, Iterable[int]] | None = None,
+    hints: str | None = None,
+    nofill: bool = True,
+    allow_serial: bool = False,
 ) -> None:
-    """
-    Write a Dataset to NetCDF through the netCDF4 library.
+    """Write a Dataset or DataArray to NetCDF.
 
-    The file is written incrementally along an unlimited dimension, which keeps
-    peak memory proportional to one batch rather than to the whole dataset. The
-    first slice defines the file, its dimensions, variables, attributes and
-    compression settings; the remaining slices are appended with
-    :func:`~climtools.nc4_utils.append_to_netcdf`.
+    Serial output is written incrementally along an unlimited dimension. With
+    ``parallel=True``, every MPI rank contributes its local contiguous slab to
+    one file through parallel NetCDF-4.
 
     Parameters
     ----------
-    data : xarray.Dataset
-        Dataset to write.
-    file : pathlib.Path
+    data : xarray.Dataset or xarray.DataArray
+        Data to write. In parallel mode, each rank supplies its local slab.
+    file : str or os.PathLike
         Output path. An existing file is replaced.
-    unlimited_dim : str, optional
-        Dimension made unlimited and appended along. Defaults to the first
-        dimension of the dataset.
+    unlimited_dim : str or iterable of str, optional
+        Dimension(s) made unlimited in the NetCDF schema.
+    partition_dim : str, optional
+        Dimension partitioned across MPI ranks in parallel mode. If omitted,
+        the parallel writer infers the partition axis.
+    parallel : bool, default False
+        Use the MPI-parallel NetCDF-4 writer.
     batch_size : int, default 1
-        Number of slices along the unlimited dimension written per append.
+        Number of slices along the unlimited dimension written per serial
+        append. Not used in parallel mode.
     format : str, default "NETCDF4"
-        NetCDF format.
+        NetCDF format. Parallel output supports only ``"NETCDF4"``.
     shuffle : bool, default True
         Apply the HDF5 shuffle filter.
     zlib : bool, default True
@@ -124,18 +138,46 @@ def to_netcdf(
     complevel : int, default 4
         Compression level, between 1 and 9.
     show_progress : bool, default True
-        Display a progress bar while writing.
+        Display a progress bar while writing serially.
     stdout : file-like, optional
-        Stream the progress bar is written to. Defaults to ``sys.stdout``.
+        Stream the serial progress bar is written to. Defaults to
+        ``sys.stdout``.
+    chunks : mapping of str to iterable of int, optional
+        Explicit chunk shape passed to the parallel writer.
+    hints : str, optional
+        Semicolon-separated MPI-IO hints in key=value format.
+    nofill : bool, default True
+        Disable NetCDF pre-filling during parallel initialization.
+    allow_serial : bool, default False
+        Permit execution when running with a single MPI rank.
 
     Returns
     -------
     None
     """
-    if isinstance(data, xr.Dataset):
-        return dataset_to_netcdf(
-            file=file,
+    if not isinstance(data, (xr.Dataset, xr.DataArray)):
+        raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
+
+    target_path = Path(file)
+
+    if parallel:
+        return to_netcdf_parallel(
+            data,
+            target_path,
+            partition_dim=partition_dim,
+            deflate=complevel if zlib else None,
+            shuffle=shuffle,
+            chunks=chunks,
+            unlimited_dim=unlimited_dim if unlimited_dim is not None else (),
+            hints=hints,
+            nofill=nofill,
+            allow_serial=allow_serial,
+        )
+
+    else:
+        return to_netcdf_serial(
             data=data,
+            file=file,
             unlimited_dim=unlimited_dim,
             batch_size=batch_size,
             format=format,
@@ -144,15 +186,6 @@ def to_netcdf(
             complevel=complevel,
             show_progress=show_progress,
             stdout=stdout,
-        )
-    elif isinstance(data, xr.DataArray):
-        return dataarray_to_netcdf(
-            file=file,
-            da=data,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
         )
 
 
@@ -168,26 +201,9 @@ def remap(
         "nearest_d2s",
     ] = "bilinear",
     parallel: bool = False,
-) -> xr.Dataset:
+) -> xr.Dataset | xr.DataArray:
     """
-    Remap source dataset to the grid of the destination dataset using xesmf.
-
-    Parameters
-    ----------
-    grid_in : xr.Dataset or xr.DataArray
-        The input dataset or data array containing 'lat' and 'lon' coordinates.
-    grid_out : xr.Dataset or xr.DataArray
-        The output dataset or data array containing 'lat' and 'lon' coordinates.
-    method : str, default 'bilinear'
-        The remapping method to use. Options include:
-        - 'bilinear': Bilinear interpolation (default)
-        - 'conservative': Conservative remapping
-        - 'conservative_normed': Normalized conservative remapping
-        - 'patch': Patch remapping
-        - 'nearest_s2d': Nearest neighbor remapping from source to destination
-        - 'nearest_d2s': Nearest neighbor remapping from destination to source
-    parallel : bool, default False
-        Whether to enable parallel remapping using Dask.
+    Remap source data to the destination grid using xESMF.
     """
 
     import xesmf as xe
@@ -211,14 +227,41 @@ def remap(
             "lon": grid_out["lon"],
         }
     )
+
+    if isinstance(grid_in, xr.DataArray):
+        chunked = grid_in if grid_in.chunks is not None else None
+    else:
+        chunked = next(
+            (
+                var
+                for var in grid_in.data_vars.values()
+                if var.chunks is not None and "lat" in var.dims and "lon" in var.dims
+            ),
+            None,
+        )
+
+    if chunked is not None:
+        chunks = {
+            "lat": chunked.chunksizes["lat"][0],
+            "lon": chunked.chunksizes["lon"][0],
+        }
+        output_chunks = chunks
+    else:
+        chunks = {
+            "lat": grid_in.sizes["lat"],
+            "lon": grid_in.sizes["lon"],
+        }
+        output_chunks = None
+
     if parallel:
         out_coords["dummy"] = xr.DataArray(
             np.ones((out_coords.lat.size, out_coords.lon.size)),
             dims=("lat", "lon"),
-            coords={"lat": out_coords.lat, "lon": out_coords.lon},
-        )
-
-        out_coords = out_coords.chunk({"lat": "auto", "lon": "auto"})
+            coords={
+                "lat": out_coords.lat,
+                "lon": out_coords.lon,
+            },
+        ).chunk(chunks)
 
     weight_file = tmp / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
     reuse = weight_file.exists()
@@ -232,9 +275,10 @@ def remap(
         reuse_weights=reuse,
     )
 
-    out = regridder(grid_in)
-
-    return out
+    return regridder(
+        grid_in,
+        output_chunks=output_chunks,
+    )
 
 
 def mask(

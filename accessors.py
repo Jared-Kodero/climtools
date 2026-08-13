@@ -39,7 +39,6 @@ class GeoBase:
             "nearest_d2s",
         ] = "bilinear",
         parallel: bool = False,
-        reuse_weights: bool = True,
     ) -> xr.Dataset | xr.DataArray:
         """Regrid onto the horizontal grid of ``grid_out``.
 
@@ -53,8 +52,6 @@ class GeoBase:
             ESMF regridding method.
         parallel : bool, default False
             Build the weights in parallel with Dask.
-        reuse_weights : bool, default True
-            Reuse a cached weight file when one exists.
 
         Returns
         -------
@@ -67,7 +64,6 @@ class GeoBase:
             grid_out,
             method=method,
             parallel=parallel,
-            reuse_weights=reuse_weights,
         )
 
     def mask(

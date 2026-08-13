@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
+from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
 
@@ -81,44 +83,152 @@ def encode_time(da: xr.DataArray):
     return da
 
 
-def createVariable(
-    ncf: nc.Dataset,
-    da: xr.DataArray,
-    varname: str,
-    zlib: bool | None = None,
-    complevel: int | None = None,
-    shuffle: bool | None = None,
-    write_values: bool = False,
-) -> nc.Variable:
+def to_netcdf_parallel(
+    data: xr.Dataset | xr.DataArray,
+    path: str | PathLike[str],
+    partition_dim: str | None = None,
+    deflate: int | None = None,
+    shuffle: bool = True,
+    chunks: Mapping[str, Iterable[int]] | None = None,
+    unlimited_dim: str | Iterable[str] = (),
+    hints: str | None = None,
+    nofill: bool = True,
+    allow_serial: bool = False,
+) -> str:
+    """Write a distributed xarray dataset to one NetCDF-4 file.
 
-    # we need to use ecoding here
-    missing = [d for d in da.dims if d not in ncf.dimensions]
-    if missing:
-        raise ValueError(
-            f"Cannot create {varname} in {ncf.filepath()}: missing dimensions {missing}"
-        )
+    Parameters
+    ----------
+    data : xarray.Dataset or xarray.DataArray
+        Dataset or DataArray slab owned by the current rank.
+    path : str or os.PathLike
+        Output path visible to every rank.
+    dim : str or None, optional
+        Partitioned dimension. The writer infers it when omitted.
+    deflate : int or None, optional
+        Deflate compression level from 0 to 9.
+    shuffle : bool, default True
+        Enable the HDF5 shuffle filter.
+    chunks : mapping of str to iterable of int, optional
+        Explicit chunk shape for selected variables.
+    unlimited_dims : str or iterable of str, default ()
+        Dimensions to define as unlimited record dimensions.
+    hints : str or None, optional
+        Semicolon-separated MPI-IO hints in key=value form.
+    nofill : bool, default True
+        Disable NetCDF pre-filling when True.
+    allow_serial : bool, default False
+        Permit execution with a one-rank MPI world.
 
-    kwargs = {}
-    if zlib is not None:
-        kwargs["zlib"] = zlib
-    if complevel is not None:
-        kwargs["complevel"] = complevel
-    if shuffle is not None:
-        kwargs["shuffle"] = shuffle
+    Returns
+    -------
+    str
+        Output path after the collective write completes.
+    """
+    if isinstance(data, xr.DataArray):
+        if data.name is None:
+            raise ValueError("DataArray must have a name for parallel output.")
+        data: xr.Dataset = data.to_dataset()
 
-    ncvar = ncf.createVariable(
-        varname=varname,
-        datatype=da.dtype,
-        dimensions=da.dims,
-        **kwargs,
+    if not isinstance(data, xr.Dataset):
+        raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
+
+    if isinstance(unlimited_dim, str):
+        unlimited_dim: tuple[str, ...] = (unlimited_dim,)
+    elif unlimited_dim:
+        unlimited_dim = tuple(unlimited_dim)
+    else:
+        unlimited_dim = ()
+
+    from .lib_mpi import to_netcdf as mpi_to_netcdf
+
+    for name in data.variables:
+        data[name] = encode_time(data[name])
+
+    return mpi_to_netcdf(
+        data,
+        path,
+        partition_dim=partition_dim,
+        deflate=deflate,
+        shuffle=shuffle,
+        chunks=chunks,
+        unlimited_dim=unlimited_dim,
+        hints=hints,
+        nofill=nofill,
+        allow_serial=allow_serial,
     )
-    for attr_name, attr_val in da.attrs.items():
-        ncvar.setncattr(attr_name, attr_val)
 
-    if write_values:
-        ncvar[:] = da.values
 
-    return ncvar
+def to_netcdf_serial(
+    data: xr.Dataset | xr.DataArray,
+    file: str | PathLike[str],
+    unlimited_dim: str | Iterable[str] | None = None,
+    *,
+    batch_size: int = 24,
+    format: str = "NETCDF4",
+    shuffle: bool = True,
+    zlib: bool = True,
+    complevel: int = 4,
+    show_progress: bool = True,
+    stdout: Any = None,
+) -> None:
+    """Write a Dataset or DataArray serially to NetCDF.
+
+    Increments are appended along the specified unlimited dimension in
+    discrete batches to manage memory overhead during serial output.
+
+    Parameters
+    ----------
+    data : xarray.Dataset or xarray.DataArray
+        Data object to be written.
+    file : str or os.PathLike
+        Output file path.
+    unlimited_dim : str or iterable of str, optional
+        Dimension(s) designated as unlimited in the NetCDF file structure.
+    batch_size : int, default 1
+        Slice count processed per file append along the primary unlimited dimension.
+    format : str, default "NETCDF4"
+        NetCDF underlying disk format.
+    shuffle : bool, default True
+        Enable HDF5 byte-shuffle filter.
+    zlib : bool, default True
+        Enable zlib deflate compression filter.
+    complevel : int, default 4
+        Zlib deflate compression level (1-9).
+    show_progress : bool, default True
+        Print incremental progress to output stream.
+    stdout : file-like, optional
+        Destination stream for progress updates; defaults to sys.stdout.
+
+    Returns
+    -------
+    None
+    """
+
+    if isinstance(data, xr.Dataset):
+        dataset_to_netcdf(
+            file=file,
+            data=data,
+            unlimited_dim=unlimited_dim,
+            batch_size=batch_size,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+            show_progress=show_progress,
+            stdout=stdout,
+        )
+        return
+
+    dataarray_to_netcdf(
+        file=file,
+        da=data,
+        format=format,
+        shuffle=shuffle,
+        zlib=zlib,
+        complevel=complevel,
+    )
+    return
 
 
 def dataset_to_netcdf(
@@ -150,8 +260,8 @@ def dataset_to_netcdf(
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}.")
 
-    for v in set(list(data.data_vars) + list(data.coords) + [dim0]):
-        data[v] = encode_time(data[v])
+    for name in data.variables:
+        data[name] = encode_time(data[name])
 
     # First write defines the file, dimensions, variables, attrs, and encodings.
     # Keep this as a single record.
@@ -194,6 +304,61 @@ def dataset_to_netcdf(
             zlib=zlib,
             complevel=complevel,
         )
+
+
+def dataarray_to_netcdf(
+    file: Path,
+    da: xr.DataArray,
+    format="NETCDF4",
+    shuffle: bool | None = None,
+    zlib: bool | None = None,
+    complevel: int | None = None,
+) -> None:
+    """Write / append a DataArray to a NetCDF file
+
+    Parameters
+    ----------
+    file : Path
+        Path to a NetCDF4 file opened with read/write access.
+    da : xr.DataArray
+        DataArray to write. Must have dimensions that already exist in the file.
+    format : str, optional
+        NetCDF format passed to netCDF4.Dataset.
+    shuffle : bool, optional
+        Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
+    zlib : bool, optional
+        Whether to apply zlib compression to the variable. If None, the default compression settings are used.
+    complevel : int, optional
+        Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
+    """
+
+    if not isinstance(da, xr.DataArray):
+        raise TypeError("da must be an xarray.DataArray")
+
+    if not Path(file).exists():
+        raise FileNotFoundError(f"File {file!r} does not exist!")
+
+    with nc.Dataset(file, mode="r+", format=format) as ncf:
+        varname = da.name
+        if varname is None:
+            raise ValueError("DataArray must have a name.")
+
+        # Overwrite values if the variable was created on a previous run.
+        if varname in ncf.variables:
+            ncf.variables[varname][:] = da.values
+
+        else:
+            ncvar = createVariable(
+                ncf,
+                da,
+                varname,
+                zlib=zlib,
+                complevel=complevel,
+                shuffle=shuffle,
+                write_values=False,
+            )
+
+            ncvar[:] = da.values
 
 
 def append_to_netcdf(
@@ -301,56 +466,41 @@ def append_to_netcdf(
             ncvar[index] = arr
 
 
-def dataarray_to_netcdf(
-    file: Path,
+def createVariable(
+    ncf: nc.Dataset,
     da: xr.DataArray,
-    format="NETCDF4",
-    shuffle: bool | None = None,
+    varname: str,
     zlib: bool | None = None,
     complevel: int | None = None,
-) -> None:
-    """Write / append a DataArray to a NetCDF file
+    shuffle: bool | None = None,
+    write_values: bool = False,
+) -> nc.Variable:
 
-    Parameters
-    ----------
-    file : Path
-        Path to a NetCDF4 file opened with read/write access.
-    da : xr.DataArray
-        DataArray to write. Must have dimensions that already exist in the file.
-    format : str, optional
-        NetCDF format passed to netCDF4.Dataset.
-    shuffle : bool, optional
-        Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
-    zlib : bool, optional
-        Whether to apply zlib compression to the variable. If None, the default compression settings are used.
-    complevel : int, optional
-        Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
-    """
+    # we need to use ecoding here
+    missing = [d for d in da.dims if d not in ncf.dimensions]
+    if missing:
+        raise ValueError(
+            f"Cannot create {varname} in {ncf.filepath()}: missing dimensions {missing}"
+        )
 
-    if not isinstance(da, xr.DataArray):
-        raise TypeError("da must be an xarray.DataArray")
+    kwargs = {}
+    if zlib is not None:
+        kwargs["zlib"] = zlib
+    if complevel is not None:
+        kwargs["complevel"] = complevel
+    if shuffle is not None:
+        kwargs["shuffle"] = shuffle
 
-    if not Path(file).exists():
-        raise FileNotFoundError(f"File {file!r} does not exist!")
+    ncvar = ncf.createVariable(
+        varname=varname,
+        datatype=da.dtype,
+        dimensions=da.dims,
+        **kwargs,
+    )
+    for attr_name, attr_val in da.attrs.items():
+        ncvar.setncattr(attr_name, attr_val)
 
-    with nc.Dataset(file, mode="r+", format=format) as ncf:
-        varname = da.name
-        if varname is None:
-            raise ValueError("DataArray must have a name.")
+    if write_values:
+        ncvar[:] = da.values
 
-        # Overwrite values if the variable was created on a previous run.
-        if varname in ncf.variables:
-            ncf.variables[varname][:] = da.values
-
-        else:
-            ncvar = createVariable(
-                ncf,
-                da,
-                varname,
-                zlib=zlib,
-                complevel=complevel,
-                shuffle=shuffle,
-                write_values=False,
-            )
-
-            ncvar[:] = da.values
+    return ncvar
