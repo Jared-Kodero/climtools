@@ -10,8 +10,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
-import matplotlib
-
+script_dir = Path(__file__).resolve().parent
 host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
@@ -19,17 +18,15 @@ home = Path.home()
 n_cpus = len(os.sched_getaffinity(0))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
-mpl_default_backend = matplotlib.get_backend()
-mpl_backend_changed = False
-widget_css_applied = False
+
 
 tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
 tmp.mkdir(parents=True, exist_ok=True)
 
 
-script_dir = Path(__file__).resolve().parent
 current_dask_cluster = None
 current_dask_client = None
+widget_css_applied = False
 fix_widget = True
 
 
@@ -135,15 +132,6 @@ def get_fsig(func: Callable) -> dict:
         )
 
     return params
-
-
-def set_preview_quality():
-    if "ipykernel" not in sys.modules:
-        return
-
-    import matplotlib_inline as plt_inline
-
-    plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
 def apply_widget_css() -> None:

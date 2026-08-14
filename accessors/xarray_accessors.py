@@ -5,12 +5,11 @@ from typing import Any, Literal
 
 import numpy as np
 import xarray as xr
-from hvplot.xarray import *
 from IPython.display import DisplayHandle
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
 from ..core import calc_stats as calc
-from ..core import xgeo
+from ..core import xarray_utils as xgeo
 from ..viz import plotting
 from ..viz.plotting import GeoPlot
 

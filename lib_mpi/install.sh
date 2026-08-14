@@ -294,10 +294,12 @@ MPI_NETCDF_LIBS."
 # ------------------------------------------------------------------ python side
 
 load_python() {
-    SELECTED_PYTHON_MODULE=${MPI_NETCDF_PYTHON_MODULE:-}
-    if [[ -n "$SELECTED_PYTHON_MODULE" ]] && ((MODULES_AVAILABLE)); then
-        module load "$SELECTED_PYTHON_MODULE" >/dev/null 2>&1 \
-            || die "cannot load Python module: $SELECTED_PYTHON_MODULE"
+    if [[ -n "${MPI_NETCDF_PYTHON_MODULE:-}" ]]; then
+        ((MODULES_AVAILABLE)) \
+            || die "MPI_NETCDF_PYTHON_MODULE requires Lmod or Environment Modules"
+        module load "$MPI_NETCDF_PYTHON_MODULE" >/dev/null 2>&1 \
+            || die "could not load Python module: $MPI_NETCDF_PYTHON_MODULE"
+        SELECTED_PYTHON_MODULE=$MPI_NETCDF_PYTHON_MODULE
     fi
 
     if [[ -n "${MPI_NETCDF_PYTHON:-}" ]]; then
@@ -305,12 +307,11 @@ load_python() {
             || die "MPI_NETCDF_PYTHON must be an absolute path"
         PYTHON_EXECUTABLE=$MPI_NETCDF_PYTHON
     else
-        PYTHON_EXECUTABLE=$(command -v python3 || command -v python || true)
+        PYTHON_EXECUTABLE=$(command -v python || true)
     fi
 
     [[ -n "$PYTHON_EXECUTABLE" && -x "$PYTHON_EXECUTABLE" ]] \
-        || die "no Python interpreter found; activate an environment or set \
-MPI_NETCDF_PYTHON"
+        || die "no usable Python interpreter found"
 
     "$PYTHON_EXECUTABLE" - <<'PY' || die "install numpy and xarray first"
 import numpy
@@ -492,6 +493,8 @@ write_manifest() {
 }
 
 main() {
+    (($# == 0)) || die "install.sh accepts no arguments; configure the build with MPI_NETCDF_* environment variables"
+
     mkdir -p "$BUILD_DIR" "$LIB_DIR"
 
     init_modules
@@ -504,6 +507,7 @@ main() {
     log "Python: $PYTHON_EXECUTABLE"
     [[ -n "$SELECTED_NETCDF_MODULE" ]] && log "NetCDF module: $SELECTED_NETCDF_MODULE"
     [[ -n "$SELECTED_MPI_MODULE" ]] && log "MPI module: $SELECTED_MPI_MODULE"
+    [[ -n "$SELECTED_PYTHON_MODULE" ]] && log "Python module: $SELECTED_PYTHON_MODULE"
     log "parallel NetCDF-4: yes (NC_HAS_PARALLEL4)"
     log "parallel HDF5 filters: $(report_parallel_filters)"
 
@@ -514,8 +518,9 @@ main() {
     write_manifest
 
     log "installation complete: $LIBRARY"
-    log "run the test suite with:"
-    log "  mpirun -n 4 $PYTHON_EXECUTABLE -m climtools.tests.test_netcdf_io"
 }
 
+
+
 main "$@"
+

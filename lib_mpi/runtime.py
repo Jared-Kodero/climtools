@@ -147,11 +147,46 @@ class MPI:
     require_ranks : int or None, optional
         Minimum acceptable size of ``MPI_COMM_WORLD``.
 
+
+    Examples
+    --------
+    Execute only on the default root rank:
+
+    >>> @MPI()
+    ... def write_output() -> None:
+    ...     pass
+
+    Execute on every rank:
+
+    >>> @MPI(all_ranks=True)
+    ... def compute() -> int:
+    ...     return MPI_RANK
+
+    Execute on the root and broadcast the result to every rank:
+
+    >>> @MPI(broadcast=True)
+    ... def configuration() -> dict[str, int]:
+    ...     return {"size": MPI_SIZE}
+
+    Use a different root rank:
+
+    >>> @MPI(root=1)
+    ... def write_from_rank_one() -> None:
+    ...     pass
+
+    Use as a context manager to finalize MPI automatically:
+
+    >>> with MPI() as mpi:
+    ...     mpi.barrier()
+
+
     Notes
     -----
     Every rank must call a decorated function in the same order because the
     wrapper performs collective MPI communication for exception propagation
-    and optional result broadcasting.
+    and optional result broadcasting. When used as a context manager,
+    ``finalize()`` is called on exit, including when the context exits with an
+    exception. Exceptions raised inside the context are not suppressed.
     """
 
     MPI_RANK: int = 0
@@ -213,6 +248,13 @@ class MPI:
             f"MPI(rank={self.rank}, size={self.size}, root={self.root}, "
             + f"all_ranks={self.all_ranks}, broadcast={self.broadcast})"
         )
+
+    def __enter__(self):
+        """Enter the MPI context and return this coordinator."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.finalize()
 
     def barrier(self) -> None:
         """Wait until every rank reaches this call."""
@@ -437,81 +479,6 @@ class MPI:
         return wrapper
 
 
-def mpi(
-    all_ranks: bool = False,
-    broadcast: bool = False,
-    root: int = 0,
-    require_ranks: int | None = None,
-) -> MPI:
-    """Create an MPI function decorator.
-
-    Parameters
-    ----------
-    all_ranks : bool, optional
-        Execute the decorated function on every rank. By default, execute
-        the function only on ``root``. Every rank must still call the wrapper.
-    broadcast : bool, optional
-        Broadcast the root function's picklable return value to every rank.
-        Requires ``all_ranks=False``.
-    root : int, optional
-        Root rank used for root-only execution and broadcasting.
-    require_ranks : int or None, optional
-        Minimum acceptable size of ``MPI_COMM_WORLD``.
-
-    Returns
-    -------
-    MPI
-        Configured MPI decorator.
-
-    Raises
-    ------
-    ValueError
-        If ``root`` is outside ``MPI_COMM_WORLD``, if ``broadcast=True`` is
-        combined with ``all_ranks=True``, or if ``require_ranks`` is less
-        than one.
-    MPIError
-        If ``MPI_COMM_WORLD`` contains fewer than ``require_ranks`` ranks.
-
-    Notes
-    -----
-    Every rank must call the decorated function in the same order because
-    exception propagation and optional broadcasting use collective MPI
-    operations.
-
-    Examples
-    --------
-    Execute only on the default root rank:
-
-    >>> @mpi()
-    ... def write_output() -> None:
-    ...     pass
-
-    Execute on every rank:
-
-    >>> @mpi(all_ranks=True)
-    ... def compute() -> int:
-    ...     return MPI_RANK
-
-    Execute on the root and broadcast the result to every rank:
-
-    >>> @mpi(broadcast=True)
-    ... def configuration() -> dict[str, int]:
-    ...     return {"size": MPI_SIZE}
-
-    Use a different root rank:
-
-    >>> @mpi(root=1)
-    ... def write_from_rank_one() -> None:
-    ...     pass
-    """
-    return MPI(
-        all_ranks=all_ranks,
-        broadcast=broadcast,
-        root=root,
-        require_ranks=require_ranks,
-    )
-
-
 __all__ = [
     "MPI",
     "MPI_RANK",
@@ -519,6 +486,5 @@ __all__ = [
     "MPIError",
     "available",
     "launcher_size",
-    "mpi",
     "world",
 ]

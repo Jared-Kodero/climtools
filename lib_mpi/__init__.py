@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import native, runtime
 from .native import NativeLibraryError
-from .runtime import MPI, MPIError, available, launcher_size, mpi, world
+from .runtime import MPI, MPIError, available, launcher_size, world
 
 if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
     MPI_RANK: int
@@ -87,7 +87,6 @@ __all__ = [
     "has_parallel_filters",
     "info",
     "launcher_size",
-    "mpi",
     "native",
     "runtime",
     "world",

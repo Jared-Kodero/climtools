@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import atexit
 import ctypes
-import os
 import pickle
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+from .module_env import ModuleLoadError, ensure_required_modules
 
 
 class NativeLibraryError(RuntimeError):
@@ -35,16 +36,27 @@ _LIBRARY: ctypes.CDLL | None = None
 
 
 def library_path() -> Path:
-    """Return the expected location of the compiled native library.
+    """Return the location of the compiled native library.
 
     Returns
     -------
     pathlib.Path
-        Path given by ``MPI_NETCDF_LIBRARY`` when set, otherwise the path
-        written by ``install.sh`` inside the package.
+        Path to the compiled ``libmpi_netcdf.so``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the native library has not been built.
     """
-    default = Path(__file__).parent / "lib" / "libmpi_netcdf.so"
-    return Path(os.environ.get("MPI_NETCDF_LIBRARY", default)).expanduser()
+    path = Path(__file__).parent / "lib" / "libmpi_netcdf.so"
+
+    if path.exists():
+        return path
+
+    install_script = Path(__file__).parent / "install.sh"
+    raise FileNotFoundError(
+        f"MPI-NetCDF native library not found: {path}\n Build the library by running:\n{install_script}"
+    )
 
 
 def _declare(library: ctypes.CDLL) -> None:
@@ -150,6 +162,11 @@ def load() -> ctypes.CDLL:
     if _LIBRARY is not None:
         return _LIBRARY
 
+    try:
+        ensure_required_modules()
+    except ModuleLoadError as exc:
+        raise NativeLibraryError(str(exc)) from exc
+
     path = library_path()
     try:
         library = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
@@ -164,6 +181,7 @@ def load() -> ctypes.CDLL:
         _PROTOTYPES_APPLIED = True
 
     _LIBRARY = library
+
     return library
 
 

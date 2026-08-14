@@ -27,7 +27,7 @@ import xarray as xr
 
 from ..lib_mpi import native
 from ..lib_mpi.native import NativeLibraryError
-from ..lib_mpi.runtime import mpi
+from ..lib_mpi.runtime import MPI
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -638,7 +638,7 @@ def _validate_schema_text(
 # ----------------------------------------------------------------- main API
 
 
-@mpi(all_ranks=True)
+@MPI(all_ranks=True)
 def to_netcdf(
     ds: Any,
     path: str | PathLike[str],

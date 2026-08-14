@@ -28,7 +28,7 @@ things differ, and only these four.
    per-rank files are written and merged afterwards.
 
 Filesystem work stays on one rank: directory preparation, the existence
-checks and the rsync are decorated with :func:`climtools.mpi`, so they run on
+checks and the rsync are decorated with :func:`climtools.MPI`, so they run on
 the root rank while the other ranks wait at the implied collective. The
 compute functions are decorated for all-rank execution. Functions that touch
 neither, such as :func:`land_mask` or :func:`_build_event_masks`, carry no
@@ -38,7 +38,7 @@ Run it either way::
 
     python time_composites.py 2021071500
     mpirun -n 8 python time_composites.py 2021071500
-    srun --mpi=pmix --ntasks=8 python time_composites.py 2021071500
+    srun --MPI=pmix --ntasks=8 python time_composites.py 2021071500
 
 With one rank and no MPI launcher the module behaves exactly like the serial
 original, except that the write goes through the parallel writer with
@@ -60,8 +60,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from climtools import mpi
-from climtools.xgeo import remap, to_netcdf
+from climtools import MPI, xgeo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,12 +73,12 @@ logger = logging.getLogger("TIME COMPOSITES")
 #: collective stages and the object carrying `rank`, `size`, `barrier` and the
 #: reductions. Building it here rather than per call keeps every rank in the
 #: same collective order.
-COMM = mpi(all_ranks=True)
+COMM = MPI(all_ranks=True)
 
 #: Root-only decorator for filesystem work. Every rank must still call the
 #: wrapped function: the wrapper is itself collective, which is what keeps the
 #: non-root ranks from racing ahead of a directory that does not exist yet.
-ON_ROOT = mpi()
+ON_ROOT = MPI()
 
 #: Rank-aware log prefix. Progress lines are emitted by the root rank only,
 #: so an eight-rank job does not produce eight copies of every message.
@@ -107,7 +106,7 @@ def get_smc_climo(ds: xr.Dataset, smc_path: Path) -> dict[str, xr.DataArray]:
         smc = smc_ds.sel(time=smc_ds.time.dt.month.isin(months))
         smc = smc.isel(zaxis_1=0, drop=True)
         smc = smc.mean(dim="time", skipna=True).squeeze(drop=True)
-        smc = remap(smc, ds, method="bilinear")["smc"].load()
+        smc = xgeo.remap(smc, ds, method="bilinear")["smc"].load()
 
     if smc.dtype != ds["soilw1"].dtype:
         smc = smc.astype(ds["soilw1"].dtype)
@@ -663,7 +662,7 @@ def compute_event_time_composites(
 
         log_root("Writing composite store to %s", out_path)
         started = time.perf_counter()
-        to_netcdf(
+        xgeo.to_netcdf(
             file=out_path,
             data=store,
             unlimited_dim="event",

@@ -8,6 +8,7 @@ stateful classes defined in :mod:`plotting`.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
@@ -35,13 +36,8 @@ from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 
-from ..core.tools import (
-    get_fsig,
-    mpl_backend_changed,
-    mpl_default_backend,
-    set_preview_quality,
-)
-from ..core.xgeo import (
+from ..core.tools import get_fsig
+from ..core.xarray_utils import (
     add_cyclic_point,
     get_spatial_dims,
     set_edges_to_nan,
@@ -77,8 +73,17 @@ __all__ = [
 ]
 
 
-AxesType = Axes | cgeo.GeoAxes
-ScalarArtist = Artist | ScalarMappable | QuadContourSet
+mpl_default_backend = matplotlib.get_backend()
+mpl_backend_changed = False
+
+
+def set_preview_quality():
+    if "ipykernel" not in sys.modules:
+        return
+
+    import matplotlib_inline as plt_inline
+
+    plt_inline.backend_inline.set_matplotlib_formats("retina")
 
 
 def interactive_backend(interactive: bool) -> None:
@@ -244,7 +249,7 @@ def validate_facets(
         raise ValueError("col_wrap must be greater than or equal to 1")
 
 
-def enable_interactive_features(ax: AxesType) -> str:
+def enable_interactive_features(ax: Axes | cgeo.GeoAxes) -> str:
 
     def format_coord(x: float, y: float) -> str:
         lon, lat = ccrs.PlateCarree().transform_point(
@@ -488,7 +493,7 @@ def get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
     return key_magnitude
 
 
-def is_geoaxes(ax: AxesType, kwargs: Mapping[str, Any]) -> dict:
+def is_geoaxes(ax: Axes | cgeo.GeoAxes, kwargs: Mapping[str, Any]) -> dict:
     """Inject a ``PlateCarree`` data transform when ``ax`` is a GeoAxes."""
     if isinstance(ax, cgeo.GeoAxes):
         kwargs["transform"] = ccrs.PlateCarree()
@@ -517,7 +522,7 @@ def style_contours(artist: QuadContourSet, rasterized: bool) -> None:
 
 def add_contour_labels(
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     artist: QuadContourSet,
     *,
     fmt: str | Mapping[float, str] = "%1.0f",
@@ -620,7 +625,7 @@ def add_gridlines(
 
 def add_map_features(
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
@@ -848,8 +853,7 @@ def get_projection(
     )
     if not known:
         raise ValueError(
-            f"Unknown projection {projection!r}. Pass a Cartopy projection name "
-            "or a cartopy.crs.Projection instance."
+            f"Unknown projection {projection!r}. Pass a Cartopy projection name or a cartopy.crs.Projection instance."
         )
     accepted = get_fsig(projection_class)
     options: dict[str, Any] = {}
@@ -1137,7 +1141,7 @@ def fmt_anim_title(
 
 def add_colorbar(
     mappable: ScalarMappable,
-    ax: AxesType | np.ndarray,
+    ax: Axes | cgeo.GeoAxes | np.ndarray,
     fig: Figure | None = None,
     *,
     orientation: Literal["vertical", "horizontal"] = "vertical",
@@ -1224,7 +1228,7 @@ def add_colorbar(
 def plot_default(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1237,7 +1241,7 @@ def plot_default(
     zorder: float = 1.0,
     add_labels: bool = False,
     **kwargs: Any,
-) -> ScalarArtist:
+) -> Artist | ScalarMappable | QuadContourSet:
     """Draw an xarray field using its default plotting method.
 
     Parameters
@@ -1298,7 +1302,7 @@ def plot_default(
 def plot_pcolormesh(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1364,7 +1368,7 @@ def plot_pcolormesh(
 def plot_contourf(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1445,7 +1449,7 @@ def plot_contourf(
 def plot_contour(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1530,7 +1534,7 @@ def plot_contour(
 def plot_imshow(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1604,7 +1608,7 @@ def plot_imshow(
 def plot_scatter(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str,
     y: str,
@@ -1689,7 +1693,7 @@ def plot_quiver(
     u: xr.DataArray,
     v: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str = "lon",
     y: str = "lat",
@@ -1878,7 +1882,7 @@ def plot_quiver(
 def plot_significance(
     data: xr.DataArray,
     fig: Figure,
-    ax: AxesType,
+    ax: Axes | cgeo.GeoAxes,
     *,
     x: str = "lon",
     y: str = "lat",

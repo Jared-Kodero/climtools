@@ -33,20 +33,20 @@ import warnings
 
 import dask.diagnostics
 
-from . import xgeo as xgeo
 from .accessors import *
 from .cdo import pycdo as cdo
 from .core import _operator as operator
-from .core import calc_stats as calc
+from .core import xgeo as xgeo
 from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import *
-from .lib_mpi import MPI_RANK, MPI_SIZE, mpi
+from .lib_mpi import MPI, MPI_RANK, MPI_SIZE
 from .viz import cmaps as cmaps
 from .viz import plotting as plot
 
 warnings.filterwarnings("ignore")
 
 __all__ = [
+    "MPI",
     "MPI_RANK",
     "MPI_SIZE",
     "DaskProgressBar",
@@ -55,7 +55,6 @@ __all__ = [
     "cdo",
     "cmaps",
     "lib_mpi",
-    "mpi",
     "n_cpus",
     "operator",
     "plot",
@@ -81,5 +80,5 @@ except Exception:
 # Setup
 
 apply_widget_css()
-set_preview_quality()
+
 dask.diagnostics.ProgressBar = DaskProgressBar

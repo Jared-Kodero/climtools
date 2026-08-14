@@ -6,7 +6,9 @@ from typing import Any
 import xarray as xr
 
 from .parallel import to_netcdf_parallel
-from .serial import to_netcdf_serial
+from .serial import append_to_netcdf, to_netcdf_serial
+
+__all__ = ["append_to_netcdf", "to_netcdf"]
 
 
 def to_netcdf(

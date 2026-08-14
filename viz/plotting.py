@@ -44,9 +44,7 @@ from matplotlib.text import Text
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.tools import n_cpus, tmp
-from .plot_utils import (
-    add_colorbar as _add_colorbar,
-)
+from .plot_utils import add_colorbar as _add_colorbar
 from .plot_utils import (
     add_contour_labels,
     add_cyclic_point,
@@ -70,6 +68,7 @@ from .plot_utils import (
     plot_scatter,
     plot_significance,
     select_facet,
+    set_preview_quality,
     to_lon180,
     validate_animation_inputs,
     validate_data,
@@ -86,6 +85,8 @@ __all__ = [
     "geo",
     "theme",
 ]
+
+set_preview_quality()
 
 
 AxesType = Axes | cgeo.GeoAxes
