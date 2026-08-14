@@ -17,7 +17,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     marker = Path(xarray_spec.origin).resolve().parent / ".xgeo_patch"
 
     if not force and marker.exists():
-        return None
+        return ()
 
     # Everything below this point is only needed to create a new patch.
     import inspect
@@ -37,9 +37,19 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     # Corrected dynamic module path to prevent duplication
     type_module = f"{__package__}.xgeo_types"
 
-    targets: tuple[tuple[type, str, str], ...] = (
-        (xr.DataArray, "DataArray", "GeoDataArray"),
-        (xr.Dataset, "Dataset", "GeoDataset"),
+    # (class, class name, accessors registered by climtools on that class).
+    # Each accessor is (attribute name, exported type name in xgeo_types).
+    targets: tuple[tuple[type, str, tuple[tuple[str, str], ...]], ...] = (
+        (
+            xr.DataArray,
+            "DataArray",
+            (("xgeo", "GeoDataArray"), ("mpi", "MPIDataArray")),
+        ),
+        (
+            xr.Dataset,
+            "Dataset",
+            (("xgeo", "GeoDataset"), ("mpi", "MPIDataset")),
+        ),
     )
     optional: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("metpy.xarray", ("metpy",)),
@@ -220,7 +230,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     discovered = discover()
     changed: list[Path] = []
 
-    for cls, class_name, geo_type in targets:
+    for cls, class_name, own_accessors in targets:
         path = sources[class_name]
 
         backup = path.with_suffix(path.suffix + ".xgeo.bak")
@@ -234,7 +244,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             )
 
         stubs: list = [
-            ("xgeo", type_module, geo_type),
+            *((attr, type_module, type_name) for attr, type_name in own_accessors),
             *discovered[cls],
         ]
 

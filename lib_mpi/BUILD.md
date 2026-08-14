@@ -1,9 +1,10 @@
 # Build and test the MPI-NetCDF library
 
-The native MPI-NetCDF library is built by `install.sh`. The installer takes no
-command-line arguments. It first uses a working MPI and parallel NetCDF-C
-stack already present on `PATH`; on systems with Lmod or Environment Modules,
-it can discover a compatible stack automatically.
+The native MPI-NetCDF library is built by `install.sh`. It first uses a working
+MPI and parallel NetCDF-C stack already present on `PATH`; on systems with Lmod
+or Environment Modules, it can discover a compatible stack automatically.
+
+For writing Python against the built library, see [README.md](README.md).
 
 The build requires an MPI C compiler, NetCDF-C with parallel NetCDF-4 support,
 Python, NumPy, and xarray. The resulting shared library is written to
@@ -19,11 +20,21 @@ dependencies:
 python -m pip install numpy xarray
 ```
 
-Then run the installer with no arguments:
+Then run the installer:
 
 ```bash
 ./install.sh
 ```
+
+It accepts three options and is otherwise configured through the environment:
+
+```text
+-h, --help     show usage and exit
+-f, --force    rebuild even when an up-to-date library is present
+-c, --clean    remove build/ and lib/, then exit
+```
+
+Without `--force`, a library newer than the C sources is left alone.
 
 For the strongest verification, run the installer inside an allocation that can
 launch at least two MPI ranks. Under Slurm, for example:
@@ -45,12 +56,21 @@ The installer performs the following checks before reporting success:
    write probe.
 5. Builds `lib/libmpi_netcdf.so`, checks its dynamic dependencies and exported
    C ABI, and imports the Python binding against that exact library.
-6. Records the verified compiler, flags, modules, Python executable, and
-   parallel-filter capability in `build/build.yml`.
+6. Confirms the ABI version the library reports matches the one the Python
+   layer expects, catching a stale `libmpi_netcdf.so` left over from an
+   earlier checkout.
+7. Records the verified compiler, flags, modules, Python executable,
+   parallel-filter capability, ABI version and probe outcome in
+   `build/build.yml`.
 
 If no two-rank launcher is available, the installer emits a warning and
 continues after the compile-time capability checks. Set `MPI_NETCDF_SKIP_PROBE=1`
 only when intentionally skipping the runtime probe.
+
+The probe is retried oversubscribed when the host has too few cores to place
+two ranks, and with `--allow-run-as-root` when running as root, since both are
+scheduling limits rather than NetCDF capability limits. If every attempt
+fails, the first failure is re-run with its output shown.
 
 ## Configuration
 
@@ -85,8 +105,20 @@ set explicitly.
 ## Runtime
 
 Use the same MPI and NetCDF runtime stack that was verified during installation.
-The exact build state is available in `build/build.yml`. Do not mix a second MPI
-implementation or a serial HDF5/NetCDF stack into the runtime environment.
+The exact build state is available in `build/build.yml`, which is also read at
+import to reload the recorded module stack when one was used.
+
+Do not mix a second MPI implementation or a serial HDF5/NetCDF stack into the
+runtime environment. This is not merely a performance caution: the `netCDF4`
+wheel on PyPI bundles its own serial HDF5, and loading it into a process that
+already holds a parallel HDF5 will segfault when the two sets of symbols
+collide. The package works around the common case by importing `netCDF4`
+before it loads the native library, so the wheel's own symbols are pinned
+first, but the safe configuration remains a single consistent stack, for
+example a conda `netcdf4` built against the same MPI.
+
+`MPI_NETCDF_LIBRARY` overrides the location of the compiled library, which is
+useful when testing a build without reinstalling.
 
 Under Slurm, launch MPI programs with the MPI mode required by the local
 cluster. On Brown Oscar this is typically `srun --mpi=pmix`.

@@ -1,7 +1,7 @@
 """MPI runtime layer: process coordination and the native C ABI.
 
 This package owns everything that talks to MPI itself. It holds no NetCDF
-Python code; the writers live in :mod:`climtools.netcdf`, which calls into the
+Python code; the writers live in :mod:`climtools.lib_netcdf`, which calls into the
 C ABI exposed here.
 
 Importing this package never initializes MPI and never loads the compiled
@@ -15,7 +15,33 @@ from typing import TYPE_CHECKING
 
 from . import native, runtime
 from .native import NativeLibraryError
-from .runtime import MPI, MPIError, available, launcher_size, world
+from .runtime import (
+    MPI,
+    MPIError,
+    abort,
+    allgather,
+    available,
+    barrier,
+    bcast,
+    comm,
+    consensus,
+    finalize,
+    gather,
+    is_root,
+    launcher_size,
+    maximum,
+    mean,
+    minimum,
+    partition,
+    prod,
+    rank,
+    reduce,
+    scatter,
+    size,
+    split,
+    total,
+    world,
+)
 
 if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
     from typing import Any
@@ -35,24 +61,32 @@ def info() -> dict[str, object]:
         dictionary reports ``available=False`` and a one-rank serial world.
     """
     if not native.available():
+        try:
+            location = str(native.library_path())
+        except FileNotFoundError as exc:
+            location = str(exc).splitlines()[0]
         return {
             "available": False,
-            "library": str(native.library_path()),
+            "library": location,
             "netcdf": None,
+            "abi": None,
+            "abi_expected": native.ABI_VERSION,
             "rank": 0,
             "size": 1,
             "parallel_filters": False,
             "thread_level": -1,
         }
 
-    rank, size = native.init()
+    world_rank, world_size = native.init()
     version = native.lib.mpi_netcdf_version()
     return {
         "available": True,
         "library": str(native.library_path()),
         "netcdf": version.decode("utf-8", errors="replace") if version else None,
-        "rank": rank,
-        "size": size,
+        "abi": native.abi_version(),
+        "abi_expected": native.ABI_VERSION,
+        "rank": world_rank,
+        "size": world_size,
         "parallel_filters": bool(native.lib.mpi_netcdf_has_parallel_filters()),
         "thread_level": int(native.lib.mpi_netcdf_thread_level()),
     }
@@ -85,11 +119,31 @@ __all__ = [
     "MPI_SIZE",
     "MPIError",
     "NativeLibraryError",
+    "abort",
+    "allgather",
     "available",
+    "barrier",
+    "bcast",
+    "comm",
+    "consensus",
+    "finalize",
+    "gather",
     "has_parallel_filters",
     "info",
+    "is_root",
     "launcher_size",
+    "maximum",
+    "mean",
+    "minimum",
     "native",
+    "partition",
+    "prod",
+    "rank",
+    "reduce",
     "runtime",
+    "scatter",
+    "size",
+    "split",
+    "total",
     "world",
 ]

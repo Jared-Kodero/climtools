@@ -3,7 +3,7 @@
 The dataset writer defines the file from its first record along the unlimited
 dimension and then appends the remainder in batches, so peak memory follows the
 batch rather than the whole dataset. The parallel counterpart lives beside this
-module in :mod:`climtools.netcdf.parallel`.
+module in :mod:`climtools.lib_netcdf.parallel`.
 """
 
 from __future__ import annotations

@@ -58,7 +58,9 @@ def _manifest_modules(path: Path) -> list[str]:
 
 def ensure_required_modules(manifest: Path | None = None) -> None:
     """Load build-time MPI/NetCDF modules that are not already loaded."""
-    path = manifest or Path(__file__).resolve().parents[2] / "build.yml"
+    path = manifest or Path(__file__).resolve().parent / "build" / "build.yml"
+    if not path.is_file():
+        return
     required = _manifest_modules(path)
     if not required:
         return

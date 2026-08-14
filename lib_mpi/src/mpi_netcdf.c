@@ -5,6 +5,7 @@
  * built with.
  */
 #define _GNU_SOURCE
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,8 @@ static void set_err(const char *fmt, ...)
 const char *mpi_netcdf_strerror(void) { return g_err; }
 
 const char *mpi_netcdf_version(void) { return nc_inq_libvers(); }
+
+int mpi_netcdf_abi_version(void) { return MPI_NETCDF_ABI_VERSION; }
 
 int mpi_netcdf_has_parallel_filters(void)
 {
@@ -156,6 +159,68 @@ int mpi_netcdf_allgather_i64(long long value, long long *out)
         return -1;
     }
     return 0;
+}
+
+int mpi_netcdf_allgatherv_bytes(const void *sendbuf, long long sendcount,
+                                void *recvbuf, const long long *counts)
+{
+    int *icounts = NULL, *idispls = NULL;
+    long long total = 0;
+    int status = 0;
+
+    if (!counts || sendcount < 0) {
+        set_err("mpi_netcdf_allgatherv_bytes received invalid arguments");
+        return -1;
+    }
+    if (g_size <= 0 && mpi_netcdf_init() != 0) return -1;
+
+    for (int i = 0; i < g_size; i++) {
+        if (counts[i] < 0) {
+            set_err("mpi_netcdf_allgatherv_bytes: rank %d reported a negative "
+                    "payload length", i);
+            return -1;
+        }
+        /* Allgatherv counts and displacements are int-typed in MPI-2.  Report
+         * the limit rather than truncating; the caller has a slower path. */
+        if (counts[i] > INT_MAX || total > (long long)INT_MAX - counts[i]) {
+            set_err("mpi_netcdf_allgatherv_bytes: total payload exceeds the "
+                    "MPI_Allgatherv INT_MAX limit");
+            return -1;
+        }
+        total += counts[i];
+    }
+    if (total > 0 && !recvbuf) {
+        set_err("mpi_netcdf_allgatherv_bytes received a null receive buffer");
+        return -1;
+    }
+    if (sendcount > 0 && !sendbuf) {
+        set_err("mpi_netcdf_allgatherv_bytes received a null send buffer");
+        return -1;
+    }
+
+    icounts = malloc((size_t)g_size * sizeof *icounts);
+    idispls = malloc((size_t)g_size * sizeof *idispls);
+    if (!icounts || !idispls) {
+        free(icounts);
+        free(idispls);
+        set_err("out of memory in mpi_netcdf_allgatherv_bytes");
+        return -1;
+    }
+    for (int i = 0, offset = 0; i < g_size; i++) {
+        icounts[i] = (int)counts[i];
+        idispls[i] = offset;
+        offset += icounts[i];
+    }
+
+    if (MPI_Allgatherv(sendcount > 0 ? sendbuf : MPI_BOTTOM, (int)sendcount,
+                       MPI_BYTE, recvbuf, icounts, idispls, MPI_BYTE,
+                       MPI_COMM_WORLD) != MPI_SUCCESS) {
+        set_err("MPI_Allgatherv failed");
+        status = -1;
+    }
+    free(icounts);
+    free(idispls);
+    return status;
 }
 
 int mpi_netcdf_bcast_i64(long long *value, int root)

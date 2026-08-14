@@ -27,18 +27,32 @@ things differ, and only these four.
    ``partition_dim="event"``. Nothing is gathered to rank zero and no
    per-rank files are written and merged afterwards.
 
-Filesystem work stays on one rank: directory preparation, the existence
-checks and the rsync are decorated with :func:`climtools.MPI`, so they run on
-the root rank while the other ranks wait at the implied collective. The
-compute functions are decorated for all-rank execution. Functions that touch
-neither, such as :func:`land_mask` or :func:`_build_event_masks`, carry no
-decorator at all and are ordinary local calls.
+Execution scope is declared per function with the :class:`climtools.MPI`
+decorator rather than through module-level handles.
+
+``@MPI`` on its own runs the function on the root rank while every other rank
+waits at the collective inside the wrapper. That is what keeps a non-root rank
+from racing ahead of a directory that does not exist yet, so all the
+filesystem work carries it: directory preparation, the existence checks and
+the rsync.
+
+``@MPI(all_ranks=True)`` runs the function everywhere and propagates a failure
+on any one rank to all of them, so a job cannot half-succeed. The stages that
+touch data carry it.
+
+Functions that need neither, such as :func:`land_mask` or
+:func:`_build_event_masks`, carry no decorator and are ordinary local calls.
+
+Rank identity and the reductions come from module-level helpers,
+``mpi.rank()``, ``mpi.size()``, ``mpi.total()`` and ``mpi.barrier()``, which
+share one coordinator behind the scenes. Nothing initializes MPI until the
+first of them is called, so importing this module is free.
 
 Run it either way::
 
-    python time_composites.py 2021071500
-    mpirun -n 8 python time_composites.py 2021071500
-    srun --MPI=pmix --ntasks=8 python time_composites.py 2021071500
+    python time_composites.py
+    mpirun -n 8 python time_composites.py
+    srun --mpi=pmix --ntasks=8 python time_composites.py
 
 With one rank and no MPI launcher the module behaves exactly like the serial
 original, except that the write goes through the parallel writer with
@@ -60,6 +74,7 @@ import pandas as pd
 import xarray as xr
 
 from climtools import MPI, xgeo
+from climtools import lib_mpi as mpi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,25 +83,19 @@ logging.basicConfig(
 
 logger = logging.getLogger("TIME COMPOSITES")
 
-#: One handle for the whole module. It is both the decorator applied to the
-#: collective stages and the object carrying `rank`, `size`, `barrier` and the
-#: reductions. Building it here rather than per call keeps every rank in the
-#: same collective order.
-COMM = MPI(all_ranks=True)
 
-#: Root-only decorator for filesystem work. Every rank must still call the
-#: wrapped function: the wrapper is itself collective, which is what keeps the
-#: non-root ranks from racing ahead of a directory that does not exist yet.
-ON_ROOT = MPI()
-
-#: Rank-aware log prefix. Progress lines are emitted by the root rank only,
-#: so an eight-rank job does not produce eight copies of every message.
-_RANK_TAG = f"[rank {COMM.rank}/{COMM.size}]"
+def rank_tag() -> str:
+    """Rank-aware log prefix, resolved when it is first needed."""
+    return f"[rank {mpi.rank()}/{mpi.size()}]"
 
 
 def log_root(message: str, *args: object) -> None:
-    """Emit an informational message from the root rank only."""
-    if COMM.is_root:
+    """Emit an informational message from the root rank only.
+
+    Progress lines come from the root rank alone, so an eight-rank job does
+    not produce eight copies of every message.
+    """
+    if mpi.is_root():
         logger.info(message, *args)
 
 
@@ -259,10 +268,8 @@ def partition_events(labels: xr.Dataset) -> tuple[xr.Dataset, int]:
     coordinate that restarts once per rank.
     """
     total = int(labels.sizes["event"])
-    base, remainder = divmod(total, COMM.size)
-    counts = [base + (1 if r < remainder else 0) for r in range(COMM.size)]
-    offset = int(sum(counts[: COMM.rank]))
-    local = labels.isel(event=slice(offset, offset + counts[COMM.rank]))
+    offset, stop = mpi.partition(total)
+    local = labels.isel(event=slice(offset, stop))
     return local, offset
 
 
@@ -462,6 +469,7 @@ def _composite_partials(
     )
 
 
+@MPI(all_ranks=True)
 def composite_from_events(
     events: xr.Dataset,
     intensity_edges: tuple[float, ...],
@@ -496,9 +504,9 @@ def composite_from_events(
     """
     numerator, denominator, counts = _composite_partials(events, intensity_edges)
 
-    numerator = COMM.allreduce_sum(numerator)
-    denominator = COMM.allreduce_sum(denominator)
-    counts = COMM.allreduce_sum(counts)
+    numerator = mpi.total(numerator)
+    denominator = mpi.total(denominator)
+    counts = mpi.total(counts)
 
     composite = numerator / denominator.where(denominator > 0)
     composite["n_events"] = counts.astype("int32")
@@ -537,14 +545,14 @@ def assemble_store(
     return xr.merge(parts, combine_attrs="no_conflicts")
 
 
-@ON_ROOT
+@MPI
 def prepare_output(output_root: Path) -> None:
     """Create the case output directory. Root rank only."""
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "event.store.nc").unlink(missing_ok=True)
 
 
-@ON_ROOT
+@MPI
 def archive_case(output_root: Path, final_path: Path, store_name: str) -> None:
     """Copy a finished case to its final location. Root rank only."""
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,6 +565,7 @@ def archive_case(output_root: Path, final_path: Path, store_name: str) -> None:
         raise RuntimeError(f"Final event store is missing after rsync: {final_store}")
 
 
+@MPI(all_ranks=True)
 def compute_event_time_composites(
     input_root: Path,
     output_root: Path,
@@ -588,7 +597,7 @@ def compute_event_time_composites(
 
     prepare_output(output_root)
     out_path = output_root / "event.store.nc"
-    COMM.barrier()
+    mpi.barrier()
 
     # chunks={} defers every field to dask. The gather in build_event_store
     # then materialises only the points this rank's events touch, instead of
@@ -612,7 +621,7 @@ def compute_event_time_composites(
         local_labels, event_offset = partition_events(labels)
         logger.info(
             "%s holds events %d to %d",
-            _RANK_TAG,
+            rank_tag(),
             event_offset,
             event_offset + local_labels.sizes["event"],
         )
@@ -671,10 +680,10 @@ def compute_event_time_composites(
         )
         elapsed = time.perf_counter() - started
         log_root(
-            "Collective write finished in %.2f s on %d rank(s)", elapsed, COMM.size
+            "Collective write finished in %.2f s on %d rank(s)", elapsed, mpi.size()
         )
 
-    COMM.barrier()
+    mpi.barrier()
 
     if not out_path.exists():
         raise RuntimeError(f"Event composite file was not written to {out_path}")
@@ -686,7 +695,7 @@ def compute_event_time_composites(
 def main() -> None:
 
     date = "2024081400Z"
-    log_root("Starting time composites for %s on %d rank(s)", date, COMM.size)
+    log_root("Starting time composites for %s on %d rank(s)", date, mpi.size())
 
     home = Path("/users/jkodero")
     gfdl_shield = home / "research/models/gfdl_shield"
@@ -749,17 +758,17 @@ def main() -> None:
 
         discard_case(tmp_dir / init_date)
 
-    COMM.barrier()
+    mpi.barrier()
 
 
-@ON_ROOT
+@MPI
 def clear_case(output_root: Path) -> None:
     """Remove and recreate a case working directory. Root rank only."""
     shutil.rmtree(output_root, ignore_errors=True)
     output_root.mkdir(parents=True)
 
 
-@ON_ROOT
+@MPI
 def discard_case(path: Path) -> None:
     """Remove a directory tree. Root rank only."""
     shutil.rmtree(path, ignore_errors=True)

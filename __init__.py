@@ -35,7 +35,8 @@ from typing import TYPE_CHECKING
 
 import dask.diagnostics
 
-from .accessors import *
+from .accessors.mpi_accessors import *
+from .accessors.xarray_accessors import *
 from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import apply_widget_css, n_cpus, redirect_streams
 
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from .viz import plotting as plot
 
 warnings.filterwarnings("ignore")
+warnings.filterwarnings("always", module=r"climtools\..*")
 
 __all__ = [
     "MPI",

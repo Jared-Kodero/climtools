@@ -17,6 +17,7 @@ statistics, NetCDF-writing and theming helpers.
 | `climtools.cmaps` | Colormaps spanning local IPCC tables, matplotlib and cmocean.             |
 | `climtools.cdo`   | Thin xarray-aware wrapper over the CDO command-line tool.                 |
 | `climtools.theme` | Publication styling for matplotlib and seaborn.                           |
+| `climtools.lib_mpi` | MPI decorators, collective reductions and parallel NetCDF-4 output.     |
 
 ## Installation
 
@@ -93,6 +94,37 @@ An animation over a dimension is encoded as MP4 (requires `ffmpeg`):
 ```python
 t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 ```
+
+## Parallel output
+
+Large workloads can be split across MPI ranks and written to one shared
+NetCDF-4 file, with no gather to rank zero and no per-rank files to merge.
+
+```python
+from climtools import MPI
+from climtools import lib_mpi as mpi
+
+@MPI(all_ranks=True)
+def main():
+    local = ds.xgeo.mpi.partition("event")     # this rank's contiguous block
+    composite = mpi.total(local.sum("event"))  # reduce across ranks
+    local.xgeo.mpi.to_netcdf("events.nc", partition_dim="event")
+
+main()
+```
+
+```bash
+mpirun -n 8 python script.py
+srun --ntasks=8 --mpi=pmix python script.py
+```
+
+The same script runs unchanged without a launcher, on a single rank. MPI is
+never initialized until a collective is actually called, so importing
+climtools in a serial session costs nothing.
+
+This requires the native extension, built once with `lib_mpi/install.sh`. See
+[`lib_mpi/README.md`](lib_mpi/README.md) for the step-by-step guide to writing
+code that uses it, and [`lib_mpi/BUILD.md`](lib_mpi/BUILD.md) for the build.
 
 ## Notes
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import os
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,21 @@ COLLECTIVE = 1
 
 _PROTOTYPES_APPLIED = False
 _LIBRARY: ctypes.CDLL | None = None
+#: Reason the library could not be loaded, cached so that a failure is
+#: diagnosed once instead of on every `available()` call. Loading is
+#: deterministic within a process: a missing file, an unloadable object or an
+#: absent module system will not become loadable later, so retrying only costs
+#: a `dlopen` attempt and a subprocess call to Lmod per query.
+_LOAD_ERROR: NativeLibraryError | None = None
+#: Rank and size of MPI_COMM_WORLD, cached after the first successful
+#: `init()`. MPI_Init_thread runs exactly once per process regardless, but
+#: caching keeps `world()` free of a C call on every access.
+_WORLD: tuple[int, int] | None = None
+
+
+#: ABI revision this Python layer is written against. Must match
+#: ``MPI_NETCDF_ABI_VERSION`` in ``src/mpi_netcdf.h``.
+ABI_VERSION = 2
 
 
 def library_path() -> Path:
@@ -44,13 +60,23 @@ def library_path() -> Path:
     Returns
     -------
     pathlib.Path
-        Path to the compiled ``libmpi_netcdf.so``.
+        Path to the compiled ``libmpi_netcdf.so``. ``MPI_NETCDF_LIBRARY``
+        overrides the bundled location when set.
 
     Raises
     ------
     FileNotFoundError
         If the native library has not been built.
     """
+    override = os.environ.get("MPI_NETCDF_LIBRARY")
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file():
+            return path
+        raise FileNotFoundError(
+            f"MPI_NETCDF_LIBRARY points at {path}, which is not a file."
+        )
+
     path = Path(__file__).parent / "lib" / "libmpi_netcdf.so"
 
     if path.exists():
@@ -82,6 +108,20 @@ def _declare(library: ctypes.CDLL) -> None:
     library.mpi_netcdf_consensus.restype = c_int
     library.mpi_netcdf_allgather_i64.argtypes = [c_ll, ctypes.POINTER(c_ll)]
     library.mpi_netcdf_allgather_i64.restype = c_int
+    # Symbols added after the first release. A library built from older
+    # sources still loads; the Python layer falls back to the broadcast loop
+    # and reports abi_version() == 1.
+    if hasattr(library, "mpi_netcdf_abi_version"):
+        library.mpi_netcdf_abi_version.argtypes = []
+        library.mpi_netcdf_abi_version.restype = c_int
+    if hasattr(library, "mpi_netcdf_allgatherv_bytes"):
+        library.mpi_netcdf_allgatherv_bytes.argtypes = [
+            c_void_p,
+            c_ll,
+            c_void_p,
+            ctypes.POINTER(c_ll),
+        ]
+        library.mpi_netcdf_allgatherv_bytes.restype = c_int
     library.mpi_netcdf_bcast_i64.argtypes = [ctypes.POINTER(c_ll), c_int]
     library.mpi_netcdf_bcast_i64.restype = c_int
     library.mpi_netcdf_bcast_bytes.argtypes = [c_void_p, c_ll, c_int]
@@ -160,24 +200,47 @@ def load() -> ctypes.CDLL:
         If the library is absent or cannot be loaded. Build it with
         ``lib_mpi/install.sh``.
     """
-    global _LIBRARY, _PROTOTYPES_APPLIED
+    global _LIBRARY, _LOAD_ERROR, _PROTOTYPES_APPLIED
 
     if _LIBRARY is not None:
         return _LIBRARY
+    if _LOAD_ERROR is not None:
+        raise _LOAD_ERROR
 
     try:
-        ensure_required_modules()
-    except ModuleLoadError as exc:
-        raise NativeLibraryError(str(exc)) from exc
+        try:
+            ensure_required_modules()
+        except ModuleLoadError as exc:
+            raise NativeLibraryError(str(exc)) from exc
 
-    path = library_path()
-    try:
-        library = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-    except OSError as exc:
-        raise NativeLibraryError(
-            f"cannot load {path}: {exc}. Build the extension by running "
-            + "lib_mpi/install.sh, or set MPI_NETCDF_LIBRARY."
-        ) from exc
+        try:
+            path = library_path()
+        except FileNotFoundError as exc:
+            raise NativeLibraryError(str(exc)) from exc
+
+        # Import netCDF4 first, if it is installed at all. The wheel on PyPI
+        # bundles its own serial HDF5 and NetCDF-C, and the library below is
+        # loaded RTLD_GLOBAL, which Open MPI needs so that its dlopened
+        # components resolve. Loading the parallel stack globally first makes
+        # the wheel's private HDF5 bind to the parallel symbols already in the
+        # global namespace, and the process segfaults on the first call into
+        # it. Importing the wheel first pins its own symbols and both stacks
+        # coexist. The order is what matters, not which stack "wins".
+        try:
+            import netCDF4  # noqa: F401
+        except Exception:  # pragma: no cover - absent or broken install
+            pass
+
+        try:
+            library = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            raise NativeLibraryError(
+                f"cannot load {path}: {exc}. Build the extension by running "
+                + "lib_mpi/install.sh, or set MPI_NETCDF_LIBRARY."
+            ) from exc
+    except NativeLibraryError as exc:
+        _LOAD_ERROR = exc
+        raise
 
     if not _PROTOTYPES_APPLIED:
         _declare(library)
@@ -186,6 +249,21 @@ def load() -> ctypes.CDLL:
     _LIBRARY = library
 
     return library
+
+
+def abi_version() -> int:
+    """Return the ABI revision of the loaded native library.
+
+    Returns
+    -------
+    int
+        Value reported by the compiled library, or ``1`` for a library built
+        before the ABI was versioned.
+    """
+    library = load()
+    if not hasattr(library, "mpi_netcdf_abi_version"):
+        return 1
+    return int(library.mpi_netcdf_abi_version())
 
 
 def available() -> bool:
@@ -266,10 +344,22 @@ def init() -> tuple[int, int]:
     -------
     tuple of int
         Rank and size of ``MPI_COMM_WORLD``.
+
+    Notes
+    -----
+    ``MPI_Init_thread`` is called at most once per process, by the C layer.
+    The rank and size are cached here as well, so that the hot paths that ask
+    for them do not cross the ctypes boundary on every call.
     """
+    global _WORLD
+
+    if _WORLD is not None:
+        return _WORLD
+
     library = load()
     check(library.mpi_netcdf_init(), "MPI initialization")
-    return int(library.mpi_netcdf_rank()), int(library.mpi_netcdf_size())
+    _WORLD = int(library.mpi_netcdf_rank()), int(library.mpi_netcdf_size())
+    return _WORLD
 
 
 def abort(code: int = 1) -> None:
@@ -285,7 +375,13 @@ def abort(code: int = 1) -> None:
 
 def finalize() -> None:
     """Finalize MPI only when this library initialized it."""
+    global _WORLD
+
     check(load().mpi_netcdf_finalize(), "MPI finalization")
+    # The world no longer exists. Clearing the cache means a later `init()`
+    # asks the C layer again and gets its "already finalized" error, rather
+    # than handing back a rank and size that are no longer meaningful.
+    _WORLD = None
 
 
 def allgather_i64(value: int, size: int) -> list[int]:
@@ -327,29 +423,132 @@ def bcast_obj(value: Any, root: int) -> Any:
         Object broadcast by the source rank.
     """
     library = load()
+    size = int(library.mpi_netcdf_size())
+    if size <= 1:
+        return value
     rank = int(library.mpi_netcdf_rank())
     payload = (
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL) if rank == root else b""
     )
-    n = ctypes.c_longlong(len(payload))
-    check(
-        library.mpi_netcdf_bcast_i64(ctypes.byref(n), int(root)),
-        "MPI broadcast size",
-    )
+    return pickle.loads(bcast_bytes(payload, int(root), size))
 
-    if n.value <= 0:
+
+def allgather_bytes(payload: bytes, size: int) -> list[bytes]:
+    """All-gather one variable-length byte payload from every rank.
+
+    Parameters
+    ----------
+    payload : bytes
+        Bytes contributed by the current rank.
+    size : int
+        Number of ranks in ``MPI_COMM_WORLD``.
+
+    Returns
+    -------
+    list of bytes
+        Payloads from all ranks in rank order.
+
+    Notes
+    -----
+    One ``MPI_Allgatherv`` when the library supports it, and a per-rank
+    broadcast loop otherwise. Both produce rank-ordered output, so any
+    reduction built on this is associated identically on every rank and is
+    therefore bit-identical everywhere.
+    """
+    if size < 1:
+        raise ValueError(f"size must be positive, got {size}.")
+    if size == 1:
+        return [payload]
+
+    library = load()
+    counts = allgather_i64(len(payload), size)
+    total = sum(counts)
+
+    if hasattr(library, "mpi_netcdf_allgatherv_bytes") and total <= 0x7FFFFFFF:
+        send = ctypes.create_string_buffer(payload, max(len(payload), 1))
+        recv = ctypes.create_string_buffer(max(total, 1))
+        count_array = (ctypes.c_longlong * size)(*counts)
+        status = library.mpi_netcdf_allgatherv_bytes(
+            ctypes.cast(send, ctypes.c_void_p) if payload else None,
+            len(payload),
+            ctypes.cast(recv, ctypes.c_void_p),
+            count_array,
+        )
+        if status == 0:
+            raw = recv.raw
+            out: list[bytes] = []
+            offset = 0
+            for count in counts:
+                out.append(raw[offset : offset + count])
+                offset += count
+            return out
+        # A refusal here is a capability limit reported by the C layer, not a
+        # communication failure: nothing has been sent, so falling through to
+        # the broadcast loop is safe and leaves no rank mid-collective.
+
+    return [bcast_bytes(payload, source, size) for source in range(size)]
+
+
+def bcast_bytes(payload: bytes, root: int, size: int) -> bytes:
+    """Broadcast a byte payload from ``root``.
+
+    Parameters
+    ----------
+    payload : bytes
+        Bytes supplied by the root rank. Ignored on other ranks.
+    root : int
+        Source rank.
+    size : int
+        Number of ranks in ``MPI_COMM_WORLD``.
+
+    Returns
+    -------
+    bytes
+        Payload held by the root rank.
+    """
+    library = load()
+    if size == 1:
+        return payload
+
+    rank = int(library.mpi_netcdf_rank())
+    n = ctypes.c_longlong(len(payload) if rank == root else 0)
+    check(library.mpi_netcdf_bcast_i64(ctypes.byref(n), int(root)), "MPI broadcast size")
+    if n.value < 0:
         raise NativeLibraryError(
             f"MPI broadcast reported an invalid payload size: {n.value}."
         )
+    if n.value == 0:
+        return b""
+
     buffer = ctypes.create_string_buffer(n.value)
-    if rank == root and n.value:
+    if rank == root:
         ctypes.memmove(buffer, payload, n.value)
-    if n.value:
-        check(
-            library.mpi_netcdf_bcast_bytes(buffer, n.value, int(root)),
-            "MPI broadcast payload",
-        )
-    return pickle.loads(buffer.raw[: n.value])
+    check(
+        library.mpi_netcdf_bcast_bytes(buffer, n.value, int(root)),
+        "MPI broadcast payload",
+    )
+    return buffer.raw[: n.value]
+
+
+def allgather_obj(value: Any, size: int) -> list[Any]:
+    """All-gather one picklable object from every rank in rank order.
+
+    Parameters
+    ----------
+    value : Any
+        Object contributed by the current rank.
+    size : int
+        Number of ranks in ``MPI_COMM_WORLD``.
+
+    Returns
+    -------
+    list of Any
+        Objects from all ranks, ordered by rank.
+    """
+    if size == 1:
+        return [value]
+    payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    return [pickle.loads(item) for item in allgather_bytes(payload, size)]
 
 
 def str_array(values: Iterable[str]) -> Any:

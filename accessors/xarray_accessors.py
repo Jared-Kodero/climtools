@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import xarray as xr
 
 from ..core import xgeo
+from .mpi_accessors import MPIAccessor
 
 if TYPE_CHECKING:
     from typing import Any, Literal
@@ -29,6 +30,19 @@ class GeoBase:
         kind = type(self._obj).__name__
         dims = ", ".join(f"{name}: {size}" for name, size in self._obj.sizes.items())
         return f"<xgeo accessor on {kind} ({dims})>"
+
+    # -- MPI ---------------------------------------------------------------
+    @property
+    def mpi(self) -> MPIAccessor:
+        """Collective namespace, for example ``ds.xgeo.mpi.sum()``.
+
+        Returns
+        -------
+        MPIAccessor
+            The same accessor reached as ``ds.mpi``. Building it costs
+            nothing: MPI is initialized only when a collective is called.
+        """
+        return MPIAccessor(self._obj)
 
     # -- regridding and masking ------------------------------------------
     def remap(

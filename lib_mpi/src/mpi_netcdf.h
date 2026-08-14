@@ -59,6 +59,18 @@ int mpi_netcdf_barrier(void);
 /* COLLECTIVE. All-gather of one 64-bit integer per rank into out[size]. */
 int mpi_netcdf_allgather_i64(long long value, long long *out);
 
+/* COLLECTIVE. All-gather of a variable-length byte payload.  counts[size]
+ * holds every rank's send length, as returned by mpi_netcdf_allgather_i64,
+ * and recvbuf must be large enough for their sum.  Displacements are computed
+ * internally, so the result is concatenated in rank order on every rank.
+ *
+ * Returns -1 without communicating when the total payload or any single
+ * displacement exceeds INT_MAX, which the MPI-2 Allgatherv signature cannot
+ * express.  The caller is expected to fall back to a per-rank broadcast loop
+ * in that case, so this is a capability report and not a fatal error. */
+int mpi_netcdf_allgatherv_bytes(const void *sendbuf, long long sendcount,
+                                void *recvbuf, const long long *counts);
+
 /* COLLECTIVE. Broadcast one 64-bit integer from root. */
 int mpi_netcdf_bcast_i64(long long *value, int root);
 
@@ -75,6 +87,13 @@ int mpi_netcdf_finalize(void);
 const char *mpi_netcdf_strerror(void);
 const char *mpi_netcdf_version(void);       /* NetCDF-C version string */
 int mpi_netcdf_has_parallel_filters(void);  /* 1 if compression is usable in parallel */
+
+/* Version of this C ABI.  Incremented whenever a symbol is added or its
+ * signature changes, so that a Python layer newer than an already-built
+ * libmpi_netcdf.so can detect the mismatch instead of calling into a symbol
+ * that is absent or has different arguments. */
+#define MPI_NETCDF_ABI_VERSION 2
+int mpi_netcdf_abi_version(void);
 
 /* --- file lifecycle ------------------------------------------------------ */
 
