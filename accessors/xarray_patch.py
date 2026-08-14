@@ -3,12 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# Dev Used in Dev Mode to test xr integration
+# Dev Used in Dev Mode to test xr integration ( DO NOT MODIFY )
 def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     """Patch xarray source so IDEs resolve registered accessors for completion."""
-    import json
+
     from importlib.util import find_spec
-    from pathlib import Path
 
     # Check the marker first, before importing xarray or any integrations.
     xarray_spec = find_spec("xarray")
@@ -17,16 +16,12 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
 
     marker = Path(xarray_spec.origin).resolve().parent / ".xgeo_patch"
 
-    recorded = None
-    if not force:
-        try:
-            recorded = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
+    if not force and marker.exists():
+        return None
 
-    # Everything below this point is only needed to validate/regenerate the
-    # existing marker or create a new patch.
+    # Everything below this point is only needed to create a new patch.
     import inspect
+    import json
     import os
     import sys
 
@@ -95,11 +90,6 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             "integrations": integrations,
         }
 
-    # Marker was already read at function entry. Validate it now without
-    # importing any optional integration.
-    if recorded is not None and recorded == signature():
-        return ()
-
     # Heavy path begins here.
     import ast
     import importlib
@@ -123,8 +113,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                     continue
 
                 raise RuntimeError(
-                    f"{module_name!r} is installed but dependency "
-                    f"{missing!r} is missing."
+                    f"{module_name!r} is installed but dependency {missing!r} is missing."
                 ) from exc
 
             for name in names:
@@ -144,8 +133,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
 
                     if accessor.__qualname__ != accessor.__name__:
                         raise RuntimeError(
-                            f"{class_name}.{name} is a nested class "
-                            "and cannot be imported."
+                            f"{class_name}.{name} is a nested class and cannot be imported."
                         )
 
                     found[cls].append(
