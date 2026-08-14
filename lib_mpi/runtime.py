@@ -1,30 +1,134 @@
 """MPI setup and decorators for functions executed by an existing MPI job.
 
-This module never starts processes. The caller must launch Python with
-``srun`` or ``mpirun``. Importing the module initializes MPI in the current
-process through :mod:`mpi.native` and publishes the immutable world rank and
-size.
+This module never starts processes. The caller launches Python with ``srun``
+or ``mpirun``. MPI is initialized through :mod:`climtools.lib_mpi.native` on
+first use rather than at import, so importing the package on a machine where
+the extension has not been built does not fail.
+
+Without the extension, and only when the process launcher reports a single
+task, :func:`world` reports ``(0, 1)`` and the decorators execute the wrapped
+function locally. One script therefore runs unchanged under ``python`` and
+under ``mpirun -n N python``. A launcher reporting more than one task with no
+usable extension raises :class:`MPIError`, because reporting ``(0, 1)`` there
+would let every rank believe it owns the whole dataset.
 """
 
 from __future__ import annotations
 
 import functools
+import os
 import pickle
 from collections.abc import Callable
 from numbers import Integral
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from . import native
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
+if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
+    MPI_RANK: int
+    MPI_SIZE: int
+
+#: Environment variables set by the common launchers, used to detect a
+#: multi-rank job when the native library itself cannot be loaded.
+_LAUNCHER_SIZE_VARS = (
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PMIX_RANK",
+    "MV2_COMM_WORLD_SIZE",
+    "SLURM_NTASKS",
+    "SLURM_NPROCS",
+)
+
 
 class MPIError(native.NativeLibraryError):
     """An error propagated from another rank."""
 
 
-MPI_RANK, MPI_SIZE = native.init()
+def available() -> bool:
+    """Report whether the compiled MPI extension can be used.
+
+    Returns
+    -------
+    bool
+        ``True`` when the native library loads and MPI initializes.
+    """
+    if not native.available():
+        return False
+    try:
+        native.init()
+    except native.NativeLibraryError:
+        return False
+    return True
+
+
+def launcher_size() -> int:
+    """Return the world size advertised by the process launcher.
+
+    Returns
+    -------
+    int
+        Number of tasks reported by the launcher environment, or ``1`` when
+        the process was started without one.
+
+    Notes
+    -----
+    This inspects the environment only. It is the sole way to tell a genuine
+    one-rank job from a multi-rank job whose native library failed to load,
+    which decides whether a serial fallback is safe.
+    """
+    for name in _LAUNCHER_SIZE_VARS:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            size = int(value)
+        except ValueError:
+            continue
+        if name == "PMIX_RANK":
+            size += 1
+        if size > 1:
+            return size
+    return 1
+
+
+def world() -> tuple[int, int]:
+    """Return the rank and size of ``MPI_COMM_WORLD``.
+
+    Returns
+    -------
+    tuple of int
+        ``(rank, size)``. Without the native library this is ``(0, 1)``, so
+        that a script written for MPI also runs unmodified in serial.
+
+    Raises
+    ------
+    MPIError
+        If the launcher reports more than one task but the native library
+        cannot be loaded. Reporting ``(0, 1)`` there would let every rank
+        believe it owns the whole dataset and overwrite the same output.
+    """
+    if native.available():
+        return native.init()
+
+    size = launcher_size()
+    if size > 1:
+        raise MPIError(
+            f"the launcher reports {size} tasks but the MPI extension is not "
+            + f"built at {native.library_path()}. Run lib_mpi/install.sh "
+            + "before launching a multi-rank job."
+        )
+    return 0, 1
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``MPI_RANK`` and ``MPI_SIZE`` on first access."""
+    if name in ("MPI_RANK", "MPI_SIZE"):
+        rank, size = world()
+        return rank if name == "MPI_RANK" else size
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class MPI:
@@ -50,8 +154,8 @@ class MPI:
     and optional result broadcasting.
     """
 
-    MPI_RANK = MPI_RANK
-    MPI_SIZE = MPI_SIZE
+    MPI_RANK: int = 0
+    MPI_SIZE: int = 1
 
     def __init__(
         self,
@@ -61,12 +165,10 @@ class MPI:
         root: int = 0,
         require_ranks: int | None = None,
     ) -> None:
-        global MPI_RANK, MPI_SIZE
-
-        rank, size = native.init()
-        MPI_RANK, MPI_SIZE = rank, size
+        rank, size = world()
         type(self).MPI_RANK = rank
         type(self).MPI_SIZE = size
+        self.native = native.available()
 
         if not isinstance(all_ranks, bool) or not isinstance(broadcast, bool):
             raise TypeError("all_ranks and broadcast must be bool values.")
@@ -114,6 +216,8 @@ class MPI:
 
     def barrier(self) -> None:
         """Wait until every rank reaches this call."""
+        if not self.native:
+            return
         native.check(native.lib.mpi_netcdf_barrier(), "MPI barrier")
 
     def allgather(self, value: int) -> list[int]:
@@ -131,6 +235,8 @@ class MPI:
         """
         if isinstance(value, bool) or not isinstance(value, Integral):
             raise TypeError("allgather value must be an integer.")
+        if not self.native:
+            return [int(value)]
         return native.allgather_i64(int(value), self.size)
 
     def bcast(self, value: Any = None, *, root: int | None = None) -> Any:
@@ -163,7 +269,53 @@ class MPI:
             raise ValueError(
                 f"Target broadcast root rank {source} is outside valid range [0, {self.size})."
             )
+        if not self.native:
+            return value
         return native.bcast_obj(value, source)
+
+    def allgather_obj(self, value: Any) -> list[Any]:
+        """Gather one picklable object from every rank in rank order.
+
+        Parameters
+        ----------
+        value : Any
+            Object contributed by the current rank.
+
+        Returns
+        -------
+        list of Any
+            Objects contributed by all ranks, ordered by rank.
+
+        Notes
+        -----
+        Implemented as one broadcast per rank, so the list is assembled in the
+        same order on every rank. Reductions built on it are bit-identical
+        everywhere, which the parallel writer requires of any array that is
+        replicated rather than partitioned.
+        """
+        if not self.native:
+            return [value]
+        return [self.bcast(value, root=source) for source in range(self.size)]
+
+    def allreduce_sum(self, value: Any) -> Any:
+        """Sum one picklable object across all ranks in rank order.
+
+        Parameters
+        ----------
+        value : Any
+            Addend contributed by the current rank. Any type supporting ``+``
+            is accepted, including numpy arrays and xarray objects.
+
+        Returns
+        -------
+        Any
+            Sum over all ranks, identical on every rank.
+        """
+        parts = self.allgather_obj(value)
+        total = parts[0]
+        for part in parts[1:]:
+            total = total + part
+        return total
 
     def abort(self, code: int = 1) -> None:
         """Terminate all ranks in ``MPI_COMM_WORLD``.
@@ -173,10 +325,14 @@ class MPI:
         code : int, optional
             Error code supplied to the MPI abort operation.
         """
+        if not self.native:
+            raise SystemExit(code)
         native.abort(code)
 
     def finalize(self) -> None:
         """Finalize MPI if this package initialized it."""
+        if not self.native:
+            return
         native.finalize()
 
     def _raise_distributed(self, error: BaseException | None) -> None:
@@ -186,6 +342,12 @@ class MPI:
             failed_rank = failed.index(1)
         except ValueError:
             return
+
+        # A rank that failed already holds the original exception, with its
+        # own type and traceback. Only ranks that succeeded need the remote
+        # description, and only those may be told about another rank.
+        if error is not None and all(failed):
+            raise error.with_traceback(error.__traceback__)
 
         detail: tuple[str, str] | None = None
 
@@ -350,4 +512,13 @@ def mpi(
     )
 
 
-__all__ = ["MPI", "MPI_RANK", "MPI_SIZE", "MPIError", "mpi"]
+__all__ = [
+    "MPI",
+    "MPI_RANK",
+    "MPI_SIZE",
+    "MPIError",
+    "available",
+    "launcher_size",
+    "mpi",
+    "world",
+]

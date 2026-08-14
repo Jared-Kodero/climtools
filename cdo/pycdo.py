@@ -51,7 +51,7 @@ from typing import Literal
 
 import xarray as xr
 
-from .tools import n_cpus
+from ..core.tools import n_cpus
 
 # ---------------------------------------------------------------------------
 # Module metadata

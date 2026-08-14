@@ -1,65 +1,34 @@
-"""
-Geospatial operations on xarray objects.
-
-This module is the working namespace of the package. It re-exports the
-plotting entry points, the statistical routines and the NetCDF writers, and
-adds the operations that act directly on gridded data: regridding
-(:func:`remap`), land-sea masking (:func:`mask`), transect selection
-(:func:`sel_transect`), local solar time (:func:`add_local_solar_time`) and a
-Dask cluster helper (:class:`SetupDask`).
-
-Typical use::
-
-    from climtools import xgeo as xg
-
-    da = xg.remap(da, target_grid, method="conservative")
-    da = xg.mask(da, valid_value=1)
-    xg.plot.geo(da.mean("time"), method="contourf")
-
-Every function here is also reachable as a method on the ``.xgeo`` accessor,
-which is registered on both ``DataArray`` and ``Dataset`` when the package is
-imported::
-
-    da.xgeo.remap(target_grid).xgeo.mask().xgeo.plot.geo()
-
-Regridding requires ``xesmf``. It is imported on first use, so the rest of the
-package remains usable in environments where ESMF is not installed.
-"""
-
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-from collections.abc import Iterable, Mapping
-from os import PathLike
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
+import cartopy.util
 import numpy as np
 import pandas as pd
 import xarray as xr
+from cf_xarray import *
 from hvplot.xarray import *
 from typing_extensions import Self
 
-from . import calc_stats as calc
-from . import cmaps
-from . import plotting as plot
-from .nc4_utils import (
-    append_to_netcdf,
-    to_netcdf_parallel,
-    to_netcdf_serial,
-)
-from .preprocess_era5 import preprocess_era5
-from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus, tmp
-from .xgeo_utils import (
-    grid_id,
+from .core import calc_stats as calc
+from .core.preprocess_data import preprocess_era5
+from .core.progress import DaskProgressBar, SerialProgressBar
+from .core.tools import n_cpus
+from .core.xgeo_utils import (
+    SetupDask,
+    add_local_solar_time,
+    mask,
+    remap,
     sel_transect,
     to_lon180,
 )
-
-# Collapse attributes by default in the repr.
-xr.set_options(display_expand_attrs=False)
+from .viz import cmaps
+from .viz import plotting as plot
 
 __all__ = [
     "DaskProgressBar",
@@ -82,111 +51,382 @@ __all__ = [
 
 _script_dir = Path(__file__).resolve().parent
 
+# Collapse attributes by default in the repr.
+xr.set_options(display_expand_attrs=False)
 
 #: Module-level Dask handles, shared by every :class:`SetupDask` instance.
 _dask_client = None
 _dask_cluster = None
 
 
-def to_netcdf(
-    data: xr.Dataset | xr.DataArray,
-    file: str | PathLike[str],
-    unlimited_dim: str | Iterable[str] | None = None,
-    partition_dim: str | None = None,
-    *,
-    parallel: bool = False,
-    batch_size: int = 1,
-    format: str = "NETCDF4",
-    shuffle: bool = True,
-    zlib: bool = True,
-    complevel: int = 4,
-    show_progress: bool = True,
-    stdout: Any = None,
-    chunks: Mapping[str, Iterable[int]] | None = None,
-    hints: str | None = None,
-    nofill: bool = True,
-    allow_serial: bool = False,
-) -> None:
-    """Write a Dataset or DataArray to NetCDF.
+def get_spatial_dims(
+    da: xr.DataArray | xr.Dataset,
+) -> tuple[str, str]:
+    """Return the longitude and latitude coordinate names."""
+    ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
 
-    Serial output is written incrementally along an unlimited dimension. With
-    ``parallel=True``, every MPI rank contributes its local contiguous slab to
-    one file through parallel NetCDF-4.
+    if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
+        ds = ds.cf.guess_coord_axis()
+
+    lon = ds.cf["longitude"]
+    lat = ds.cf["latitude"]
+
+    if lon.name is None or lat.name is None:
+        raise ValueError(
+            "Could not determine longitude and latitude coordinate names, specify x= and y="
+        )
+
+    return lon.name, lat.name
+
+
+def set_edges_to_nan(
+    da: xr.DataArray,
+    dims: str | Sequence[str],
+    width: int = 1,
+) -> xr.DataArray:
+    """Set edge cells along selected dimensions to NaN."""
+    if width < 0:
+        raise ValueError("width must be non-negative")
+
+    if width == 0:
+        return da
+
+    selected_dims = (dims,) if isinstance(dims, str) else tuple(dims)
+
+    missing_dims = set(selected_dims).difference(da.dims)
+    if missing_dims:
+        raise ValueError(f"Dimensions not found in DataArray: {sorted(missing_dims)}")
+
+    interior: dict[str, slice] = {}
+
+    for dim in selected_dims:
+        size = da.sizes[dim]
+
+        if 2 * width >= size:
+            return da.where(False)
+
+        interior[dim] = slice(width, size - width)
+
+    mask = xr.zeros_like(da, dtype=bool)
+    mask[interior] = True
+
+    return da.where(mask)
+
+
+def add_cyclic_point(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
+    """
+    Add a cyclic point to a DataArray along the specified longitude dimension.
 
     Parameters
     ----------
-    data : xarray.Dataset or xarray.DataArray
-        Data to write. In parallel mode, each rank supplies its local slab.
-    file : str or os.PathLike
-        Output path. An existing file is replaced.
-    unlimited_dim : str or iterable of str, optional
-        Dimension(s) made unlimited in the NetCDF schema.
-    partition_dim : str, optional
-        Dimension partitioned across MPI ranks in parallel mode. If omitted,
-        the parallel writer infers the partition axis.
-    parallel : bool, default False
-        Use the MPI-parallel NetCDF-4 writer.
-    batch_size : int, default 1
-        Number of slices along the unlimited dimension written per serial
-        append. Not used in parallel mode.
-    format : str, default "NETCDF4"
-        NetCDF format. Parallel output supports only ``"NETCDF4"``.
-    shuffle : bool, default True
-        Apply the HDF5 shuffle filter.
-    zlib : bool, default True
-        Apply zlib compression.
-    complevel : int, default 4
-        Compression level, between 1 and 9.
-    show_progress : bool, default True
-        Display a progress bar while writing serially.
-    stdout : file-like, optional
-        Stream the serial progress bar is written to. Defaults to
-        ``sys.stdout``.
-    chunks : mapping of str to iterable of int, optional
-        Explicit chunk shape passed to the parallel writer.
-    hints : str, optional
-        Semicolon-separated MPI-IO hints in key=value format.
-    nofill : bool, default True
-        Disable NetCDF pre-filling during parallel initialization.
-    allow_serial : bool, default False
-        Permit execution when running with a single MPI rank.
+    obj : xarray.DataArray or xarray.Dataset
+        The input DataArray or Dataset to which a cyclic point will be added.
+    lon : str, optional
+        The name of the longitude dimension. Default is "lon".
 
     Returns
     -------
-    None
+    xarray.DataArray or xarray.Dataset
+        The object with a cyclic point added.
     """
-    if not isinstance(data, (xr.Dataset, xr.DataArray)):
-        raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
-    target_path = Path(file)
+    dataset = False
 
-    if parallel:
-        return to_netcdf_parallel(
-            data,
-            target_path,
-            partition_dim=partition_dim,
-            deflate=complevel if zlib else None,
-            shuffle=shuffle,
-            chunks=chunks,
-            unlimited_dim=unlimited_dim if unlimited_dim is not None else (),
-            hints=hints,
-            nofill=nofill,
-            allow_serial=allow_serial,
+    if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
+        raise ValueError(
+            "Input object must be a DataArray or a Dataset with only one data variable."
         )
 
+    if isinstance(obj, xr.Dataset):
+        obj = list(obj.data_vars.values())[0]
+        dataset = True
+
+    if lon not in obj.dims:
+        raise ValueError(f"Longitude dimension '{lon}' not found in data dims.")
+
+    attrs = obj.attrs
+    cyclic_data, cyclic_dim = cartopy.util.add_cyclic_point(obj.values, coord=obj[lon])
+    coords = {dim: obj.coords[dim] for dim in obj.dims}
+    coords[lon] = cyclic_dim
+
+    new_obj = xr.DataArray(cyclic_data, dims=obj.dims, coords=coords, attrs=attrs)
+
+    if dataset:
+        new_obj = new_obj.to_dataset(name=obj.name)
+
+    return new_obj
+
+
+def sel_transect(
+    data: xr.Dataset | xr.DataArray,
+    x: float | None = None,
+    y: float | None = None,
+    orientation: float = 0.0,
+    width: float = 1.0,
+    *,
+    xdim: str | None = None,
+    ydim: str | None = None,
+    geometry: Literal["xy", "latlon"] = "latlon",
+    auto_infer_xy: Literal["min", "max"] | None = None,
+    snap: bool = True,
+    drop: bool = True,
+) -> xr.Dataset | xr.DataArray:
+    """
+    Select cells lying within a transect on a rectilinear xarray grid.
+
+    Parameters
+    ----------
+    data
+        Input Dataset or DataArray.
+    x, y
+        Transect centre. For spherical geometry, x is longitude and y is
+        latitude. Either coordinate may be omitted to select an axis-aligned
+        band.
+    orientation
+        Transect orientation in degrees clockwise from the positive y
+        direction. For spherical geometry, this is clockwise from north.
+    width
+        Transect width in approximate grid-cell units.
+    xdim, ydim
+        Names of the x and y coordinates.
+    geometry
+        ``"xy"`` for planar coordinates or ``"latlon"`` for
+        longitude-latitude coordinates in degrees.
+    auto_infer_xy
+        Extreme used to infer the transect centre when both ``x`` and ``y``
+        are omitted. The default, ``None``, disables automatic inference.
+        Set explicitly to ``"min"`` or ``"max"`` to infer the centre from
+        a two-dimensional field.
+    snap
+        Snap the supplied centre coordinates to the nearest grid point.
+    drop
+        Drop coordinate locations outside the transect.
+    """
+
+    if xdim not in data.coords or ydim not in data.coords:
+        xdim, ydim = get_spatial_dims(data)
+
+    if width <= 0:
+        raise ValueError("`width` must be positive.")
+
+    if geometry not in {"xy", "latlon"}:
+        raise ValueError("`geometry` must be either 'xy' or 'latlon'.")
+
+    if auto_infer_xy not in {None, "min", "max"}:
+        raise ValueError("`auto_infer_xy` must be None, 'min', or 'max'.")
+
+    xc = data[xdim]
+    yc = data[ydim]
+
+    if xc.ndim != 1 or yc.ndim != 1 or xc.dims != (xdim,) or yc.dims != (ydim,):
+        raise ValueError(
+            "Coordinates must define a rectilinear grid with one-dimensional coordinate variables."
+        )
+
+    if xc.size < 2 or yc.size < 2:
+        raise ValueError("Each coordinate must contain at least two points.")
+
+    if x is None and y is None:
+        if auto_infer_xy is None:
+            raise ValueError(
+                "Both `x` and `y` are missing. Provide at least one coordinate or set `auto_infer_xy` explicitly to 'min' or 'max'."
+            )
+
+        if isinstance(data, xr.DataArray):
+            inference_data = data
+        elif len(data.data_vars) == 1:
+            inference_data = next(iter(data.data_vars.values()))
+        else:
+            raise ValueError(
+                "Automatic x/y inference for a Dataset requires exactly one data variable."
+            )
+
+        if inference_data.ndim != 2 or set(inference_data.dims) != {xdim, ydim}:
+            raise ValueError(
+                "Automatic x/y inference requires data with exactly the x and y dimensions."
+            )
+
+        point_dim = "__transect_point"
+        flattened = inference_data.stack({point_dim: (ydim, xdim)})
+
+        if not bool(flattened.notnull().any().compute().item()):
+            raise ValueError(
+                "Cannot infer x and y from data containing only missing values."
+            )
+
+        if auto_infer_xy == "max":
+            point_index = flattened.argmax(point_dim, skipna=True)
+        else:
+            point_index = flattened.argmin(point_dim, skipna=True)
+
+        selected = flattened.isel({point_dim: int(point_index.compute().item())})
+        x = float(selected[xdim].item())
+        y = float(selected[ydim].item())
+
+    latlon = geometry == "latlon"
+
+    def longitude_delta(
+        values: xr.DataArray,
+        centre: float,
+    ) -> xr.DataArray:
+        """Signed shortest longitude difference in degrees."""
+        return (values - centre + 180.0) % 360.0 - 180.0
+
+    dx_values = xc.diff(xdim)
+    if latlon:
+        dx_values = longitude_delta(dx_values, 0.0)
+
+    dx = np.abs(dx_values).median(xdim)
+    dy = np.abs(yc.diff(ydim)).median(ydim)
+
+    # Resolve the x-coordinate of the transect centre.
+    if x is None:
+        x0 = None
+    elif not snap:
+        x0 = float(x)
+    elif latlon:
+        distance = np.abs(longitude_delta(xc, x))
+        index = distance.argmin(xdim)
+        x0 = float(xc.isel({xdim: index}))
     else:
-        return to_netcdf_serial(
-            data=data,
-            file=file,
-            unlimited_dim=unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
+        x0 = float(xc.sel({xdim: x}, method="nearest"))
+
+    # Resolve the y-coordinate of the transect centre.
+    if y is None:
+        y0 = None
+    elif snap:
+        y0 = float(yc.sel({ydim: y}, method="nearest"))
+    else:
+        y0 = float(y)
+
+    # Axis-aligned y band.
+    if x0 is None:
+        mask = np.abs(yc - y0) <= 0.5 * width * dy
+        return data.where(mask, drop=drop)
+
+    # Axis-aligned x or longitude band.
+    if y0 is None:
+        offset = longitude_delta(xc, x0) if latlon else xc - x0
+        mask = np.abs(offset) <= 0.5 * width * dx
+        return data.where(mask, drop=drop)
+
+    theta = np.deg2rad(orientation % 180.0)
+
+    if not latlon:
+        # Unit normal to a line oriented clockwise from positive y.
+        normal_x = np.cos(theta)
+        normal_y = -np.sin(theta)
+
+        cross_track = (xc - x0) * normal_x + (yc - y0) * normal_y
+
+        cell_width = np.hypot(
+            normal_x * dx,
+            normal_y * dy,
         )
+
+        mask = np.abs(cross_track) <= 0.5 * width * cell_width
+        return data.where(mask, drop=drop)
+
+    # Spherical great-circle transect.
+    phi0 = np.deg2rad(y0)
+    lam0 = np.deg2rad(x0)
+
+    cross_north_weight = abs(np.sin(theta))
+    cross_east_weight = abs(np.cos(theta))
+
+    cell_width = np.hypot(
+        cross_north_weight * dy,
+        cross_east_weight * dx * np.cos(phi0),
+    )
+
+    anchor = np.array(
+        [
+            np.cos(phi0) * np.cos(lam0),
+            np.cos(phi0) * np.sin(lam0),
+            np.sin(phi0),
+        ]
+    )
+
+    north = np.array(
+        [
+            -np.sin(phi0) * np.cos(lam0),
+            -np.sin(phi0) * np.sin(lam0),
+            np.cos(phi0),
+        ]
+    )
+
+    east = np.array(
+        [
+            -np.sin(lam0),
+            np.cos(lam0),
+            0.0,
+        ]
+    )
+
+    direction = np.cos(theta) * north + np.sin(theta) * east
+    normal = np.cross(anchor, direction)
+
+    phi = np.deg2rad(yc)
+    lam = np.deg2rad(xc)
+
+    point_x = np.cos(phi) * np.cos(lam)
+    point_y = np.cos(phi) * np.sin(lam)
+    point_z = np.sin(phi)
+
+    dot_normal = (normal[0] * point_x + normal[1] * point_y + normal[2] * point_z).clip(
+        min=-1.0, max=1.0
+    )
+
+    cross_track = np.rad2deg(np.arcsin(dot_normal))
+    mask = np.abs(cross_track) <= 0.5 * width * cell_width
+
+    return data.where(mask, drop=drop)
+
+
+def to_lon180(
+    data: xr.Dataset | xr.DataArray, lon: str = "lon"
+) -> xr.Dataset | xr.DataArray:
+    """
+    Standardize longitude coordinates to [-180, 180).
+
+    Parameters
+    ----------
+    data : xr.Dataset or xr.DataArray
+        The input dataset or data array containing a longitude coordinate.
+    lon : str, default 'lon'
+        The name of the longitude coordinate in the dataset.
+
+    Returns
+    -------
+    xr.Dataset or xr.DataArray
+        The dataset or data array with standardized longitude coordinates.
+    """
+    if lon not in data.coords:
+        raise ValueError(f"Dataset must contain {lon!r} coordinate.")
+
+    data = data.copy()
+    data[lon] = (data[lon] + 180) % 360 - 180
+    data = data.sortby(lon)
+    return data
+
+
+def coord_id(coord: xr.DataArray) -> str:
+    """Return a compact description of a regular coordinate."""
+    dim = coord.dims[0]
+    step = float(coord.diff(dim).mean())
+    mean = float(coord.mean(dim))
+
+    return f"{coord.size}:{float(coord.min()):.8g}:{float(coord.max()):.8g}:{mean:.8g}:{step:.8g}"
+
+
+def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
+    """Return a deterministic hexadecimal identifier for a lat-lon grid."""
+    signature = f"lat-{coord_id(coords['lat'])}_lon-{coord_id(coords['lon'])}"
+
+    return hashlib.blake2b(
+        signature.encode("utf-8"),
+        digest_size=8,
+    ).hexdigest()
 
 
 def remap(

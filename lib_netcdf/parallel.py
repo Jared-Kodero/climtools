@@ -1,9 +1,12 @@
-"""Public binding for collective NetCDF-4 output from an xarray Dataset.
+"""Collective NetCDF-4 output from a distributed xarray Dataset.
 
 Model: every rank holds a contiguous, non-overlapping slab of one dimension of
 the same logical dataset, and identical copies of everything else. The slab
 boundaries are recovered at write time from an all-gather of the local lengths
 along that dimension, so no rank has to be told its global offset.
+
+This module is the NetCDF half of the parallel writer. Process coordination
+and the C ABI live in :mod:`climtools.lib_mpi`.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import ctypes
 import hashlib
 import logging
 import math
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from numbers import Integral
 from os import PathLike
@@ -19,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import xarray as xr
 
-from . import native
-from .native import NativeLibraryError
-from .runtime import mpi
+from ..lib_mpi import native
+from ..lib_mpi.native import NativeLibraryError
+from ..lib_mpi.runtime import mpi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -314,10 +319,30 @@ class WorldComm:
         error: BaseException | None,
         phase: str,
     ) -> None:
-        """Raise the same synchronized validation error on every rank."""
+        """Raise the same synchronized validation error on every rank.
+
+        Parameters
+        ----------
+        error : BaseException or None
+            Failure observed locally, or ``None``.
+        phase : str
+            Name of the validation phase, used in the message.
+
+        Raises
+        ------
+        BaseException
+            The local exception, unchanged, when every rank failed. A bad
+            argument is not a disagreement between ranks, so its type and
+            message must survive.
+        InconsistentRanksError
+            When only some ranks failed.
+        """
         failures = self.allgather(1 if error is not None else 0)
         if not any(failures):
             return
+
+        if error is not None and all(failures):
+            raise error
 
         failed_rank = failures.index(1)
         detail: tuple[str, str] | None = None
@@ -625,6 +650,7 @@ def to_netcdf(
     hints: str | None = None,
     nofill: bool = True,
     allow_serial: bool = False,
+    strict_compression: bool = False,
 ) -> str:
     """Write a distributed xarray dataset to one NetCDF-4 file.
 
@@ -652,6 +678,10 @@ def to_netcdf(
         Disable NetCDF pre-filling when ``True``.
     allow_serial : bool, optional
         Permit execution with a one-rank MPI world.
+    strict_compression : bool, optional
+        Fail when ``deflate`` is requested but the linked NetCDF-C and HDF5
+        lack parallel filter support. When ``False``, compression is disabled
+        and a warning is issued instead.
 
     Returns
     -------
@@ -677,6 +707,7 @@ def to_netcdf(
     rank, size = native.init()
     require_parallel(size, allow_serial)
     comm = WorldComm(rank, size)
+    dropped_deflate = False
 
     normalized: (
         tuple[
@@ -689,6 +720,8 @@ def to_netcdf(
     ) = None
     error: BaseException | None = None
     try:
+        if not isinstance(strict_compression, bool):
+            raise TypeError("strict_compression must be a bool.")
         normalized = _normalize_options(
             path,
             partition_dim,
@@ -703,16 +736,33 @@ def to_netcdf(
         if normalized[1] is not None and not bool(
             native.lib.mpi_netcdf_has_parallel_filters()
         ):
-            raise NativeLibraryError(
-                "Deflate compression requires NetCDF-C and HDF5 built with "
-                + "parallel filter support."
-            )
+            if strict_compression:
+                raise NativeLibraryError(
+                    "Deflate compression requires NetCDF-C and HDF5 built "
+                    + "with parallel filter support. Pass deflate=None, or "
+                    + "strict_compression=False to write uncompressed."
+                )
+            # Filter support is a property of the linked library, so this
+            # decision is identical on every rank and cannot desynchronize
+            # them. Downgrading here keeps the documented default call
+            # working on the many stacks built without parallel filters.
+            normalized = (normalized[0], None, normalized[2], normalized[3])
+            dropped_deflate = True
     except BaseException as exc:
         error = exc
     comm.raise_if_error(error, "writer option validation")
     if normalized is None:
         raise AssertionError("synchronized option validation produced no result")
     output_path, deflate_level, chunk_map, unlimited = normalized
+
+    if dropped_deflate and rank == 0:
+        warnings.warn(
+            "Deflate compression was requested but the linked NetCDF-C and "
+            + "HDF5 lack parallel filter support; writing uncompressed. Pass "
+            + "strict_compression=True to make this an error.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     option_key = repr(
         (
@@ -725,6 +775,7 @@ def to_netcdf(
             hints,
             nofill,
             allow_serial,
+            strict_compression,
         )
     )
     _agree(_fingerprint(option_key), comm, "the writer options")
@@ -1002,4 +1053,95 @@ def require_parallel(size: int, allow_serial: bool) -> None:
     raise NativeLibraryError(msg)
 
 
-__all__ = ["InconsistentRanksError", "NativeLibraryError", "to_netcdf"]
+def to_netcdf_parallel(
+    data: xr.Dataset | xr.DataArray,
+    path: str | PathLike[str],
+    partition_dim: str | None = None,
+    deflate: int | None = None,
+    shuffle: bool = True,
+    chunks: Mapping[str, Iterable[int]] | None = None,
+    unlimited_dim: str | Iterable[str] = (),
+    hints: str | None = None,
+    nofill: bool = True,
+    allow_serial: bool = False,
+    strict_compression: bool = False,
+) -> str:
+    """Write a distributed Dataset or DataArray to one NetCDF-4 file.
+
+    Parameters
+    ----------
+    data : xarray.Dataset or xarray.DataArray
+        Slab owned by the current rank. A DataArray must be named.
+    path : str or os.PathLike
+        Output path visible to every rank.
+    partition_dim : str or None, optional
+        Partitioned dimension. The writer infers it when omitted.
+    deflate : int or None, optional
+        Deflate compression level from 0 to 9.
+    shuffle : bool, default True
+        Enable the HDF5 shuffle filter.
+    chunks : mapping of str to iterable of int, optional
+        Explicit chunk shape for selected variables.
+    unlimited_dim : str or iterable of str, default ()
+        Dimensions defined as unlimited record dimensions.
+    hints : str or None, optional
+        Semicolon-separated MPI-IO hints in key=value form.
+    nofill : bool, default True
+        Disable NetCDF pre-filling.
+    allow_serial : bool, default False
+        Permit execution with a one-rank MPI world.
+    strict_compression : bool, default False
+        Fail rather than warn when compression is unavailable in parallel.
+
+    Returns
+    -------
+    str
+        Output path after the collective write completes.
+
+    Notes
+    -----
+    Time variables are deliberately not encoded here. The writer negotiates a
+    single set of CF units across all ranks before applying xarray's encoders;
+    encoding first would fix each rank's units from the values that rank
+    happens to hold, and the ranks would then disagree about the schema.
+    """
+    if isinstance(data, xr.DataArray):
+        if data.name is None:
+            raise ValueError("DataArray must have a name for parallel output.")
+        dataset = data.to_dataset()
+    elif isinstance(data, xr.Dataset):
+        dataset = data
+    else:
+        raise TypeError(
+            "data must be an xarray.Dataset or xarray.DataArray, got "
+            + f"{type(data).__name__}."
+        )
+
+    if isinstance(unlimited_dim, str):
+        unlimited: tuple[str, ...] = (unlimited_dim,)
+    elif unlimited_dim:
+        unlimited = tuple(unlimited_dim)
+    else:
+        unlimited = ()
+
+    return to_netcdf(
+        dataset,
+        path,
+        partition_dim=partition_dim,
+        deflate=deflate,
+        shuffle=shuffle,
+        chunks=chunks,
+        unlimited_dim=unlimited,
+        hints=hints,
+        nofill=nofill,
+        allow_serial=allow_serial,
+        strict_compression=strict_compression,
+    )
+
+
+__all__ = [
+    "InconsistentRanksError",
+    "NativeLibraryError",
+    "to_netcdf",
+    "to_netcdf_parallel",
+]

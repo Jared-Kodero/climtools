@@ -35,13 +35,18 @@ from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 
-from .tools import (
+from ..core.tools import (
     get_fsig,
     mpl_backend_changed,
     mpl_default_backend,
     set_preview_quality,
 )
-from .xgeo_utils import add_cyclic_point, get_spatial_dims, set_edges_to_nan, to_lon180
+from ..core.xgeo import (
+    add_cyclic_point,
+    get_spatial_dims,
+    set_edges_to_nan,
+    to_lon180,
+)
 
 __all__ = [
     "add_colorbar",

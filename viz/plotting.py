@@ -42,6 +42,8 @@ from matplotlib.image import AxesImage
 from matplotlib.quiver import Quiver, QuiverKey
 from matplotlib.text import Text
 
+from ..core.progress import DaskProgressBar, SerialProgressBar
+from ..core.tools import n_cpus, tmp
 from .plot_utils import (
     add_colorbar as _add_colorbar,
 )
@@ -73,8 +75,6 @@ from .plot_utils import (
     validate_data,
     validate_vector_components,
 )
-from .progress import DaskProgressBar, SerialProgressBar
-from .tools import n_cpus, tmp
 
 __all__ = [
     "Adder",

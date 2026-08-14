@@ -33,16 +33,16 @@ import warnings
 
 import dask.diagnostics
 
-from . import _operator as operator
-from . import calc_stats as calc
-from . import cmaps as cmaps
-from . import plotting as plot
-from . import pycdo as cdo
 from . import xgeo as xgeo
 from .accessors import *
+from .cdo import pycdo as cdo
+from .core import _operator as operator
+from .core import calc_stats as calc
+from .core.progress import DaskProgressBar, SerialProgressBar
+from .core.tools import *
 from .lib_mpi import MPI_RANK, MPI_SIZE, mpi
-from .progress import DaskProgressBar, SerialProgressBar
-from .tools import *
+from .viz import cmaps as cmaps
+from .viz import plotting as plot
 
 warnings.filterwarnings("ignore")
 
@@ -55,6 +55,7 @@ __all__ = [
     "cdo",
     "cmaps",
     "lib_mpi",
+    "mpi",
     "n_cpus",
     "operator",
     "plot",
@@ -68,7 +69,7 @@ __all__ = [
 # _self_update()
 
 try:
-    from ._typing import fix_xarray
+    from .accessors.xarray_patch import fix_xarray
 
     modified = fix_xarray()
     if modified:

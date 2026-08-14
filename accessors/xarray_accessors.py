@@ -5,12 +5,14 @@ from typing import Any, Literal
 
 import numpy as np
 import xarray as xr
+from hvplot.xarray import *
 from IPython.display import DisplayHandle
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from . import calc_stats as calc
-from . import plotting, xgeo, xgeo_utils
-from .plotting import GeoPlot
+from ..core import calc_stats as calc
+from ..core import xgeo
+from ..viz import plotting
+from ..viz.plotting import GeoPlot
 
 
 class GeoBase:
@@ -182,7 +184,7 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with wrapped and sorted longitudes.
         """
-        return xgeo_utils.to_lon180(self._obj, lon=lon)
+        return xgeo.to_lon180(self._obj, lon=lon)
 
     def add_cyclic_point(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
         """Append a cyclic longitude point, closing the seam at the date line.
@@ -197,7 +199,7 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with one extra longitude point.
         """
-        return xgeo_utils.add_cyclic_point(self._obj, lon=lon)
+        return xgeo.add_cyclic_point(self._obj, lon=lon)
 
     # -- selection --------------------------------------------------------
     def sel_transect(
@@ -239,7 +241,7 @@ class GeoBase:
         drop
             Drop coordinate locations outside the transect.
         """
-        return xgeo_utils.sel_transect(
+        return xgeo.sel_transect(
             self._obj,
             x=x,
             y=y,
