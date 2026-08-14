@@ -52,7 +52,6 @@ import itertools
 import logging
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -685,10 +684,8 @@ def compute_event_time_composites(
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"Usage: {Path(sys.argv[0]).name} YYYYMMDDHH")
 
-    date = sys.argv[1]
+    date = "2024081400Z"
     log_root("Starting time composites for %s on %d rank(s)", date, COMM.size)
 
     home = Path("/users/jkodero")
