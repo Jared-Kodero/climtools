@@ -43,8 +43,8 @@ import xarray as xr
 
 from climtools import lib_mpi
 from climtools.lib_mpi import mpi
-from climtools.netcdf import to_netcdf_serial
-from climtools.netcdf.parallel import to_netcdf_parallel
+from climtools.lib_netcdf import to_netcdf_serial
+from climtools.lib_netcdf.parallel import to_netcdf_parallel
 
 RANK, SIZE = lib_mpi.world()
 ROOT = RANK == 0

@@ -33,8 +33,8 @@ if __package__ in (None, ""):  # executed as a plain script
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from climtools import lib_mpi
-from climtools.netcdf import append_to_netcdf, to_netcdf_serial
-from climtools.netcdf.parallel import (
+from climtools.lib_netcdf import append_to_netcdf, to_netcdf_serial
+from climtools.lib_netcdf.parallel import (
     InconsistentRanksError,
     to_netcdf_parallel,
 )
