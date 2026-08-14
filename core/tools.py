@@ -6,9 +6,12 @@ import os
 import socket
 import sys
 import uuid
-from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 script_dir = Path(__file__).resolve().parent
 host = socket.gethostname()

@@ -18,9 +18,8 @@ from __future__ import annotations
 import functools
 import os
 import pickle
-from collections.abc import Callable
 from numbers import Integral
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from . import native
 
@@ -28,6 +27,9 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
+    from collections.abc import Callable
+    from typing import Any
+
     MPI_RANK: int
     MPI_SIZE: int
 

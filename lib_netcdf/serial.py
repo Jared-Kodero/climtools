@@ -8,16 +8,19 @@ module in :mod:`climtools.netcdf.parallel`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from os import PathLike
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING
 
 import netCDF4 as nc
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
 from .encoding import encode_dataset_time, encode_time, is_time_like
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from os import PathLike
+    from typing import Any, Literal
 
 
 def resolve_unlimited_dim(

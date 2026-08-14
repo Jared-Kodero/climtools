@@ -3,9 +3,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import cartopy.util
 import numpy as np
@@ -13,9 +12,14 @@ import pandas as pd
 import xarray as xr
 from cf_xarray import *
 from hvplot.xarray import *
-from typing_extensions import Self
 
 from .tools import n_cpus, tmp
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Literal
+
+    from typing_extensions import Self
 
 xr.set_options(display_expand_attrs=False)
 

@@ -30,18 +30,26 @@ package works without it.
 from __future__ import annotations
 
 import warnings
+from importlib import import_module
+from typing import TYPE_CHECKING
 
 import dask.diagnostics
 
 from .accessors import *
-from .cdo import pycdo as cdo
-from .core import _operator as operator
-from .core import xgeo as xgeo
 from .core.progress import DaskProgressBar, SerialProgressBar
-from .core.tools import *
-from .lib_mpi import MPI, MPI_RANK, MPI_SIZE
-from .viz import cmaps as cmaps
-from .viz import plotting as plot
+from .core.tools import apply_widget_css, n_cpus, redirect_streams
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from . import lib_mpi as lib_mpi
+    from .cdo import pycdo as cdo
+    from .core import _operator as operator
+    from .core import calc_stats as calc
+    from .core import xgeo as xgeo
+    from .lib_mpi import MPI, MPI_RANK, MPI_SIZE
+    from .viz import cmaps as cmaps
+    from .viz import plotting as plot
 
 warnings.filterwarnings("ignore")
 
@@ -61,6 +69,38 @@ __all__ = [
     "redirect_streams",
     "xgeo",
 ]
+
+
+_LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    "MPI": (".lib_mpi", "MPI"),
+    "MPI_RANK": (".lib_mpi", "MPI_RANK"),
+    "MPI_SIZE": (".lib_mpi", "MPI_SIZE"),
+    "calc": (".core.calc_stats", None),
+    "cdo": (".cdo.pycdo", None),
+    "cmaps": (".viz.cmaps", None),
+    "lib_mpi": (".lib_mpi", None),
+    "operator": (".core._operator", None),
+    "plot": (".viz.plotting", None),
+    "xgeo": (".core.xgeo", None),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Import expensive public objects when they are first requested."""
+    try:
+        module_name, attribute = _LAZY_IMPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
+    module = import_module(module_name, __name__)
+    value = module if attribute is None else getattr(module, attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Include lazily exported objects in interactive discovery."""
+    return sorted(set(globals()) | set(__all__))
 
 
 # from .update import _self_update

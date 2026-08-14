@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING
 
-import numpy as np
 import xarray as xr
-from IPython.display import DisplayHandle
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from ..core import calc_stats as calc
-from ..core import xarray_utils as xgeo
-from ..viz import plotting
-from ..viz.plotting import GeoPlot
+from ..core import xgeo
+
+if TYPE_CHECKING:
+    from typing import Any, Literal
+
+    import numpy as np
+    from IPython.display import DisplayHandle
+    from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+
+    from ..viz.plotting import GeoPlot
 
 
 class GeoBase:
@@ -198,7 +201,9 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with one extra longitude point.
         """
-        return xgeo.add_cyclic_point(self._obj, lon=lon)
+        from ..core.xarray_utils import add_cyclic_point
+
+        return add_cyclic_point(self._obj, lon=lon)
 
     # -- selection --------------------------------------------------------
     def sel_transect(
@@ -563,6 +568,8 @@ class PlotAccessor:
         kwargs1 = kwargs0.pop("kwargs")
         _ = kwargs0.pop("self")
 
+        from ..viz import plotting
+
         return plotting.geo(self._obj, **kwargs0, **kwargs1)
 
     def animate(
@@ -766,6 +773,8 @@ class PlotAccessor:
         kwargs1 = kwargs0.pop("kwargs")
         _ = kwargs0.pop("self")
 
+        from ..viz import plotting
+
         return plotting.animate(self._obj, **kwargs0, **kwargs1)
 
     def quiver(
@@ -812,6 +821,8 @@ class PlotAccessor:
         tuple
             ``(ax, quiver, quiver_key)``.
         """
+        from ..viz import plotting
+
         return plotting.quiver(
             self._obj,
             v,
@@ -870,6 +881,8 @@ class PlotAccessor:
         matplotlib.collections.PathCollection
             The scatter artist holding the markers.
         """
+        from ..viz import plotting
+
         return plotting.significance(
             self._obj,
             x=x,
@@ -927,6 +940,8 @@ class CalcAccessor:
         xarray.Dataset
             Dataset holding ``corr`` and ``p_value``.
         """
+        from ..core import calc_stats as calc
+
         return calc.corr(
             self._obj,
             other,
@@ -953,6 +968,8 @@ class CalcAccessor:
         xarray.DataArray
             Pointwise p-values of a Welch t-test.
         """
+        from ..core import calc_stats as calc
+
         return calc.pvalues(self._obj, other, dim=dim)
 
     def trends(
@@ -984,6 +1001,8 @@ class CalcAccessor:
         xarray.Dataset
             Trend statistics, including the slope and its p-value.
         """
+        from ..core import calc_stats as calc
+
         return calc.trends(
             self._obj,
             dim=dim,

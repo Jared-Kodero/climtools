@@ -29,13 +29,17 @@ import os
 import sys
 from functools import cache, lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cmocean
 import matplotlib as mpl
 import matplotlib.colors as mcolors
 import numpy as np
-from IPython.display import DisplayHandle, display
+from IPython.display import display
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
+
+if TYPE_CHECKING:
+    from IPython.display import DisplayHandle
 
 _file_dir = Path(__file__).resolve().parent
 _src_dir = _file_dir / "data" / "cmaps"

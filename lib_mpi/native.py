@@ -5,11 +5,14 @@ from __future__ import annotations
 import atexit
 import ctypes
 import pickle
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from .module_env import ModuleLoadError, ensure_required_modules
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Any
 
 
 class NativeLibraryError(RuntimeError):

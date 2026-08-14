@@ -16,11 +16,10 @@ import hashlib
 import logging
 import math
 import warnings
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping
 from numbers import Integral
-from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -28,6 +27,11 @@ import xarray as xr
 from ..lib_mpi import native
 from ..lib_mpi.native import NativeLibraryError
 from ..lib_mpi.runtime import MPI
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+    from os import PathLike
+    from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -16,10 +16,9 @@ import subprocess
 import sys
 import tempfile
 import warnings
-from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING
 
 import cartopy.crs as ccrs
 import cartopy.mpl.geoaxes as cgeo
@@ -28,19 +27,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
-from matplotlib.colorbar import Colorbar
-from matplotlib.colors import Colormap, Normalize
 from matplotlib.contour import QuadContourSet
-from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
-from matplotlib.quiver import Quiver, QuiverKey
-from matplotlib.text import Text
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.tools import n_cpus, tmp
@@ -74,6 +67,17 @@ from .plot_utils import (
     validate_data,
     validate_vector_components,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+    from typing import Any, Literal, Self
+
+    import xarray as xr
+    from matplotlib.colorbar import Colorbar
+    from matplotlib.colors import Colormap, Normalize
+    from matplotlib.figure import Figure
+    from matplotlib.quiver import Quiver, QuiverKey
+    from matplotlib.text import Text
 
 __all__ = [
     "Adder",

@@ -3,10 +3,13 @@ from __future__ import annotations
 import datetime
 import sys
 import threading
-from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import TYPE_CHECKING
 
 from dask.diagnostics import ProgressBar
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+    from typing import Any
 
 
 class DaskProgressBar(ProgressBar):

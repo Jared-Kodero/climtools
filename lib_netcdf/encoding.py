@@ -9,12 +9,16 @@ defeat that negotiation.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import cftime
 import numpy as np
-import xarray as xr
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    import xarray as xr
 
 
 def is_cftime(da: xr.DataArray) -> bool:

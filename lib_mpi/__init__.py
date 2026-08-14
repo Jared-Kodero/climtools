@@ -11,13 +11,15 @@ machine where ``install.sh`` has not been run.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from . import native, runtime
 from .native import NativeLibraryError
 from .runtime import MPI, MPIError, available, launcher_size, world
 
 if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
+    from typing import Any
+
     MPI_RANK: int
     MPI_SIZE: int
 

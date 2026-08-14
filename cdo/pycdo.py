@@ -43,15 +43,17 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import xarray as xr
 
 from ..core.tools import n_cpus
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterable
 
 # ---------------------------------------------------------------------------
 # Module metadata

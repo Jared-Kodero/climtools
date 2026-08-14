@@ -9,8 +9,7 @@ stateful classes defined in :mod:`plotting`.
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import TYPE_CHECKING
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -20,20 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-from cartopy.mpl.gridliner import Gridliner
 from cf_xarray import *
 from IPython.display import clear_output
-from matplotlib.artist import Artist
-from matplotlib.axes import Axes
-from matplotlib.cm import ScalarMappable
-from matplotlib.collections import PathCollection, QuadMesh
-from matplotlib.colorbar import Colorbar
-from matplotlib.colors import Colormap, Normalize
-from matplotlib.contour import QuadContourSet
-from matplotlib.figure import Figure
-from matplotlib.image import AxesImage
-from matplotlib.quiver import Quiver, QuiverKey
-from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 
 from ..core.tools import get_fsig
@@ -43,6 +30,23 @@ from ..core.xarray_utils import (
     set_edges_to_nan,
     to_lon180,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from typing import Any, Literal
+
+    from cartopy.mpl.gridliner import Gridliner
+    from matplotlib.artist import Artist
+    from matplotlib.axes import Axes
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.collections import PathCollection, QuadMesh
+    from matplotlib.colorbar import Colorbar
+    from matplotlib.colors import Colormap, Normalize
+    from matplotlib.contour import QuadContourSet
+    from matplotlib.figure import Figure
+    from matplotlib.image import AxesImage
+    from matplotlib.quiver import Quiver, QuiverKey
+    from matplotlib.text import Text
 
 __all__ = [
     "add_colorbar",
