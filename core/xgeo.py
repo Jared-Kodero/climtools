@@ -15,6 +15,7 @@ from cf_xarray import *
 from hvplot.xarray import *
 from typing_extensions import Self
 
+from ..lib_netcdf import append_to_netcdf, to_netcdf
 from .core import calc_stats as calc
 from .core.preprocess_data import preprocess_era5
 from .core.progress import DaskProgressBar, SerialProgressBar

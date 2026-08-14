@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from pathlib import Path
 
 import xarray as xr
@@ -225,5 +227,6 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     # Recompute after writing so the recorded file stats match the patched state.
     tmp = marker.with_suffix(marker.suffix + ".tmp")
     tmp.write_text(json.dumps(signature(), sort_keys=True), encoding="utf-8")
+    time.sleep(random.uniform(0, 1))
     tmp.replace(marker)  # atomic
     return tuple(changed)
