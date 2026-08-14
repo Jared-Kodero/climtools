@@ -33,7 +33,9 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     begin = "XGEO_IDE_TYPING BEGIN"
     end = "XGEO_IDE_TYPING END"
     guard = "_XGEO_TYPE_CHECKING"
-    type_module = f"{__package__}.accessors.xgeo_types"
+
+    # Corrected dynamic module path to prevent duplication
+    type_module = f"{__package__}.xgeo_types"
 
     targets: tuple[tuple[type, str, str], ...] = (
         (xr.DataArray, "DataArray", "GeoDataArray"),
@@ -54,6 +56,14 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         if source_file is None:
             raise RuntimeError(f"Cannot locate xarray.{class_name} source.")
         sources[class_name] = Path(source_file).resolve()
+
+    # Restore backups before attempting to modify if force is True, then unlink
+    if force:
+        for path in sources.values():
+            backup = path.with_suffix(path.suffix + ".xgeo.bak")
+            if backup.exists():
+                path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+                backup.unlink()  # Remove the backup file after restoring
 
     def stat_of(path) -> list[int] | None:
         if not path:
