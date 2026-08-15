@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from .core import _operator as operator
     from .core import calc_stats as calc
     from .core import xgeo as xgeo
-    from .lib_mpi import MPI
+    from .lib_mpi import mpi
     from .viz import cmaps as cmaps
     from .viz import plotting as plot
 
@@ -56,13 +56,13 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("always", module=r"climtools\..*")
 
 __all__ = [
-    "MPI",
     "DaskProgressBar",
     "SerialProgressBar",
     "calc",
     "cdo",
     "cmaps",
     "lib_mpi",
+    "mpi",
     "n_cpus",
     "operator",
     "plot",

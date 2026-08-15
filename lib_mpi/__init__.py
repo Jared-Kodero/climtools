@@ -11,7 +11,7 @@ from __future__ import annotations
 from . import native
 from .module_env import load_env_stack
 from .native import NativeLibraryError
-from .runtime import MPI, MPIError
+from .runtime import MPIError, mpi
 
 
 def env_stack():
@@ -32,9 +32,9 @@ def info() -> dict[str, object]:
         multi-rank launcher without a usable runtime raises :class:`MPIError`,
         consistent with ``MPI.world``.
     """
-    runtime_available = MPI.world.available()
-    rank = MPI.world.rank()
-    size = MPI.world.size()
+    runtime_available = mpi.world.available()
+    rank = mpi.world.rank()
+    size = mpi.world.size()
 
     if not runtime_available:
         try:
@@ -82,10 +82,10 @@ def has_parallel_filters() -> bool:
 
 
 __all__ = [
-    "MPI",
     "MPIError",
     "NativeLibraryError",
     "env_stack",
     "has_parallel_filters",
     "info",
+    "mpi",
 ]

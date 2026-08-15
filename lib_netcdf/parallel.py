@@ -26,7 +26,7 @@ import xarray as xr
 
 from ..lib_mpi import native
 from ..lib_mpi.native import NativeLibraryError
-from ..lib_mpi.runtime import MPI
+from ..lib_mpi.runtime import mpi
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -642,7 +642,7 @@ def _validate_schema_text(
 # ----------------------------------------------------------------- main API
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def to_netcdf(
     ds: Any,
     path: str | PathLike[str],

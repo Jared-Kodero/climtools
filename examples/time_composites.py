@@ -75,7 +75,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from climtools import MPI, xgeo
+from climtools import mpi, xgeo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,7 +87,7 @@ logger = logging.getLogger("TIME COMPOSITES")
 
 def rank_tag() -> str:
     """Rank-aware log prefix, resolved when it is first needed."""
-    return f"[rank {MPI.world.rank()}/{MPI.world.size()}]"
+    return f"[rank {mpi.world.rank()}/{mpi.world.size()}]"
 
 
 def log_root(message: str, *args: object) -> None:
@@ -96,7 +96,7 @@ def log_root(message: str, *args: object) -> None:
     Progress lines come from the root rank alone, so an eight-rank job does
     not produce eight copies of every message.
     """
-    if MPI.world.is_root():
+    if mpi.world.is_root():
         logger.info(message, *args)
 
 
@@ -107,7 +107,7 @@ def land_mask(ds: xr.Dataset) -> xr.DataArray:
     return slmsk.squeeze(drop=True) == 1
 
 
-@MPI(broadcast=True)
+@mpi(broadcast=True)
 def _load_smc_climo(
     ds: xr.Dataset, smc_path: Path
 ) -> tuple[xr.DataArray, xr.DataArray]:
@@ -155,7 +155,7 @@ def get_smc_climo(ds: xr.Dataset, smc_path: Path) -> dict[str, xr.DataArray]:
     return smc_climo
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def derived_vars(
     ds: xr.Dataset, smc_path: Path, vertical_dim: str = "plev"
 ) -> xr.Dataset:
@@ -250,7 +250,7 @@ def _event_labels(trigger: xr.DataArray, lat_offset: int = 0) -> xr.Dataset:
     )
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def _detect_event_slab(
     pr: xr.DataArray,
     lat_start: int,
@@ -301,7 +301,7 @@ def _merge_event_labels(parts: list[xr.Dataset]) -> xr.Dataset:
     return labels.isel(event=order)
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def detect_events(
     pr: xr.DataArray,
     window_before: int,
@@ -309,7 +309,7 @@ def detect_events(
     dry_threshold: float,
 ) -> xr.Dataset:
     """Detect events collectively with one horizontal slab per rank."""
-    lat_start, lat_stop = MPI.world.partition(pr.sizes["lat"])
+    lat_start, lat_stop = mpi.world.partition(pr.sizes["lat"])
     logger.info(
         "%s detects latitude indices %d to %d",
         rank_tag(),
@@ -324,7 +324,7 @@ def detect_events(
         window_after,
         dry_threshold,
     )
-    return _merge_event_labels(MPI.world.allgather(local_labels))
+    return _merge_event_labels(mpi.world.allgather(local_labels))
 
 
 def partition_events(labels: xr.Dataset) -> tuple[xr.Dataset, int]:
@@ -354,7 +354,7 @@ def partition_events(labels: xr.Dataset) -> tuple[xr.Dataset, int]:
     coordinate that restarts once per rank.
     """
     total = int(labels.sizes["event"])
-    offset, stop = MPI.world.partition(total)
+    offset, stop = mpi.world.partition(total)
     local = labels.isel(event=slice(offset, stop))
     return local, offset
 
@@ -376,7 +376,7 @@ def _window_time_index(
     return relative_time, time_index
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def build_event_store(
     ds: xr.Dataset,
     labels: xr.Dataset,
@@ -431,7 +431,7 @@ def build_event_store(
     return events.transpose("event", "relative_time", vertical_dim, ...).load()
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def build_event_patches(
     ds: xr.Dataset,
     labels: xr.Dataset,
@@ -497,7 +497,7 @@ def _bin_edges(intensity_edges: tuple[float, ...]) -> tuple[np.ndarray, list[flo
     return np.append(edge_values, np.inf), edge_values.tolist()
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def _composite_partials(
     events: xr.Dataset,
     intensity_edges: tuple[float, ...],
@@ -545,7 +545,7 @@ def _composite_partials(
     )
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def composite_from_events(
     events: xr.Dataset,
     intensity_edges: tuple[float, ...],
@@ -580,9 +580,9 @@ def composite_from_events(
     """
     numerator, denominator, counts = _composite_partials(events, intensity_edges)
 
-    numerator = MPI.world.sum(numerator)
-    denominator = MPI.world.sum(denominator)
-    counts = MPI.world.sum(counts)
+    numerator = mpi.world.sum(numerator)
+    denominator = mpi.world.sum(denominator)
+    counts = mpi.world.sum(counts)
 
     composite = numerator / denominator.where(denominator > 0)
     composite["n_events"] = counts.astype("int32")
@@ -590,7 +590,7 @@ def composite_from_events(
     return composite.transpose("peak_bins", "relative_time", vertical_dim, ...)
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def assemble_store(
     events: xr.Dataset,
     composite: xr.Dataset,
@@ -622,14 +622,14 @@ def assemble_store(
     return xr.merge(parts, combine_attrs="no_conflicts")
 
 
-@MPI
+@mpi
 def prepare_output(output_root: Path) -> None:
     """Create the case output directory. Root rank only."""
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "event.store.nc").unlink(missing_ok=True)
 
 
-@MPI
+@mpi
 def archive_case(output_root: Path, final_path: Path, store_name: str) -> None:
     """Copy a finished case to its final location. Root rank only."""
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,7 +642,7 @@ def archive_case(output_root: Path, final_path: Path, store_name: str) -> None:
         raise RuntimeError(f"Final event store is missing after rsync: {final_store}")
 
 
-@MPI(all_ranks=True)
+@mpi(all_ranks=True)
 def compute_event_time_composites(
     input_root: Path,
     output_root: Path,
@@ -674,7 +674,7 @@ def compute_event_time_composites(
 
     prepare_output(output_root)
     out_path = output_root / "event.store.nc"
-    MPI.world.barrier()
+    mpi.world.barrier()
 
     # chunks={} defers every field to dask. The gather in build_event_store
     # then materialises only the points this rank's events touch, instead of
@@ -742,10 +742,10 @@ def compute_event_time_composites(
         log_root(
             "Collective write finished in %.2f s on %d rank(s)",
             elapsed,
-            MPI.world.size(),
+            mpi.world.size(),
         )
 
-    MPI.world.barrier()
+    mpi.world.barrier()
 
     if not out_path.exists():
         raise RuntimeError(f"Event composite file was not written to {out_path}")
@@ -757,7 +757,7 @@ def compute_event_time_composites(
 def main() -> None:
 
     date = "2024081400Z"
-    log_root("Starting time composites for %s on %d rank(s)", date, MPI.world.size())
+    log_root("Starting time composites for %s on %d rank(s)", date, mpi.world.size())
 
     home = Path("/users/jkodero")
     gfdl_shield = home / "research/models/gfdl_shield"
@@ -819,17 +819,17 @@ def main() -> None:
 
         discard_case(tmp_dir / init_date)
 
-    MPI.world.barrier()
+    mpi.world.barrier()
 
 
-@MPI
+@mpi
 def clear_case(output_root: Path) -> None:
     """Remove and recreate a case working directory. Root rank only."""
     shutil.rmtree(output_root, ignore_errors=True)
     output_root.mkdir(parents=True)
 
 
-@MPI
+@mpi
 def discard_case(path: Path) -> None:
     """Remove a directory tree. Root rank only."""
     shutil.rmtree(path, ignore_errors=True)

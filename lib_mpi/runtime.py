@@ -21,7 +21,7 @@ import operator as _operator
 import os
 import pickle
 from numbers import Integral
-from typing import TYPE_CHECKING, ClassVar, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, ParamSpec, TypeVar, cast
 
 import numpy as np
 
@@ -199,7 +199,7 @@ _REDUCE_OPS: dict[str, Callable[[Any, Any], Any]] = {
 }
 
 
-class MPI:
+class mpi:
     """Initialize and coordinate calls over ``MPI_COMM_WORLD``.
 
     The object is both a decorator and the handle carrying the collective
@@ -396,7 +396,7 @@ class MPI:
         """Enter the MPI context and return this coordinator."""
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback: Any) -> None:
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.finalize()
 
     # -- point-to-point and collective primitives -------------------------
@@ -860,7 +860,8 @@ class MPI:
 
 
 class MPIWorldAccessor:
-    """Lazy namespace for operations on ``MPI_COMM_WORLD``.
+    """
+    Lazy namespace for operations on ``MPI_COMM_WORLD``.
 
     ``MPI.world`` provides process-wide collectives without requiring callers to
     construct an :class:`MPI` coordinator. The accessor itself is created at
@@ -886,117 +887,397 @@ class MPIWorldAccessor:
     __slots__ = ("_coordinator",)
 
     def __init__(self) -> None:
-        self._coordinator: MPI | None = None
+        self._coordinator: mpi | None = None
 
-    def _comm(self) -> MPI:
-        """Return the shared all-rank coordinator, creating it lazily."""
+    def _comm(self) -> mpi:
+        """
+        Return the shared all-rank coordinator, creating it lazily.
+
+        Returns
+        -------
+        MPI
+            The active MPI coordinator instance.
+        """
         if self._coordinator is None:
-            self._coordinator = MPI(all_ranks=True)
+            self._coordinator = mpi(all_ranks=True)
         return self._coordinator
 
+    # -- admin & environment ----------------------------------------------
     def available(self) -> bool:
-        """Return whether the native MPI runtime can be loaded and initialized."""
+        """
+        Return whether the native MPI runtime can be loaded and initialized.
+
+        Returns
+        -------
+        bool
+            True if MPI runtime is available, False otherwise.
+        """
         return _available()
 
     def launcher_size(self) -> int:
-        """Return the world size advertised by the process launcher."""
+        """
+        Return the world size advertised by the process launcher.
+
+        Returns
+        -------
+        int
+            World size retrieved from launcher metadata.
+        """
         return _launcher_size()
 
     def rank(self) -> int:
-        """Return this process's rank in ``MPI_COMM_WORLD``."""
+        """
+        Return this process's rank in ``MPI_COMM_WORLD``.
+
+        Returns
+        -------
+        int
+            Rank of the current process.
+        """
         return self._comm().rank
 
     def size(self) -> int:
-        """Return the number of ranks in ``MPI_COMM_WORLD``."""
+        """
+        Return the number of ranks in ``MPI_COMM_WORLD``.
+
+        Returns
+        -------
+        int
+            Total number of processes in the world.
+        """
         return self._comm().size
 
     def is_root(self, root: int = 0) -> bool:
-        """Return whether this process has rank ``root``."""
+        """
+        Return whether this process has rank ``root``.
+
+        Parameters
+        ----------
+        root : int, default 0
+            The rank to check against.
+
+        Returns
+        -------
+        bool
+            True if the process matches the root rank, False otherwise.
+        """
         return self._comm().rank == root
 
-    def barrier(self) -> None:
-        """Block until every rank in ``MPI_COMM_WORLD`` reaches the barrier."""
-        self._comm().barrier()
-
-    def bcast(self, value: Any = None, *, root: int = 0) -> Any:
-        """Broadcast a picklable object from ``root`` to every rank."""
-        return self._comm().bcast(value, root=root)
-
-    def gather(self, value: Any, *, root: int = 0) -> list[Any] | None:
-        """Gather one picklable object per rank onto ``root`` in rank order."""
-        return self._comm().gather(value, root=root)
-
-    def allgather(self, value: Any) -> list[Any]:
-        """Gather one picklable object from every rank in rank order."""
-        return self._comm().allgather_obj(value)
-
-    def scatter(self, values: Any = None, *, root: int = 0) -> Any:
-        """Scatter one item per rank from a sequence supplied by ``root``."""
-        return self._comm().scatter(values, root=root)
-
-    def reduce(self, value: Any, op: str = "sum") -> Any:
-        """Reduce one value contributed by each rank using ``op``."""
-        return self._comm().reduce(value, op)
-
-    def sum(self, value: Any) -> Any:
-        """Return the sum of one value contributed by each rank."""
-        return self._comm().sum(value)
-
-    def prod(self, value: Any) -> Any:
-        """Return the product of one value contributed by each rank."""
-        return self._comm().prod(value)
-
-    def min(self, value: Any) -> Any:
-        """Return the elementwise minimum over values contributed by all ranks."""
-        return self._comm().min(value)
-
-    def max(self, value: Any) -> Any:
-        """Return the elementwise maximum over values contributed by all ranks."""
-        return self._comm().max(value)
-
-    def any(self, value: Any) -> Any:
-        """Return the elementwise logical OR over values contributed by all ranks."""
-        return self._comm().any(value)
-
-    def all(self, value: Any) -> Any:
-        """Return the elementwise logical AND over values contributed by all ranks."""
-        return self._comm().all(value)
-
-    def mean(self, value: Any) -> Any:
-        """Return the equal-rank arithmetic mean of contributed values."""
-        return self._comm().mean(value)
-
-    def partition(self, total: int, *, rank: int | None = None) -> tuple[int, int]:
-        """Return a rank's contiguous half-open block of ``total`` items."""
-        return self._comm().partition(total, rank=rank)
-
-    def split(self, sequence: Any) -> Any:
-        """Return this rank's contiguous slice of ``sequence``."""
-        return self._comm().split(sequence)
-
-    def consensus(self, ok: bool) -> bool:
-        """Return ``True`` only when every rank contributes a true value."""
-        return self._comm().consensus(ok)
-
     def abort(self, code: int = 1) -> None:
-        """Abort all ranks in ``MPI_COMM_WORLD`` with process exit ``code``."""
+        """
+        Abort all ranks in ``MPI_COMM_WORLD`` with a process exit code.
+
+        Parameters
+        ----------
+        code : int, default 1
+            Exit code to return to the process launcher.
+        """
         self._comm().abort(code)
 
     def finalize(self) -> None:
-        """Finalize MPI when initialized by the shared world coordinator."""
+        """
+        Finalize MPI when initialized by the shared world coordinator.
+        """
         if self._coordinator is None:
             return
         self._coordinator.finalize()
         self._coordinator = None
 
+    # -- synchronization --------------------------------------------------
+    def barrier(self) -> None:
+        """
+        Block until every rank in ``MPI_COMM_WORLD`` reaches the barrier.
+        """
+        self._comm().barrier()
 
-MPI.world = MPIWorldAccessor()
+    def consensus(self, ok: bool) -> bool:
+        """
+        Return ``True`` only when every rank contributes a true value.
+
+        Parameters
+        ----------
+        ok : bool
+            The local boolean value contributed by this rank.
+
+        Returns
+        -------
+        bool
+            True if all ranks contribute True, False otherwise.
+        """
+        return self._comm().consensus(ok)
+
+    # -- data movement ----------------------------------------------------
+    def bcast(self, value: Any = None, *, root: int = 0) -> Any:
+        """
+        Broadcast a picklable object from ``root`` to every rank.
+
+        Parameters
+        ----------
+        value : Any, optional
+            Object to broadcast. Required only on the root rank. Default is None.
+        root : int, default 0
+            Source rank.
+
+        Returns
+        -------
+        Any
+            The broadcasted object.
+        """
+        return self._comm().bcast(value, root=root)
+
+    def gather(self, value: Any, *, root: int = 0) -> list[Any] | None:
+        """
+        Gather one picklable object per rank onto ``root`` in rank order.
+
+        Parameters
+        ----------
+        value : Any
+            The local object contributed by this rank.
+        root : int, default 0
+            Destination rank.
+
+        Returns
+        -------
+        list or None
+            A list of gathered objects on the root rank, None elsewhere.
+        """
+        return self._comm().gather(value, root=root)
+
+    def allgather(self, value: Any) -> list[Any]:
+        """
+        Gather one picklable object from every rank in rank order.
+
+        Parameters
+        ----------
+        value : Any
+            The local object contributed by this rank.
+
+        Returns
+        -------
+        list
+            A list of objects contributed by all ranks, identical everywhere.
+        """
+        return self._comm().allgather_obj(value)
+
+    def scatter(self, values: Any = None, *, root: int = 0) -> Any:
+        """
+        Scatter one item per rank from a sequence supplied by ``root``.
+
+        Parameters
+        ----------
+        values : Any, optional
+            Sequence to scatter. Required only on the root rank. Default is None.
+        root : int, default 0
+            Source rank.
+
+        Returns
+        -------
+        Any
+            The scattered item assigned to this rank.
+        """
+        return self._comm().scatter(values, root=root)
+
+    def concat(
+        self, sequence: list[Any], *, root: int | None = None
+    ) -> list[Any] | None:
+        """
+        Join every rank's sequence in rank order.
+
+        Parameters
+        ----------
+        sequence : list
+            The local sequence contributed by this rank.
+        root : int or None, optional
+            Rank the result is assembled on. If None, assemble on every rank.
+            Default is None.
+
+        Returns
+        -------
+        list or None
+            The concatenated global sequence, or None on non-root ranks if
+            a root is specified.
+        """
+        if root is None:
+            parts = self.allgather(sequence)
+            return [item for sublist in parts for item in sublist]
+        else:
+            parts = self.gather(sequence, root=root)
+            if parts is None:
+                return None
+            return [item for sublist in parts for item in sublist]
+
+    def partition(self, total: int, *, rank: int | None = None) -> tuple[int, int]:
+        """
+        Return a rank's contiguous half-open block of ``total`` items.
+
+        Parameters
+        ----------
+        total : int
+            Total number of items to partition across the world.
+        rank : int or None, optional
+            Rank to compute the partition block for. If None, uses current rank.
+
+        Returns
+        -------
+        tuple of int
+            Start and stop indices `(start, stop)` for the block.
+        """
+        return self._comm().partition(total, rank=rank)
+
+    def split(self, sequence: Any) -> Any:
+        """
+        Return this rank's contiguous slice of a sequence.
+
+        Parameters
+        ----------
+        sequence : Any
+            Sequence to be split.
+
+        Returns
+        -------
+        Any
+            Contiguous slice of the sequence for this rank.
+        """
+        return self._comm().split(sequence)
+
+    # -- reductions -------------------------------------------------------
+    def reduce(
+        self,
+        value: Any,
+        op: Literal["sum", "prod", "min", "max", "any", "all"] = "sum",
+    ) -> Any:
+        """
+        Reduce one value contributed by each rank using ``op``.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to contribute.
+        op : {"sum", "prod", "min", "max", "any", "all"}, default "sum"
+            The reduction operator to use.
+
+        Returns
+        -------
+        Any
+            The reduced value, identical on every rank.
+        """
+
+        return self._comm().reduce(value, op)
+
+    def sum(self, value: Any) -> Any:
+        """
+        Return the sum of one value contributed by each rank.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to sum.
+
+        Returns
+        -------
+        Any
+            The sum across all ranks.
+        """
+        return self._comm().sum(value)
+
+    def prod(self, value: Any) -> Any:
+        """
+        Return the product of one value contributed by each rank.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to multiply.
+
+        Returns
+        -------
+        Any
+            The product across all ranks.
+        """
+        return self._comm().prod(value)
+
+    def min(self, value: Any) -> Any:
+        """
+        Return the elementwise minimum over values contributed by all ranks.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to evaluate.
+
+        Returns
+        -------
+        Any
+            The minimum across all ranks.
+        """
+        return self._comm().min(value)
+
+    def max(self, value: Any) -> Any:
+        """
+        Return the elementwise maximum over values contributed by all ranks.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to evaluate.
+
+        Returns
+        -------
+        Any
+            The maximum across all ranks.
+        """
+        return self._comm().max(value)
+
+    def any(self, value: Any) -> Any:
+        """
+        Return the elementwise logical OR over values contributed by all ranks.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to evaluate.
+
+        Returns
+        -------
+        Any
+            The logical OR across all ranks.
+        """
+        return self._comm().any(value)
+
+    def all(self, value: Any) -> Any:
+        """
+        Return the elementwise logical AND over values contributed by all ranks.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to evaluate.
+
+        Returns
+        -------
+        Any
+            The logical AND across all ranks.
+        """
+        return self._comm().all(value)
+
+    def mean(self, value: Any) -> Any:
+        """
+        Return the equal-rank arithmetic mean of contributed values.
+
+        Parameters
+        ----------
+        value : Any
+            The local value to evaluate.
+
+        Returns
+        -------
+        Any
+            The mean across all ranks.
+        """
+        return self._comm().mean(value)
 
 
-__all__ = ["MPI", "MPIError"]
+mpi.world = MPIWorldAccessor()
 
 
-# we need another class so that when working with xarray ds or da we can use the available ranks without using boiler plate
-# class should be xposed in accessors mpi etc so lest da.xgeo.mpi.mean() auto does all boiler plate setup that way uses dont even have to know they are using mpi
-# we can add another pyfile in lib_mpi that implimet these auto da and ds
-# also should we move lib_mpi dir into lib_netcdf??
+__all__ = ["MPIError", "mpi"]

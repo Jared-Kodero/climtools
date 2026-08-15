@@ -26,16 +26,15 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
-from ..lib_mpi import MPI
+from ..lib_mpi import mpi
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-    from os import PathLike
-    from typing import Any, Literal
+    from typing import Literal
 
 
 class MPIAccessor:
-    """Collective operations bound to a DataArray or Dataset.
+    """
+    Collective operations bound to a DataArray or Dataset.
 
     Parameters
     ----------
@@ -48,97 +47,127 @@ class MPIAccessor:
     def __init__(self, xarray_obj: xr.DataArray | xr.Dataset) -> None:
         self._obj = xarray_obj
 
-    @property
-    def rank(self) -> int:
-        """Rank of this process in ``MPI_COMM_WORLD``."""
-        return MPI.world.rank()
-
-    @property
-    def size(self) -> int:
-        """Number of ranks in ``MPI_COMM_WORLD``."""
-        return MPI.world.size()
-
-    @property
-    def is_root(self) -> bool:
-        """Whether this process is rank zero."""
-        return MPI.world.is_root()
-
     def __repr__(self) -> str:
         kind = type(self._obj).__name__
         return f"<xgeo mpi accessor on {kind}>"
 
-    # -- reductions -------------------------------------------------------
-    def reduce(
-        self,
-        op: Literal["sum", "prod", "min", "max", "any", "all"] = "sum",
-    ) -> xr.DataArray | xr.Dataset:
-        """Combine this rank's object with every other rank's.
+    # -- admin & environment ----------------------------------------------
+    def available(self) -> bool:
+        """
+        Return whether the native MPI runtime can be loaded and initialized.
+
+        Returns
+        -------
+        bool
+            True if MPI runtime is available, False otherwise.
+        """
+        return mpi.world.available()
+
+    def launcher_size(self) -> int:
+        """
+        Return the world size advertised by the process launcher.
+
+        Returns
+        -------
+        int
+            World size retrieved from launcher metadata.
+        """
+        return mpi.world.launcher_size()
+
+    def rank(self) -> int:
+        """
+        Return this process's rank in ``MPI_COMM_WORLD``.
+
+        Returns
+        -------
+        int
+            Rank of the current process.
+        """
+        return mpi.world.rank()
+
+    def size(self) -> int:
+        """
+        Return the number of ranks in ``MPI_COMM_WORLD``.
+
+        Returns
+        -------
+        int
+            Total number of processes in the world.
+        """
+        return mpi.world.size()
+
+    def is_root(self, root: int = 0) -> bool:
+        """
+        Return whether this process has rank ``root``.
 
         Parameters
         ----------
-        op : {"sum", "prod", "min", "max", "any", "all"}, default "sum"
-            Associative operator applied across ranks.
+        root : int, default 0
+            The rank to check against.
+
+        Returns
+        -------
+        bool
+            True if the process matches the root rank, False otherwise.
+        """
+        return mpi.world.is_root(root)
+
+    def abort(self, code: int = 1) -> None:
+        """
+        Abort all ranks in ``MPI_COMM_WORLD`` with a process exit code.
+
+        Parameters
+        ----------
+        code : int, default 1
+            Exit code to return to the process launcher.
+        """
+        mpi.world.abort(code)
+
+    def finalize(self) -> None:
+        """
+        Finalize MPI when initialized by the shared world coordinator.
+        """
+        mpi.world.finalize()
+
+    # -- synchronization --------------------------------------------------
+    def barrier(self) -> xr.DataArray | xr.Dataset:
+        """
+        Wait for every rank, then return the bound object unchanged.
 
         Returns
         -------
         xarray.DataArray or xarray.Dataset
-            Reduction over all ranks, identical on every rank.
-
-        Notes
-        -----
-        The operator is applied to whole xarray objects, so xarray's alignment
-        rules apply: ranks holding different coordinate values along a shared
-        dimension produce the intersection, not an error. Reduce objects that
-        are already aligned, which for a partitioned workload means the
-        per-rank partial results rather than the partitioned data itself.
+            The local object, allowing the call to sit inside a method chain.
         """
-        return MPI.world.reduce(self._obj, op)
+        mpi.world.barrier()
+        return self._obj
 
-    def sum(self) -> xr.DataArray | xr.Dataset:
-        """Sum this object across ranks. See :meth:`reduce`."""
-        return MPI.world.sum(self._obj)
+    def consensus(self, ok: bool | None = None) -> bool:
+        """
+        Return True only when every rank contributes a true value.
 
-    def prod(self) -> xr.DataArray | xr.Dataset:
-        """Multiply this object across ranks. See :meth:`reduce`."""
-        return MPI.world.prod(self._obj)
-
-    def min(self) -> xr.DataArray | xr.Dataset:
-        """Elementwise minimum across ranks. See :meth:`reduce`."""
-        return MPI.world.min(self._obj)
-
-    def max(self) -> xr.DataArray | xr.Dataset:
-        """Elementwise maximum across ranks. See :meth:`reduce`."""
-        return MPI.world.max(self._obj)
-
-    def any(self) -> xr.DataArray | xr.Dataset:
-        """Elementwise logical OR across ranks. See :meth:`reduce`."""
-        return MPI.world.any(self._obj)
-
-    def all(self) -> xr.DataArray | xr.Dataset:
-        """Elementwise logical AND across ranks. See :meth:`reduce`."""
-        return MPI.world.all(self._obj)
-
-    def mean(self) -> xr.DataArray | xr.Dataset:
-        """Arithmetic mean over ranks of the bound objects.
+        Parameters
+        ----------
+        ok : bool, optional
+            An explicit boolean value to contribute. If not provided,
+            the bound xarray object is implicitly reduced to a boolean.
 
         Returns
         -------
-        xarray.DataArray or xarray.Dataset
-            ``sum over ranks / size``, identical on every rank.
-
-        Notes
-        -----
-        Each rank carries equal weight. This is not the mean over a
-        partitioned dimension: a rank holding three records would count as
-        much as a rank holding three thousand. A partitioned mean is a ratio
-        of two sums, so form the local weighted numerator and the local
-        weight, reduce each with :meth:`sum`, and divide afterwards.
+        bool
+            True if all ranks evaluate to True, False otherwise.
         """
-        return MPI.world.mean(self._obj)
+        if ok is None:
+            if isinstance(self._obj, xr.Dataset):
+                ok = all(bool(da.all().item()) for da in self._obj.data_vars.values())
+            else:
+                ok = bool(self._obj.all().item())
+        return mpi.world.consensus(ok)
 
-    # -- movement ---------------------------------------------------------
+    # -- data movement ----------------------------------------------------
     def bcast(self, root: int = 0) -> xr.DataArray | xr.Dataset:
-        """Replace this object with the one held by ``root``.
+        """
+        Replace this object with the one held by ``root``.
 
         Parameters
         ----------
@@ -148,12 +177,13 @@ class MPIAccessor:
         Returns
         -------
         xarray.DataArray or xarray.Dataset
-            The object held by ``root``, on every rank.
+            The object held by ``root``, distributed to every rank.
         """
-        return MPI.world.bcast(self._obj, root=root)
+        return mpi.world.bcast(self._obj, root=root)
 
-    def gather(self, root: int = 0) -> list[Any] | None:
-        """Collect every rank's object onto ``root``.
+    def gather(self, root: int = 0) -> list[xr.DataArray | xr.Dataset] | None:
+        """
+        Collect every rank's object onto ``root``.
 
         Parameters
         ----------
@@ -162,7 +192,7 @@ class MPIAccessor:
 
         Returns
         -------
-        list or None
+        list of xarray.DataArray or xarray.Dataset, or None
             Objects from all ranks in rank order on ``root``, ``None``
             elsewhere.
 
@@ -172,49 +202,22 @@ class MPIAccessor:
         memory cliff on anything large. Use :meth:`to_netcdf` to write a
         distributed dataset without gathering it.
         """
-        return MPI.world.gather(self._obj, root=root)
+        return mpi.world.gather(self._obj, root=root)
 
-    def allgather(self) -> list[Any]:
-        """Collect every rank's object onto every rank, in rank order."""
-        return MPI.world.allgather(self._obj)
-
-    def concat(self, dim: str, root: int | None = None) -> xr.DataArray | xr.Dataset:
-        """Join every rank's object along ``dim`` in rank order.
-
-        Parameters
-        ----------
-        dim : str
-            Dimension to concatenate along, normally the partitioned one.
-        root : int or None, optional
-            Rank the result is assembled on. If ``None``, assemble on every
-            rank.
+    def allgather(self) -> list[xr.DataArray | xr.Dataset]:
+        """
+        Collect every rank's object onto every rank, in rank order.
 
         Returns
         -------
-        xarray.DataArray or xarray.Dataset
-            The reassembled global object, or the local object unchanged on
-            non-root ranks when ``root`` is given.
-
-        Notes
-        -----
-        This materializes the global object in one process's memory per rank
-        that receives it, which is what the parallel writer exists to avoid.
-        It is meant for a final reduced result, not for the partitioned data.
+        list of xarray.DataArray or xarray.Dataset
+            Objects from all ranks in rank order, identical everywhere.
         """
-        if not isinstance(dim, str) or not dim:
-            raise TypeError("dim must be a non-empty string.")
-
-        if root is None:
-            parts = MPI.world.allgather(self._obj)
-        else:
-            gathered = MPI.world.gather(self._obj, root=root)
-            if gathered is None:
-                return self._obj
-            parts = gathered
-        return xr.concat(parts, dim=dim)
+        return mpi.world.allgather(self._obj)
 
     def scatter(self, dim: str, root: int = 0) -> xr.DataArray | xr.Dataset:
-        """Split ``root``'s object along ``dim`` and keep this rank's block.
+        """
+        Split ``root``'s object along ``dim`` and keep this rank's block.
 
         Parameters
         ----------
@@ -238,14 +241,51 @@ class MPIAccessor:
         if not isinstance(dim, str) or not dim:
             raise TypeError("dim must be a non-empty string.")
 
-        obj = MPI.world.bcast(self._obj, root=root)
+        obj = mpi.world.bcast(self._obj, root=root)
         if dim not in obj.sizes:
             raise KeyError(f"Dimension {dim!r} is not present in the dataset.")
-        start, stop = MPI.world.partition(int(obj.sizes[dim]))
+        start, stop = mpi.world.partition(int(obj.sizes[dim]))
         return obj.isel({dim: slice(start, stop)})
 
+    def concat(self, dim: str, root: int | None = None) -> xr.DataArray | xr.Dataset:
+        """
+        Join every rank's object along ``dim`` in rank order.
+
+        Parameters
+        ----------
+        dim : str
+            Dimension to concatenate along, normally the partitioned one.
+        root : int or None, optional
+            Rank the result is assembled on. If None, assemble on every rank.
+            Default is None.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The reassembled global object, or the local object unchanged on
+            non-root ranks when ``root`` is given.
+
+        Notes
+        -----
+        This materializes the global object in one process's memory per rank
+        that receives it, which is what the parallel writer exists to avoid.
+        It is meant for a final reduced result, not for the partitioned data.
+        """
+        if not isinstance(dim, str) or not dim:
+            raise TypeError("dim must be a non-empty string.")
+
+        if root is None:
+            parts = mpi.world.allgather(self._obj)
+        else:
+            gathered = mpi.world.gather(self._obj, root=root)
+            if gathered is None:
+                return self._obj
+            parts = gathered
+        return xr.concat(parts, dim=dim)
+
     def partition(self, dim: str) -> xr.DataArray | xr.Dataset:
-        """Keep only this rank's contiguous block along ``dim``.
+        """
+        Keep only this rank's contiguous block along ``dim``.
 
         Parameters
         ----------
@@ -268,101 +308,150 @@ class MPIAccessor:
             raise TypeError("dim must be a non-empty string.")
         if dim not in self._obj.sizes:
             raise KeyError(f"Dimension {dim!r} is not present in the dataset.")
-        start, stop = MPI.world.partition(int(self._obj.sizes[dim]))
+        start, stop = mpi.world.partition(int(self._obj.sizes[dim]))
         return self._obj.isel({dim: slice(start, stop)})
 
-    # -- synchronization --------------------------------------------------
-    def barrier(self) -> xr.DataArray | xr.Dataset:
-        """Wait for every rank, then return the bound object unchanged.
+    def split(self, dim: str) -> xr.DataArray | xr.Dataset:
+        """
+        Keep only this rank's contiguous block along ``dim``.
+
+        Alias for :meth:`partition`.
+
+        Parameters
+        ----------
+        dim : str
+            Dimension to partition.
 
         Returns
         -------
         xarray.DataArray or xarray.Dataset
-            The local object, so the call can sit inside a method chain.
+            This rank's block.
         """
-        MPI.world.barrier()
-        return self._obj
+        return self.partition(dim)
 
-    # -- output -----------------------------------------------------------
-    def to_netcdf(
-        self,
-        file: str | PathLike[str],
-        partition_dim: str | None = None,
-        *,
-        unlimited_dim: str | Iterable[str] = (),
-        zlib: bool = False,
-        complevel: int = 4,
-        shuffle: bool = True,
-        chunks: Any = None,
-        hints: str | None = None,
-        nofill: bool = True,
-        allow_serial: bool = True,
-        strict_compression: bool = False,
-    ) -> str:
-        """Write this rank's slab into one shared NetCDF-4 file.
-
-        Every rank contributes its contiguous block of ``partition_dim`` and
-        the file is written once, collectively. Nothing is gathered to rank
-        zero and no per-rank files are produced.
+    # -- reductions -------------------------------------------------------
+    def reduce(
+        self, op: Literal["sum", "prod", "min", "max", "any", "all"] = "sum"
+    ) -> xr.DataArray | xr.Dataset:
+        """
+        Combine this rank's object with every other rank's.
 
         Parameters
         ----------
-        file : str or os.PathLike
-            Output path, visible to every rank. An existing file is replaced.
-        partition_dim : str or None, optional
-            Dimension partitioned across ranks. Inferred when omitted, from
-            the one dimension whose length or coordinate values differ
-            between ranks.
-        unlimited_dim : str or iterable of str, default ()
-            Dimensions defined as unlimited record dimensions.
-        zlib : bool, default False
-            Request deflate compression. Compression during a collective
-            write needs a NetCDF-C and HDF5 built with parallel filters,
-            which many stacks lack; the default is therefore off.
-        complevel : int, default 4
-            Deflate level from 1 to 9, used when ``zlib`` is true.
-        shuffle : bool, default True
-            Apply the HDF5 shuffle filter alongside compression.
-        chunks : mapping of str to iterable of int, optional
-            Explicit chunk shape for selected variables.
-        hints : str or None, optional
-            Semicolon-separated MPI-IO hints in ``key=value`` form.
-        nofill : bool, default True
-            Disable NetCDF pre-filling, which is a large speed-up.
-        allow_serial : bool, default True
-            Permit a one-rank world, so the same call works unlaunched.
-        strict_compression : bool, default False
-            Fail rather than warn when compression was requested but the
-            linked libraries cannot apply it in parallel.
+        op : {"sum", "prod", "min", "max", "any", "all"}, default "sum"
+            Associative operator applied across ranks.
 
         Returns
         -------
-        str
-            The output path, after the collective write completes.
+        xarray.DataArray or xarray.Dataset
+            Reduction over all ranks, identical on every rank.
 
         Notes
         -----
-        All ranks must supply matching variable names, dtypes, dimension
-        names and attributes. Arrays that do not carry ``partition_dim`` are
-        treated as replicated and are checked for bit-identity across ranks
-        before the write, so a per-rank difference is reported rather than
-        silently resolved in rank zero's favour.
+        The operator is applied to whole xarray objects, so xarray's alignment
+        rules apply: ranks holding different coordinate values along a shared
+        dimension produce the intersection, not an error. Reduce objects that
+        are already aligned, which for a partitioned workload means the
+        per-rank partial results rather than the partitioned data itself.
         """
-        from ..lib_netcdf.parallel import to_netcdf_parallel
+        return mpi.world.reduce(self._obj, op)
 
-        return to_netcdf_parallel(
-            self._obj,
-            file,
-            partition_dim=partition_dim,
-            deflate=complevel if zlib else None,
-            shuffle=shuffle,
-            chunks=chunks,
-            unlimited_dim=unlimited_dim,
-            hints=hints,
-            nofill=nofill,
-            allow_serial=allow_serial,
-            strict_compression=strict_compression,
-        )
+    def sum(self) -> xr.DataArray | xr.Dataset:
+        """
+        Sum this object across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The sum across all ranks.
+        """
+        return mpi.world.sum(self._obj)
+
+    def prod(self) -> xr.DataArray | xr.Dataset:
+        """
+        Multiply this object across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The product across all ranks.
+        """
+        return mpi.world.prod(self._obj)
+
+    def min(self) -> xr.DataArray | xr.Dataset:
+        """
+        Elementwise minimum across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The minimum across all ranks.
+        """
+        return mpi.world.min(self._obj)
+
+    def max(self) -> xr.DataArray | xr.Dataset:
+        """
+        Elementwise maximum across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The maximum across all ranks.
+        """
+        return mpi.world.max(self._obj)
+
+    def any(self) -> xr.DataArray | xr.Dataset:
+        """
+        Elementwise logical OR across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The logical OR across all ranks.
+        """
+        return mpi.world.any(self._obj)
+
+    def all(self) -> xr.DataArray | xr.Dataset:
+        """
+        Elementwise logical AND across ranks.
+
+        See :meth:`reduce` for further details.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            The logical AND across all ranks.
+        """
+        return mpi.world.all(self._obj)
+
+    def mean(self) -> xr.DataArray | xr.Dataset:
+        """
+        Arithmetic mean over ranks of the bound objects.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            ``sum over ranks / size``, identical on every rank.
+
+        Notes
+        -----
+        Each rank carries equal weight. This is not the mean over a
+        partitioned dimension: a rank holding three records would count as
+        much as a rank holding three thousand. A partitioned mean is a ratio
+        of two sums, so form the local weighted numerator and the local
+        weight, reduce each with :meth:`sum`, and divide afterwards.
+        """
+        return mpi.world.mean(self._obj)
 
 
 @xr.register_dataarray_accessor("mpi")
