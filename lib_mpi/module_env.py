@@ -5,10 +5,41 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+MANIFEST_NAME = "stack_env.yaml"
+
+
+def load_env_stack() -> dict[str, object]:
+    """Return the recorded build manifest, or an empty mapping if unavailable."""
+    path = Path(__file__).resolve().parent / MANIFEST_NAME
+    if not path.is_file():
+        return {}
+
+    try:
+        import yaml
+    except ImportError:
+        return {}
+
+    try:
+        with path.open(encoding="utf-8") as stream:
+            manifest = yaml.safe_load(stream)
+    except (OSError, yaml.YAMLError):
+        return {}
+
+    return dict(manifest) if isinstance(manifest, dict) else {}
 
 
 class ModuleLoadError(RuntimeError):
     """Raised when the recorded module stack cannot be loaded."""
+
+
+def _load_hint(modules: Sequence[str]) -> str:
+    """Return the command that loads ``modules`` by hand."""
+    return f"Load them first with:\n    module load {' '.join(modules)}"
 
 
 def module(*args: str) -> None:
@@ -20,52 +51,51 @@ def module(*args: str) -> None:
             "LMOD_CMD is not set; cannot load required modules"
         ) from exc
 
-    result = subprocess.run(
-        [lmod_cmd, "python", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [lmod_cmd, "python", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise ModuleLoadError(f"cannot run {lmod_cmd}: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or f"exit status {exc.returncode}"
+        raise ModuleLoadError(f"`module {' '.join(args)}` failed: {detail}") from exc
+
     exec(result.stdout, {"os": os})  # noqa: S102
 
 
-def _manifest_modules(path: Path) -> list[str]:
-    """Read the ``modules`` sequence from the generated build manifest."""
-    modules: list[str] = []
-    in_modules = False
+def _loaded_modules() -> set[str]:
+    """Return the module names currently recorded in ``LOADEDMODULES``."""
+    return {item for item in os.environ.get("LOADEDMODULES", "").split(":") if item}
+
+
+def check_env_stack() -> None:
+    """Load build-time MPI/NetCDF modules that are not already loaded."""
+
+    env_stack = load_env_stack()
+    modules = env_stack.get("modules", [])
+
+    if not modules:
+        return
+
+    missing = [name for name in modules if name not in _loaded_modules()]
+    if not missing:
+        return
 
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ModuleLoadError(f"cannot read build manifest {path}: {exc}") from exc
-
-    for line in lines:
-        if not in_modules:
-            if line.strip() == "modules:":
-                in_modules = True
-            continue
-
-        if line.startswith("  - "):
-            modules.append(line[4:].strip())
-            continue
-        if line.strip() == "[]":
-            return []
-        if line and not line.startswith(" "):
-            break
-
-    return modules
-
-
-def ensure_required_modules(manifest: Path | None = None) -> None:
-    """Load build-time MPI/NetCDF modules that are not already loaded."""
-    path = manifest or Path(__file__).resolve().parent / "build" / "build.yml"
-    if not path.is_file():
-        return
-    required = _manifest_modules(path)
-    if not required:
-        return
-
-    loaded = {item for item in os.environ.get("LOADEDMODULES", "").split(":") if item}
-    missing = [name for name in required if name not in loaded]
-    if missing:
         module("load", *missing)
+    except ModuleLoadError as exc:
+        raise ModuleLoadError(f"{exc}\n{_load_hint(missing)}") from exc
+
+    # Lmod does not always signal a failed load through its exit status. A
+    # module that is still absent here would otherwise surface much later, as
+    # an unresolved symbol when libmpi_netcdf.so is opened.
+    unloaded = [name for name in missing if name not in _loaded_modules()]
+    if unloaded:
+        names = ", ".join(unloaded)
+        raise ModuleLoadError(
+            f"not loaded after `module load`: {names}\n{_load_hint(missing)}"
+        )

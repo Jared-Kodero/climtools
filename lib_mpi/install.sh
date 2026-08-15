@@ -31,7 +31,7 @@ SOURCE_DIR="$PACKAGE_DIR/src"
 BUILD_DIR="$PACKAGE_DIR/build"
 LIB_DIR="$PACKAGE_DIR/lib"
 LIBRARY="$LIB_DIR/libmpi_netcdf.so"
-MANIFEST="$BUILD_DIR/build.yml"
+MANIFEST="$PACKAGE_DIR/stack_env.yaml"
 
 SELECTED_MPI_MODULE=""
 SELECTED_NETCDF_MODULE=""
@@ -78,7 +78,8 @@ Usage:
 Options:
   -h, --help     Show this message and exit.
   -f, --force    Rebuild even if an up-to-date library is already present.
-  -c, --clean    Remove the build directory and the compiled library, then exit.
+  -c, --clean    Remove the build directory, the compiled library and the
+                 manifest, then exit.
 
 Environment variables:
   MPI_NETCDF_MODULE           NetCDF-C module to load instead of searching
@@ -111,7 +112,8 @@ parse_arguments() {
             -f|--force) FORCE=1 ;;
             -c|--clean)
                 rm -rf "$BUILD_DIR" "$LIB_DIR"
-                printf 'Removed %s and %s\n' "$BUILD_DIR" "$LIB_DIR"
+                rm -f "$MANIFEST"
+                printf 'Removed %s, %s and %s\n' "$BUILD_DIR" "$LIB_DIR" "$MANIFEST"
                 exit 0 ;;
             *)
                 usage >&2
@@ -253,7 +255,7 @@ report_parallel_filters() {
     local program='#include <stdio.h>
 #include <netcdf_meta.h>
 int main(void) {
-#if defined(NC_HAS_PARALLEL_FILTERS) && NC_HAS_PARALLEL_FILTERS
+#if defined(NC_HAS_PAR_FILTERS) && NC_HAS_PAR_FILTERS
     printf("yes\n");
 #else
     printf("no\n");
@@ -546,10 +548,13 @@ compile_library() {
 }
 
 verify_python_binding() {
+    # The manifest is written before this check, because importing the Python
+    # binding reads it. A failure here removes it again, so that a broken
+    # build never leaves behind a manifest a later run would treat as valid.
     PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
         MPI_NETCDF_LIBRARY="$LIBRARY" \
         "$PYTHON_EXECUTABLE" - "$PACKAGE_PARENT" <<'PY' \
-        || die "the compiled library did not load through its Python binding"
+        || { rm -f "$MANIFEST"; die "the compiled library did not load through its Python binding"; }
 import pathlib
 import sys
 
@@ -581,8 +586,14 @@ PY
 write_manifest() {
     local temporary="$BUILD_DIR/build.yml.$$"
     local abi
+    local -a loaded_modules=()
+
     abi=$(sed -n 's/^#define MPI_NETCDF_ABI_VERSION \([0-9]*\).*/\1/p' \
         "$SOURCE_DIR/mpi_netcdf.h" | head -n 1)
+
+    if [[ -n "${LOADEDMODULES:-}" ]]; then
+        IFS=':' read -r -a loaded_modules <<< "$LOADEDMODULES"
+    fi
 
     {
         printf '# Written by lib_mpi/install.sh. Read at runtime by module_env.py\n'
@@ -593,7 +604,6 @@ write_manifest() {
         printf 'abi_version: %s\n' "${abi:-unknown}"
         printf 'flag_source: %s\n' "$FLAG_SOURCE"
         printf 'parallel_filters: %s\n' "$PARALLEL_FILTERS"
-        printf 'probe: %s\n' "$PROBE_RESULT"
         printf 'python: %s\n' "$PYTHON_EXECUTABLE"
         printf 'mpicc: %s\n' "$(command -v mpicc)"
         printf 'cflags: %s\n' "${CFLAGS_LIST[*]}"
@@ -611,7 +621,12 @@ write_manifest() {
         if [[ -z "$SELECTED_MPI_MODULE$SELECTED_NETCDF_MODULE$SELECTED_PYTHON_MODULE" ]]; then
             printf '  []\n'
         fi
-        printf 'loaded_modules: %s\n' "${LOADEDMODULES:-}"
+        printf 'loaded_modules:\n'
+        if ((${#loaded_modules[@]})); then
+            printf '  - %s\n' "${loaded_modules[@]}"
+        else
+            printf '  []\n'
+        fi
     } > "$temporary"
 
     mv -f "$temporary" "$MANIFEST"
@@ -655,7 +670,8 @@ main() {
 
     if ((FORCE == 0)) && [[ -f "$LIBRARY" && -f "$MANIFEST" ]] \
         && [[ "$LIBRARY" -nt "$SOURCE_DIR/mpi_netcdf.c" ]] \
-        && [[ "$LIBRARY" -nt "$SOURCE_DIR/mpi_netcdf.h" ]]; then
+        && [[ "$LIBRARY" -nt "$SOURCE_DIR/mpi_netcdf.h" ]] \
+        && [[ "$MANIFEST" -nt "${BASH_SOURCE[0]}" ]]; then
         printf '\n%s is already up to date.\n' "$LIBRARY"
         printf 'Run with --force to rebuild, or --clean to remove it.\n\n'
         exit 0
@@ -695,11 +711,13 @@ main() {
     step "Building the shared library"
     compile_library
 
-    step "Verifying the Python binding"
-    verify_python_binding
+    step "Recording the manifest and verifying the Python binding"
     write_manifest
+    verify_python_binding
 
     summary
 }
 
 main "$@"
+
+rm -rf $BUILD_DIR

@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import netCDF4 as nc
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
@@ -21,6 +20,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
     from typing import Any, Literal
+
+    import netCDF4
 
 
 def resolve_unlimited_dim(
@@ -297,7 +298,9 @@ def dataarray_to_netcdf(
     if not Path(file).exists():
         raise FileNotFoundError(f"File {file!r} does not exist!")
 
-    with nc.Dataset(file, mode="r+", format=format) as ncf:
+    import netCDF4
+
+    with netCDF4.Dataset(file, mode="r+", format=format) as ncf:
         varname = da.name
         if varname is None:
             raise ValueError("DataArray must have a name.")
@@ -378,7 +381,9 @@ def append_to_netcdf(
 
     n_new = ds.sizes[dim]
 
-    with nc.Dataset(file, mode=mode, format=format) as ncf:
+    import netCDF4
+
+    with netCDF4.Dataset(file, mode=mode, format=format) as ncf:
         if dim not in ncf.dimensions:
             raise ValueError(f"Append dimension {dim!r} not found in {file}")
 
@@ -459,14 +464,14 @@ def append_to_netcdf(
 
 
 def createVariable(
-    ncf: nc.Dataset,
+    ncf: netCDF4.Dataset,
     da: xr.DataArray,
     varname: str,
     zlib: bool | None = None,
     complevel: int | None = None,
     shuffle: bool | None = None,
     write_values: bool = False,
-) -> nc.Variable:
+) -> netCDF4.Variable:
 
     # we need to use ecoding here
     missing = [d for d in da.dims if d not in ncf.dimensions]

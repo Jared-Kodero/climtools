@@ -1,0 +1,151 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 4981849
+##  Job Name : work.sh
+##  Nodelist : node2347
+##      CPUs : 8
+##  Mem/Node : 102400 MB
+## Directory : /oscar/home/jkodero/research/climtools/examples
+##   Job Started : Sat Aug 15 12:35:57 AM EDT 2026
+###############################################################################
+Building the climtools MPI-NetCDF extension
+/users/jkodero/research/climtools/lib_mpi
+
+[1/7] Locating a parallel NetCDF-4 toolchain
+      module system detected
+      no usable toolchain on PATH; searching the module system
+      trying netcdf/4.9.3-gmha
+      trying netcdf-mpi/4.9.3-kuxq
+      trying netcdf-c/4.9.3-hycc
+      trying netcdf-c-mpi/4.9.3-xy6i
+      trying netcdf-c-mpi/4.9.3-lezy
+      trying openmpi/5.0.8-q6yg + netcdf/4.9.3-gmha
+      trying openmpi/5.0.7-qgoy + netcdf/4.9.3-gmha
+      trying openmpi/5.0.7-dmue + netcdf/4.9.3-gmha
+      trying openmpi/4.1.8-iqkf + netcdf/4.9.3-gmha
+      trying hpcx-mpi/2.25.1s-le4f + netcdf/4.9.3-gmha
+      trying openmpi/5.0.8-q6yg + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/5.0.7-qgoy + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/5.0.7-dmue + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/4.1.8-iqkf + netcdf-mpi/4.9.3-kuxq
+      trying hpcx-mpi/2.25.1s-le4f + netcdf-mpi/4.9.3-kuxq
+      [ok] loaded hpcx-mpi/2.25.1s-le4f + netcdf-mpi/4.9.3-kuxq
+      flags from nc-config
+      cflags: -I/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/include
+      libs:   -L/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/lib -lnetcdf
+      [ok] parallel NetCDF-4 available (NC_HAS_PARALLEL4)
+      [ok] parallel HDF5 filters available
+
+[2/7] Checking the Python environment
+      NumPy 2.4.6, xarray 2026.7.0
+      Python 3.14.6 at /users/jkodero/miniconda3/envs/mother/bin/python3
+      [ok] Python dependencies satisfied
+
+[3/7] Checking the checkout
+      [ok] all sources present
+
+[4/7] Compiling the capability probe
+      [ok] probe compiled
+
+[5/7] Running the two-rank probe
+      running the two-rank probe: srun --mpi=pmix --ntasks=2
+      [ok] two-rank parallel write succeeded
+
+[6/7] Building the shared library
+      [ok] built /users/jkodero/research/climtools/lib_mpi/lib/libmpi_netcdf.so
+      [ok] dynamic dependencies and exported ABI verified
+
+[7/7] Recording the manifest and verifying the Python binding
+      [ok] recorded the verified configuration in /users/jkodero/research/climtools/lib_mpi/stack_env.yaml
+      NetCDF-C 4.9.3 of Jan 13 2026 01:33:58 $
+      ABI version 2, thread level 3
+      [ok] Python binding loads the compiled library
+
+Installation complete
+  library            /users/jkodero/research/climtools/lib_mpi/lib/libmpi_netcdf.so
+  flags from         nc-config
+  mpicc              /oscar/rt/sw/external/hpcx-mpi/2.25.1/bin/mpicc
+  python             /users/jkodero/miniconda3/envs/mother/bin/python3
+  netcdf module      netcdf-mpi/4.9.3-kuxq
+  mpi module         hpcx-mpi/2.25.1s-le4f
+  parallel filters   yes
+  two-rank probe     passed with 'srun --mpi=pmix --ntasks=2'
+  manifest           /users/jkodero/research/climtools/lib_mpi/stack_env.yaml
+
+Run a job with:
+  mpirun -n 4 python your_script.py
+  srun --ntasks=4 --mpi=pmix python your_script.py
+
+Use the same MPI and NetCDF stack at runtime that was verified here.
+See /users/jkodero/research/climtools/lib_mpi/README.md for how to write code that uses it.
+
+========================================
+Starting MPI time composites: 8 processes
+========================================
+2026-08-15 00:36:35,003 - TIME COMPOSITES - INFO - Starting time composites for 2024081400Z on 8 rank(s)
+2026-08-15 00:36:35,016 - TIME COMPOSITES - INFO - Running 2024081400Z C96.NESTED.R4x2.R2x1.CNTRL mem01
+2026-08-15 00:36:40,796 - TIME COMPOSITES - INFO - [rank 4/8] detects latitude indices 235 to 293
+2026-08-15 00:36:40,866 - TIME COMPOSITES - INFO - [rank 1/8] detects latitude indices 59 to 118
+2026-08-15 00:36:40,899 - TIME COMPOSITES - INFO - [rank 6/8] detects latitude indices 351 to 409
+2026-08-15 00:36:40,901 - TIME COMPOSITES - INFO - [rank 2/8] detects latitude indices 118 to 177
+2026-08-15 00:36:40,902 - TIME COMPOSITES - INFO - [rank 7/8] detects latitude indices 409 to 467
+2026-08-15 00:36:40,909 - TIME COMPOSITES - INFO - [rank 5/8] detects latitude indices 293 to 351
+2026-08-15 00:36:40,910 - TIME COMPOSITES - INFO - [rank 3/8] detects latitude indices 177 to 235
+2026-08-15 00:36:40,910 - TIME COMPOSITES - INFO - [rank 0/8] detects latitude indices 0 to 59
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - 29164 events
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 7/8] holds events 25519 to 29164
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 3/8] holds events 10938 to 14584
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 1/8] holds events 3646 to 7292
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 5/8] holds events 18229 to 21874
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 2/8] holds events 7292 to 10938
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 4/8] holds events 14584 to 18229
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 6/8] holds events 21874 to 25519
+2026-08-15 00:36:42,276 - TIME COMPOSITES - INFO - [rank 0/8] holds events 0 to 3646
+2026-08-15 00:45:30,591 - TIME COMPOSITES - INFO - Loaded and remapped soil moisture climatology
+2026-08-15 00:45:30,623 - TIME COMPOSITES - INFO - Building event store
+2026-08-15 00:47:13,098 - TIME COMPOSITES - INFO - Building composite
+2026-08-15 00:48:06,334 - TIME COMPOSITES - INFO - Assembling composite store
+2026-08-15 00:48:06,336 - TIME COMPOSITES - INFO - Writing composite store to /users/jkodero/jobtmp/data/002/time_composites/2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/event.store.nc
+2026-08-15 00:48:22,013 - TIME COMPOSITES - INFO - Collective write finished in 15.68 s on 8 rank(s)
+2026-08-15 00:48:22,043 - TIME COMPOSITES - INFO - Finished writing event composite file to /users/jkodero/jobtmp/data/002/time_composites/2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/event.store.nc
+2026-08-15 00:48:28,156 - TIME COMPOSITES - INFO - Finished 2024081400Z C96.NESTED.R4x2.R2x1.CNTRL mem01
+2026-08-15 00:48:28,367 - TIME COMPOSITES - INFO - Running 2024081400Z C96.NESTED.R4x2.R2x1.2SIGMA_DRY mem01
+2026-08-15 00:48:28,908 - TIME COMPOSITES - INFO - [rank 2/8] detects latitude indices 118 to 177
+2026-08-15 00:48:28,908 - TIME COMPOSITES - INFO - [rank 6/8] detects latitude indices 351 to 409
+2026-08-15 00:48:28,908 - TIME COMPOSITES - INFO - [rank 0/8] detects latitude indices 0 to 59
+2026-08-15 00:48:28,909 - TIME COMPOSITES - INFO - [rank 5/8] detects latitude indices 293 to 351
+2026-08-15 00:48:28,909 - TIME COMPOSITES - INFO - [rank 4/8] detects latitude indices 235 to 293
+2026-08-15 00:48:28,909 - TIME COMPOSITES - INFO - [rank 7/8] detects latitude indices 409 to 467
+2026-08-15 00:48:28,909 - TIME COMPOSITES - INFO - [rank 1/8] detects latitude indices 59 to 118
+2026-08-15 00:48:28,909 - TIME COMPOSITES - INFO - [rank 3/8] detects latitude indices 177 to 235
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - 28191 events
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 4/8] holds events 14096 to 17620
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 2/8] holds events 7048 to 10572
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 6/8] holds events 21144 to 24668
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 7/8] holds events 24668 to 28191
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 1/8] holds events 3524 to 7048
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 5/8] holds events 17620 to 21144
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 3/8] holds events 10572 to 14096
+2026-08-15 00:48:29,830 - TIME COMPOSITES - INFO - [rank 0/8] holds events 0 to 3524
+2026-08-15 00:56:04,804 - TIME COMPOSITES - INFO - Loaded and remapped soil moisture climatology
+2026-08-15 00:56:04,832 - TIME COMPOSITES - INFO - Building event store
+2026-08-15 00:57:37,688 - TIME COMPOSITES - INFO - Building composite
+2026-08-15 00:58:18,510 - TIME COMPOSITES - INFO - Assembling composite store
+2026-08-15 00:58:18,512 - TIME COMPOSITES - INFO - Writing composite store to /users/jkodero/jobtmp/data/002/time_composites/2024081400Z/C96.NESTED.R4x2.R2x1.2SIGMA_DRY/mem01/event.store.nc
+2026-08-15 00:58:27,408 - TIME COMPOSITES - INFO - Collective write finished in 8.90 s on 8 rank(s)
+2026-08-15 00:58:27,452 - TIME COMPOSITES - INFO - Finished writing event composite file to /users/jkodero/jobtmp/data/002/time_composites/2024081400Z/C96.NESTED.R4x2.R2x1.2SIGMA_DRY/mem01/event.store.nc
+2026-08-15 00:58:32,910 - TIME COMPOSITES - INFO - Finished 2024081400Z C96.NESTED.R4x2.R2x1.2SIGMA_DRY mem01
+
+real	22m1.126s
+user	163m26.516s
+sys	9m42.359s
+Finished MPI time composites
+
+========================================
+Starting serial time composites
+========================================
+2026-08-15 00:58:36,147 - TIME COMPOSITES - INFO - Starting time composites for 2024081400Z
+2026-08-15 00:58:36,149 - TIME COMPOSITES - INFO - Running 2024081400Z C96.NESTED.R4x2.R2x1.CNTRL mem01
+2026-08-15 01:05:32,829 - TIME COMPOSITES - INFO - Loaded and remapped soil moisture climatology
+2026-08-15 01:07:10,067 - TIME COMPOSITES - INFO - 29164 events
+2026-08-15 01:07:10,067 - TIME COMPOSITES - INFO - Building event store
+[2026-08-15T06:36:03.006] error: *** JOB 4981849 ON node2347 CANCELLED AT 2026-08-15T06:36:03 DUE TO TIME LIMIT ***

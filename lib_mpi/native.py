@@ -9,7 +9,7 @@ import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .module_env import ModuleLoadError, ensure_required_modules
+from .module_env import ModuleLoadError, check_env_stack
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -209,7 +209,7 @@ def load() -> ctypes.CDLL:
 
     try:
         try:
-            ensure_required_modules()
+            check_env_stack()
         except ModuleLoadError as exc:
             raise NativeLibraryError(str(exc)) from exc
 
@@ -226,10 +226,10 @@ def load() -> ctypes.CDLL:
         # global namespace, and the process segfaults on the first call into
         # it. Importing the wheel first pins its own symbols and both stacks
         # coexist. The order is what matters, not which stack "wins".
-        try:
-            import netCDF4  # noqa: F401
-        except Exception:  # pragma: no cover - absent or broken install
-            pass
+        # try:
+        #     import netCDF4
+        # except Exception:  # pragma: no cover - absent or broken install
+        #     pass
 
         try:
             library = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
@@ -512,7 +512,9 @@ def bcast_bytes(payload: bytes, root: int, size: int) -> bytes:
 
     rank = int(library.mpi_netcdf_rank())
     n = ctypes.c_longlong(len(payload) if rank == root else 0)
-    check(library.mpi_netcdf_bcast_i64(ctypes.byref(n), int(root)), "MPI broadcast size")
+    check(
+        library.mpi_netcdf_bcast_i64(ctypes.byref(n), int(root)), "MPI broadcast size"
+    )
     if n.value < 0:
         raise NativeLibraryError(
             f"MPI broadcast reported an invalid payload size: {n.value}."

@@ -1,53 +1,23 @@
-"""MPI runtime layer: process coordination and the native C ABI.
+"""MPI runtime layer and native MPI-NetCDF diagnostics.
 
-This package owns everything that talks to MPI itself. It holds no NetCDF
-Python code; the writers live in :mod:`climtools.lib_netcdf`, which calls into the
-C ABI exposed here.
-
-Importing this package never initializes MPI and never loads the compiled
-extension. Both happen on first use, so ``import climtools`` succeeds on a
-machine where ``install.sh`` has not been run.
+The public coordination API is :class:`MPI`. Process-wide operations on
+``MPI_COMM_WORLD`` are available through ``MPI.world``. Importing this package
+does not initialize MPI or load the compiled extension; both remain lazy until
+first use.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from . import native, runtime
+from . import native
+from .module_env import load_env_stack
 from .native import NativeLibraryError
-from .runtime import (
-    MPI,
-    MPIError,
-    abort,
-    allgather,
-    available,
-    barrier,
-    bcast,
-    comm,
-    consensus,
-    finalize,
-    gather,
-    is_root,
-    launcher_size,
-    maximum,
-    mean,
-    minimum,
-    partition,
-    prod,
-    rank,
-    reduce,
-    scatter,
-    size,
-    split,
-    total,
-    world,
-)
+from .runtime import MPI, MPIError
 
-if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
-    from typing import Any
 
-    MPI_RANK: int
-    MPI_SIZE: int
+def env_stack():
+    import pprint
+
+    pprint.pprint(load_env_stack())
 
 
 def info() -> dict[str, object]:
@@ -56,11 +26,17 @@ def info() -> dict[str, object]:
     Returns
     -------
     dict of str to object
-        NetCDF-C version, MPI rank and size, parallel-filter capability and
-        the granted MPI thread level. When the extension is not built, the
-        dictionary reports ``available=False`` and a one-rank serial world.
+        Native-library location, NetCDF-C version, ABI revision, world rank and
+        size, parallel-filter capability, and granted MPI thread level. Without
+        a usable native library, a serial process reports rank 0 of size 1. A
+        multi-rank launcher without a usable runtime raises :class:`MPIError`,
+        consistent with ``MPI.world``.
     """
-    if not native.available():
+    runtime_available = MPI.world.available()
+    rank = MPI.world.rank()
+    size = MPI.world.size()
+
+    if not runtime_available:
         try:
             location = str(native.library_path())
         except FileNotFoundError as exc:
@@ -71,13 +47,12 @@ def info() -> dict[str, object]:
             "netcdf": None,
             "abi": None,
             "abi_expected": native.ABI_VERSION,
-            "rank": 0,
-            "size": 1,
+            "rank": rank,
+            "size": size,
             "parallel_filters": False,
             "thread_level": -1,
         }
 
-    world_rank, world_size = native.init()
     version = native.lib.mpi_netcdf_version()
     return {
         "available": True,
@@ -85,65 +60,32 @@ def info() -> dict[str, object]:
         "netcdf": version.decode("utf-8", errors="replace") if version else None,
         "abi": native.abi_version(),
         "abi_expected": native.ABI_VERSION,
-        "rank": world_rank,
-        "size": world_size,
+        "rank": rank,
+        "size": size,
         "parallel_filters": bool(native.lib.mpi_netcdf_has_parallel_filters()),
         "thread_level": int(native.lib.mpi_netcdf_thread_level()),
     }
 
 
 def has_parallel_filters() -> bool:
-    """Report whether compression is usable during a parallel write.
+    """Return whether parallel NetCDF output supports compression filters.
 
     Returns
     -------
     bool
-        ``True`` when NetCDF-C and HDF5 were built with parallel filter
-        support. Deflate is unavailable during collective output otherwise.
+        ``True`` when the loaded NetCDF-C/HDF5 stack supports parallel filters;
+        otherwise ``False``.
     """
     if not native.available():
         return False
     return bool(native.lib.mpi_netcdf_has_parallel_filters())
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve ``MPI_RANK`` and ``MPI_SIZE`` without initializing MPI early."""
-    if name in ("MPI_RANK", "MPI_SIZE"):
-        return getattr(runtime, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 __all__ = [
     "MPI",
-    "MPI_RANK",
-    "MPI_SIZE",
     "MPIError",
     "NativeLibraryError",
-    "abort",
-    "allgather",
-    "available",
-    "barrier",
-    "bcast",
-    "comm",
-    "consensus",
-    "finalize",
-    "gather",
+    "env_stack",
     "has_parallel_filters",
     "info",
-    "is_root",
-    "launcher_size",
-    "maximum",
-    "mean",
-    "minimum",
-    "native",
-    "partition",
-    "prod",
-    "rank",
-    "reduce",
-    "runtime",
-    "scatter",
-    "size",
-    "split",
-    "total",
-    "world",
 ]

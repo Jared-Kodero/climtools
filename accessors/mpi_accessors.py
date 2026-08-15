@@ -10,9 +10,9 @@ the object the accessor is bound to, and every rank must call the method, in
 the same order. Reductions combine the ranks' contributions in rank order, so
 the result is identical on every rank down to the last bit.
 
-Nothing in this module initializes MPI at import. The coordinator is built on
-first attribute access, and ``MPI_Init_thread`` runs only when a collective is
-actually called, so ``import climtools`` on a laptop costs nothing.
+Nothing in this module initializes MPI at import. Process coordination is
+delegated to ``MPI.world``, whose shared coordinator is created lazily when an
+operation first needs it. ``MPI_Init_thread`` therefore runs only on first use.
 
 Without the compiled extension, and only when the launcher reports a single
 task, every operation degrades to the identity: a reduction returns the local
@@ -26,12 +26,12 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
+from ..lib_mpi import MPI
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
     from typing import Any, Literal
-
-    from ..lib_mpi.runtime import MPI
 
 
 class MPIAccessor:
@@ -43,36 +43,25 @@ class MPIAccessor:
         Local contribution of this rank.
     """
 
-    __slots__ = ("_comm", "_obj")
+    __slots__ = ("_obj",)
 
     def __init__(self, xarray_obj: xr.DataArray | xr.Dataset) -> None:
         self._obj = xarray_obj
-        self._comm: MPI | None = None
-
-    # -- lazy handle ------------------------------------------------------
-    @property
-    def comm(self) -> MPI:
-        """Shared all-rank coordinator, created on first access."""
-        if self._comm is None:
-            from ..lib_mpi.runtime import comm
-
-            self._comm = comm()
-        return self._comm
 
     @property
     def rank(self) -> int:
         """Rank of this process in ``MPI_COMM_WORLD``."""
-        return self.comm.rank
+        return MPI.world.rank()
 
     @property
     def size(self) -> int:
         """Number of ranks in ``MPI_COMM_WORLD``."""
-        return self.comm.size
+        return MPI.world.size()
 
     @property
     def is_root(self) -> bool:
         """Whether this process is rank zero."""
-        return self.comm.rank == 0
+        return MPI.world.is_root()
 
     def __repr__(self) -> str:
         kind = type(self._obj).__name__
@@ -103,31 +92,31 @@ class MPIAccessor:
         are already aligned, which for a partitioned workload means the
         per-rank partial results rather than the partitioned data itself.
         """
-        return self.comm.reduce(self._obj, op)
+        return MPI.world.reduce(self._obj, op)
 
     def sum(self) -> xr.DataArray | xr.Dataset:
         """Sum this object across ranks. See :meth:`reduce`."""
-        return self.comm.sum(self._obj)
+        return MPI.world.sum(self._obj)
 
     def prod(self) -> xr.DataArray | xr.Dataset:
         """Multiply this object across ranks. See :meth:`reduce`."""
-        return self.comm.prod(self._obj)
+        return MPI.world.prod(self._obj)
 
     def min(self) -> xr.DataArray | xr.Dataset:
         """Elementwise minimum across ranks. See :meth:`reduce`."""
-        return self.comm.min(self._obj)
+        return MPI.world.min(self._obj)
 
     def max(self) -> xr.DataArray | xr.Dataset:
         """Elementwise maximum across ranks. See :meth:`reduce`."""
-        return self.comm.max(self._obj)
+        return MPI.world.max(self._obj)
 
     def any(self) -> xr.DataArray | xr.Dataset:
         """Elementwise logical OR across ranks. See :meth:`reduce`."""
-        return self.comm.any(self._obj)
+        return MPI.world.any(self._obj)
 
     def all(self) -> xr.DataArray | xr.Dataset:
         """Elementwise logical AND across ranks. See :meth:`reduce`."""
-        return self.comm.all(self._obj)
+        return MPI.world.all(self._obj)
 
     def mean(self) -> xr.DataArray | xr.Dataset:
         """Arithmetic mean over ranks of the bound objects.
@@ -145,7 +134,7 @@ class MPIAccessor:
         of two sums, so form the local weighted numerator and the local
         weight, reduce each with :meth:`sum`, and divide afterwards.
         """
-        return self.comm.mean(self._obj)
+        return MPI.world.mean(self._obj)
 
     # -- movement ---------------------------------------------------------
     def bcast(self, root: int = 0) -> xr.DataArray | xr.Dataset:
@@ -161,7 +150,7 @@ class MPIAccessor:
         xarray.DataArray or xarray.Dataset
             The object held by ``root``, on every rank.
         """
-        return self.comm.bcast(self._obj, root=root)
+        return MPI.world.bcast(self._obj, root=root)
 
     def gather(self, root: int = 0) -> list[Any] | None:
         """Collect every rank's object onto ``root``.
@@ -183,11 +172,11 @@ class MPIAccessor:
         memory cliff on anything large. Use :meth:`to_netcdf` to write a
         distributed dataset without gathering it.
         """
-        return self.comm.gather(self._obj, root=root)
+        return MPI.world.gather(self._obj, root=root)
 
     def allgather(self) -> list[Any]:
         """Collect every rank's object onto every rank, in rank order."""
-        return self.comm.allgather_obj(self._obj)
+        return MPI.world.allgather(self._obj)
 
     def concat(self, dim: str, root: int | None = None) -> xr.DataArray | xr.Dataset:
         """Join every rank's object along ``dim`` in rank order.
@@ -216,9 +205,9 @@ class MPIAccessor:
             raise TypeError("dim must be a non-empty string.")
 
         if root is None:
-            parts = self.comm.allgather_obj(self._obj)
+            parts = MPI.world.allgather(self._obj)
         else:
-            gathered = self.comm.gather(self._obj, root=root)
+            gathered = MPI.world.gather(self._obj, root=root)
             if gathered is None:
                 return self._obj
             parts = gathered
@@ -249,10 +238,10 @@ class MPIAccessor:
         if not isinstance(dim, str) or not dim:
             raise TypeError("dim must be a non-empty string.")
 
-        obj = self.comm.bcast(self._obj, root=root)
+        obj = MPI.world.bcast(self._obj, root=root)
         if dim not in obj.sizes:
             raise KeyError(f"Dimension {dim!r} is not present in the dataset.")
-        start, stop = self.comm.partition(int(obj.sizes[dim]))
+        start, stop = MPI.world.partition(int(obj.sizes[dim]))
         return obj.isel({dim: slice(start, stop)})
 
     def partition(self, dim: str) -> xr.DataArray | xr.Dataset:
@@ -279,7 +268,7 @@ class MPIAccessor:
             raise TypeError("dim must be a non-empty string.")
         if dim not in self._obj.sizes:
             raise KeyError(f"Dimension {dim!r} is not present in the dataset.")
-        start, stop = self.comm.partition(int(self._obj.sizes[dim]))
+        start, stop = MPI.world.partition(int(self._obj.sizes[dim]))
         return self._obj.isel({dim: slice(start, stop)})
 
     # -- synchronization --------------------------------------------------
@@ -291,7 +280,7 @@ class MPIAccessor:
         xarray.DataArray or xarray.Dataset
             The local object, so the call can sit inside a method chain.
         """
-        self.comm.barrier()
+        MPI.world.barrier()
         return self._obj
 
     # -- output -----------------------------------------------------------

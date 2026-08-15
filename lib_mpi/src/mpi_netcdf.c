@@ -65,10 +65,12 @@ const char *mpi_netcdf_version(void) { return nc_inq_libvers(); }
 
 int mpi_netcdf_abi_version(void) { return MPI_NETCDF_ABI_VERSION; }
 
+
+
 int mpi_netcdf_has_parallel_filters(void)
 {
-#if defined(NC_HAS_PARALLEL4) && defined(NC_HAS_PARALLEL_FILTERS)
-    return NC_HAS_PARALLEL4 && NC_HAS_PARALLEL_FILTERS;
+#if defined(NC_HAS_PARALLEL4) && defined(NC_HAS_PAR_FILTERS)
+    return NC_HAS_PARALLEL4 && NC_HAS_PAR_FILTERS;
 #else
     return 0;
 #endif

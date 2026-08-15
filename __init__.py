@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from .core import _operator as operator
     from .core import calc_stats as calc
     from .core import xgeo as xgeo
-    from .lib_mpi import MPI, MPI_RANK, MPI_SIZE
+    from .lib_mpi import MPI
     from .viz import cmaps as cmaps
     from .viz import plotting as plot
 
@@ -57,8 +57,6 @@ warnings.filterwarnings("always", module=r"climtools\..*")
 
 __all__ = [
     "MPI",
-    "MPI_RANK",
-    "MPI_SIZE",
     "DaskProgressBar",
     "SerialProgressBar",
     "calc",
@@ -75,8 +73,6 @@ __all__ = [
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "MPI": (".lib_mpi", "MPI"),
-    "MPI_RANK": (".lib_mpi", "MPI_RANK"),
-    "MPI_SIZE": (".lib_mpi", "MPI_SIZE"),
     "calc": (".core.calc_stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),

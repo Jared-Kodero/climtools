@@ -6,10 +6,10 @@ first use rather than at import, so importing the package on a machine where
 the extension has not been built does not fail.
 
 Without the extension, and only when the process launcher reports a single
-task, :func:`world` reports ``(0, 1)`` and the decorators execute the wrapped
-function locally. One script therefore runs unchanged under ``python`` and
+task, ``MPI.world`` reports rank 0 of a one-rank world and decorated calls
+execute locally. One script therefore runs unchanged under ``python`` and
 under ``mpirun -n N python``. A launcher reporting more than one task with no
-usable extension raises :class:`MPIError`, because reporting ``(0, 1)`` there
+usable extension raises :class:`MPIError`, because a serial fallback there
 would let every rank believe it owns the whole dataset.
 """
 
@@ -21,7 +21,7 @@ import operator as _operator
 import os
 import pickle
 from numbers import Integral
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, ParamSpec, TypeVar, cast
 
 import numpy as np
 
@@ -30,12 +30,9 @@ from . import native
 P = ParamSpec("P")
 R = TypeVar("R")
 
-if TYPE_CHECKING:  # resolved at runtime by the module-level __getattr__
+if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
-
-    MPI_RANK: int
-    MPI_SIZE: int
 
 #: Environment variables that carry the world size, used to detect a
 #: multi-rank job when the native library itself cannot be loaded.
@@ -61,10 +58,10 @@ _LAUNCHER_RANK_VARS = (
 
 
 class MPIError(native.NativeLibraryError):
-    """An error propagated from another rank."""
+    """MPI runtime or distributed-execution error."""
 
 
-def available() -> bool:
+def _available() -> bool:
     """Report whether the compiled MPI extension can be used.
 
     Returns
@@ -81,7 +78,7 @@ def available() -> bool:
     return True
 
 
-def launcher_size() -> int:
+def _launcher_size() -> int:
     """Return the world size advertised by the process launcher.
 
     Returns
@@ -123,41 +120,32 @@ def launcher_size() -> int:
     return 1
 
 
-def world() -> tuple[int, int]:
+def _resolve_world() -> tuple[int, int]:
     """Return the rank and size of ``MPI_COMM_WORLD``.
 
     Returns
     -------
     tuple of int
-        ``(rank, size)``. Without the native library this is ``(0, 1)``, so
-        that a script written for MPI also runs unmodified in serial.
+        ``(rank, size)``. Without a usable native library this is ``(0, 1)``
+        for a serial process, so MPI-aware code also runs under plain Python.
 
     Raises
     ------
     MPIError
-        If the launcher reports more than one task but the native library
-        cannot be loaded. Reporting ``(0, 1)`` there would let every rank
-        believe it owns the whole dataset and overwrite the same output.
+        If the launcher reports more than one task but the native MPI runtime
+        cannot be initialized. A serial fallback is unsafe in that case because
+        every process would otherwise believe it owns the entire dataset.
     """
-    if native.available():
+    try:
         return native.init()
-
-    size = launcher_size()
-    if size > 1:
-        raise MPIError(
-            f"the launcher reports {size} tasks but the MPI extension is not "
-            + f"built at {native.library_path()}. Run lib_mpi/install.sh "
-            + "before launching a multi-rank job."
-        )
-    return 0, 1
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve ``MPI_RANK`` and ``MPI_SIZE`` on first access."""
-    if name in ("MPI_RANK", "MPI_SIZE"):
-        rank, size = world()
-        return rank if name == "MPI_RANK" else size
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    except native.NativeLibraryError as exc:
+        size = _launcher_size()
+        if size > 1:
+            raise MPIError(
+                f"the launcher reports {size} tasks but the MPI runtime is "
+                + f"unavailable: {exc}"
+            ) from exc
+        return 0, 1
 
 
 # --------------------------------------------------------------- reductions
@@ -246,13 +234,13 @@ class MPI:
 
     >>> @MPI(all_ranks=True)
     ... def compute() -> int:
-    ...     return rank()
+    ...     return MPI.world.rank()
 
     Execute on the root and broadcast the result to every rank:
 
     >>> @MPI(broadcast=True)
     ... def configuration() -> dict[str, int]:
-    ...     return {"size": size()}
+    ...     return {"size": MPI.world.size()}
 
     Use a different root rank:
 
@@ -260,10 +248,9 @@ class MPI:
     ... def write_from_rank_one() -> None:
     ...     pass
 
-    Reduce across ranks through the handle:
+    Reduce across ranks through the world accessor:
 
-    >>> mpi = MPI(all_ranks=True)
-    >>> total = mpi.sum(local_partial)          # doctest: +SKIP
+    >>> total = MPI.world.sum(local_partial)    # doctest: +SKIP
 
     Use as a context manager to finalize MPI automatically:
 
@@ -320,7 +307,8 @@ class MPI:
             raise TypeError("root must be an integer rank.")
         if broadcast and all_ranks:
             raise ValueError(
-                "Invalid configuration: broadcast=True is incompatible with all_ranks=True."
+                "Invalid configuration: broadcast=True is incompatible "
+                + "with all_ranks=True."
             )
         if require_ranks is not None and (
             isinstance(require_ranks, bool) or not isinstance(require_ranks, Integral)
@@ -338,8 +326,8 @@ class MPI:
         self.root = int(root)
         self.require_ranks = None if require_ranks is None else int(require_ranks)
 
-        # Resolved on first use, never at construction. `world()` initializes
-        # MPI, and doing that from a decorator evaluated at import time would
+        # Resolved on first use, never at construction. `_resolve_world()`
+        # initializes MPI, and doing that from a decorator evaluated at import time
         # make every module that merely imports this one an MPI process.
         self._rank: int | None = None
         self._size: int | None = None
@@ -351,7 +339,7 @@ class MPI:
         if self._rank is not None and self._size is not None:
             return self._rank, self._size
 
-        rank, size = world()
+        rank, size = _resolve_world()
 
         if not 0 <= self.root < size:
             raise ValueError(
@@ -359,22 +347,18 @@ class MPI:
             )
         if self.require_ranks is not None and size < self.require_ranks:
             raise MPIError(
-                f"MPI_COMM_WORLD size ({size}) is smaller than required minimum ranks ({self.require_ranks}). "
-                + f"Launch job with `srun --ntasks={self.require_ranks} --mpi=pmix ...` or `mpirun -n {self.require_ranks} ...`."
+                f"MPI_COMM_WORLD size ({size}) is smaller than required "
+                + f"minimum ranks ({self.require_ranks}). Launch job with "
+                + f"`srun --ntasks={self.require_ranks} --mpi=pmix ...` or "
+                + f"`mpirun -n {self.require_ranks} ...`."
             )
 
         self._rank = rank
         self._size = size
         self._native = native.available()
-        type(self).MPI_RANK = rank
-        type(self).MPI_SIZE = size
         return rank, size
 
-    #: Rank and size of the last resolved coordinator, kept for backwards
-    #: compatibility with code reading ``MPI.MPI_RANK``. Prefer the instance
-    #: properties or the module-level :func:`rank` and :func:`size`.
-    MPI_RANK: int = 0
-    MPI_SIZE: int = 1
+    world: ClassVar[MPIWorldAccessor]
 
     @property
     def rank(self) -> int:
@@ -412,7 +396,7 @@ class MPI:
         """Enter the MPI context and return this coordinator."""
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(self, exc_type, exc_value, traceback: Any) -> None:
         self.finalize()
 
     # -- point-to-point and collective primitives -------------------------
@@ -741,10 +725,13 @@ class MPI:
         native.abort(code)
 
     def finalize(self) -> None:
-        """Finalize MPI if this package initialized it."""
+        """Finalize MPI if this coordinator initialized it."""
         if not self._native:
             return
         native.finalize()
+        self._rank = None
+        self._size = None
+        self._native = False
 
     # -- internals --------------------------------------------------------
     def _check_root(self, root: int | None) -> int:
@@ -869,155 +856,147 @@ class MPI:
         return wrapper
 
 
-# ------------------------------------------------------- module-level handle
+# ------------------------------------------------------- world accessor
 
 
-_DEFAULT: MPI | None = None
+class MPIWorldAccessor:
+    """Lazy namespace for operations on ``MPI_COMM_WORLD``.
 
+    ``MPI.world`` provides process-wide collectives without requiring callers to
+    construct an :class:`MPI` coordinator. The accessor itself is created at
+    import time, but its shared all-rank coordinator is created only on first
+    use. MPI initialization therefore remains lazy.
 
-def comm() -> MPI:
-    """Return the shared all-rank coordinator for this process.
+    Examples
+    --------
+    Query the active world:
 
-    Returns
-    -------
-    MPI
-        A cached :class:`MPI` configured with ``all_ranks=True``. It backs the
-        module-level helpers below, so ``mpi.sum(x)`` and ``MPI(all_ranks=True).sum(x)``
-        are the same operation.
+    >>> MPI.world.rank()
+    0
+    >>> MPI.world.size()
+    1
 
-    Notes
-    -----
-    The handle is created on first call and resolves MPI on first use, so
-    importing this module still costs nothing.
+    Use collective operations through the same namespace:
+
+    >>> MPI.world.barrier()
+    >>> MPI.world.sum(3)
+    3
     """
-    global _DEFAULT
 
-    if _DEFAULT is None:
-        _DEFAULT = MPI(all_ranks=True)
-    return _DEFAULT
+    __slots__ = ("_coordinator",)
+
+    def __init__(self) -> None:
+        self._coordinator: MPI | None = None
+
+    def _comm(self) -> MPI:
+        """Return the shared all-rank coordinator, creating it lazily."""
+        if self._coordinator is None:
+            self._coordinator = MPI(all_ranks=True)
+        return self._coordinator
+
+    def available(self) -> bool:
+        """Return whether the native MPI runtime can be loaded and initialized."""
+        return _available()
+
+    def launcher_size(self) -> int:
+        """Return the world size advertised by the process launcher."""
+        return _launcher_size()
+
+    def rank(self) -> int:
+        """Return this process's rank in ``MPI_COMM_WORLD``."""
+        return self._comm().rank
+
+    def size(self) -> int:
+        """Return the number of ranks in ``MPI_COMM_WORLD``."""
+        return self._comm().size
+
+    def is_root(self, root: int = 0) -> bool:
+        """Return whether this process has rank ``root``."""
+        return self._comm().rank == root
+
+    def barrier(self) -> None:
+        """Block until every rank in ``MPI_COMM_WORLD`` reaches the barrier."""
+        self._comm().barrier()
+
+    def bcast(self, value: Any = None, *, root: int = 0) -> Any:
+        """Broadcast a picklable object from ``root`` to every rank."""
+        return self._comm().bcast(value, root=root)
+
+    def gather(self, value: Any, *, root: int = 0) -> list[Any] | None:
+        """Gather one picklable object per rank onto ``root`` in rank order."""
+        return self._comm().gather(value, root=root)
+
+    def allgather(self, value: Any) -> list[Any]:
+        """Gather one picklable object from every rank in rank order."""
+        return self._comm().allgather_obj(value)
+
+    def scatter(self, values: Any = None, *, root: int = 0) -> Any:
+        """Scatter one item per rank from a sequence supplied by ``root``."""
+        return self._comm().scatter(values, root=root)
+
+    def reduce(self, value: Any, op: str = "sum") -> Any:
+        """Reduce one value contributed by each rank using ``op``."""
+        return self._comm().reduce(value, op)
+
+    def sum(self, value: Any) -> Any:
+        """Return the sum of one value contributed by each rank."""
+        return self._comm().sum(value)
+
+    def prod(self, value: Any) -> Any:
+        """Return the product of one value contributed by each rank."""
+        return self._comm().prod(value)
+
+    def min(self, value: Any) -> Any:
+        """Return the elementwise minimum over values contributed by all ranks."""
+        return self._comm().min(value)
+
+    def max(self, value: Any) -> Any:
+        """Return the elementwise maximum over values contributed by all ranks."""
+        return self._comm().max(value)
+
+    def any(self, value: Any) -> Any:
+        """Return the elementwise logical OR over values contributed by all ranks."""
+        return self._comm().any(value)
+
+    def all(self, value: Any) -> Any:
+        """Return the elementwise logical AND over values contributed by all ranks."""
+        return self._comm().all(value)
+
+    def mean(self, value: Any) -> Any:
+        """Return the equal-rank arithmetic mean of contributed values."""
+        return self._comm().mean(value)
+
+    def partition(self, total: int, *, rank: int | None = None) -> tuple[int, int]:
+        """Return a rank's contiguous half-open block of ``total`` items."""
+        return self._comm().partition(total, rank=rank)
+
+    def split(self, sequence: Any) -> Any:
+        """Return this rank's contiguous slice of ``sequence``."""
+        return self._comm().split(sequence)
+
+    def consensus(self, ok: bool) -> bool:
+        """Return ``True`` only when every rank contributes a true value."""
+        return self._comm().consensus(ok)
+
+    def abort(self, code: int = 1) -> None:
+        """Abort all ranks in ``MPI_COMM_WORLD`` with process exit ``code``."""
+        self._comm().abort(code)
+
+    def finalize(self) -> None:
+        """Finalize MPI when initialized by the shared world coordinator."""
+        if self._coordinator is None:
+            return
+        self._coordinator.finalize()
+        self._coordinator = None
 
 
-def rank() -> int:
-    """Return the rank of this process in ``MPI_COMM_WORLD``."""
-    return comm().rank
+MPI.world = MPIWorldAccessor()
 
 
-def size() -> int:
-    """Return the number of ranks in ``MPI_COMM_WORLD``."""
-    return comm().size
+__all__ = ["MPI", "MPIError"]
 
 
-def is_root(root: int = 0) -> bool:
-    """Report whether this process is ``root``."""
-    return comm().rank == root
-
-
-def barrier() -> None:
-    """Wait until every rank reaches this call."""
-    comm().barrier()
-
-
-def bcast(value: Any = None, *, root: int = 0) -> Any:
-    """Broadcast a picklable object from ``root``. See :meth:`MPI.bcast`."""
-    return comm().bcast(value, root=root)
-
-
-def gather(value: Any, *, root: int = 0) -> list[Any] | None:
-    """Gather one object per rank onto ``root``. See :meth:`MPI.gather`."""
-    return comm().gather(value, root=root)
-
-
-def allgather(value: Any) -> list[Any]:
-    """Gather one object from every rank. See :meth:`MPI.allgather_obj`."""
-    return comm().allgather_obj(value)
-
-
-def scatter(values: Any = None, *, root: int = 0) -> Any:
-    """Distribute one item per rank from ``root``. See :meth:`MPI.scatter`."""
-    return comm().scatter(values, root=root)
-
-
-def reduce(value: Any, op: str = "sum") -> Any:
-    """Reduce one value per rank. See :meth:`MPI.reduce`."""
-    return comm().reduce(value, op)
-
-
-def total(value: Any) -> Any:
-    """Sum one value per rank. See :meth:`MPI.sum`."""
-    return comm().sum(value)
-
-
-def prod(value: Any) -> Any:
-    """Multiply one value per rank. See :meth:`MPI.prod`."""
-    return comm().prod(value)
-
-
-def minimum(value: Any) -> Any:
-    """Elementwise minimum over ranks. See :meth:`MPI.min`."""
-    return comm().min(value)
-
-
-def maximum(value: Any) -> Any:
-    """Elementwise maximum over ranks. See :meth:`MPI.max`."""
-    return comm().max(value)
-
-
-def mean(value: Any) -> Any:
-    """Arithmetic mean over ranks. See :meth:`MPI.mean`."""
-    return comm().mean(value)
-
-
-def partition(count: int) -> tuple[int, int]:
-    """Return this rank's contiguous block of ``count`` items."""
-    return comm().partition(count)
-
-
-def split(sequence: Any) -> Any:
-    """Return this rank's contiguous slice of ``sequence``."""
-    return comm().split(sequence)
-
-
-def consensus(ok: bool) -> bool:
-    """Report whether every rank passed a true value."""
-    return comm().consensus(ok)
-
-
-def abort(code: int = 1) -> None:
-    """Terminate all ranks in ``MPI_COMM_WORLD``."""
-    comm().abort(code)
-
-
-def finalize() -> None:
-    """Finalize MPI if this package initialized it."""
-    comm().finalize()
-
-
-__all__ = [
-    "MPI",
-    "MPI_RANK",
-    "MPI_SIZE",
-    "MPIError",
-    "abort",
-    "allgather",
-    "available",
-    "barrier",
-    "bcast",
-    "comm",
-    "consensus",
-    "finalize",
-    "gather",
-    "is_root",
-    "launcher_size",
-    "maximum",
-    "mean",
-    "minimum",
-    "partition",
-    "prod",
-    "rank",
-    "reduce",
-    "scatter",
-    "size",
-    "split",
-    "total",
-    "world",
-]
+# we need another class so that when working with xarray ds or da we can use the available ranks without using boiler plate
+# class should be xposed in accessors mpi etc so lest da.xgeo.mpi.mean() auto does all boiler plate setup that way uses dont even have to know they are using mpi
+# we can add another pyfile in lib_mpi that implimet these auto da and ds
+# also should we move lib_mpi dir into lib_netcdf??

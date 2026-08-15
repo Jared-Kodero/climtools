@@ -1,0 +1,39 @@
+# Written by lib_mpi/install.sh. Read at runtime by module_env.py
+# to reload the same module stack the library was built against.
+schema_version: 3
+built_at: 2026-08-15T04:36:30Z
+library: /users/jkodero/research/climtools/lib_mpi/lib/libmpi_netcdf.so
+abi_version: 2
+flag_source: nc-config
+parallel_filters: yes
+python: /users/jkodero/miniconda3/envs/mother/bin/python3
+mpicc: /oscar/rt/sw/external/hpcx-mpi/2.25.1/bin/mpicc
+cflags: -I/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/include
+libs: -L/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/lib -lnetcdf
+modules:
+  - hpcx-mpi/2.25.1s-le4f
+  - netcdf-mpi/4.9.3-kuxq
+loaded_modules:
+  - hpcx-mpi/2.25.1s-le4f
+  - glibc/2.34-xtty
+  - gcc-runtime/11.5.0-7cbl
+  - libaec/1.0.6-sjxu
+  - zlib/1.3.1-xo4x
+  - libiconv/1.18-ifc5
+  - xz/5.6.3-pvai
+  - libxml2/2.13.5-ikrc
+  - pkgconf/2.3.0-wdev
+  - hdf5-mpi/1.14.6-wybi
+  - bzip2/1.0.8-raqr
+  - zstd/1.5.7-v3mt
+  - libunistring/1.2-pf4t
+  - libidn2/2.3.7-xkvg
+  - openssl/3.5.1s-cpde
+  - nghttp2/1.65.0-67io
+  - curl/8.11.1-qbgr
+  - lz4/1.10.0-vu6t
+  - snappy/1.2.1-llhc
+  - c-blosc/1.21.6-vyv3
+  - netcdf-c-mpi/4.9.3-lezy
+  - netcdf-fortran-mpi/4.6.1-7t2u
+  - netcdf-mpi/4.9.3-kuxq
