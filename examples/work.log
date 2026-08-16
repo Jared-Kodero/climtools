@@ -1,0 +1,57 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 5007527
+##  Job Name : work.sh
+##  Nodelist : node2418
+##      CPUs : 16
+##  Mem/Node : 512000 MB
+## Directory : /oscar/home/jkodero/research/climtools/examples
+##   Job Started : Sun Aug 16 02:55:30 AM EDT 2026
+###############################################################################
+Building the climtools MPI-NetCDF extension
+/users/jkodero/research/climtools/lib_mpi
+
+[1/7] Locating a parallel NetCDF-4 toolchain
+      module system detected
+      no usable toolchain on PATH; searching the module system
+      trying netcdf/4.9.3-gmha
+      trying netcdf-mpi/4.9.3-kuxq
+      trying netcdf-c/4.9.3-hycc
+      trying netcdf-c-mpi/4.9.3-xy6i
+      trying netcdf-c-mpi/4.9.3-lezy
+      trying openmpi/5.0.8-q6yg + netcdf/4.9.3-gmha
+      trying openmpi/5.0.7-qgoy + netcdf/4.9.3-gmha
+      trying openmpi/5.0.7-dmue + netcdf/4.9.3-gmha
+      trying openmpi/4.1.8-iqkf + netcdf/4.9.3-gmha
+      trying hpcx-mpi/2.25.1s-le4f + netcdf/4.9.3-gmha
+      trying openmpi/5.0.8-q6yg + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/5.0.7-qgoy + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/5.0.7-dmue + netcdf-mpi/4.9.3-kuxq
+      trying openmpi/4.1.8-iqkf + netcdf-mpi/4.9.3-kuxq
+      trying hpcx-mpi/2.25.1s-le4f + netcdf-mpi/4.9.3-kuxq
+      [ok] loaded hpcx-mpi/2.25.1s-le4f + netcdf-mpi/4.9.3-kuxq
+      flags from nc-config
+      cflags: -I/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/include
+      libs:   -L/oscar/rt/9.6/25/spack/x86_64_v3/netcdf-c-4.9.3-lezypm3krqvzjvkqnfhxlvysdsetpazn/lib -lnetcdf
+      [ok] parallel NetCDF-4 available (NC_HAS_PARALLEL4)
+      [ok] parallel HDF5 filters available
+
+[2/7] Checking the Python environment
+      NumPy 2.4.6, xarray 2026.7.0
+      Python 3.14.6 at /users/jkodero/miniconda3/envs/mother/bin/python3
+      [ok] Python dependencies satisfied
+
+[3/7] Checking the checkout
+      [ok] all sources present
+
+[4/7] Compiling the capability probe
+      [ok] probe compiled
+
+[5/7] Running the two-rank probe
+      running the two-rank probe: srun --mpi=pmix --ntasks=2
+      [ok] two-rank parallel write succeeded
+
+[6/7] Building the shared library
+      [ok] built /users/jkodero/research/climtools/lib_mpi/lib/libmpi_netcdf.so
+
+ERROR /users/jkodero/research/climtools/lib_mpi/lib/libmpi_netcdf.so does not export mpi_runtime_abi_version; the sources and this script are out of step
+

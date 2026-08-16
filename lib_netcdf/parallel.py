@@ -221,7 +221,7 @@ def harmonise_time_encoding(
         except BaseException as exc:
             error = exc
         comm.raise_if_error(error, f"time resolution for variable '{name}'")
-        code = max(comm.allgather(resolution))
+        code = max(comm.allgather_i64(resolution))
         unit = _TIME_UNITS[code][0]
         error = None
         try:
@@ -315,7 +315,7 @@ class WorldComm:
         self.rank = rank
         self.size = size
 
-    def allgather(self, value: int) -> list[int]:
+    def allgather_i64(self, value: int) -> list[int]:
         return native.allgather_i64(int(value), self.size)
 
     def raise_if_error(
@@ -341,7 +341,7 @@ class WorldComm:
         InconsistentRanksError
             When only some ranks failed.
         """
-        failures = self.allgather(1 if error is not None else 0)
+        failures = self.allgather_i64(1 if error is not None else 0)
         if not any(failures):
             return
 
@@ -362,7 +362,7 @@ class WorldComm:
 
 
 def _agree(value: int, comm: WorldComm, what: str) -> int:
-    values = comm.allgather(int(value))
+    values = comm.allgather_i64(int(value))
     if min(values) != max(values):
         raise InconsistentRanksError(
             f"Ranks disagree about {what}: {values}. Every rank must hold matching variables, dimensions, dtypes, and attributes."
@@ -432,12 +432,12 @@ def infer_parallel_dim(
     """Find the one dimension that is partitioned across ranks."""
     candidates = []
     for dim in sorted(local_sizes):
-        lengths = comm.allgather(local_sizes[dim])
+        lengths = comm.allgather_i64(local_sizes[dim])
         if min(lengths) != max(lengths):
             candidates.append(dim)
             continue
         fp = coord_fingerprint(encvars, strings, dim)
-        fps = comm.allgather(fp)
+        fps = comm.allgather_i64(fp)
         if fp != -1 and len(set(fps)) > 1:
             candidates.append(dim)
     if len(candidates) == 1:
@@ -833,7 +833,7 @@ def to_netcdf(
             )
         comm.raise_if_error(error, "partitioned-dimension validation")
 
-        lengths = comm.allgather(local_sizes[pdim])
+        lengths = comm.allgather_i64(local_sizes[pdim])
         offset = int(sum(lengths[: comm.rank]))
         global_sizes = dict(local_sizes)
         global_sizes[pdim] = int(sum(lengths))
@@ -845,7 +845,7 @@ def to_netcdf(
         string_widths: dict[str, int] = {}
         for name in sorted(strings):
             _, width, _ = strings[name]
-            widths = comm.allgather(width)
+            widths = comm.allgather_i64(width)
             string_widths[name] = max(widths)
 
         error = None
