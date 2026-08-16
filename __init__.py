@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING
 
 import dask.diagnostics
 
-from .accessors.mpi_accessors import *
 from .accessors.xarray_accessors import *
 from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import apply_widget_css, n_cpus, redirect_streams
@@ -48,9 +47,10 @@ if TYPE_CHECKING:
     from .core import _operator as operator
     from .core import calc_stats as calc
     from .core import xgeo as xgeo
-    from .lib_mpi import mpi
+    from .lib_mpi import mpi, relaunch_with_mpi
     from .viz import cmaps as cmaps
     from .viz import plotting as plot
+
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("always", module=r"climtools\..*")
@@ -67,12 +67,14 @@ __all__ = [
     "operator",
     "plot",
     "redirect_streams",
+    "relaunch_with_mpi",
     "xgeo",
 ]
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "MPI": (".lib_mpi", "MPI"),
+    "mpi": (".lib_mpi", "mpi"),
+    "relaunch_with_mpi": (".lib_mpi", "relaunch_with_mpi"),
     "calc": (".core.calc_stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),

@@ -74,7 +74,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
-
 from climtools import mpi, xgeo
 
 logging.basicConfig(
@@ -88,16 +87,6 @@ logger = logging.getLogger("TIME COMPOSITES")
 def rank_tag() -> str:
     """Rank-aware log prefix, resolved when it is first needed."""
     return f"[rank {mpi.world.rank()}/{mpi.world.size()}]"
-
-
-def log_root(message: str, *args: object) -> None:
-    """Emit an informational message from the root rank only.
-
-    Progress lines come from the root rank alone, so an eight-rank job does
-    not produce eight copies of every message.
-    """
-    if mpi.world.is_root():
-        logger.info(message, *args)
 
 
 def land_mask(ds: xr.Dataset) -> xr.DataArray:
@@ -151,7 +140,7 @@ def get_smc_climo(ds: xr.Dataset, smc_path: Path) -> dict[str, xr.DataArray]:
     soilw1_cgm = soilw1_cgm.broadcast_like(ds["soilw1"]).transpose(*ds["soilw1"].dims)
     smc_climo["soilw1_cgm"] = soilw1_cgm
 
-    log_root("Loaded and remapped soil moisture climatology")
+    mpi.log("Loaded and remapped soil moisture climatology", logger=logger.info)
     return smc_climo
 
 
@@ -310,11 +299,12 @@ def detect_events(
 ) -> xr.Dataset:
     """Detect events collectively with one horizontal slab per rank."""
     lat_start, lat_stop = mpi.world.partition(pr.sizes["lat"])
-    logger.info(
+    mpi.log(
         "%s detects latitude indices %d to %d",
         rank_tag(),
         lat_start,
         lat_stop,
+        logger=logger.info,
     )
     local_labels = _detect_event_slab(
         pr,
@@ -683,24 +673,34 @@ def compute_event_time_composites(
         ds = source.sortby("lat").sortby("lon")
         ds["time"] = ds["time"] - pd.Timedelta(hours=5)
         utc5_lon_bounds = (-82.5, None)
+
+        try:
+            _ = ds.xgeo.mpi.mean("time")
+        except Exception:
+            mpi.log("ds.xgeo.mpi.mean('time'), Failed !", logger=logger.info)
+
         ds = ds.sel(lon=slice(*utc5_lon_bounds))
         labels = detect_events(ds["pr"], window_before, window_after, dry_threshold)
         if labels.sizes["event"] == 0:
-            log_root("No triggered events with a dry antecedent. Skipping case.")
+            mpi.log(
+                "No triggered events with a dry antecedent. Skipping case.",
+                logger=logger.info,
+            )
             return None
-        log_root("%d events", labels.sizes["event"])
+        mpi.log("%d events", labels.sizes["event"])
 
         local_labels, event_offset = partition_events(labels)
-        logger.info(
+        mpi.log(
             "%s holds events %d to %d",
             rank_tag(),
             event_offset,
             event_offset + local_labels.sizes["event"],
+            logger=logger.info,
         )
 
         ds = derived_vars(ds, smc_path, vertical_dim)
 
-        log_root("Building event store")
+        mpi.log("Building event store", logger=logger.info)
         events = build_event_store(
             ds,
             local_labels,
@@ -710,7 +710,7 @@ def compute_event_time_composites(
             event_offset,
         )
 
-        log_root("Building composite")
+        mpi.log("Building composite", logger=logger.info)
         composite = composite_from_events(events, intensity_edges, vertical_dim)
 
         patches = None
@@ -725,10 +725,10 @@ def compute_event_time_composites(
                 event_offset,
             )
 
-        log_root("Assembling composite store")
+        mpi.log("Assembling composite store", logger=logger.info)
         store = assemble_store(events, composite, patches)
 
-        log_root("Writing composite store to %s", out_path)
+        mpi.log("Writing composite store to %s", out_path)
         started = time.perf_counter()
         xgeo.to_netcdf(
             file=out_path,
@@ -739,10 +739,11 @@ def compute_event_time_composites(
             allow_serial=True,
         )
         elapsed = time.perf_counter() - started
-        log_root(
+        mpi.log(
             "Collective write finished in %.2f s on %d rank(s)",
             elapsed,
             mpi.world.size(),
+            logger=logger.info,
         )
 
     mpi.world.barrier()
@@ -750,14 +751,19 @@ def compute_event_time_composites(
     if not out_path.exists():
         raise RuntimeError(f"Event composite file was not written to {out_path}")
 
-    log_root("Finished writing event composite file to %s", out_path)
+    mpi.log("Finished writing event composite file to %s", out_path, logger=logger.info)
     return out_path
 
 
 def main() -> None:
 
     date = "2024081400Z"
-    log_root("Starting time composites for %s on %d rank(s)", date, mpi.world.size())
+    mpi.log(
+        "Starting time composites for %s on %d rank(s)",
+        date,
+        mpi.world.size(),
+        logger=logger.info,
+    )
 
     home = Path("/users/jkodero")
     gfdl_shield = home / "research/models/gfdl_shield"
@@ -784,7 +790,7 @@ def main() -> None:
         for exp_name in experiments:
             exp = f"{prefix}.{exp_name}"
 
-            log_root("Running %s %s %s", init_date, exp, member)
+            mpi.log("Running %s %s %s", init_date, exp, member, logger=logger.info)
             input_root = data_store / init_date / exp / member
 
             output_root = tmp_dir / init_date / exp / member
@@ -797,11 +803,12 @@ def main() -> None:
             final_path = final_dir / init_date / exp / member
 
             if store_path is None:
-                log_root(
+                mpi.log(
                     "No qualifying onsets, nothing to archive for %s %s %s",
                     init_date,
                     exp,
                     member,
+                    logger=logger.info,
                 )
                 discard_case(final_path)
                 gc.collect()
@@ -814,7 +821,7 @@ def main() -> None:
 
             archive_case(output_root, final_path, store_path.name)
 
-            log_root("Finished %s %s %s", init_date, exp, member)
+            mpi.log("Finished %s %s %s", init_date, exp, member, logger=logger.info)
             gc.collect()
 
         discard_case(tmp_dir / init_date)

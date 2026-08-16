@@ -20,12 +20,25 @@ import functools
 import operator as _operator
 import os
 import pickle
+import shutil
+import sys
+from collections.abc import Callable
 from numbers import Integral
-from typing import TYPE_CHECKING, ClassVar, Literal, ParamSpec, TypeVar, cast
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    ParamSpec,
+    TypeVar,
+    cast,
+)
 
 import numpy as np
 
 from . import native
+from .module_env import check_env_stack
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -33,6 +46,7 @@ R = TypeVar("R")
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+
 
 #: Environment variables that carry the world size, used to detect a
 #: multi-rank job when the native library itself cannot be loaded.
@@ -59,6 +73,82 @@ _LAUNCHER_RANK_VARS = (
 
 class MPIError(native.NativeLibraryError):
     """MPI runtime or distributed-execution error."""
+
+
+def relaunch_with_mpi(
+    ntasks: int | None = None,
+    path: str | Path | None = None,
+) -> None:
+    """Relaunch the current script under mpirun if not already running under MPI.
+
+    The recorded build-time module stack is loaded into the current environment
+    before resolving and launching mpirun.
+
+    Parameters
+    ----------
+    ntasks : int or None, optional
+        Number of MPI processes to launch. If None, use the number of available
+        CPUs, capped at 32.
+    path : str or Path or None, optional
+        Path to the mpirun executable. If None, search for mpirun in PATH after
+        loading the recorded module stack.
+    """
+    env = os.environ
+
+    under_mpi = any(
+        name in env
+        for name in (
+            "OMPI_COMM_WORLD_SIZE",
+            "PMI_SIZE",
+            "PMIX_RANK",
+        )
+    )
+
+    under_srun = "SLURM_STEP_ID" in env and "SLURM_PROCID" in env
+
+    if under_mpi or under_srun:
+        return
+
+    check_env_stack()
+
+    if path is not None:
+        candidate = Path(path).expanduser().resolve()
+        if not candidate.is_file():
+            raise RuntimeError(f"mpirun was not found at {candidate}")
+        mpirun = str(candidate)
+    else:
+        mpirun = shutil.which("mpirun")
+        if mpirun is None:
+            raise RuntimeError("mpirun was not found in PATH")
+
+    if not sys.argv[0]:
+        raise RuntimeError(
+            "Automatic MPI restart requires execution from a Python script"
+        )
+
+    if ntasks is None:
+        try:
+            n = min(len(os.sched_getaffinity(0)), 32)
+        except AttributeError:
+            n = min(os.cpu_count() or 1, 32)
+    elif ntasks > 0:
+        n = ntasks
+    else:
+        raise ValueError("ntasks must be greater than zero")
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    os.execv(
+        mpirun,
+        [
+            mpirun,
+            "-n",
+            str(n),
+            sys.executable,
+            *sys.argv,
+        ],
+    )
 
 
 def _available() -> bool:
@@ -301,6 +391,7 @@ class mpi:
         root: int = 0,
         require_ranks: int | None = None,
     ) -> None:
+
         if not isinstance(all_ranks, bool) or not isinstance(broadcast, bool):
             raise TypeError("all_ranks and broadcast must be bool values.")
         if isinstance(root, bool) or not isinstance(root, Integral):
@@ -398,6 +489,34 @@ class mpi:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.finalize()
+
+    def log(
+        self,
+        message: str,
+        *args: Any,
+        logger: Callable[..., None] = print,
+        **kwargs: Any,
+    ) -> None:
+        """Emit an informational message from the root rank only.
+
+        Progress lines come from the root rank alone, so an eight-rank job does
+        not produce eight copies of every message.
+
+        Args:
+            message (str): The message string or format string to log.
+            *args (Any): Variable length arguments for lazy string formatting.
+            logger (Callable[..., None], optional): The logging callable to use.
+                Defaults to the built-in `print` function.
+            **kwargs (Any): Arbitrary keyword arguments passed directly to the `logger`.
+                For example, `exc_info=True` for standard loggers, or `end=""` for `print`.
+        """
+        if self.is_root():
+            # Standard loggers handle lazy % formatting with *args, but print() does not.
+            # If the fallback print is used alongside args, we format it manually.
+            if logger is print and args:
+                logger(message % args, **kwargs)
+            else:
+                logger(message, *args, **kwargs)
 
     # -- point-to-point and collective primitives -------------------------
     def barrier(self) -> None:
@@ -1280,4 +1399,4 @@ class MPIWorldAccessor:
 mpi.world = MPIWorldAccessor()
 
 
-__all__ = ["MPIError", "mpi"]
+__all__ = ["MPIError", "mpi", "relaunch_with_mpi"]

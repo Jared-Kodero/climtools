@@ -3,7 +3,7 @@
 #SBATCH -n 8
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=100G
-#SBATCH -t 6:00:00
+#SBATCH -t 12:00:00
 #SBATCH -o work.log
 
 

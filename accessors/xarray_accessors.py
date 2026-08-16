@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import xarray as xr
 
 from ..core import xgeo
-from .mpi_accessors import MPIAccessor
+from ..lib_mpi.mpi_xarray import MPIAccessor
 
 if TYPE_CHECKING:
     from typing import Any, Literal

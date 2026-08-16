@@ -11,7 +11,7 @@ from __future__ import annotations
 from . import native
 from .module_env import load_env_stack
 from .native import NativeLibraryError
-from .runtime import MPIError, mpi
+from .runtime import MPIError, mpi, relaunch_with_mpi
 
 
 def env_stack():
@@ -88,4 +88,5 @@ __all__ = [
     "has_parallel_filters",
     "info",
     "mpi",
+    "relaunch_with_mpi",
 ]
