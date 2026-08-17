@@ -10,8 +10,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+
 from climtools import *
-from climtools import mpi, xgeo
+from climtools import xgeo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -451,7 +452,6 @@ def compute_event_time_composites(
     return out_path
 
 
-@mpi
 def main() -> None:
     date = "2024081400Z"
     logger.info("Starting time composites for %s", date)

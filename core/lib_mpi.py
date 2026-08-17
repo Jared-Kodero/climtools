@@ -15,10 +15,14 @@ from mpi4py import MPI as _MPI
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    _CommBase = _MPI.Comm
+else:
+    _CommBase = object
+
 P = ParamSpec("P")
 R = TypeVar("R")
 
-mpi: _MPIRuntime = None
+mpi: _MPIRuntime = cast("_MPIRuntime", None)
 
 
 class MPIError(Exception):
@@ -76,8 +80,28 @@ def _warn_unlaunched() -> None:
     )
 
 
-class _MPIRuntime:
-    """Namespace for MPI state, collectives, reductions, and ``@mpi`` execution."""
+class _MPIRuntime(_CommBase):
+    """User-facing MPI runtime namespace.
+
+    The object exposes convenience properties and reductions while delegating
+    unwrapped communicator operations to ``MPI.COMM_WORLD``. Static type
+    checkers see this class as an ``mpi4py.MPI.Comm`` subclass, so delegated
+    communicator methods retain their mpi4py signatures and IDE completion.
+
+    Parameters
+    ----------
+    world : mpi4py.MPI.Comm or None, optional
+        Communicator wrapped by the runtime. If None, use ``MPI.COMM_WORLD``.
+
+    Attributes
+    ----------
+    MPI : module
+        The :mod:`mpi4py.MPI` module.
+    MPI_TYPE_BY_DTYPE : dict
+        Mapping from supported NumPy dtypes to MPI datatypes.
+    MPIError : type[MPIError]
+        Exception type used for synchronized MPI failures.
+    """
 
     MPI = _MPI
     MPI_TYPE_BY_DTYPE = MPI_TYPE_BY_DTYPE
@@ -88,7 +112,13 @@ class _MPIRuntime:
 
     @property
     def launched(self) -> bool:
-        """Whether this process appears to have been started by MPI or Slurm."""
+        """Return whether this process appears to have been launched by MPI.
+
+        Returns
+        -------
+        bool
+            True when an MPI or Slurm launch environment is detected.
+        """
         return _launched(self._world)
 
     def _check_launcher(self) -> None:
@@ -97,24 +127,73 @@ class _MPIRuntime:
 
     @property
     def world(self) -> _MPI.Comm:
-        """The wrapped communicator, normally ``MPI.COMM_WORLD``."""
+        """Return the wrapped communicator.
+
+        Returns
+        -------
+        mpi4py.MPI.Comm
+            Wrapped communicator, normally ``MPI.COMM_WORLD``.
+
+        Warns
+        -----
+        RuntimeWarning
+            If no MPI or Slurm launcher is detected.
+        """
         self._check_launcher()
         return self._world
 
     @property
     def rank(self) -> int:
-        """This process's rank in ``mpi.world``."""
+        """Return the rank of this process in the wrapped communicator.
+
+        Returns
+        -------
+        int
+            Zero-based MPI rank.
+
+        Warns
+        -----
+        RuntimeWarning
+            If no MPI or Slurm launcher is detected.
+        """
         self._check_launcher()
         return self._world.Get_rank()
 
     @property
     def size(self) -> int:
-        """Number of ranks in ``mpi.world``."""
+        """Return the number of ranks in the wrapped communicator.
+
+        Returns
+        -------
+        int
+            Communicator size.
+
+        Warns
+        -----
+        RuntimeWarning
+            If no MPI or Slurm launcher is detected.
+        """
         self._check_launcher()
         return self._world.Get_size()
 
     def datatype(self, dtype: np.dtype[Any] | type[Any]) -> _MPI.Datatype:
-        """Return the MPI datatype corresponding to a NumPy dtype."""
+        """Return the MPI datatype corresponding to a NumPy dtype.
+
+        Parameters
+        ----------
+        dtype : numpy.dtype or type
+            NumPy dtype or scalar type to translate.
+
+        Returns
+        -------
+        mpi4py.MPI.Datatype
+            MPI datatype corresponding to ``dtype``.
+
+        Raises
+        ------
+        MPIError
+            If ``dtype`` has no supported MPI datatype mapping.
+        """
         key = np.dtype(dtype)
         try:
             return self.MPI_TYPE_BY_DTYPE[key]
@@ -122,7 +201,18 @@ class _MPIRuntime:
             raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from None
 
     def is_root(self, root: int = 0) -> bool:
-        """Return whether this process has rank ``root``."""
+        """Return whether this process has the requested root rank.
+
+        Parameters
+        ----------
+        root : int, optional
+            Root rank to compare against. Default is 0.
+
+        Returns
+        -------
+        bool
+            True when the current rank equals ``root``.
+        """
         return self.rank == root
 
     def scatterv(
@@ -134,7 +224,35 @@ class _MPIRuntime:
         *,
         root: int = 0,
     ) -> np.ndarray[Any, Any]:
-        """Scatter unequal contiguous leading-axis slabs from ``root``."""
+        """Scatter unequal contiguous leading-axis slabs from one rank.
+
+        Parameters
+        ----------
+        array : numpy.ndarray or None
+            Source array on ``root``. Non-root ranks may pass None.
+        counts : sequence of int
+            Number of leading-axis rows sent to each rank. The sequence must
+            contain exactly ``mpi.size`` entries.
+        recv_shape : sequence of int
+            Shape of the local receive array on this rank.
+        dtype : numpy.dtype or type
+            NumPy dtype of the send and receive arrays.
+        root : int, optional
+            Rank that owns ``array``. Default is 0.
+
+        Returns
+        -------
+        numpy.ndarray
+            Contiguous local slab received by this rank.
+
+        Raises
+        ------
+        ValueError
+            If ``counts`` does not contain one entry per rank, or if ``array``
+            is None on the root rank.
+        MPIError
+            If ``dtype`` has no supported MPI datatype mapping.
+        """
         counts_array = np.asarray(counts, dtype=np.int64)
         if counts_array.shape != (self.size,):
             raise ValueError(f"counts must contain {self.size} values.")
@@ -181,36 +299,148 @@ class _MPIRuntime:
         return recv
 
     def sum(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce values by summation.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like Python object or NumPy array to reduce.
+        root : int or None, optional
+            Destination rank. If None, perform an all-reduce and return the
+            result on every rank. Default is None.
+
+        Returns
+        -------
+        Any
+            Reduced value on every rank when ``root`` is None, on ``root``
+            otherwise, and None on non-root ranks for rooted reductions.
+        """
         return self._reduce(value, _MPI.SUM, root)
 
     def prod(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce values by multiplication.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like Python object or NumPy array to reduce.
+        root : int or None, optional
+            Destination rank. If None, perform an all-reduce and return the
+            result on every rank. Default is None.
+
+        Returns
+        -------
+        Any
+            Reduced value on every rank when ``root`` is None, on ``root``
+            otherwise, and None on non-root ranks for rooted reductions.
+        """
         return self._reduce(value, _MPI.PROD, root)
 
     def min(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce values by minimum.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like Python object or NumPy array to reduce.
+        root : int or None, optional
+            Destination rank. If None, perform an all-reduce and return the
+            result on every rank. Default is None.
+
+        Returns
+        -------
+        Any
+            Reduced value on every rank when ``root`` is None, on ``root``
+            otherwise, and None on non-root ranks for rooted reductions.
+        """
         return self._reduce(value, _MPI.MIN, root)
 
     def max(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce values by maximum.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like Python object or NumPy array to reduce.
+        root : int or None, optional
+            Destination rank. If None, perform an all-reduce and return the
+            result on every rank. Default is None.
+
+        Returns
+        -------
+        Any
+            Reduced value on every rank when ``root`` is None, on ``root``
+            otherwise, and None on non-root ranks for rooted reductions.
+        """
         return self._reduce(value, _MPI.MAX, root)
 
     def mean(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce values by arithmetic mean across ranks.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like Python object or NumPy array to average.
+        root : int or None, optional
+            Destination rank. If None, return the mean on every rank. Default
+            is None.
+
+        Returns
+        -------
+        Any
+            Arithmetic mean on every rank when ``root`` is None, on ``root``
+            otherwise, and None on non-root ranks for rooted reductions.
+        """
         result = self.sum(value, root=root)
         if root is not None and not self.is_root(root):
             return None
         return result / self.size
 
     def any(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce truth values by logical OR.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like value or array converted to Boolean values.
+        root : int or None, optional
+            Destination rank. If None, return the result on every rank.
+            Default is None.
+
+        Returns
+        -------
+        bool or numpy.ndarray or None
+            Logical-OR reduction. Scalar inputs return bool where a result is
+            present; array inputs return an array.
+        """
         result = self._reduce(np.asarray(value, dtype=bool), _MPI.LOR, root)
         if np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
     def all(self, value: Any, *, root: int | None = None) -> Any:
+        """Reduce truth values by logical AND.
+
+        Parameters
+        ----------
+        value : Any
+            Scalar-like value or array converted to Boolean values.
+        root : int or None, optional
+            Destination rank. If None, return the result on every rank.
+            Default is None.
+
+        Returns
+        -------
+        bool or numpy.ndarray or None
+            Logical-AND reduction. Scalar inputs return bool where a result is
+            present; array inputs return an array.
+        """
         result = self._reduce(np.asarray(value, dtype=bool), _MPI.LAND, root)
         if np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
-    def mpi_log(
+    def log(
         self,
         message: str,
         *args: Any,
@@ -218,7 +448,27 @@ class _MPIRuntime:
         logger: Callable[..., None] = print,
         **kwargs: Any,
     ) -> None:
-        """Emit a message from one rank, normally rank 0."""
+        """Emit a message from one rank.
+
+        Parameters
+        ----------
+        message : str
+            Message or format string passed to ``logger``.
+        *args : Any
+            Positional arguments passed to ``logger``. With the default
+            ``print`` logger, positional arguments trigger percent-formatting
+            of ``message`` before printing.
+        root : int, optional
+            Rank allowed to emit the message. Default is 0.
+        logger : callable, optional
+            Callable used to emit the message. Default is :func:`print`.
+        **kwargs : Any
+            Keyword arguments forwarded to ``logger``.
+
+        Returns
+        -------
+        None
+        """
         if not self.is_root(root):
             return
         if logger is print and args:
@@ -227,7 +477,28 @@ class _MPIRuntime:
             logger(message, *args, **kwargs)
 
     def raise_if_error(self, error: BaseException | None, phase: str) -> None:
-        """Raise a synchronized error on all ranks if any rank failed."""
+        """Raise a synchronized error on all ranks if any rank failed.
+
+        Parameters
+        ----------
+        error : BaseException or None
+            Local exception, or None if the local rank completed successfully.
+        phase : str
+            Name of the distributed execution phase used in error messages.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        BaseException
+            The original local exception when every rank reports failure.
+        MPIError
+            If only a subset of ranks failed. The raised error identifies the
+            first failed rank and, when available, its exception type and
+            message.
+        """
         failed = self.allgather(error is not None)
         if not builtins.any(failed):
             return
@@ -255,49 +526,58 @@ class _MPIRuntime:
         broadcast: bool = False,
         root: int = 0,
     ) -> Any:
-        """
-        Decorate a function for root-only or synchronized all-rank execution.
+        """Decorate a function for MPI-aware execution.
 
         By default, the decorated function executes only on the designated
-        root rank. Keyword arguments can modify this behavior to execute
-        on all ranks or to broadcast the root's return value to all ranks.
+        root rank. It can instead execute on all ranks, or execute on ``root``
+        and broadcast its return value to every rank.
 
         Parameters
         ----------
-        function : Callable[P, R] or None, optional
-            The function to be decorated. Passed as a positional-only argument.
-            Defaults to None to support decorator usage with keyword arguments.
+        function : callable or None, optional
+            Function to decorate. Passed positionally when using ``@mpi``.
+            None supports decorator use with keyword arguments.
         all_ranks : bool, optional
-            If True, the function is executed on every rank. Default is False.
+            If True, execute the function on every rank. Default is False.
         broadcast : bool, optional
-            If True, the function is executed on ``root`` and its return value
-            is broadcast to every rank. Default is False.
+            If True, execute on ``root`` and broadcast its return value to
+            every rank. Default is False.
         root : int, optional
-            The integer identifier of the root rank. Default is 0.
+            Root rank used for root-only execution and broadcasting. Default
+            is 0.
 
         Returns
         -------
-        Any
-            The decorated function or a decorator closure (if called with arguments).
-            When the decorated function is invoked, it returns the original
-            function's result, which may be broadcasted to all ranks if
-            ``broadcast=True``.
+        callable
+            Decorated function, or a decorator closure when ``function`` is
+            None. Root-only execution returns None on non-root ranks; broadcast
+            mode returns the root result on every rank.
+
+        Raises
+        ------
+        TypeError
+            If the positional argument is not callable.
+        ValueError
+            If ``broadcast`` and ``all_ranks`` are both True, or if ``root`` is
+            not a non-negative integer rank.
+        MPIError
+            If distributed execution fails on only a subset of ranks.
 
         Examples
         --------
-        Run the function on the ``root`` rank only:
+        Run a function on the root rank only.
 
         >>> @mpi
         ... def compute_metrics():
         ...     pass
 
-        Run the function on every rank:
+        Run a function on every rank.
 
         >>> @mpi(all_ranks=True)
         ... def initialize_worker():
         ...     pass
 
-        Run the function on ``root`` and broadcast the result to all ranks:
+        Run a function on the root rank and broadcast the result.
 
         >>> @mpi(broadcast=True)
         ... def load_shared_configuration():
@@ -339,7 +619,24 @@ class _MPIRuntime:
         return wrapper
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate unwrapped communicator operations to ``mpi.world``."""
+        """Delegate an unwrapped attribute to the wrapped communicator.
+
+        Parameters
+        ----------
+        name : str
+            Communicator attribute name.
+
+        Returns
+        -------
+        Any
+            Attribute resolved from :attr:`world`.
+
+        Notes
+        -----
+        Static type checkers obtain known communicator members from the
+        type-only ``mpi4py.MPI.Comm`` base class. This fallback preserves the
+        existing runtime delegation for the full communicator API.
+        """
         return getattr(self.world, name)
 
 
@@ -349,7 +646,3 @@ except Exception:
     ...
 
 __all__ = ["mpi"]
-
-
-@mpi
-def x(): ...
