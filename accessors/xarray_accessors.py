@@ -8,7 +8,6 @@ import xarray as xr
 from ..core import xgeo
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
     from typing import Any, Literal
 
     import numpy as np
@@ -258,126 +257,6 @@ class GeoBase:
             snap=snap,
             drop=drop,
         )
-
-    def append_to_netcdf(
-        self,
-        file: Path,
-        dim: str = "time",
-        mode: Literal["a", "r+"] = "r+",
-        format: str = "NETCDF4",
-        shuffle: bool | None = None,
-        zlib: bool | None = None,
-        complevel: int | None = None,
-    ) -> None:
-        """Append a Dataset along an unlimited dimension.
-
-        Variables containing ``dim`` are extended from the current end of the file.
-        Variables without ``dim`` are written only if not already present.
-        datetime64, timedelta64, and cftime variables are encoded to CF numeric
-        values. When the target variable already exists, the new batch is encoded
-        against the units and calendar already stored in the file so the numeric
-        axis stays consistent across appends.
-
-        Parameters
-        ----------
-        file : Path
-            NetCDF4 file with read/write access. ``dim`` must be the unlimited
-            dimension.
-        dim : str, optional
-            Unlimited dimension to append along. Default "time".
-        mode : {"a", "r+"}, optional
-            File access mode passed to netCDF4.Dataset.
-        format : str, optional
-            NetCDF format passed to netCDF4.Dataset.
-        shuffle : bool, optional
-            Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
-        zlib : bool, optional
-            Whether to apply zlib compression to the variable. If None, the default compression settings are used.
-        complevel : int, optional
-            Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
-        """
-
-        return xgeo.append_to_netcdf(
-            data=self._obj,
-            file=Path(file),
-            dim=dim,
-            mode=mode,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-        )
-
-    def to_netcdf(
-        self,
-        file: str | Path,
-        unlimited_dim: str | Iterable[str] | None = None,
-        partition_dim: str | None = None,
-        *,
-        batch_size: int = 1,
-        format: str = "NETCDF4",
-        shuffle: bool = True,
-        zlib: bool = True,
-        complevel: int = 4,
-        show_progress: bool = True,
-        stdout: Any = None,
-        chunks: Mapping[str, Iterable[int]] | None = None,
-        hints: str | None = None,
-        nofill: bool = True,
-        allow_serial: bool = False,
-    ) -> None:
-        """Write a Dataset or DataArray to NetCDF.
-
-        Serial output is written incrementally along an unlimited dimension. With
-        ``parallel=True``, every MPI rank contributes its local contiguous slab to
-        one file through parallel NetCDF-4.
-
-        Parameters
-        ----------
-        data : xarray.Dataset or xarray.DataArray
-            Data to write. In parallel mode, each rank supplies its local slab.
-        file : str or os.PathLike
-            Output path. An existing file is replaced.
-        unlimited_dim : str or iterable of str, optional
-            Dimension(s) made unlimited in the NetCDF schema.
-        partition_dim : str, optional
-            Dimension partitioned across MPI ranks in parallel mode. If omitted,
-            the parallel writer infers the partition axis.
-        parallel : bool, default False
-            Use the MPI-parallel NetCDF-4 writer.
-        batch_size : int, default 1
-            Number of slices along the unlimited dimension written per serial
-            append. Not used in parallel mode.
-        format : str, default "NETCDF4"
-            NetCDF format. Parallel output supports only ``"NETCDF4"``.
-        shuffle : bool, default True
-            Apply the HDF5 shuffle filter.
-        zlib : bool, default True
-            Apply zlib compression.
-        complevel : int, default 4
-            Compression level, between 1 and 9.
-        show_progress : bool, default True
-            Display a progress bar while writing serially.
-        stdout : file-like, optional
-            Stream the serial progress bar is written to. Defaults to
-            ``sys.stdout``.
-        chunks : mapping of str to iterable of int, optional
-            Explicit chunk shape passed to the parallel writer.
-        hints : str, optional
-            Semicolon-separated MPI-IO hints in key=value format.
-        nofill : bool, default True
-            Disable NetCDF pre-filling during parallel initialization.
-        allow_serial : bool, default False
-            Permit execution when running with a single MPI rank.
-
-        Returns
-        -------
-        None
-        """
-
-        kwargs1 = locals()
-        _ = kwargs1.pop("self")
-        return xgeo.to_netcdf(self._obj, **kwargs1)
 
 
 class PlotAccessor:
