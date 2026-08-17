@@ -8,6 +8,7 @@ import xarray as xr
 from ..core import xgeo
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from typing import Any, Literal
 
     import numpy as np
@@ -256,6 +257,143 @@ class GeoBase:
             geometry=geometry,
             snap=snap,
             drop=drop,
+        )
+
+    # -- NetCDF output -----------------------------------------------------
+    def append_to_netcdf(
+        self,
+        file: str | Path,
+        dim: str = "time",
+        mode: Literal["a", "r+"] = "r+",
+        format: str = "NETCDF4",
+        shuffle: bool | None = None,
+        zlib: bool | None = None,
+        complevel: int | None = None,
+    ) -> None:
+        """Append the bound Dataset to an existing file along an unlimited dimension.
+
+        See :func:`climtools.xgeo.append_to_netcdf` for the full description.
+
+        Parameters
+        ----------
+        file : str or pathlib.Path
+            NetCDF4 file with read/write access. ``dim`` must be the unlimited
+            dimension.
+        dim : str, default "time"
+            Unlimited dimension to append along.
+        mode : {"a", "r+"}, default "r+"
+            File access mode passed to netCDF4.Dataset.
+        format : str, default "NETCDF4"
+            NetCDF format passed to netCDF4.Dataset.
+        shuffle : bool, optional
+            Whether to apply the shuffle filter to newly created variables.
+        zlib : bool, optional
+            Whether to apply zlib compression to newly created variables.
+        complevel : int, optional
+            Compression level, between 1 and 9.
+
+        Returns
+        -------
+        None
+        """
+        return xgeo.append_to_netcdf(
+            file=Path(file),
+            data=self._obj,
+            dim=dim,
+            mode=mode,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+        )
+
+    def to_netcdf(
+        self,
+        file: str | Path,
+        unlimited_dim: str | Iterable[str] | None = None,
+        partition_dim: str | None = None,
+        *,
+        parallel: bool = False,
+        batch_size: int = 24,
+        format: str = "NETCDF4",
+        shuffle: bool = True,
+        zlib: bool = True,
+        complevel: int = 4,
+        show_progress: bool = True,
+        stdout: Any = None,
+        chunks: Mapping[str, Iterable[int]] | None = None,
+        hints: str | None = None,
+        nofill: bool = True,
+        allow_serial: bool = False,
+    ) -> None:
+        """Write the bound Dataset or DataArray to NetCDF.
+
+        See :func:`climtools.xgeo.to_netcdf` for the full description.
+
+        Serial output is written incrementally along an unlimited dimension. With
+        ``parallel=True``, rank 0 must be bound to the complete object; every
+        other rank must be bound to :func:`climtools.xgeo.empty_dataset` so that
+        ``.xgeo`` still resolves, since MPI ranks cannot bind the accessor to
+        ``None``. The bound object on non-root ranks is otherwise unused, since
+        the parallel writer scatters rank 0's local buffers directly.
+
+        Parameters
+        ----------
+        file : str or pathlib.Path
+            Output path. An existing file is replaced.
+        unlimited_dim : str or iterable of str, optional
+            Dimension(s) made unlimited in the NetCDF schema.
+        partition_dim : str, optional
+            Dimension partitioned across MPI ranks in parallel mode. If omitted,
+            the parallel writer infers the partition axis.
+        parallel : bool, default False
+            Use the MPI-parallel NetCDF-4 writer.
+        batch_size : int, default 24
+            Number of slices along the unlimited dimension written per serial
+            append. Not used in parallel mode.
+        format : str, default "NETCDF4"
+            NetCDF format. Parallel output supports only ``"NETCDF4"``.
+        shuffle : bool, default True
+            Apply the HDF5 shuffle filter.
+        zlib : bool, default True
+            Apply zlib compression.
+        complevel : int, default 4
+            Compression level, between 1 and 9.
+        show_progress : bool, default True
+            Display a progress bar while writing serially.
+        stdout : file-like, optional
+            Stream the serial progress bar is written to. Defaults to
+            ``sys.stdout``.
+        chunks : mapping of str to iterable of int, optional
+            Explicit chunk shape passed to the parallel writer.
+        hints : str, optional
+            Semicolon-separated MPI-IO hints in key=value format.
+        nofill : bool, default True
+            Disable NetCDF pre-filling during parallel initialization.
+        allow_serial : bool, default False
+            Permit execution when running with a single MPI rank.
+
+        Returns
+        -------
+        None
+        """
+        return xgeo.to_netcdf(
+            self._obj,
+            file,
+            unlimited_dim=unlimited_dim,
+            partition_dim=partition_dim,
+            parallel=parallel,
+            batch_size=batch_size,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+            show_progress=show_progress,
+            stdout=stdout,
+            chunks=chunks,
+            hints=hints,
+            nofill=nofill,
+            allow_serial=allow_serial,
         )
 
 

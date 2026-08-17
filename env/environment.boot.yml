@@ -1,0 +1,22 @@
+# Bootstrap environment: the minimum needed to compile mpi4py and netCDF4
+# against a parallel-enabled MPI/HDF5/NetCDF-C stack. Nothing else should be
+# added here — the rest of climtools's dependencies come from environment.yml,
+# applied only after scripts/setup_env.sh has patched mpi4py and netCDF4 in
+# place. env name is set at creation time, e.g.:
+#
+#   conda env create -n climtools -f environment.boot.yml
+#
+name: climtools
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.12
+  - pip
+  - setuptools>=77
+  - wheel
+  - cython>=3,<4
+  - numpy
+  - packaging>=23
+  - pkgconfig>=1.5.5
+  - cftime
+  - certifi

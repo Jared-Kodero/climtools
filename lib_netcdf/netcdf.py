@@ -29,7 +29,7 @@ def to_netcdf(
     partition_dim: str | None = None,
     *,
     parallel: bool = False,
-    batch_size: int = 1,
+    batch_size: int = 24,
     format: str = "NETCDF4",
     shuffle: bool = True,
     zlib: bool = True,
@@ -60,7 +60,7 @@ def to_netcdf(
         the parallel writer infers the partition axis.
     parallel : bool, default False
         Use the MPI-parallel NetCDF-4 writer.
-    batch_size : int, default 1
+    batch_size : int, default 24
         Number of slices along the unlimited dimension written per serial
         append. Not used in parallel mode.
     format : str, default "NETCDF4"

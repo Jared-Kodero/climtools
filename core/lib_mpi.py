@@ -5,13 +5,16 @@ from __future__ import annotations
 import builtins
 import functools
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from numbers import Integral
+from types import EllipsisType
 from typing import Any, Literal, ParamSpec, TypeVar, cast
 
 import numpy as np
+import xarray as xr
 from mpi4py import MPI as _MPI
 from mpi4py.MPI import Intracomm
+from mpi4py.util import dtlib as _dtlib
 from numpy.typing import DTypeLike, NDArray
 
 P = ParamSpec("P")
@@ -19,27 +22,11 @@ R = TypeVar("R")
 T = TypeVar("T")
 
 
-class MPIError(Exception):
-    """MPI runtime or synchronized distributed-execution error."""
-
-
-_MPI_TYPE_BY_DTYPE: dict[np.dtype[Any], _MPI.Datatype] = {
-    np.dtype(np.bool_): getattr(_MPI, "C_BOOL", _MPI.BOOL),
-    np.dtype(np.float32): _MPI.FLOAT,
-    np.dtype(np.float64): _MPI.DOUBLE,
-    np.dtype(np.int8): _MPI.INT8_T,
-    np.dtype(np.int16): _MPI.INT16_T,
-    np.dtype(np.int32): _MPI.INT32_T,
-    np.dtype(np.int64): _MPI.INT64_T,
-    np.dtype(np.uint8): _MPI.UINT8_T,
-    np.dtype(np.uint16): _MPI.UINT16_T,
-    np.dtype(np.uint32): _MPI.UINT32_T,
-    np.dtype(np.uint64): _MPI.UINT64_T,
-}
-if hasattr(_MPI, "C_FLOAT_COMPLEX"):
-    _MPI_TYPE_BY_DTYPE[np.dtype(np.complex64)] = _MPI.C_FLOAT_COMPLEX
-if hasattr(_MPI, "C_DOUBLE_COMPLEX"):
-    _MPI_TYPE_BY_DTYPE[np.dtype(np.complex128)] = _MPI.C_DOUBLE_COMPLEX
+# NumPy dtype kinds mpi4py.util.dtlib can translate to a meaningful MPI
+# datatype: boolean, unsigned/signed integer, float, complex. Other kinds
+# (strings, objects, structured dtypes) produce an opaque byte-derived type
+# that is not meaningful for the reductions in this module.
+_REDUCIBLE_DTYPE_KINDS = "biufc"
 
 _LAUNCH_ENV = (
     "OMPI_COMM_WORLD_RANK",
@@ -51,7 +38,11 @@ _LAUNCH_ENV = (
 )
 
 
-def _launched(comm: _MPI.Comm) -> bool:
+class MPIError(Exception):
+    """MPI runtime or synchronized distributed-execution error."""
+
+
+def mpi_alive(comm: _MPI.Comm) -> bool:
     if comm.Get_size() > 1 or builtins.any(key in os.environ for key in _LAUNCH_ENV):
         return True
     try:
@@ -60,7 +51,19 @@ def _launched(comm: _MPI.Comm) -> bool:
         return False
 
 
-def _reduce(
+def is_dataarray(value: Any) -> bool:
+    """Check if value is an xarray DataArray."""
+
+    return isinstance(value, xr.DataArray)
+
+
+def is_dataset(value: Any) -> bool:
+    """Check if value is an xarray Dataset."""
+
+    return isinstance(value, xr.Dataset)
+
+
+def mpi_comm_reduce(
     runtime: MPIRuntime,
     value: T,
     op: _MPI.Op,
@@ -75,7 +78,9 @@ def _reduce(
     runtime : _MPIRuntime
         MPI runtime that owns the active communicator.
     value : T
-        Python object or NumPy array to reduce.
+        Python object, NumPy array, or xarray DataArray/Dataset to reduce.
+        xarray inputs are reduced element-wise per variable and rewrapped
+        with the original dims, coords, and attrs.
     op : mpi4py.MPI.Op
         MPI reduction operator.
     mode : {"all", "root"}, optional
@@ -101,22 +106,48 @@ def _reduce(
         if root >= comm.size:
             raise ValueError(f"root {root} is outside [0, {comm.size}).")
 
+    if is_dataset(value):
+        reduced_vars = {
+            name: mpi_comm_reduce(runtime, da, op, mode=mode, root=root)
+            for name, da in value.data_vars.items()
+        }
+        if mode == "root" and comm.rank != root:
+            return None
+        return cast("T", value.copy(data=reduced_vars))
+
+    if is_dataarray(value):
+        reduced = mpi_comm_reduce(
+            runtime, np.asarray(value.values), op, mode=mode, root=root
+        )
+        if reduced is None:
+            return None
+        return cast("T", value.copy(data=reduced))
+
     if not isinstance(value, np.ndarray):
         if mode == "all":
             return cast("T", comm.allreduce(value, op=op))
         return cast("T | None", comm.reduce(value, op=op, root=root))
 
-    send = np.ascontiguousarray(value)
-    mpi_type = runtime.datatype(send.dtype)
-    send_buffer = [send, mpi_type]
+    send = np.asarray(value)
+    if not send.flags.c_contiguous:
+        send = np.ascontiguousarray(send)
+    if send.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
+        raise MPIError(f"Unsupported MPI NumPy dtype: {send.dtype}.")
+
+    # Pass the buffer-provider array directly rather than the explicit
+    # [array, MPI.Datatype] form: mpi4py infers the MPI datatype from the
+    # NumPy dtype automatically for buffer-like arguments to fixed-size
+    # collectives such as Allreduce/Reduce. See the mpi4py tutorial,
+    # "Communication of buffer-like objects". Vector collectives such as
+    # scatterv still need the datatype spelled out explicitly; that
+    # inference does not extend to them.
     if mode == "all":
         recv = np.empty_like(send)
-        comm.Allreduce(send_buffer, [recv, mpi_type], op=op)
+        comm.Allreduce(send, recv, op=op)
         return cast("T", recv)
 
     recv = np.empty_like(send) if comm.rank == root else None
-    recv_buffer = [recv, mpi_type] if recv is not None else None
-    comm.Reduce(send_buffer, recv_buffer, op=op, root=root)
+    comm.Reduce(send, recv, op=op, root=root)
     return cast("T | None", recv)
 
 
@@ -166,7 +197,7 @@ class ReduceAccessor:
             ``mode="root"``, the reduced value is returned on ``root``
             and None is returned on other ranks.
         """
-        return _reduce(self._runtime, value, _MPI.SUM, mode=mode, root=root)
+        return mpi_comm_reduce(self._runtime, value, _MPI.SUM, mode=mode, root=root)
 
     def prod(
         self,
@@ -195,7 +226,7 @@ class ReduceAccessor:
         T or None
             Reduced value according to ``mode``.
         """
-        return _reduce(self._runtime, value, _MPI.PROD, mode=mode, root=root)
+        return mpi_comm_reduce(self._runtime, value, _MPI.PROD, mode=mode, root=root)
 
     def min(
         self,
@@ -224,7 +255,7 @@ class ReduceAccessor:
         T or None
             Reduced value according to ``mode``.
         """
-        return _reduce(self._runtime, value, _MPI.MIN, mode=mode, root=root)
+        return mpi_comm_reduce(self._runtime, value, _MPI.MIN, mode=mode, root=root)
 
     def max(
         self,
@@ -253,7 +284,7 @@ class ReduceAccessor:
         T or None
             Reduced value according to ``mode``.
         """
-        return _reduce(self._runtime, value, _MPI.MAX, mode=mode, root=root)
+        return mpi_comm_reduce(self._runtime, value, _MPI.MAX, mode=mode, root=root)
 
     def mean(
         self,
@@ -299,7 +330,8 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Scalar-like value or array converted to Boolean values.
+            Scalar-like value, NumPy array, or xarray DataArray/Dataset
+            converted to Boolean values.
         mode : {"all", "root"}, optional
             Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
             and returns the result on every rank. ``"root"`` selects
@@ -311,15 +343,16 @@ class ReduceAccessor:
 
         Returns
         -------
-        bool or numpy.ndarray or None
+        bool, numpy.ndarray, xarray.DataArray, xarray.Dataset, or None
             Logical-OR reduction according to ``mode``.
         """
-        result = _reduce(
-            self._runtime,
-            np.asarray(value, dtype=bool),
-            _MPI.LOR,
-            mode=mode,
-            root=root,
+        boolean_value = (
+            value.astype(bool)
+            if is_dataset(value) or is_dataarray(value)
+            else np.asarray(value, dtype=bool)
+        )
+        result = mpi_comm_reduce(
+            self._runtime, boolean_value, _MPI.LOR, mode=mode, root=root
         )
         if np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
@@ -337,7 +370,8 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Scalar-like value or array converted to Boolean values.
+            Scalar-like value, NumPy array, or xarray DataArray/Dataset
+            converted to Boolean values.
         mode : {"all", "root"}, optional
             Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
             and returns the result on every rank. ``"root"`` selects
@@ -349,19 +383,611 @@ class ReduceAccessor:
 
         Returns
         -------
-        bool or numpy.ndarray or None
+        bool, numpy.ndarray, xarray.DataArray, xarray.Dataset, or None
             Logical-AND reduction according to ``mode``.
         """
-        result = _reduce(
-            self._runtime,
-            np.asarray(value, dtype=bool),
-            _MPI.LAND,
-            mode=mode,
-            root=root,
+        boolean_value = (
+            value.astype(bool)
+            if is_dataset(value) or is_dataarray(value)
+            else np.asarray(value, dtype=bool)
+        )
+        result = mpi_comm_reduce(
+            self._runtime, boolean_value, _MPI.LAND, mode=mode, root=root
         )
         if np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
+
+
+class XarrayReduceAccessor:
+    """Distributed reductions with xarray-style dimension semantics.
+
+    Each method first performs the named-dimension reduction locally with
+    xarray, then combines the resulting partial reductions across the active
+    MPI communicator. Dimensions removed by ``dim`` are therefore reduced
+    across both the local xarray object and the MPI partitioning.
+
+    The distributed dimension or dimensions must be included in ``dim``.
+    Dimensions retained in the result must have matching shapes, coordinate
+    values, and ordering on every rank. Variables that do not contain a
+    reduced dimension are treated as replicated and remain unchanged. The
+    MPI combination is limited to buffer dtypes supported by this module;
+    complex minimum/maximum and nonnumeric extrema are not supported.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime that owns the active communicator.
+    """
+
+    def __init__(self, runtime: MPIRuntime) -> None:
+        self._runtime = runtime
+
+    def _validate_collective(
+        self,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> None:
+        if mode not in ("all", "root"):
+            raise ValueError("mode must be either 'all' or 'root'.")
+        if mode == "root":
+            if isinstance(root, bool) or not isinstance(root, Integral) or root < 0:
+                raise ValueError("root must be a non-negative integer rank.")
+            if root >= self._runtime.comm.size:
+                raise ValueError(
+                    f"root {root} is outside [0, {self._runtime.comm.size})."
+                )
+
+    @staticmethod
+    def _normalize_dim(
+        value: xr.DataArray | xr.Dataset,
+        dim: str,
+    ) -> tuple[str, tuple[Hashable, ...]]:
+        if not isinstance(value, (xr.DataArray, xr.Dataset)):
+            raise TypeError("xreduce requires an xarray DataArray or Dataset.")
+        if dim is None or dim is ...:
+            return dim, tuple(value.dims)
+        if isinstance(dim, str):
+            return dim, (dim,)
+        dims = tuple(dim)
+        return dims, dims
+
+    @staticmethod
+    def _variable_dims(
+        value: xr.DataArray,
+        dims: tuple[Hashable, ...],
+    ) -> tuple[Hashable, ...]:
+        return tuple(dim for dim in dims if dim in value.dims)
+
+    @staticmethod
+    def _skipna_enabled(dtype: np.dtype[Any], skipna: bool | None) -> bool:
+        if skipna is not None:
+            return skipna
+        return dtype.kind in "fc"
+
+    @staticmethod
+    def _mean_dtype(dtype: np.dtype[Any]) -> np.dtype[Any]:
+        sample = np.zeros(1, dtype=dtype)
+        return np.asarray(np.mean(sample)).dtype
+
+    def _local_result(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | xr.Dataset | None:
+        if mode == "root" and self._runtime.comm.rank != root:
+            return None
+        return value
+
+    def _dataset_result(
+        self,
+        local: xr.Dataset,
+        updates: dict[str, xr.DataArray],
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.Dataset | None:
+        if mode == "root" and self._runtime.comm.rank != root:
+            return None
+        data = {
+            name: updates[name] if name in updates else local[name]
+            for name in local.data_vars
+        }
+        return local.copy(data=data)
+
+    def _count(
+        self,
+        value: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | None:
+        local_count = value.count(dim=dims, keep_attrs=False)
+        return mpi_comm_reduce(
+            self._runtime,
+            local_count,
+            _MPI.SUM,
+            mode=mode,
+            root=root,
+        )
+
+    def _combine_sum_or_prod(
+        self,
+        value: xr.DataArray,
+        partial: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        op: _MPI.Op,
+        *,
+        skipna: bool | None,
+        min_count: int | None,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | None:
+        result = mpi_comm_reduce(
+            self._runtime,
+            partial,
+            op,
+            mode=mode,
+            root=root,
+        )
+        global_count = None
+        if min_count is not None and self._skipna_enabled(value.dtype, skipna):
+            global_count = self._count(value, dims, mode=mode, root=root)
+
+        if result is None:
+            return None
+        if global_count is not None:
+            result = result.where(global_count >= min_count)
+        return result
+
+    def _combine_mean(
+        self,
+        value: xr.DataArray,
+        partial_sum: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | None:
+        global_sum = mpi_comm_reduce(
+            self._runtime,
+            partial_sum,
+            _MPI.SUM,
+            mode=mode,
+            root=root,
+        )
+        global_count = self._count(value, dims, mode=mode, root=root)
+        if global_sum is None or global_count is None:
+            return None
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result = global_sum / global_count
+        result = result.where(global_count != 0)
+        return result.astype(self._mean_dtype(value.dtype), keep_attrs=True)
+
+    def _combine_extreme(
+        self,
+        value: xr.DataArray,
+        partial: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        *,
+        minimum: bool,
+        skipna: bool | None,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | None:
+        kind = partial.dtype.kind
+        if kind == "c":
+            name = "minimum" if minimum else "maximum"
+            raise MPIError(f"MPI {name} is not defined for complex xarray data.")
+        if kind not in "biuf":
+            raise MPIError(f"Unsupported MPI xarray dtype: {partial.dtype}.")
+
+        if kind == "b":
+            op = _MPI.LAND if minimum else _MPI.LOR
+            return mpi_comm_reduce(
+                self._runtime,
+                partial,
+                op,
+                mode=mode,
+                root=root,
+            )
+
+        op = _MPI.MIN if minimum else _MPI.MAX
+        if kind != "f":
+            return mpi_comm_reduce(
+                self._runtime,
+                partial,
+                op,
+                mode=mode,
+                root=root,
+            )
+
+        identity = np.asarray(
+            np.inf if minimum else -np.inf,
+            dtype=partial.dtype,
+        ).item()
+        if self._skipna_enabled(value.dtype, skipna):
+            local_mask = value.count(dim=dims, keep_attrs=False) > 0
+            safe_partial = partial.where(local_mask, other=identity)
+            mask_op = _MPI.LOR
+        else:
+            local_mask = value.isnull().any(dim=dims, keep_attrs=False)
+            safe_partial = partial.where(~local_mask, other=identity)
+            mask_op = _MPI.LOR
+
+        result = mpi_comm_reduce(
+            self._runtime,
+            safe_partial,
+            op,
+            mode=mode,
+            root=root,
+        )
+        global_mask = mpi_comm_reduce(
+            self._runtime,
+            local_mask,
+            mask_op,
+            mode=mode,
+            root=root,
+        )
+        if result is None or global_mask is None:
+            return None
+        if self._skipna_enabled(value.dtype, skipna):
+            return result.where(global_mask)
+        return result.where(~global_mask)
+
+    def _combine_logical(
+        self,
+        partial: xr.DataArray,
+        op: _MPI.Op,
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | None:
+        return mpi_comm_reduce(
+            self._runtime,
+            partial,
+            op,
+            mode=mode,
+            root=root,
+        )
+
+    def sum(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        skipna: bool | None = None,
+        min_count: int | None = None,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed summation."""
+        self._validate_collective(mode, root)
+        local_dim, dims = self._normalize_dim(value, dim)
+        local = value.sum(
+            dim=local_dim,
+            skipna=skipna,
+            min_count=None,
+            keep_attrs=keep_attrs,
+        )
+
+        if isinstance(value, xr.DataArray):
+            if not dims:
+                return self._local_result(local, mode=mode, root=root)
+            return self._combine_sum_or_prod(
+                value,
+                local,
+                dims,
+                _MPI.SUM,
+                skipna=skipna,
+                min_count=min_count,
+                mode=mode,
+                root=root,
+            )
+
+        updates: dict[str, xr.DataArray] = {}
+        for name in local.data_vars:
+            variable = value[name]
+            variable_dims = self._variable_dims(variable, dims)
+            if not variable_dims:
+                continue
+            result = self._combine_sum_or_prod(
+                variable,
+                local[name],
+                variable_dims,
+                _MPI.SUM,
+                skipna=skipna,
+                min_count=min_count,
+                mode=mode,
+                root=root,
+            )
+            if result is not None:
+                updates[name] = result
+        return self._dataset_result(local, updates, mode=mode, root=root)
+
+    def prod(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        skipna: bool | None = None,
+        min_count: int | None = None,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed multiplication."""
+        self._validate_collective(mode, root)
+        local_dim, dims = self._normalize_dim(value, dim)
+        local = value.prod(
+            dim=local_dim,
+            skipna=skipna,
+            min_count=None,
+            keep_attrs=keep_attrs,
+        )
+
+        if isinstance(value, xr.DataArray):
+            if not dims:
+                return self._local_result(local, mode=mode, root=root)
+            return self._combine_sum_or_prod(
+                value,
+                local,
+                dims,
+                _MPI.PROD,
+                skipna=skipna,
+                min_count=min_count,
+                mode=mode,
+                root=root,
+            )
+
+        updates: dict[str, xr.DataArray] = {}
+        for name in local.data_vars:
+            variable = value[name]
+            variable_dims = self._variable_dims(variable, dims)
+            if not variable_dims:
+                continue
+            result = self._combine_sum_or_prod(
+                variable,
+                local[name],
+                variable_dims,
+                _MPI.PROD,
+                skipna=skipna,
+                min_count=min_count,
+                mode=mode,
+                root=root,
+            )
+            if result is not None:
+                updates[name] = result
+        return self._dataset_result(local, updates, mode=mode, root=root)
+
+    def min(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed minimum."""
+        return self._extreme(
+            value,
+            dim,
+            minimum=True,
+            skipna=skipna,
+            keep_attrs=keep_attrs,
+            mode=mode,
+            root=root,
+        )
+
+    def max(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed maximum."""
+        return self._extreme(
+            value,
+            dim,
+            minimum=False,
+            skipna=skipna,
+            keep_attrs=keep_attrs,
+            mode=mode,
+            root=root,
+        )
+
+    def _extreme(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str,
+        *,
+        minimum: bool,
+        skipna: bool | None,
+        keep_attrs: bool | None,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | xr.Dataset | None:
+        self._validate_collective(mode, root)
+        local_dim, dims = self._normalize_dim(value, dim)
+        method = value.min if minimum else value.max
+        local = method(
+            dim=local_dim,
+            skipna=skipna,
+            keep_attrs=keep_attrs,
+        )
+
+        if isinstance(value, xr.DataArray):
+            if not dims:
+                return self._local_result(local, mode=mode, root=root)
+            return self._combine_extreme(
+                value,
+                local,
+                dims,
+                minimum=minimum,
+                skipna=skipna,
+                mode=mode,
+                root=root,
+            )
+
+        updates: dict[str, xr.DataArray] = {}
+        for name in local.data_vars:
+            variable = value[name]
+            variable_dims = self._variable_dims(variable, dims)
+            if not variable_dims:
+                continue
+            result = self._combine_extreme(
+                variable,
+                local[name],
+                variable_dims,
+                minimum=minimum,
+                skipna=skipna,
+                mode=mode,
+                root=root,
+            )
+            if result is not None:
+                updates[name] = result
+        return self._dataset_result(local, updates, mode=mode, root=root)
+
+    def mean(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed arithmetic mean."""
+        self._validate_collective(mode, root)
+        local_dim, dims = self._normalize_dim(value, dim)
+        local_sum = value.sum(
+            dim=local_dim,
+            skipna=skipna,
+            min_count=None,
+            keep_attrs=keep_attrs,
+        )
+
+        if isinstance(value, xr.DataArray):
+            if not dims:
+                local_mean = value.mean(
+                    dim=local_dim,
+                    skipna=skipna,
+                    keep_attrs=keep_attrs,
+                )
+                return self._local_result(local_mean, mode=mode, root=root)
+            return self._combine_mean(
+                value,
+                local_sum,
+                dims,
+                mode=mode,
+                root=root,
+            )
+
+        updates: dict[str, xr.DataArray] = {}
+        for name in local_sum.data_vars:
+            variable = value[name]
+            variable_dims = self._variable_dims(variable, dims)
+            if not variable_dims:
+                continue
+            result = self._combine_mean(
+                variable,
+                local_sum[name],
+                variable_dims,
+                mode=mode,
+                root=root,
+            )
+            if result is not None:
+                updates[name] = result
+
+        return self._dataset_result(local_sum, updates, mode=mode, root=root)
+
+    def any(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed logical OR."""
+        return self._logical(
+            value,
+            dim,
+            op=_MPI.LOR,
+            all_values=False,
+            keep_attrs=keep_attrs,
+            mode=mode,
+            root=root,
+        )
+
+    def all(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str | Iterable[Hashable] | EllipsisType | None = None,
+        *,
+        keep_attrs: bool | None = None,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> xr.DataArray | xr.Dataset | None:
+        """Reduce an xarray object by distributed logical AND."""
+        return self._logical(
+            value,
+            dim,
+            op=_MPI.LAND,
+            all_values=True,
+            keep_attrs=keep_attrs,
+            mode=mode,
+            root=root,
+        )
+
+    def _logical(
+        self,
+        value: xr.DataArray | xr.Dataset,
+        dim: str,
+        *,
+        op: _MPI.Op,
+        all_values: bool,
+        keep_attrs: bool | None,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> xr.DataArray | xr.Dataset | None:
+        self._validate_collective(mode, root)
+        local_dim, dims = self._normalize_dim(value, dim)
+        method = value.all if all_values else value.any
+        local = method(dim=local_dim, keep_attrs=keep_attrs)
+
+        if isinstance(value, xr.DataArray):
+            if not dims:
+                return self._local_result(local, mode=mode, root=root)
+            return self._combine_logical(local, op, mode=mode, root=root)
+
+        updates: dict[str, xr.DataArray] = {}
+        for name in local.data_vars:
+            variable_dims = self._variable_dims(value[name], dims)
+            if not variable_dims:
+                continue
+            result = self._combine_logical(
+                local[name],
+                op,
+                mode=mode,
+                root=root,
+            )
+            if result is not None:
+                updates[name] = result
+        return self._dataset_result(local, updates, mode=mode, root=root)
 
 
 class MPIRuntime:
@@ -370,7 +996,8 @@ class MPIRuntime:
     The runtime owns one intracommunicator and exposes it directly through
     :attr:`comm`, preserving the native :class:`mpi4py.MPI.Intracomm` type,
     method signatures, IDE completion, and third-party interoperability.
-    High-level reductions are grouped under :attr:`reduce`.
+    Direct MPI reductions are grouped under :attr:`reduce`, while distributed
+    xarray-style dimension reductions are grouped under :attr:`xreduce`.
 
     Parameters
     ----------
@@ -386,8 +1013,10 @@ class MPIRuntime:
         Exception type used for synchronized MPI failures.
     comm : mpi4py.MPI.Intracomm
         Native intracommunicator used by the runtime.
-    reduce : _ReduceAccessor
-        Typed high-level reduction operations.
+    reduce : ReduceAccessor
+        Direct element-wise reductions across MPI ranks.
+    xreduce : XarrayReduceAccessor
+        Distributed xarray-style reductions over named dimensions.
     """
 
     MPI = _MPI
@@ -396,6 +1025,7 @@ class MPIRuntime:
     def __init__(self, comm: Intracomm | None = None) -> None:
         self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
         self._reduce: ReduceAccessor = ReduceAccessor(self)
+        self._xreduce: XarrayReduceAccessor = XarrayReduceAccessor(self)
 
     @property
     def launched(self) -> bool:
@@ -406,7 +1036,7 @@ class MPIRuntime:
         bool
             True when an MPI or Slurm launch environment is detected.
         """
-        return _launched(self.comm)
+        return mpi_alive(self.comm)
 
     def is_root(self, root: int = 0) -> bool:
         """Return whether this process has the requested root rank.
@@ -528,23 +1158,49 @@ class MPIRuntime:
 
     @property
     def reduce(self) -> ReduceAccessor:
-        """Return high-level reduction operations.
+        """Return direct MPI reduction operations.
 
         Returns
         -------
-        _ReduceAccessor
-            Typed reduction accessor providing ``sum``, ``prod``, ``min``,
-            ``max``, ``mean``, ``any``, and ``all``.
+        ReduceAccessor
+            Element-wise cross-rank ``sum``, ``prod``, ``min``, ``max``,
+            ``mean``, ``any``, and ``all`` operations.
         """
         return self._reduce
 
+    @property
+    def xreduce(self) -> XarrayReduceAccessor:
+        """Return distributed xarray-style reduction operations.
+
+        Returns
+        -------
+        XarrayReduceAccessor
+            Named-dimension ``sum``, ``prod``, ``min``, ``max``, ``mean``,
+            ``any``, and ``all`` operations.
+        """
+        return self._xreduce
+
     def datatype(self, dtype: DTypeLike) -> _MPI.Datatype:
-        """Return the MPI datatype corresponding to a NumPy dtype."""
+        """Return the MPI datatype corresponding to a NumPy dtype.
+
+        Backed by :func:`mpi4py.util.dtlib.from_numpy_dtype`, the datatype
+        conversion mpi4py itself maintains, rather than a hand-kept mapping.
+
+        Raises
+        ------
+        MPIError
+            If ``dtype`` is not boolean, integer, float, or complex; other
+            kinds (strings, objects, structured dtypes) are not meaningful
+            for the reductions in this module even though ``dtlib`` itself
+            would still produce an opaque derived type for them.
+        """
         key = np.dtype(dtype)
+        if key.kind not in _REDUCIBLE_DTYPE_KINDS:
+            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.")
         try:
-            return _MPI_TYPE_BY_DTYPE[key]
-        except KeyError:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from None
+            return _dtlib.from_numpy_dtype(key)
+        except (KeyError, ValueError) as exc:
+            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
 
     def raise_if_error(self, error: BaseException | None, phase: str) -> None:
         """Raise a synchronized error on all ranks if any rank failed."""

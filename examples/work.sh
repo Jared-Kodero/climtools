@@ -36,34 +36,3 @@ echo "========================================"
 time python serial_time_composites.py
 echo "Finished serial time composites"
 echo "========================================"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

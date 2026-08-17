@@ -3,12 +3,12 @@
 The package collects the routines used repeatedly when exploring and
 publishing gridded climate data with xarray:
 
-- ``plot``      Cartopy map plotting. Entry point :func:`climtools.plotting.geo`.
-- ``xgeo``      Geospatial operations: regridding, masking, transects, local solar time.
+- ``plot``      Cartopy map plotting. Entry point :func:`climtools.plot.geo`.
+- ``xgeo``      Geospatial operations and NetCDF output: regridding, masking, transects, local solar time.
 - ``calc``      Trends, correlations and difference-of-means testing.
 - ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib and cmocean.
 - ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
-- ``theme``     Publication styling for matplotlib and seaborn.
+- ``mpi``       MPI runtime: ``mpi.comm`` for the raw communicator, ``mpi.reduce`` for collective reductions.
 
 Two access patterns are supported and are equivalent::
 
@@ -20,7 +20,7 @@ Two access patterns are supported and are equivalent::
 
 Importing the package registers the ``.xgeo`` accessor on ``xarray.DataArray``
 and ``xarray.Dataset``, replaces the dask progress bar with the styled one from
-:mod:`climtools.progress`, and, inside a Jupyter kernel, applies the widget CSS
+:mod:`climtools.core.progress`, and, inside a Jupyter kernel, applies the widget CSS
 fix and switches inline figures to retina resolution.
 
 Regridding requires ``xesmf``, which is imported on first use. The rest of the
@@ -42,7 +42,6 @@ from .core.tools import apply_widget_css, n_cpus, redirect_streams
 if TYPE_CHECKING:
     from typing import Any
 
-    from . import lib_mpi as lib_mpi
     from .cdo import pycdo as cdo
     from .core import _operator as operator
     from .core import calc_stats as calc
