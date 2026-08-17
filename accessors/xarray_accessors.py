@@ -8,6 +8,7 @@ import xarray as xr
 from ..core import xgeo
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from typing import Any, Literal
 
     import numpy as np
@@ -310,7 +311,8 @@ class GeoBase:
     def to_netcdf(
         self,
         file: str | Path,
-        unlimited_dim: str | None = None,
+        unlimited_dim: str | Iterable[str] | None = None,
+        partition_dim: str | None = None,
         *,
         batch_size: int = 1,
         format: str = "NETCDF4",
@@ -319,21 +321,35 @@ class GeoBase:
         complevel: int = 4,
         show_progress: bool = True,
         stdout: Any = None,
+        chunks: Mapping[str, Iterable[int]] | None = None,
+        hints: str | None = None,
+        nofill: bool = True,
+        allow_serial: bool = False,
     ) -> None:
-        """Write the Dataset to NetCDF incrementally using NetCDF4 lib
+        """Write a Dataset or DataArray to NetCDF.
 
-        See :func:`climtools.xgeo.to_netcdf` for the full description.
+        Serial output is written incrementally along an unlimited dimension. With
+        ``parallel=True``, every MPI rank contributes its local contiguous slab to
+        one file through parallel NetCDF-4.
 
         Parameters
         ----------
-        file : str or pathlib.Path
+        data : xarray.Dataset or xarray.DataArray
+            Data to write. In parallel mode, each rank supplies its local slab.
+        file : str or os.PathLike
             Output path. An existing file is replaced.
-        unlimited_dim : str, optional
-            Dimension made unlimited and appended along.
+        unlimited_dim : str or iterable of str, optional
+            Dimension(s) made unlimited in the NetCDF schema.
+        partition_dim : str, optional
+            Dimension partitioned across MPI ranks in parallel mode. If omitted,
+            the parallel writer infers the partition axis.
+        parallel : bool, default False
+            Use the MPI-parallel NetCDF-4 writer.
         batch_size : int, default 1
-            Number of slices written per append.
+            Number of slices along the unlimited dimension written per serial
+            append. Not used in parallel mode.
         format : str, default "NETCDF4"
-            NetCDF format.
+            NetCDF format. Parallel output supports only ``"NETCDF4"``.
         shuffle : bool, default True
             Apply the HDF5 shuffle filter.
         zlib : bool, default True
@@ -341,26 +357,27 @@ class GeoBase:
         complevel : int, default 4
             Compression level, between 1 and 9.
         show_progress : bool, default True
-            Display a progress bar while writing.
+            Display a progress bar while writing serially.
         stdout : file-like, optional
-            Stream the progress bar is written to.
+            Stream the serial progress bar is written to. Defaults to
+            ``sys.stdout``.
+        chunks : mapping of str to iterable of int, optional
+            Explicit chunk shape passed to the parallel writer.
+        hints : str, optional
+            Semicolon-separated MPI-IO hints in key=value format.
+        nofill : bool, default True
+            Disable NetCDF pre-filling during parallel initialization.
+        allow_serial : bool, default False
+            Permit execution when running with a single MPI rank.
 
         Returns
         -------
         None
         """
-        return xgeo.to_netcdf(
-            self._obj,
-            Path(file),
-            unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
-        )
+
+        kwargs1 = locals()
+        _ = kwargs1.pop("self")
+        return xgeo.to_netcdf(self._obj, **kwargs1)
 
 
 class PlotAccessor:

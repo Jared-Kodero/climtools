@@ -8,7 +8,18 @@ import xarray as xr
 from .parallel import to_netcdf_parallel
 from .serial import append_to_netcdf, to_netcdf_serial
 
-__all__ = ["append_to_netcdf", "to_netcdf"]
+__all__ = ["append_to_netcdf", "dataset_is_empty", "empty_dataset", "to_netcdf"]
+
+_NO_DATA_ATTR = "_climtools_no_data"
+
+
+def empty_dataset() -> xr.Dataset:
+    """Placeholder passed on non-root ranks in place of real data."""
+    return xr.Dataset(attrs={_NO_DATA_ATTR: True})
+
+
+def dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
+    return isinstance(data, xr.Dataset) and data.attrs.get(_NO_DATA_ATTR) is True
 
 
 def to_netcdf(
@@ -78,10 +89,22 @@ def to_netcdf(
     -------
     None
     """
+
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
+    from ..core.lib_mpi import mpi
+
     target_path = Path(file)
+
+    if parallel:
+        if mpi.rank == 0:
+            if not isinstance(data, (xr.Dataset, xr.DataArray)):
+                raise TypeError(
+                    "data must be an xarray.Dataset or xarray.DataArray on rank 0"
+                )
+        else:
+            data = empty_dataset()
 
     if parallel:
         return to_netcdf_parallel(
@@ -96,11 +119,10 @@ def to_netcdf(
             nofill=nofill,
             allow_serial=allow_serial,
         )
-
     else:
         return to_netcdf_serial(
             data=data,
-            file=file,
+            file=target_path,
             unlimited_dim=unlimited_dim,
             batch_size=batch_size,
             format=format,

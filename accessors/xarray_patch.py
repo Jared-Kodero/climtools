@@ -40,12 +40,11 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     # (class, class name, accessors registered by climtools on that class).
     # Each accessor is (attribute name, exported type name in xgeo_types).
     targets: tuple[tuple[type, str, tuple[tuple[str, str], ...]], ...] = (
-        (xr.DataArray, "DataArray", (("xgeo", "GeoDataArray"))),
-        (xr.Dataset, "Dataset", (("xgeo", "GeoDataset"))),
+        (xr.DataArray, "DataArray", (("xgeo", "GeoDataArray"),)),
+        (xr.Dataset, "Dataset", (("xgeo", "GeoDataset"),)),
     )
     optional: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("metpy.xarray", ("metpy",)),
-        ("hvplot.xarray", ("hvplot",)),
         ("cf_xarray", ("cf",)),
         ("pint_xarray", ("pint",)),
         ("rioxarray", ("rio",)),

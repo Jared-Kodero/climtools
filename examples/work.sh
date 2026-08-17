@@ -19,30 +19,23 @@ chmod +x install.sh
 ./install.sh
 
 
-# cd /users/jkodero/research/climtools/examples
+cd /users/jkodero/research/climtools/examples
 
 
-# echo "========================================"
-# echo "Starting MPI time composites: 32 processes"
-# echo "========================================"
-# time mpirun -np 16 --map-by core --bind-to core python time_composites.py
-# echo "Finished MPI time composites"
-# echo
+echo "========================================"
+echo "Starting MPI time composites: 32 processes"
+echo "========================================"
+time mpirun -np 16 --map-by core --bind-to core python time_composites.py
+echo "Finished MPI time composites"
+echo
 
 
-# echo "========================================"
-# echo "Starting MPI time composites: 32 processes"
-# echo "========================================"
-# time mpirun -np 16 --map-by core --bind-to core python save_composites.py
-# echo "Finished MPI time composites"
-# echo
-
-# echo "========================================"
-# echo "Starting serial time composites"
-# echo "========================================"
-# time python serial_time_composites.py
-# echo "Finished serial time composites"
-# echo "========================================"
+echo "========================================"
+echo "Starting serial time composites"
+echo "========================================"
+time python serial_time_composites.py
+echo "Finished serial time composites"
+echo "========================================"
 
 
 

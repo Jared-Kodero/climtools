@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any
 
-    from ..lib_netcdf.netcdf import append_to_netcdf, to_netcdf
+    from ..lib_netcdf.netcdf import (
+        append_to_netcdf,
+        dataset_is_empty,
+        empty_dataset,
+        to_netcdf,
+    )
     from ..viz import cmaps
     from ..viz import plotting as plot
     from . import calc_stats as calc
@@ -30,6 +35,8 @@ __all__ = [
     "append_to_netcdf",
     "calc",
     "cmaps",
+    "dataset_is_empty",
+    "empty_dataset",
     "mask",
     "n_cpus",
     "plot",
@@ -47,6 +54,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SetupDask": (".xarray_utils", "SetupDask"),
     "add_local_solar_time": (".xarray_utils", "add_local_solar_time"),
     "append_to_netcdf": ("..lib_netcdf.netcdf", "append_to_netcdf"),
+    "empty_dataset": ("..lib_netcdf.netcdf", "empty_dataset"),
+    "dataset_is_empty": ("..lib_netcdf.netcdf", "dataset_is_empty"),
     "calc": (".calc_stats", None),
     "cmaps": ("..viz.cmaps", None),
     "mask": (".xarray_utils", "mask"),

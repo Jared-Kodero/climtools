@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import netCDF4
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
@@ -20,8 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
     from typing import Any, Literal
-
-    import netCDF4
 
 
 def resolve_unlimited_dim(
@@ -298,8 +297,6 @@ def dataarray_to_netcdf(
     if not Path(file).exists():
         raise FileNotFoundError(f"File {file!r} does not exist!")
 
-    import netCDF4
-
     with netCDF4.Dataset(file, mode="r+", format=format) as ncf:
         varname = da.name
         if varname is None:
@@ -380,8 +377,6 @@ def append_to_netcdf(
         raise ValueError(f"Append dimension {dim!r} not present in the data")
 
     n_new = ds.sizes[dim]
-
-    import netCDF4
 
     with netCDF4.Dataset(file, mode=mode, format=format) as ncf:
         if dim not in ncf.dimensions:

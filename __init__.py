@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from .core import _operator as operator
     from .core import calc_stats as calc
     from .core import xgeo as xgeo
-    from .lib_mpi import mpi, relaunch_with_mpi
+    from .core.lib_mpi import mpi
     from .viz import cmaps as cmaps
     from .viz import plotting as plot
 
@@ -61,24 +61,20 @@ __all__ = [
     "calc",
     "cdo",
     "cmaps",
-    "lib_mpi",
     "mpi",
     "n_cpus",
     "operator",
     "plot",
     "redirect_streams",
-    "relaunch_with_mpi",
     "xgeo",
 ]
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "mpi": (".lib_mpi", "mpi"),
-    "relaunch_with_mpi": (".lib_mpi", "relaunch_with_mpi"),
+    "mpi": (".core.lib_mpi", None),
     "calc": (".core.calc_stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),
-    "lib_mpi": (".lib_mpi", None),
     "operator": (".core._operator", None),
     "plot": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),

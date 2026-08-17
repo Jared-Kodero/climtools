@@ -36,7 +36,7 @@ def get_smc_climo(ds: xr.Dataset, smc_path: Path) -> dict[str, xr.DataArray]:
         smc = smc_ds.sel(time=smc_ds.time.dt.month.isin(months))
         smc = smc.isel(zaxis_1=0, drop=True)
         smc = smc.mean(dim="time", skipna=True).squeeze(drop=True)
-        smc = smc.xgeo.remap(smc, ds, method="bilinear")["smc"].load()
+        smc = smc.xgeo.remap(ds, method="bilinear")["smc"].load()
 
     if smc.dtype != ds["soilw1"].dtype:
         smc = smc.astype(ds["soilw1"].dtype)
