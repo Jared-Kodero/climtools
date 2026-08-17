@@ -71,7 +71,7 @@ __all__ = [
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "mpi": (".core.lib_mpi", None),
+    "mpi": (".core.lib_mpi", "mpi"),
     "calc": (".core.calc_stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),

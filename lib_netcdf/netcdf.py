@@ -98,7 +98,7 @@ def to_netcdf(
     target_path = Path(file)
 
     if parallel:
-        if mpi.rank == 0:
+        if mpi.comm.rank == 0:
             if not isinstance(data, (xr.Dataset, xr.DataArray)):
                 raise TypeError(
                     "data must be an xarray.Dataset or xarray.DataArray on rank 0"

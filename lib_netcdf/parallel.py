@@ -116,13 +116,13 @@ def write_partitioned(
         return
 
     length = int(schema["sizes"][partition_dim])
-    counts = np.full(mpi.size, length // mpi.size, dtype=np.int64)
-    counts[: length % mpi.size] += 1
-    start = int(np.sum(counts[: mpi.rank], dtype=np.int64))
-    stop = start + int(counts[mpi.rank])
+    counts = np.full(mpi.comm.size, length // mpi.comm.size, dtype=np.int64)
+    counts[: length % mpi.comm.size] += 1
+    start = int(np.sum(counts[: mpi.comm.rank], dtype=np.int64))
+    stop = start + int(counts[mpi.comm.rank])
 
     info: MPI.Info | None = None
-    if mpi.size > 1:
+    if mpi.comm.size > 1:
         info = MPI.Info.Create()
         for item in (schema["hints"] or "").split(";"):
             if not item.strip():
@@ -134,12 +134,12 @@ def write_partitioned(
             info.Set(key.strip(), value.strip())
 
     try:
-        if mpi.size > 1:
+        if mpi.comm.size > 1:
             nc = netCDF4.Dataset(
                 path,
                 mode="r+",
                 parallel=True,
-                comm=mpi.world,
+                comm=mpi.comm,
                 info=info,
             )
         else:
@@ -159,11 +159,11 @@ def write_partitioned(
                 axis = dims.index(partition_dim)
                 shape = tuple(int(value) for value in spec["shape"])
                 moved_shape = (shape[axis], *shape[:axis], *shape[axis + 1 :])
-                local_shape = (int(counts[mpi.rank]), *moved_shape[1:])
+                local_shape = (int(counts[mpi.comm.rank]), *moved_shape[1:])
                 dtype = np.dtype(spec["dtype"])
 
                 send = None
-                if mpi.rank == 0:
+                if mpi.comm.rank == 0:
                     if root_data is None:
                         raise AssertionError("Rank 0 data buffers are missing.")
                     send = np.ascontiguousarray(
@@ -174,7 +174,7 @@ def write_partitioned(
                 local = mpi.scatterv(send, counts, local_shape, dtype)
                 local = np.moveaxis(local, 0, axis)
                 ncvar = nc.variables[name]
-                if mpi.size > 1:
+                if mpi.comm.size > 1:
                     ncvar.set_collective(True)
                 index = tuple(
                     slice(start, stop) if dim == partition_dim else slice(None)
@@ -207,12 +207,12 @@ def to_netcdf_parallel(
     time-like variables are encoded, using :mod:`.encoding`; other variables
     are written from their original values and attributes.
     """
-    if mpi.size == 1 and not allow_serial:
+    if mpi.comm.size == 1 and not allow_serial:
         raise NetCDFWriteError(
             "MPI_COMM_WORLD contains one process. Launch with mpirun/mpiexec/srun "
             + "or pass allow_serial=True."
         )
-    if mpi.size > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
+    if mpi.comm.size > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
         raise NetCDFWriteError(
             "netCDF4-python is not linked with parallel NetCDF-4/HDF5 support."
         )
@@ -222,7 +222,7 @@ def to_netcdf_parallel(
     output_path: str | None = None
     error: BaseException | None = None
 
-    if mpi.rank == 0:
+    if mpi.comm.rank == 0:
         try:
             if isinstance(data, xr.DataArray):
                 if data.name is None:
@@ -319,12 +319,12 @@ def to_netcdf_parallel(
             error = exc
 
     mpi.raise_if_error(error, "parallel NetCDF preparation")
-    output_path, schema = mpi.bcast((output_path, schema), root=0)
+    output_path, schema = mpi.comm.bcast((output_path, schema), root=0)
     if output_path is None or schema is None:
         raise AssertionError("Rank 0 did not broadcast the NetCDF schema.")
 
     error = None
-    if mpi.rank == 0:
+    if mpi.comm.rank == 0:
         try:
             if root_data is None:
                 raise AssertionError("Rank 0 data buffers are missing.")
@@ -332,16 +332,16 @@ def to_netcdf_parallel(
         except BaseException as exc:
             error = exc
     mpi.raise_if_error(error, "serial NetCDF schema creation")
-    mpi.barrier()
+    mpi.comm.barrier()
 
     try:
         write_partitioned(output_path, schema, root_data)
     except BaseException:
-        if mpi.size > 1:
-            mpi.Abort(1)
+        if mpi.comm.size > 1:
+            mpi.comm.Abort(1)
         raise
 
-    mpi.barrier()
+    mpi.comm.barrier()
     return output_path
 
 
