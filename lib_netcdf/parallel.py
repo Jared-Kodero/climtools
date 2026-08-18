@@ -1,8 +1,8 @@
-"""Parallel NetCDF-4 output using serial schema creation and collective writes.
+"""Parallel NetCDF-4 output for root-owned or MPI-distributed xarray data.
 
-Rank 0 owns the complete xarray object. It creates the NetCDF schema and all
-replicated values serially, then every rank reopens the file in parallel and
-collectively writes its balanced slab of each partitioned data variable.
+Rank-0-owned objects retain the legacy scatter path. Objects carrying
+``mpi_meta`` are already distributed: every rank participates directly in
+collective NetCDF writes using its recorded global ``start:stop`` interval.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import xarray as xr
 from mpi4py import MPI
 
 from ..core.lib_mpi import mpi
+from ..core.xarray_mpi import MPI_META, get_mpi_meta
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:
@@ -32,7 +33,20 @@ def get_chunks(
     ds: xr.Dataset,
     chunks: Mapping[str, Iterable[int]] | None,
 ) -> dict[str, tuple[int, ...]]:
-    """Use existing xarray chunks, or xarray ``chunk('auto')`` when absent."""
+    """Return explicit or existing xarray chunk shapes.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset whose variable chunks are inspected.
+    chunks : mapping, optional
+        Explicit variable chunk shapes.
+
+    Returns
+    -------
+    dict
+        Mapping from variable name to NetCDF chunk shape.
+    """
     if chunks is not None:
         return {
             name: tuple(int(length) for length in shape)
@@ -49,9 +63,31 @@ def get_chunks(
 
 
 def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
+    """Set serializable NetCDF attributes, excluding internal MPI metadata."""
     for key, value in attrs.items():
-        if key != "_FillValue" and value is not None:
+        if key not in ("_FillValue", MPI_META) and value is not None:
             target.setncattr(str(key), value)
+
+
+def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray, str | np.dtype[Any]]:
+    variable = encode_time(source) if is_time_like(source) else source
+    values = np.asarray(variable.values)
+
+    if values.dtype.kind in ("U", "S", "O"):
+        values = np.asarray(
+            [
+                value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in values.ravel()
+            ],
+            dtype=object,
+        ).reshape(values.shape)
+        return values, "str"
+
+    if values.dtype.kind == "b":
+        values = values.astype(np.int8)
+    if values.dtype.byteorder not in ("=", "|"):
+        values = values.astype(values.dtype.newbyteorder("="))
+    return np.ascontiguousarray(values), values.dtype
 
 
 def create_file(
@@ -59,7 +95,7 @@ def create_file(
     schema: Mapping[str, Any],
     root_data: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    """Create all NetCDF metadata and replicated values serially on rank 0."""
+    """Create NetCDF metadata and write variables replicated on all ranks."""
     partition_dim = schema["partition_dim"]
     unlimited = set(schema["unlimited_dim"])
     chunks = schema["chunks"]
@@ -94,15 +130,74 @@ def create_file(
             ncvar = nc.createVariable(name, dtype, dims, **kwargs)
             set_attrs(ncvar, attrs)
 
-            partitioned = (
-                partition_dim is not None
-                and partition_dim in dims
-                and not variable["coord"]
-            )
+            partitioned = partition_dim is not None and partition_dim in dims
             if not partitioned:
                 ncvar[...] = variable["data"]
 
         set_attrs(nc, schema["attrs"])
+
+
+def open_in_parallel(path: str, schema: Mapping[str, Any]) -> netCDF4.Dataset:
+    info: MPI.Info | None = None
+    if mpi.comm.size > 1:
+        info = MPI.Info.Create()
+        try:
+            for item in (schema["hints"] or "").split(";"):
+                if not item.strip():
+                    continue
+                key, separator, value = item.partition("=")
+                if not separator or not key.strip():
+                    raise ValueError(
+                        f"Invalid MPI-IO hint: {item!r}; expected key=value."
+                    )
+                info.Set(key.strip(), value.strip())
+            return netCDF4.Dataset(
+                path,
+                mode="r+",
+                parallel=True,
+                comm=mpi.comm,
+                info=info,
+            )
+        finally:
+            info.Free()
+    return netCDF4.Dataset(path, mode="r+")
+
+
+def write_distributed(
+    path: str,
+    schema: Mapping[str, Any],
+    ds: xr.Dataset,
+    meta: Mapping[str, Any],
+) -> None:
+    """Collectively write rank-local slabs from an already distributed Dataset."""
+
+    mpi.log(f"Saving file to >> {path}")  # for testing
+
+    partition_dim = str(meta["dim"])
+    start = int(meta["start"])
+    stop = int(meta["stop"])
+
+    with open_in_parallel(path, schema) as nc:
+        for name, spec in schema["variables"].items():
+            dims = tuple(spec["dims"])
+            if partition_dim not in dims:
+                continue
+            if spec["dtype"] == "str":
+                raise NetCDFWriteError(
+                    f"Partitioned string variable {name!r} is unsupported because "
+                    + "netCDF4 parallel I/O cannot write VLEN data types."
+                )
+
+            source = ds[name]
+            values, _ = _normalise_variable(source)
+            ncvar = nc.variables[name]
+            if mpi.comm.size > 1:
+                ncvar.set_collective(True)
+            index = tuple(
+                slice(start, stop) if dim == partition_dim else slice(None)
+                for dim in dims
+            )
+            ncvar[index] = values
 
 
 def write_partitioned(
@@ -110,7 +205,7 @@ def write_partitioned(
     schema: Mapping[str, Any],
     root_data: Mapping[str, Mapping[str, Any]] | None,
 ) -> None:
-    """Scatter each partitioned root buffer and write its local slab."""
+    """Scatter root-owned partitioned buffers and collectively write them."""
     partition_dim = schema["partition_dim"]
     if partition_dim is None:
         return
@@ -121,69 +216,42 @@ def write_partitioned(
     start = int(np.sum(counts[: mpi.comm.rank], dtype=np.int64))
     stop = start + int(counts[mpi.comm.rank])
 
-    info: MPI.Info | None = None
-    if mpi.comm.size > 1:
-        info = MPI.Info.Create()
-        for item in (schema["hints"] or "").split(";"):
-            if not item.strip():
+    with open_in_parallel(path, schema) as nc:
+        for name, spec in schema["variables"].items():
+            dims = tuple(spec["dims"])
+            if partition_dim not in dims:
                 continue
-            key, separator, value = item.partition("=")
-            if not separator or not key.strip():
-                info.Free()
-                raise ValueError(f"Invalid MPI-IO hint: {item!r}; expected key=value.")
-            info.Set(key.strip(), value.strip())
-
-    try:
-        if mpi.comm.size > 1:
-            nc = netCDF4.Dataset(
-                path,
-                mode="r+",
-                parallel=True,
-                comm=mpi.comm,
-                info=info,
-            )
-        else:
-            nc = netCDF4.Dataset(path, mode="r+")
-
-        with nc:
-            for name, spec in schema["variables"].items():
-                dims = tuple(spec["dims"])
-                if partition_dim not in dims or spec["coord"]:
-                    continue
-                if spec["dtype"] == "str":
-                    raise NetCDFWriteError(
-                        f"Partitioned string variable {name!r} is unsupported because "
-                        + "netCDF4 parallel I/O cannot write VLEN data types."
-                    )
-
-                axis = dims.index(partition_dim)
-                shape = tuple(int(value) for value in spec["shape"])
-                moved_shape = (shape[axis], *shape[:axis], *shape[axis + 1 :])
-                local_shape = (int(counts[mpi.comm.rank]), *moved_shape[1:])
-                dtype = np.dtype(spec["dtype"])
-
-                send = None
-                if mpi.comm.rank == 0:
-                    if root_data is None:
-                        raise AssertionError("Rank 0 data buffers are missing.")
-                    send = np.ascontiguousarray(
-                        np.moveaxis(root_data[name]["data"], axis, 0),
-                        dtype=dtype,
-                    )
-
-                local = mpi.scatterv(send, counts, local_shape, dtype)
-                local = np.moveaxis(local, 0, axis)
-                ncvar = nc.variables[name]
-                if mpi.comm.size > 1:
-                    ncvar.set_collective(True)
-                index = tuple(
-                    slice(start, stop) if dim == partition_dim else slice(None)
-                    for dim in dims
+            if spec["dtype"] == "str":
+                raise NetCDFWriteError(
+                    f"Partitioned string variable {name!r} is unsupported because "
+                    + "netCDF4 parallel I/O cannot write VLEN data types."
                 )
-                ncvar[index] = local
-    finally:
-        if info is not None:
-            info.Free()
+
+            axis = dims.index(partition_dim)
+            shape = tuple(int(value) for value in spec["shape"])
+            moved_shape = (shape[axis], *shape[:axis], *shape[axis + 1 :])
+            local_shape = (int(counts[mpi.comm.rank]), *moved_shape[1:])
+            dtype = np.dtype(spec["dtype"])
+
+            send = None
+            if mpi.comm.rank == 0:
+                if root_data is None:
+                    raise AssertionError("Rank 0 data buffers are missing.")
+                send = np.ascontiguousarray(
+                    np.moveaxis(root_data[name]["data"], axis, 0),
+                    dtype=dtype,
+                )
+
+            local = mpi.scatterv(send, counts, local_shape, dtype)
+            local = np.moveaxis(local, 0, axis)
+            ncvar = nc.variables[name]
+            if mpi.comm.size > 1:
+                ncvar.set_collective(True)
+            index = tuple(
+                slice(start, stop) if dim == partition_dim else slice(None)
+                for dim in dims
+            )
+            ncvar[index] = local
 
 
 def to_netcdf_parallel(
@@ -198,14 +266,41 @@ def to_netcdf_parallel(
     nofill: bool = True,
     allow_serial: bool = False,
 ) -> str:
-    """Write one xarray object to NetCDF using MPI collective data writes.
+    """Write an xarray object to NetCDF using MPI collective data writes.
 
-    Rank 0 supplies the complete Dataset or DataArray. Other ranks may pass
-    ``None``. If ``partition_dim`` is omitted, the first dimension of the first
-    dimensional data variable is used. Existing DataArray chunks define the
-    NetCDF chunk shape; unchunked arrays use ``da.chunk('auto')`` first. Only
-    time-like variables are encoded, using :mod:`.encoding`; other variables
-    are written from their original values and attributes.
+    Objects carrying ``mpi_meta`` are treated as already distributed. Every
+    rank contributes its existing local slab directly and no data gather or
+    scatter is performed. For ordinary objects, rank 0 owns the complete data
+    and the legacy scatter path is used.
+
+    Parameters
+    ----------
+    data : xarray.Dataset or xarray.DataArray or None
+        Rank-local distributed data, or the complete object on rank 0 for the
+        legacy path.
+    path : str or os.PathLike
+        Output path.
+    partition_dim : str, optional
+        Partition dimension. In distributed mode this must match ``mpi_meta``.
+    deflate : int, optional
+        NetCDF compression level.
+    shuffle : bool, default True
+        Apply the HDF5 shuffle filter.
+    chunks : mapping, optional
+        Explicit variable chunk shapes.
+    unlimited_dim : str or iterable of str, optional
+        Unlimited dimensions.
+    hints : str, optional
+        Semicolon-separated MPI-IO hints.
+    nofill : bool, default True
+        Disable NetCDF pre-filling.
+    allow_serial : bool, default False
+        Permit execution with one MPI rank.
+
+    Returns
+    -------
+    str
+        Absolute output path.
     """
     if mpi.comm.size == 1 and not allow_serial:
         raise NetCDFWriteError(
@@ -217,22 +312,114 @@ def to_netcdf_parallel(
             "netCDF4-python is not linked with parallel NetCDF-4/HDF5 support."
         )
 
+    local_ds: xr.Dataset | None
+    if isinstance(data, xr.DataArray):
+        if data.name is None:
+            raise ValueError("DataArray must have a name for NetCDF output.")
+        local_ds = data.to_dataset()
+    elif isinstance(data, xr.Dataset):
+        local_ds = data
+    elif data is None:
+        local_ds = None
+    else:
+        raise TypeError("data must be an xarray Dataset, DataArray, or None.")
+
+    local_meta = get_mpi_meta(local_ds) if local_ds is not None else None
+    distributed = local_meta is not None
+
     root_data: dict[str, dict[str, Any]] | None = None
     schema: dict[str, Any] | None = None
     output_path: str | None = None
     error: BaseException | None = None
 
-    if mpi.comm.rank == 0:
-        try:
-            if isinstance(data, xr.DataArray):
-                if data.name is None:
-                    raise ValueError("DataArray must have a name for NetCDF output.")
-                ds = data.to_dataset()
-            elif isinstance(data, xr.Dataset):
-                ds = data
-            else:
-                raise TypeError("Rank 0 must provide an xarray Dataset or DataArray.")
+    if distributed:
+        if local_ds is None or local_meta is None:
+            raise AssertionError("Distributed data and metadata are missing.")
 
+        distributed_dim = str(local_meta["dim"])
+        if partition_dim is not None and partition_dim != distributed_dim:
+            raise ValueError(
+                f"partition_dim {partition_dim!r} does not match "
+                + f"distributed dimension {distributed_dim!r}."
+            )
+        partition_dim = distributed_dim
+
+        # No data gather/scatter. Rank 0 only constructs the schema from its
+        # local metadata and mpi_meta's global partition length.
+        if mpi.comm.rank == 0:
+            try:
+                ds = local_ds
+                if deflate is not None and not 0 <= int(deflate) <= 9:
+                    raise ValueError(
+                        "deflate must be None or an integer from 0 through 9."
+                    )
+                if unlimited_dim is None:
+                    unlimited = ()
+                elif isinstance(unlimited_dim, str):
+                    unlimited = (unlimited_dim,)
+                else:
+                    unlimited = tuple(unlimited_dim)
+
+                sizes = dict(ds.sizes)
+                sizes[partition_dim] = int(local_meta["global_size"])
+                missing = set(unlimited) - set(sizes)
+                if missing:
+                    raise ValueError(
+                        f"Unknown unlimited dimensions: {sorted(missing)}."
+                    )
+
+                chunk_map = get_chunks(ds, chunks)
+                root_data = {}
+                variables: dict[str, dict[str, Any]] = {}
+                for name, source in ds.variables.items():
+                    variable = encode_time(source) if is_time_like(source) else source
+                    values, dtype = _normalise_variable(source)
+                    attrs = {
+                        key: value
+                        for key, value in variable.attrs.items()
+                        if key != MPI_META
+                    }
+                    dims = tuple(variable.dims)
+                    shape = list(values.shape)
+                    if partition_dim in dims:
+                        shape[dims.index(partition_dim)] = sizes[partition_dim]
+
+                    root_data[name] = {
+                        "attrs": attrs,
+                        "data": values,
+                        "dims": dims,
+                        "dtype": dtype,
+                        "coord": name in ds.coords,
+                    }
+                    variables[name] = {
+                        "coord": name in ds.coords,
+                        "dims": dims,
+                        "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
+                        "shape": tuple(shape),
+                    }
+
+                output_path = str(Path(path).expanduser().resolve(strict=False))
+                schema = {
+                    "attrs": {
+                        key: value for key, value in ds.attrs.items() if key != MPI_META
+                    },
+                    "chunks": chunk_map,
+                    "deflate": None if deflate is None else int(deflate),
+                    "hints": hints,
+                    "nofill": bool(nofill),
+                    "partition_dim": partition_dim,
+                    "shuffle": bool(shuffle),
+                    "sizes": sizes,
+                    "unlimited_dim": unlimited,
+                    "variables": variables,
+                }
+            except BaseException as exc:
+                error = exc
+    elif mpi.comm.rank == 0:
+        try:
+            if local_ds is None:
+                raise TypeError("Rank 0 must provide an xarray Dataset or DataArray.")
+            ds = local_ds
             if partition_dim is None:
                 partition_dim = next(
                     (da.dims[0] for da in ds.data_vars.values() if da.dims),
@@ -260,28 +447,12 @@ def to_netcdf_parallel(
             variables = {}
             for name, source in ds.variables.items():
                 variable = encode_time(source) if is_time_like(source) else source
-                values = np.asarray(variable.values)
-                attrs = dict(variable.attrs)
-
-                if values.dtype.kind in ("U", "S", "O"):
-                    values = np.asarray(
-                        [
-                            value.decode("utf-8")
-                            if isinstance(value, bytes)
-                            else str(value)
-                            for value in values.ravel()
-                        ],
-                        dtype=object,
-                    ).reshape(values.shape)
-                    dtype: str | np.dtype[Any] = "str"
-                else:
-                    if values.dtype.kind == "b":
-                        values = values.astype(np.int8)
-                    if values.dtype.byteorder not in ("=", "|"):
-                        values = values.astype(values.dtype.newbyteorder("="))
-                    values = np.ascontiguousarray(values)
-                    dtype = values.dtype
-
+                values, dtype = _normalise_variable(source)
+                attrs = {
+                    key: value
+                    for key, value in variable.attrs.items()
+                    if key != MPI_META
+                }
                 root_data[name] = {
                     "attrs": attrs,
                     "data": values,
@@ -295,31 +466,12 @@ def to_netcdf_parallel(
                     "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
                     "shape": values.shape,
                 }
-            unknown_chunks = set(chunk_map) - set(variables)
-            if unknown_chunks:
-                raise ValueError(
-                    "Chunk specifications reference unknown variables: "
-                    + f"{sorted(unknown_chunks)}."
-                )
-
-            if partition_dim is not None:
-                unsupported = sorted(
-                    name
-                    for name, spec in variables.items()
-                    if not spec["coord"]
-                    and partition_dim in spec["dims"]
-                    and spec["dtype"] == "str"
-                )
-                if unsupported:
-                    raise NetCDFWriteError(
-                        "Partitioned string variable(s) "
-                        + f"{unsupported} are unsupported because netCDF4 "
-                        + "parallel I/O cannot write VLEN data types."
-                    )
 
             output_path = str(Path(path).expanduser().resolve(strict=False))
             schema = {
-                "attrs": dict(ds.attrs),
+                "attrs": {
+                    key: value for key, value in ds.attrs.items() if key != MPI_META
+                },
                 "chunks": chunk_map,
                 "deflate": None if deflate is None else int(deflate),
                 "hints": hints,
@@ -350,7 +502,12 @@ def to_netcdf_parallel(
     mpi.comm.barrier()
 
     try:
-        write_partitioned(output_path, schema, root_data)
+        if distributed:
+            if local_ds is None or local_meta is None:
+                raise AssertionError("Distributed rank-local data are missing.")
+            write_distributed(output_path, schema, local_ds, local_meta)
+        else:
+            write_partitioned(output_path, schema, root_data)
     except BaseException:
         if mpi.comm.size > 1:
             mpi.comm.Abort(1)

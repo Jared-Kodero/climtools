@@ -19,9 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-
-from climtools import mpi
-from climtools.core.xgeo import empty_dataset
+from climtools import mpi, xgeo
 
 
 def create_precipitation_dataset() -> xr.Dataset:
@@ -97,7 +95,7 @@ def run_parallel(out_dir: Path) -> None:
         ds = create_precipitation_dataset()
         path.unlink(missing_ok=True)
     else:
-        ds = empty_dataset()
+        ds = xgeo.empty_dataset()
 
     mpi.log(f"writing {path} in parallel across {mpi.comm.size} rank(s)")
     started = time.perf_counter()

@@ -20,9 +20,9 @@ Run:
 
     # scale the workload up for a bigger machine
     mpirun -n 16 python climtools_test.py \
-        --n-events 2000000 --xreduce-events 40000 --netcdf-steps 500
+        --n-events 2000000 --xarray-events 40000 --netcdf-steps 500
 
-Speedups from mpi.reduce / mpi.xreduce / the parallel NetCDF writer only
+Speedups from mpi.reduce / mpi.xarray / the parallel NetCDF writer only
 show up when ranks genuinely run on separate cores. On a single-core
 machine, or an oversubscribed launch with more ranks than cores, results
 will be flat or even slower, since ranks are then time-sliced rather than
@@ -46,11 +46,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+from climtools import mpi, xgeo
 
-import climtools
-from climtools.core.xgeo import empty_dataset, to_netcdf
-
-mpi = climtools.mpi
 RANK: int = mpi.comm.rank
 SIZE: int = mpi.comm.size
 
@@ -160,6 +157,32 @@ def safe_run(fn, *args, **kwargs) -> None:
         mpi.raise_if_error(error, fn.__name__)
     except mpi.MPIError as exc:
         mpi.log(f"[ERROR] {fn.__name__} failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# mpi runtime namespace -- small public helpers
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_helpers() -> None:
+    """Check the small MPIRuntime helpers exposed alongside the collectives."""
+    alternate_root = min(1, SIZE - 1)
+    datatype = mpi.datatype(np.float64)
+    correct = (
+        mpi.is_root() == (RANK == 0)
+        and mpi.is_root(alternate_root) == (RANK == alternate_root)
+        and isinstance(mpi.launched, bool)
+        and datatype.Get_size() == np.dtype(np.float64).itemsize
+        and issubclass(mpi.MPIError, Exception)
+    )
+    correct = bool(mpi.reduce.all(correct))
+    record(
+        "mpi runtime helpers (is_root/launched/datatype/MPIError)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -273,36 +296,438 @@ def test_reduce_xarray_object(ny: int, nx: int) -> None:
     )
 
 
+def test_reduce_operations() -> None:
+    """Exercise every mpi.reduce operation in all-ranks and root modes."""
+    numeric = np.array([RANK + 1.0, 2.0 * RANK + 3.0], dtype=np.float64)
+    numeric_stack = np.stack(
+        [
+            np.array([rank + 1.0, 2.0 * rank + 3.0], dtype=np.float64)
+            for rank in range(SIZE)
+        ]
+    )
+    logical = np.array([RANK == 0, RANK % 2 == 0, True], dtype=bool)
+    logical_stack = np.stack(
+        [np.array([rank == 0, rank % 2 == 0, True], dtype=bool) for rank in range(SIZE)]
+    )
+
+    cases = (
+        ("sum", numeric, numeric_stack.sum(axis=0)),
+        ("prod", numeric, numeric_stack.prod(axis=0)),
+        ("min", numeric, numeric_stack.min(axis=0)),
+        ("max", numeric, numeric_stack.max(axis=0)),
+        ("mean", numeric, numeric_stack.mean(axis=0)),
+        ("any", logical, logical_stack.any(axis=0)),
+        ("all", logical, logical_stack.all(axis=0)),
+    )
+
+    for op_name, value, expected in cases:
+        op = getattr(mpi.reduce, op_name)
+        with timed() as box:
+            result = op(value)
+        parallel_s = box["seconds"]
+
+        root_result = op(value, mode="root", root=0)
+        all_mode_ok = bool(np.allclose(result, expected))
+        root_mode_ok = (
+            bool(np.allclose(root_result, expected))
+            if RANK == 0
+            else root_result is None
+        )
+        correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
+        record(
+            f"mpi.reduce.{op_name} (all/root modes)",
+            correct,
+            0.0,
+            parallel_s,
+            note="correctness-focused",
+        )
+
+
 # ---------------------------------------------------------------------------
-# mpi.xreduce -- distributed xarray dimension reductions
+# mpi.xarray -- distributed xarray operations
 # ---------------------------------------------------------------------------
 
 
-def test_xreduce(n_events_total: int, ny: int, nx: int, op_name: str) -> None:
-    """mpi.xreduce.<op> vs plain xarray's <op> on the fully assembled array."""
+def test_xarray_open_dataset(out_dir: str) -> None:
+    """mpi.xarray.open_dataset: lazy open plus rank-local partition metadata."""
+    path = os.path.join(out_dir, "climtools_test_xarray_source.nc")
+    n_time = max(2 * SIZE + 1, 9)
+    ny = 4
+    nx = 5
+
+    def make_source() -> xr.Dataset:
+        values = np.arange(n_time * ny * nx, dtype=np.float64).reshape(n_time, ny, nx)
+        return xr.Dataset(
+            {
+                "field": xr.DataArray(
+                    values,
+                    dims=("time", "y", "x"),
+                    coords={
+                        "time": np.arange(n_time),
+                        "y": np.arange(ny),
+                        "x": np.arange(nx),
+                    },
+                    attrs={"units": "K"},
+                )
+            }
+        )
+
+    if RANK == 0:
+        make_source().to_netcdf(path)
+    mpi.comm.barrier()
+
+    with timed() as box:
+        distributed = mpi.xarray.open_dataset(path, partition_dim="time")
+        distributed.load()
+    parallel_s = box["seconds"]
+
+    local = distributed["field"].values.copy()
+    meta = distributed.attrs.get("mpi_meta")
+    variable_meta = distributed["field"].attrs.get("mpi_meta")
+    distributed.close()
+
+    parts = mpi.comm.allgather(local)
+    assembled = np.concatenate(parts, axis=0)
+    expected = make_source()["field"].values
+    local_meta_ok = (
+        isinstance(meta, dict)
+        and meta.get("dim") == "time"
+        and int(meta.get("global_size", -1)) == n_time
+        and int(meta.get("stop", -1)) - int(meta.get("start", -1)) == local.shape[0]
+        and isinstance(variable_meta, dict)
+        and variable_meta.get("dim") == "time"
+    )
+    correct = bool(np.array_equal(assembled, expected)) and bool(
+        mpi.reduce.all(local_meta_ok)
+    )
+
+    def serial_fn() -> float:
+        with xr.open_dataset(path) as serial:
+            serial.load()
+            return float(serial["field"].sum())
+
+    _, serial_s = run_serial_baseline(serial_fn)
+    record(
+        "mpi.xarray.open_dataset (partitioned time dimension)",
+        correct,
+        serial_s,
+        parallel_s,
+    )
+
+    mpi.comm.barrier()
+    if RANK == 0:
+        os.remove(path)
+    mpi.comm.barrier()
+
+
+def test_xarray_redistribute() -> None:
+    """mpi.xarray.redistribute: explicit and automatic partition dimensions."""
+    n_time = max(3 * SIZE + 2, 11)
+    ny = 3
+    full = xr.DataArray(
+        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
+        dims=("time", "y"),
+        coords={"time": np.arange(n_time), "y": np.arange(ny)},
+    )
+
+    with timed() as box:
+        distributed = mpi.xarray.redistribute(full, "time")
+    parallel_s = box["seconds"]
+    auto = mpi.xarray.redistribute(full, "auto")
+
+    explicit_parts = mpi.comm.allgather(distributed.values)
+    auto_parts = mpi.comm.allgather(auto.values)
+    explicit_meta = distributed.attrs.get("mpi_meta")
+    auto_meta = auto.attrs.get("mpi_meta")
+    local_ok = (
+        isinstance(explicit_meta, dict)
+        and explicit_meta.get("dim") == "time"
+        and int(explicit_meta.get("global_size", -1)) == n_time
+        and isinstance(auto_meta, dict)
+        and auto_meta.get("dim") == "time"
+        and int(auto_meta.get("global_size", -1)) == n_time
+    )
+    correct = (
+        bool(np.array_equal(np.concatenate(explicit_parts, axis=0), full.values))
+        and bool(np.array_equal(np.concatenate(auto_parts, axis=0), full.values))
+        and bool(mpi.reduce.all(local_ok))
+    )
+    record(
+        "mpi.xarray.redistribute (explicit/auto)",
+        correct,
+        0.0,
+        parallel_s,
+        note="correctness-focused",
+    )
+
+
+def test_xarray_isel() -> None:
+    """mpi.xarray.isel: global slice and scalar integer indexing."""
+    n_time = max(4 * SIZE + 3, 19)
+    ny = 3
+    full = xr.DataArray(
+        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
+        dims=("time", "y"),
+        coords={"time": np.arange(n_time), "y": np.arange(ny)},
+    )
+    distributed = mpi.xarray.redistribute(full, "time")
+    start = 2
+    stop = n_time - 2
+    scalar_index = n_time // 2
+
+    with timed() as box:
+        sliced = mpi.xarray.isel(distributed, time=slice(start, stop))
+        scalar = mpi.xarray.isel(distributed, time=scalar_index)
+    parallel_s = box["seconds"]
+
+    sliced_parts = mpi.comm.allgather(sliced.values)
+    assembled = np.concatenate(sliced_parts, axis=0)
+    expected_slice = full.isel(time=slice(start, stop)).values
+    expected_scalar = full.isel(time=scalar_index).values
+    meta = sliced.attrs.get("mpi_meta")
+    local_meta_ok = (
+        isinstance(meta, dict)
+        and meta.get("dim") == "time"
+        and int(meta.get("global_size", -1)) == stop - start
+    )
+    correct = (
+        bool(np.array_equal(assembled, expected_slice))
+        and bool(np.array_equal(scalar.values, expected_scalar))
+        and "mpi_meta" not in scalar.attrs
+        and bool(mpi.reduce.all(local_meta_ok))
+    )
+    record(
+        "mpi.xarray.isel (global slice/scalar)",
+        correct,
+        0.0,
+        parallel_s,
+        note="correctness-focused",
+    )
+
+
+def test_xarray_sel() -> None:
+    """mpi.xarray.sel: global coordinate slice and scalar label selection."""
+    n_time = max(4 * SIZE + 3, 19)
+    ny = 3
+    time = np.arange(n_time, dtype=np.int64) * 6
+    full = xr.DataArray(
+        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
+        dims=("time", "y"),
+        coords={"time": time, "y": np.arange(ny)},
+    )
+    distributed = mpi.xarray.redistribute(full, "time")
+    start_label = int(time[2])
+    stop_label = int(time[-3])
+    scalar_label = int(time[n_time // 2])
+
+    with timed() as box:
+        sliced = mpi.xarray.sel(distributed, time=slice(start_label, stop_label))
+        scalar = mpi.xarray.sel(distributed, time=scalar_label)
+    parallel_s = box["seconds"]
+
+    sliced_parts = mpi.comm.allgather(sliced.values)
+    assembled = np.concatenate(sliced_parts, axis=0)
+    expected_slice = full.sel(time=slice(start_label, stop_label)).values
+    expected_scalar = full.sel(time=scalar_label).values
+    meta = sliced.attrs.get("mpi_meta")
+    local_meta_ok = isinstance(meta, dict) and meta.get("dim") == "time"
+    correct = (
+        bool(np.array_equal(assembled, expected_slice))
+        and bool(np.array_equal(scalar.values, expected_scalar))
+        and "mpi_meta" not in scalar.attrs
+        and bool(mpi.reduce.all(local_meta_ok))
+    )
+    record(
+        "mpi.xarray.sel (global slice/scalar)",
+        correct,
+        0.0,
+        parallel_s,
+        note="correctness-focused",
+    )
+
+
+def test_xarray_reduction(n_events_total: int, ny: int, nx: int, op_name: str) -> None:
+    """Numeric mpi.xarray reductions vs xarray on the assembled global array."""
     per_rank = max(1, n_events_total // SIZE)
 
     def make_local(rank: int) -> xr.DataArray:
         rng = np.random.default_rng(7000 + rank)
-        data = rng.standard_normal((per_rank, ny, nx)).astype(np.float64)
+        if op_name == "prod":
+            data = 1.0 + 1.0e-3 * rng.standard_normal((per_rank, ny, nx))
+        else:
+            data = rng.standard_normal((per_rank, ny, nx))
+        data = data.astype(np.float64)
+        data[0, 0, 0] = np.nan
+        return xr.DataArray(
+            data,
+            dims=("event", "y", "x"),
+            attrs={"units": "1"},
+        )
+
+    local = make_local(RANK)
+    op = getattr(mpi.xarray, op_name)
+    kwargs = {"skipna": True, "keep_attrs": True}
+    if op_name in {"sum", "prod"}:
+        kwargs["min_count"] = 1
+
+    with timed() as box:
+        result = op(local, dim="event", **kwargs)
+    parallel_s = box["seconds"]
+
+    def serial_fn() -> np.ndarray:
+        parts = [make_local(rank).values for rank in range(SIZE)]
+        full = xr.DataArray(
+            np.concatenate(parts, axis=0),
+            dims=("event", "y", "x"),
+        )
+        serial_kwargs = {"skipna": True}
+        if op_name in {"sum", "prod"}:
+            serial_kwargs["min_count"] = 1
+        return getattr(full, op_name)(dim="event", **serial_kwargs).values
+
+    expected, serial_s = run_serial_baseline(serial_fn)
+    root_result = op(local, dim="event", mode="root", root=0, **kwargs)
+    all_mode_ok = (
+        result is not None
+        and bool(np.allclose(result.values, expected, rtol=1.0e-9, equal_nan=True))
+        and result.attrs.get("units") == "1"
+    )
+    root_mode_ok = (
+        root_result is not None
+        and bool(np.allclose(root_result.values, expected, rtol=1.0e-9, equal_nan=True))
+        if RANK == 0
+        else root_result is None
+    )
+    correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
+    record(
+        f"mpi.xarray.{op_name} ({n_events_total} events, {ny}x{nx} field)",
+        correct,
+        serial_s,
+        parallel_s,
+    )
+
+
+def test_xarray_logical_reduction(
+    n_events_total: int,
+    ny: int,
+    nx: int,
+    op_name: str,
+) -> None:
+    """Logical mpi.xarray.any/all vs xarray on the assembled global array."""
+    per_rank = max(1, n_events_total // SIZE)
+
+    def make_local(rank: int) -> xr.DataArray:
+        rng = np.random.default_rng(8000 + rank)
+        data = rng.random((per_rank, ny, nx)) > 0.5
+        data[0, 0, 0] = rank == 0
         return xr.DataArray(data, dims=("event", "y", "x"))
 
     local = make_local(RANK)
-    op = getattr(mpi.xreduce, op_name)
+    op = getattr(mpi.xarray, op_name)
 
     with timed() as box:
         result = op(local, dim="event")
     parallel_s = box["seconds"]
 
     def serial_fn() -> np.ndarray:
-        parts = [make_local(r).values for r in range(SIZE)]
-        full = xr.DataArray(np.concatenate(parts, axis=0), dims=("event", "y", "x"))
+        parts = [make_local(rank).values for rank in range(SIZE)]
+        full = xr.DataArray(
+            np.concatenate(parts, axis=0),
+            dims=("event", "y", "x"),
+        )
         return getattr(full, op_name)(dim="event").values
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    correct = bool(np.allclose(result.values, expected, rtol=1e-9))
+    root_result = op(local, dim="event", mode="root", root=0)
+    all_mode_ok = result is not None and bool(np.array_equal(result.values, expected))
+    root_mode_ok = (
+        root_result is not None and bool(np.array_equal(root_result.values, expected))
+        if RANK == 0
+        else root_result is None
+    )
+    correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
     record(
-        f"mpi.xreduce.{op_name} ({n_events_total} events, {ny}x{nx} field)",
+        f"mpi.xarray.{op_name} ({n_events_total} Boolean events, {ny}x{nx})",
+        correct,
+        serial_s,
+        parallel_s,
+    )
+
+
+def test_xarray_dataset_reduction() -> None:
+    """Dataset reduction keeps variables that do not use the partition dimension."""
+    n_event = max(2 * SIZE + 1, 9)
+    ny = 4
+    event = np.arange(n_event)
+    y = np.arange(ny)
+    signal = 1.0 + np.arange(n_event * ny, dtype=np.float64).reshape(n_event, ny)
+    static = np.linspace(10.0, 40.0, ny)
+    full = xr.Dataset(
+        {
+            "signal": xr.DataArray(signal, dims=("event", "y")),
+            "static": xr.DataArray(static, dims=("y",)),
+        },
+        coords={"event": event, "y": y},
+    )
+    distributed = mpi.xarray.redistribute(full, "event")
+
+    with timed() as box:
+        result = mpi.xarray.sum(distributed, dim="event")
+    parallel_s = box["seconds"]
+
+    expected = full.sum(dim="event")
+    correct = (
+        result is not None
+        and bool(np.allclose(result["signal"].values, expected["signal"].values))
+        and bool(np.array_equal(result["static"].values, expected["static"].values))
+        and "mpi_meta" not in result.attrs
+    )
+    correct = bool(mpi.reduce.all(correct))
+    record(
+        "mpi.xarray.sum Dataset (distributed + static variables)",
+        correct,
+        0.0,
+        parallel_s,
+        note="correctness-focused",
+    )
+
+
+def test_xarray_redistribute_on(n_events_total: int, ny: int, nx: int) -> None:
+    """Reduction result can be redistributed along a remaining dimension."""
+    per_rank = max(1, n_events_total // SIZE)
+
+    def make_local(rank: int) -> xr.DataArray:
+        rng = np.random.default_rng(8500 + rank)
+        data = rng.standard_normal((per_rank, ny, nx)).astype(np.float64)
+        return xr.DataArray(data, dims=("event", "y", "x"))
+
+    local = make_local(RANK)
+    with timed() as box:
+        result = mpi.xarray.mean(local, dim="event", redistribute_on="y")
+    parallel_s = box["seconds"]
+
+    parts = mpi.comm.allgather(result.values)
+    assembled = np.concatenate(parts, axis=0)
+
+    def serial_fn() -> np.ndarray:
+        full = xr.DataArray(
+            np.concatenate([make_local(rank).values for rank in range(SIZE)], axis=0),
+            dims=("event", "y", "x"),
+        )
+        return full.mean(dim="event").values
+
+    expected, serial_s = run_serial_baseline(serial_fn)
+    meta = result.attrs.get("mpi_meta")
+    local_meta_ok = (
+        isinstance(meta, dict)
+        and meta.get("dim") == "y"
+        and int(meta.get("global_size", -1)) == ny
+    )
+    correct = bool(np.allclose(assembled, expected, rtol=1.0e-9)) and bool(
+        mpi.reduce.all(local_meta_ok)
+    )
+    record(
+        "mpi.xarray.mean(..., redistribute_on='y')",
         correct,
         serial_s,
         parallel_s,
@@ -500,8 +925,8 @@ def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
     serial_path = os.path.join(out_dir, "climtools_test_serial.nc")
 
     with timed() as box:
-        ds = make_full_dataset() if RANK == 0 else empty_dataset()
-        to_netcdf(
+        ds = make_full_dataset() if RANK == 0 else xgeo.empty_dataset()
+        xgeo.to_netcdf(
             ds,
             parallel_path,
             unlimited_dim="time",
@@ -513,7 +938,7 @@ def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
 
     def serial_fn() -> None:
         full = make_full_dataset()
-        to_netcdf(full, serial_path, unlimited_dim="time", show_progress=False)
+        xgeo.to_netcdf(full, serial_path, unlimited_dim="time", show_progress=False)
 
     _, serial_s = run_serial_baseline(serial_fn)
 
@@ -532,6 +957,140 @@ def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
     )
 
 
+def test_netcdf_distributed_roundtrip(
+    n_time: int,
+    ny: int,
+    nx: int,
+    out_dir: str,
+) -> None:
+    """Compare distributed MPI NetCDF output with ordinary xarray I/O.
+
+    The source is opened independently through ordinary ``xarray`` and
+    ``mpi.xarray``. The distributed object is written without gathering its
+    partitioned data back to rank 0. The resulting files are then loaded with
+    ordinary xarray and compared for complete data, coordinate, and attribute
+    integrity. Wall-clock write times are also reported.
+    """
+    import netCDF4
+
+    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
+        mpi.log(
+            "\n--- Distributed NetCDF round-trip SKIPPED: netCDF4 lacks "
+            "parallel4 support ---"
+        )
+        return
+
+    source_path = os.path.join(out_dir, "climtools_test_distributed_source.nc")
+    serial_path = os.path.join(out_dir, "climtools_test_distributed_serial.nc")
+    parallel_path = os.path.join(out_dir, "climtools_test_distributed_parallel.nc")
+
+    def make_source() -> xr.Dataset:
+        rng = np.random.default_rng(24601)
+        times = pd.date_range("1980-01-01", periods=n_time, freq="6h")
+        lat = np.linspace(-90.0, 90.0, ny, dtype=np.float64)
+        lon = np.linspace(0.0, 360.0, nx, endpoint=False, dtype=np.float64)
+        return xr.Dataset(
+            data_vars={
+                "precipitation": (
+                    ("time", "lat", "lon"),
+                    rng.random((n_time, ny, nx), dtype=np.float32),
+                    {"units": "mm/day", "long_name": "precipitation rate"},
+                ),
+                "temperature": (
+                    ("time", "lat", "lon"),
+                    (250.0 + 40.0 * rng.random((n_time, ny, nx), dtype=np.float32)),
+                    {"units": "K"},
+                ),
+                "orography": (
+                    ("lat", "lon"),
+                    np.arange(ny * nx, dtype=np.float32).reshape(ny, nx),
+                    {"units": "m"},
+                ),
+            },
+            coords={"time": times, "lat": lat, "lon": lon},
+            attrs={"title": "distributed NetCDF integrity test"},
+        )
+
+    if RANK == 0:
+        source = make_source()
+        source.to_netcdf(source_path)
+    mpi.comm.barrier()
+
+    def serial_fn() -> None:
+        with xr.open_dataset(source_path) as normal:
+            normal.load()
+            normal.to_netcdf(serial_path)
+
+    _, serial_s = run_serial_baseline(serial_fn)
+    mpi.comm.barrier()
+
+    distributed = mpi.xarray.open_dataset(
+        source_path,
+        partition_dim="time",
+    )
+    meta = distributed.attrs.get("mpi_meta")
+    local_meta_ok = (
+        isinstance(meta, dict)
+        and meta.get("dim") == "time"
+        and int(meta.get("global_size", -1)) == n_time
+    )
+
+    with timed() as box:
+        xgeo.to_netcdf(
+            distributed,
+            parallel_path,
+            parallel=True,
+            allow_serial=(SIZE == 1),
+        )
+    parallel_s = box["seconds"]
+    distributed.close()
+    mpi.comm.barrier()
+
+    correct = bool(mpi.reduce.all(local_meta_ok))
+    integrity_note = ""
+
+    if RANK == 0:
+        try:
+            with (
+                xr.open_dataset(serial_path) as expected,
+                xr.open_dataset(parallel_path) as actual,
+            ):
+                expected.load()
+                actual.load()
+                xr.testing.assert_identical(actual, expected)
+
+                mpi_meta_leaked = "mpi_meta" in actual.attrs or any(
+                    "mpi_meta" in variable.attrs
+                    for variable in actual.variables.values()
+                )
+                if mpi_meta_leaked:
+                    raise AssertionError(
+                        "Internal mpi_meta attributes were written to NetCDF."
+                    )
+        except AssertionError as exc:
+            correct = False
+            integrity_note = str(exc)
+
+    correct, integrity_note = mpi.comm.bcast(
+        (correct, integrity_note),
+        root=0,
+    )
+    record(
+        f"distributed NetCDF round-trip ({n_time} steps, {ny}x{nx})",
+        correct,
+        serial_s,
+        parallel_s,
+        note=integrity_note or "xr.testing.assert_identical",
+    )
+
+    mpi.comm.barrier()
+    if RANK == 0:
+        for path in (source_path, serial_path, parallel_path):
+            if os.path.exists(path):
+                os.remove(path)
+    mpi.comm.barrier()
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -545,10 +1104,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-ny", type=int, default=180)
     parser.add_argument("--grid-nx", type=int, default=360)
     parser.add_argument(
-        "--xreduce-events", type=int, default=5_000, help="events for mpi.xreduce tests"
+        "--xarray-events", type=int, default=5_000, help="events for mpi.xarray tests"
     )
-    parser.add_argument("--xreduce-ny", type=int, default=40)
-    parser.add_argument("--xreduce-nx", type=int, default=40)
+    parser.add_argument("--xarray-ny", type=int, default=40)
+    parser.add_argument("--xarray-nx", type=int, default=40)
     parser.add_argument("--n-lat", type=int, default=180, help="weighted-mean test")
     parser.add_argument("--n-lon", type=int, default=360)
     parser.add_argument("--netcdf-steps", type=int, default=200)
@@ -582,7 +1141,7 @@ def print_summary() -> None:
         mpi.log("All tests: parallel and serial results agree.")
     if SIZE == 1:
         mpi.log(
-            "\nRan on 1 rank: speedups will be ~1x or worse. mpi.reduce/mpi.xreduce/\n"
+            "\nRan on 1 rank: speedups will be ~1x or worse. mpi.reduce/mpi.xarray/\n"
             "the parallel NetCDF writer all still pay collective-call overhead even\n"
             "with nothing to parallelize against. Run `mpirun -n N python "
             "climtools_test.py`\nwith N >= 2 real cores to see actual speedups."
@@ -615,20 +1174,43 @@ def main() -> None:
     )
     mpi.log("=" * 88)
 
+    mpi.log("\n--- mpi runtime helpers ---")
+    safe_run(test_runtime_helpers)
+
     mpi.log("\n--- mpi.reduce ---")
     safe_run(test_reduce_sum_scalar, args.n_events)
     safe_run(test_reduce_composite, args.n_events, args.grid_ny, args.grid_nx)
     safe_run(test_reduce_xarray_object, args.grid_ny, args.grid_nx)
+    safe_run(test_reduce_operations)
 
-    mpi.log("\n--- mpi.xreduce (vs plain xarray on the assembled array) ---")
-    for op_name in ("sum", "mean", "max", "min"):
+    mpi.log("\n--- mpi.xarray ---")
+    safe_run(test_xarray_open_dataset, args.out_dir)
+    safe_run(test_xarray_redistribute)
+    safe_run(test_xarray_isel)
+    safe_run(test_xarray_sel)
+    for op_name in ("sum", "prod", "mean", "max", "min"):
         safe_run(
-            test_xreduce,
-            args.xreduce_events,
-            args.xreduce_ny,
-            args.xreduce_nx,
+            test_xarray_reduction,
+            args.xarray_events,
+            args.xarray_ny,
+            args.xarray_nx,
             op_name,
         )
+    for op_name in ("any", "all"):
+        safe_run(
+            test_xarray_logical_reduction,
+            args.xarray_events,
+            args.xarray_ny,
+            args.xarray_nx,
+            op_name,
+        )
+    safe_run(test_xarray_dataset_reduction)
+    safe_run(
+        test_xarray_redistribute_on,
+        args.xarray_events,
+        args.xarray_ny,
+        args.xarray_nx,
+    )
 
     mpi.log("\n--- mpi.scatterv ---")
     safe_run(test_scatterv, args.n_events)
@@ -641,6 +1223,13 @@ def main() -> None:
     if not args.skip_netcdf:
         safe_run(
             test_netcdf_write,
+            args.netcdf_steps,
+            args.netcdf_ny,
+            args.netcdf_nx,
+            args.out_dir,
+        )
+        safe_run(
+            test_netcdf_distributed_roundtrip,
             args.netcdf_steps,
             args.netcdf_ny,
             args.netcdf_nx,

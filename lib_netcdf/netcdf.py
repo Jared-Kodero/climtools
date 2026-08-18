@@ -5,6 +5,7 @@ from typing import Any
 
 import xarray as xr
 
+from ..core.xarray_mpi import get_mpi_meta
 from .parallel import to_netcdf_parallel
 from .serial import append, to_netcdf_serial
 
@@ -14,11 +15,29 @@ _NO_DATA_ATTR = "_climtools_no_data"
 
 
 def empty_dataset() -> xr.Dataset:
-    """Placeholder passed on non-root ranks in place of real data."""
+    """Return a placeholder Dataset for a non-root MPI rank.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset marked as containing no rank-local data.
+    """
     return xr.Dataset(attrs={_NO_DATA_ATTR: True})
 
 
 def dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
+    """Return whether an object is a non-root MPI placeholder.
+
+    Parameters
+    ----------
+    data : xarray.Dataset or xarray.DataArray
+        Object to inspect.
+
+    Returns
+    -------
+    bool
+        True when ``data`` is an MPI placeholder Dataset.
+    """
     return isinstance(data, xr.Dataset) and data.attrs.get(_NO_DATA_ATTR) is True
 
 
@@ -43,53 +62,51 @@ def to_netcdf(
 ) -> None:
     """Write a Dataset or DataArray to NetCDF.
 
-    Serial output is written incrementally along an unlimited dimension. With
-    ``parallel=True``, every MPI rank contributes its local contiguous slab to
-    one file through parallel NetCDF-4.
+    Serial output is written incrementally along an unlimited dimension. In
+    parallel mode, an object carrying ``mpi_meta`` is already distributed and
+    every rank writes its existing local slab directly. Otherwise rank 0 owns
+    the complete object and the parallel writer distributes partitioned data.
 
     Parameters
     ----------
     data : xarray.Dataset or xarray.DataArray
-        Data to write. In parallel mode, each rank supplies its local slab.
+        Object to write.
     file : str or os.PathLike
-        Output path. An existing file is replaced.
+        Output path.
     unlimited_dim : str or iterable of str, optional
-        Dimension(s) made unlimited in the NetCDF schema.
+        Dimension or dimensions made unlimited.
     partition_dim : str, optional
-        Dimension partitioned across MPI ranks in parallel mode. If omitted,
-        the parallel writer infers the partition axis.
+        MPI partition dimension. For an already distributed object this must
+        agree with ``mpi_meta["dim"]``.
     parallel : bool, default False
-        Use the MPI-parallel NetCDF-4 writer.
+        Use MPI-parallel NetCDF-4 output.
     batch_size : int, default 24
-        Number of slices along the unlimited dimension written per serial
-        append. Not used in parallel mode.
+        Number of slices written per serial append.
     format : str, default "NETCDF4"
-        NetCDF format. Parallel output supports only ``"NETCDF4"``.
+        NetCDF format for serial output.
     shuffle : bool, default True
         Apply the HDF5 shuffle filter.
     zlib : bool, default True
         Apply zlib compression.
     complevel : int, default 4
-        Compression level, between 1 and 9.
+        Compression level from 0 through 9.
     show_progress : bool, default True
-        Display a progress bar while writing serially.
-    stdout : file-like, optional
-        Stream the serial progress bar is written to. Defaults to
-        ``sys.stdout``.
+        Display serial write progress.
+    stdout : Any, optional
+        Serial progress output stream.
     chunks : mapping of str to iterable of int, optional
-        Explicit chunk shape passed to the parallel writer.
+        Explicit NetCDF variable chunk shapes.
     hints : str, optional
-        Semicolon-separated MPI-IO hints in key=value format.
+        Semicolon-separated MPI-IO hints in ``key=value`` form.
     nofill : bool, default True
         Disable NetCDF pre-filling during parallel initialization.
     allow_serial : bool, default False
-        Permit execution when running with a single MPI rank.
+        Permit the parallel writer with one MPI rank.
 
     Returns
     -------
     None
     """
-
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
@@ -98,16 +115,21 @@ def to_netcdf(
     target_path = Path(file)
 
     if parallel:
-        if mpi.comm.rank == 0:
-            if not isinstance(data, (xr.Dataset, xr.DataArray)):
-                raise TypeError(
-                    "data must be an xarray.Dataset or xarray.DataArray on rank 0"
+        mpi_meta = get_mpi_meta(data)
+        distributed = mpi_meta is not None
+
+        if distributed:
+            distributed_dim = str(mpi_meta["dim"])
+            if partition_dim is not None and partition_dim != distributed_dim:
+                raise ValueError(
+                    f"partition_dim {partition_dim!r} does not match "
+                    + f"distributed dimension {distributed_dim!r}."
                 )
-        else:
+            partition_dim = distributed_dim
+        elif mpi.comm.rank != 0:
             data = empty_dataset()
 
-    if parallel:
-        return to_netcdf_parallel(
+        to_netcdf_parallel(
             data,
             target_path,
             partition_dim=partition_dim,
@@ -119,16 +141,17 @@ def to_netcdf(
             nofill=nofill,
             allow_serial=allow_serial,
         )
-    else:
-        return to_netcdf_serial(
-            data=data,
-            file=target_path,
-            unlimited_dim=unlimited_dim,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
-        )
+        return
+
+    to_netcdf_serial(
+        data=data,
+        file=target_path,
+        unlimited_dim=unlimited_dim,
+        batch_size=batch_size,
+        format=format,
+        shuffle=shuffle,
+        zlib=zlib,
+        complevel=complevel,
+        show_progress=show_progress,
+        stdout=stdout,
+    )
