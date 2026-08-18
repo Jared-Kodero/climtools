@@ -20,7 +20,7 @@ Run:
 
     # scale the workload up for a bigger machine
     mpirun -n 16 python climtools_test.py \
-        --n-events 2000000 --xarray-events 40000 --netcdf-steps 500
+        --n-events 2000000 --xarray-events 40000
 
 Speedups from mpi.reduce / mpi.xarray / the parallel NetCDF writer only
 show up when ranks genuinely run on separate cores. On a single-core
@@ -44,12 +44,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 from climtools import mpi, xgeo
 
 RANK: int = mpi.comm.rank
 SIZE: int = mpi.comm.size
+DEFAULT_NETCDF_SOURCE = Path(
+    "/oscar/data/deeps/private/jl322/jkodero/data/models/gfdl_shield/archive/"
+    + "2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/case/fv3_hist.nest04.nc"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +162,47 @@ def safe_run(fn, *args, **kwargs) -> None:
         mpi.log(f"[ERROR] {fn.__name__} failed: {exc}")
 
 
+def _require_source() -> None:
+    """Require the configured SHiELD NetCDF file on every MPI rank."""
+    visible = DEFAULT_NETCDF_SOURCE.is_file()
+    if not bool(mpi.reduce.all(visible)):
+        raise FileNotFoundError(
+            "SHiELD NetCDF source is not visible on every rank: "
+            f"{DEFAULT_NETCDF_SOURCE}"
+        )
+
+
+def _rank_bounds(size: int, rank: int = RANK) -> tuple[int, int]:
+    """Return this rank's contiguous bounds within a global dimension."""
+    return size * rank // SIZE, size * (rank + 1) // SIZE
+
+
+def _load_source_variable(
+    variable: str,
+    **indexers: int | slice,
+) -> xr.DataArray:
+    """Load only the requested selection of one variable from the SHiELD file."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        data = source[variable]
+        valid_indexers = {
+            dim: indexer for dim, indexer in indexers.items() if dim in data.dims
+        }
+        return data.isel(valid_indexers).load()
+
+
+def _load_source_dataset(
+    variables: tuple[str, ...],
+    **indexers: int | slice,
+) -> xr.Dataset:
+    """Load only requested variables and dimension slices from the SHiELD file."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        data = source[list(variables)]
+        valid_indexers = {
+            dim: indexer for dim, indexer in indexers.items() if dim in data.dims
+        }
+        return data.isel(valid_indexers).load()
+
+
 # ---------------------------------------------------------------------------
 # mpi runtime namespace -- small public helpers
 # ---------------------------------------------------------------------------
@@ -191,27 +235,32 @@ def test_runtime_helpers() -> None:
 
 
 def test_reduce_sum_scalar(n_total: int) -> None:
-    """Scalar mpi.reduce.sum: each rank contributes one partial sum."""
-    per_rank = max(1, n_total // SIZE)
+    """Scalar mpi.reduce.sum using real SHiELD precipitation values."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        n_lat = int(source.sizes["lat"])
+        n_lon = int(source.sizes["lon"])
 
-    def make_local(rank: int) -> np.ndarray:
-        rng = np.random.default_rng(1000 + rank)
-        return rng.standard_normal(per_rank).astype(np.float64)
-
-    local = make_local(RANK)
+    n_rows = min(n_lat, max(1, (n_total + n_lon - 1) // n_lon))
+    start, stop = _rank_bounds(n_rows)
+    local = _load_source_variable(
+        "pr",
+        time=0,
+        lat=slice(start, stop),
+    )
 
     with timed() as box:
-        local_partial = float(local.sum())
+        local_partial = float(local.sum(skipna=True))
         combined = mpi.reduce.sum(local_partial)
     parallel_s = box["seconds"]
 
     def serial_fn() -> float:
-        return sum(float(make_local(r).sum()) for r in range(SIZE))
+        field = _load_source_variable("pr", time=0, lat=slice(0, n_rows))
+        return float(field.sum(skipna=True))
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    correct = bool(np.isclose(combined, expected, rtol=1e-8))
+    correct = bool(np.isclose(combined, expected, rtol=1.0e-8, equal_nan=True))
     record(
-        f"mpi.reduce.sum scalar ({n_total} values total)",
+        f"mpi.reduce.sum scalar ({n_rows * n_lon} real pr values)",
         correct,
         serial_s,
         parallel_s,
@@ -219,47 +268,39 @@ def test_reduce_sum_scalar(n_total: int) -> None:
 
 
 def test_reduce_composite(n_events_total: int, ny: int, nx: int) -> None:
-    """mpi.reduce.sum on a NumPy array: distributed point-event binning.
+    """mpi.reduce.sum on real SHiELD precipitation fields from rank-selected times."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        n_time = int(source.sizes["time"])
+        n_lat = min(int(source.sizes["lat"]), ny)
+        n_lon = min(int(source.sizes["lon"]), nx)
 
-    Mirrors the README's parallel-output pattern: each rank owns a disjoint
-    share of point events, bins its own share onto a shared (ny, nx) grid,
-    and mpi.reduce.sum combines every rank's partial grid into one global
-    composite. Compared against binning every event serially on one rank.
-    """
-    per_rank = max(1, n_events_total // SIZE)
+    max_points_per_rank = max(1, n_events_total // SIZE)
+    if n_lat * n_lon > max_points_per_rank:
+        n_lat = max(1, min(n_lat, max_points_per_rank // max(1, n_lon)))
 
-    def make_events(rank: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        rng = np.random.default_rng(5000 + rank)
-        lat_idx = rng.integers(0, ny, size=per_rank)
-        lon_idx = rng.integers(0, nx, size=per_rank)
-        values = rng.standard_normal(per_rank)
-        return lat_idx, lon_idx, values
+    def load_rank_field(rank: int) -> np.ndarray:
+        field = _load_source_variable(
+            "pr",
+            time=rank % n_time,
+            lat=slice(0, n_lat),
+            lon=slice(0, n_lon),
+        )
+        return np.asarray(field.values, dtype=np.float64)
 
-    def bin_events(
-        lat_idx: np.ndarray, lon_idx: np.ndarray, values: np.ndarray
-    ) -> np.ndarray:
-        grid = np.zeros((ny, nx), dtype=np.float64)
-        np.add.at(grid, (lat_idx, lon_idx), values)
-        return grid
-
-    lat_idx, lon_idx, values = make_events(RANK)
+    local = load_rank_field(RANK)
 
     with timed() as box:
-        local_grid = bin_events(lat_idx, lon_idx, values)
-        combined = mpi.reduce.sum(local_grid)
+        combined = mpi.reduce.sum(local)
     parallel_s = box["seconds"]
 
     def serial_fn() -> np.ndarray:
-        grid = np.zeros((ny, nx), dtype=np.float64)
-        for r in range(SIZE):
-            li, lo, v = make_events(r)
-            np.add.at(grid, (li, lo), v)
-        return grid
+        fields = [load_rank_field(rank) for rank in range(SIZE)]
+        return np.sum(np.stack(fields, axis=0), axis=0)
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    correct = bool(np.allclose(combined, expected))
+    correct = bool(np.allclose(combined, expected, rtol=1.0e-8, equal_nan=True))
     record(
-        f"mpi.reduce.sum composite grid ({ny}x{nx}, {n_events_total} events)",
+        f"mpi.reduce.sum real pr fields ({n_lat}x{n_lon}, {SIZE} rank selections)",
         correct,
         serial_s,
         parallel_s,
@@ -267,48 +308,75 @@ def test_reduce_composite(n_events_total: int, ny: int, nx: int) -> None:
 
 
 def test_reduce_xarray_object(ny: int, nx: int) -> None:
-    """mpi.reduce.sum on an xarray DataArray: dims/coords/attrs preserved."""
-    da = xr.DataArray(
-        np.full((ny, nx), RANK + 1.0),
-        dims=("y", "x"),
-        coords={"y": np.arange(ny), "x": np.arange(nx)},
-        attrs={"units": "K"},
-    )
+    """mpi.reduce.sum on a real SHiELD xarray DataArray with metadata preserved."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        n_time = int(source.sizes["time"])
+        n_lat = min(int(source.sizes["lat"]), ny)
+        n_lon = min(int(source.sizes["lon"]), nx)
+
+    def load_rank_field(rank: int) -> xr.DataArray:
+        return _load_source_variable(
+            "t2m",
+            time=rank % n_time,
+            lat=slice(0, n_lat),
+            lon=slice(0, n_lon),
+        )
+
+    local = load_rank_field(RANK)
 
     with timed() as box:
-        combined = mpi.reduce.sum(da)
+        combined = mpi.reduce.sum(local)
     parallel_s = box["seconds"]
 
-    def serial_fn() -> float:
-        return float(sum(r + 1.0 for r in range(SIZE)))
+    def serial_fn() -> np.ndarray:
+        fields = [load_rank_field(rank).values for rank in range(SIZE)]
+        return np.sum(np.stack(fields, axis=0), axis=0)
 
-    expected_scalar, serial_s = run_serial_baseline(serial_fn)
-    correct = (
-        bool(np.allclose(combined.values, expected_scalar))
-        and combined.attrs.get("units") == "K"
-    )
+    expected, serial_s = run_serial_baseline(serial_fn)
+    correct = bool(
+        np.allclose(combined.values, expected, rtol=1.0e-8, equal_nan=True)
+    ) and combined.attrs.get("units") == local.attrs.get("units")
     record(
-        "mpi.reduce.sum xarray DataArray (dims/attrs kept)",
+        "mpi.reduce.sum real t2m DataArray (dims/attrs kept)",
         correct,
         serial_s,
         parallel_s,
-        note="tiny op, correctness-focused",
+        note="correctness-focused",
     )
 
 
 def test_reduce_operations() -> None:
-    """Exercise every mpi.reduce operation in all-ranks and root modes."""
-    numeric = np.array([RANK + 1.0, 2.0 * RANK + 3.0], dtype=np.float64)
-    numeric_stack = np.stack(
-        [
-            np.array([rank + 1.0, 2.0 * rank + 3.0], dtype=np.float64)
-            for rank in range(SIZE)
-        ]
-    )
-    logical = np.array([RANK == 0, RANK % 2 == 0, True], dtype=bool)
-    logical_stack = np.stack(
-        [np.array([rank == 0, rank % 2 == 0, True], dtype=bool) for rank in range(SIZE)]
-    )
+    """Exercise every mpi.reduce operation using real SHiELD values."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        n_time = int(source.sizes["time"])
+        n_lat = int(source.sizes["lat"])
+        n_lon = int(source.sizes["lon"])
+
+    numeric_width = min(2, n_lon)
+    logical_width = min(3, n_lon)
+
+    def load_numeric(rank: int) -> np.ndarray:
+        data = _load_source_variable(
+            "t2m",
+            time=rank % n_time,
+            lat=rank % n_lat,
+            lon=slice(0, numeric_width),
+        )
+        return np.asarray(data.values, dtype=np.float64)
+
+    def load_logical(rank: int) -> np.ndarray:
+        mask = _load_source_variable(
+            "slmsk",
+            time=rank % n_time,
+            lat=rank % n_lat,
+            lon=slice(0, logical_width),
+        )
+        return np.asarray(mask.values == 1)
+
+    numeric = load_numeric(RANK)
+    numeric_stack = np.stack([load_numeric(rank) for rank in range(SIZE)], axis=0)
+    logical = load_logical(RANK)
+    logical_stack = np.stack([load_logical(rank) for rank in range(SIZE)], axis=0)
 
     cases = (
         ("sum", numeric, numeric_stack.sum(axis=0)),
@@ -327,20 +395,77 @@ def test_reduce_operations() -> None:
         parallel_s = box["seconds"]
 
         root_result = op(value, mode="root", root=0)
-        all_mode_ok = bool(np.allclose(result, expected))
+        all_mode_ok = bool(np.allclose(result, expected, equal_nan=True))
         root_mode_ok = (
-            bool(np.allclose(root_result, expected))
+            bool(np.allclose(root_result, expected, equal_nan=True))
             if RANK == 0
             else root_result is None
         )
         correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
         record(
-            f"mpi.reduce.{op_name} (all/root modes)",
+            f"mpi.reduce.{op_name} real SHiELD values (all/root modes)",
             correct,
             0.0,
             parallel_s,
             note="correctness-focused",
         )
+
+    mask = _load_source_variable(
+        "slmsk",
+        time=RANK % n_time,
+        lat=RANK % n_lat,
+        lon=slice(0, logical_width),
+    )
+    logical_dataset = xr.Dataset(
+        {
+            "land": mask == 1,
+            "nonsea": mask != 0,
+        }
+    )
+    dataset_any = mpi.reduce.any(logical_dataset)
+    dataset_all = mpi.reduce.all(logical_dataset)
+
+    land_stack = np.stack(
+        [
+            _load_source_variable(
+                "slmsk",
+                time=rank % n_time,
+                lat=rank % n_lat,
+                lon=slice(0, logical_width),
+            ).values
+            == 1
+            for rank in range(SIZE)
+        ],
+        axis=0,
+    )
+    nonsea_stack = np.stack(
+        [
+            _load_source_variable(
+                "slmsk",
+                time=rank % n_time,
+                lat=rank % n_lat,
+                lon=slice(0, logical_width),
+            ).values
+            != 0
+            for rank in range(SIZE)
+        ],
+        axis=0,
+    )
+    dataset_ok = (
+        isinstance(dataset_any, xr.Dataset)
+        and isinstance(dataset_all, xr.Dataset)
+        and bool(np.array_equal(dataset_any["land"].values, land_stack.any(axis=0)))
+        and bool(np.array_equal(dataset_any["nonsea"].values, nonsea_stack.any(axis=0)))
+        and bool(np.array_equal(dataset_all["land"].values, land_stack.all(axis=0)))
+        and bool(np.array_equal(dataset_all["nonsea"].values, nonsea_stack.all(axis=0)))
+    )
+    record(
+        "mpi.reduce.any/all real slmsk Dataset",
+        bool(mpi.reduce.all(dataset_ok)),
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -348,112 +473,100 @@ def test_reduce_operations() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_xarray_open_dataset(out_dir: str) -> None:
-    """mpi.xarray.open_dataset: lazy open plus rank-local partition metadata."""
-    path = os.path.join(out_dir, "climtools_test_xarray_source.nc")
-    n_time = max(2 * SIZE + 1, 9)
-    ny = 4
-    nx = 5
-
-    def make_source() -> xr.Dataset:
-        values = np.arange(n_time * ny * nx, dtype=np.float64).reshape(n_time, ny, nx)
-        return xr.Dataset(
-            {
-                "field": xr.DataArray(
-                    values,
-                    dims=("time", "y", "x"),
-                    coords={
-                        "time": np.arange(n_time),
-                        "y": np.arange(ny),
-                        "x": np.arange(nx),
-                    },
-                    attrs={"units": "K"},
-                )
-            }
-        )
-
-    if RANK == 0:
-        make_source().to_netcdf(path)
-    mpi.comm.barrier()
-
+def test_xarray_open_dataset() -> None:
+    """mpi.xarray.open_dataset on the real SHiELD file partitioned by latitude."""
     with timed() as box:
-        distributed = mpi.xarray.open_dataset(path, partition_dim="time")
-        distributed.load()
+        distributed = mpi.xarray.open_dataset(
+            str(DEFAULT_NETCDF_SOURCE),
+            partition_dim="lat",
+        )[["pr"]]
+        distributed["pr"].isel(time=0).load()
     parallel_s = box["seconds"]
 
-    local = distributed["field"].values.copy()
+    local = distributed["pr"].isel(time=0).values.copy()
     meta = distributed.attrs.get("mpi_meta")
-    variable_meta = distributed["field"].attrs.get("mpi_meta")
+    variable_meta = distributed["pr"].attrs.get("mpi_meta")
+    n_lat = int(meta.get("global_size", -1)) if isinstance(meta, dict) else -1
+    local_lat_axis = distributed["pr"].isel(time=0).get_axis_num("lat")
     distributed.close()
 
     parts = mpi.comm.allgather(local)
-    assembled = np.concatenate(parts, axis=0)
-    expected = make_source()["field"].values
+    assembled = np.concatenate(parts, axis=local_lat_axis)
+    expected = _load_source_variable("pr", time=0).values
     local_meta_ok = (
         isinstance(meta, dict)
-        and meta.get("dim") == "time"
-        and int(meta.get("global_size", -1)) == n_time
-        and int(meta.get("stop", -1)) - int(meta.get("start", -1)) == local.shape[0]
+        and meta.get("dim") == "lat"
+        and n_lat == expected.shape[local_lat_axis]
+        and int(meta.get("stop", -1)) - int(meta.get("start", -1))
+        == local.shape[local_lat_axis]
         and isinstance(variable_meta, dict)
-        and variable_meta.get("dim") == "time"
+        and variable_meta.get("dim") == "lat"
     )
-    correct = bool(np.array_equal(assembled, expected)) and bool(
+    correct = bool(np.array_equal(assembled, expected, equal_nan=True)) and bool(
         mpi.reduce.all(local_meta_ok)
     )
 
     def serial_fn() -> float:
-        with xr.open_dataset(path) as serial:
-            serial.load()
-            return float(serial["field"].sum())
+        field = _load_source_variable("pr", time=0)
+        return float(field.sum(skipna=True))
 
     _, serial_s = run_serial_baseline(serial_fn)
     record(
-        "mpi.xarray.open_dataset (partitioned time dimension)",
+        "mpi.xarray.open_dataset (real pr, partitioned latitude)",
         correct,
         serial_s,
         parallel_s,
     )
 
-    mpi.comm.barrier()
-    if RANK == 0:
-        os.remove(path)
-    mpi.comm.barrier()
 
-
-def test_xarray_redistribute() -> None:
-    """mpi.xarray.redistribute: explicit and automatic partition dimensions."""
-    n_time = max(3 * SIZE + 2, 11)
-    ny = 3
-    full = xr.DataArray(
-        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
-        dims=("time", "y"),
-        coords={"time": np.arange(n_time), "y": np.arange(ny)},
+def test_xarray_redistribute(ny: int, nx: int) -> None:
+    """mpi.xarray.redistribute using a real SHiELD precipitation field."""
+    full = _load_source_variable(
+        "pr",
+        time=0,
+        lat=slice(0, ny),
+        lon=slice(0, nx),
     )
 
     with timed() as box:
-        distributed = mpi.xarray.redistribute(full, "time")
+        distributed = mpi.xarray.redistribute(full, "lat")
     parallel_s = box["seconds"]
     auto = mpi.xarray.redistribute(full, "auto")
 
     explicit_parts = mpi.comm.allgather(distributed.values)
-    auto_parts = mpi.comm.allgather(auto.values)
     explicit_meta = distributed.attrs.get("mpi_meta")
+    auto_parts = mpi.comm.allgather(auto.values)
     auto_meta = auto.attrs.get("mpi_meta")
+
+    auto_dim = auto_meta.get("dim") if isinstance(auto_meta, dict) else None
+    auto_axis = full.get_axis_num(auto_dim) if isinstance(auto_dim, str) else 0
     local_ok = (
         isinstance(explicit_meta, dict)
-        and explicit_meta.get("dim") == "time"
-        and int(explicit_meta.get("global_size", -1)) == n_time
+        and explicit_meta.get("dim") == "lat"
+        and int(explicit_meta.get("global_size", -1)) == full.sizes["lat"]
         and isinstance(auto_meta, dict)
-        and auto_meta.get("dim") == "time"
-        and int(auto_meta.get("global_size", -1)) == n_time
+        and isinstance(auto_dim, str)
+        and int(auto_meta.get("global_size", -1)) == full.sizes[auto_dim]
     )
     correct = (
-        bool(np.array_equal(np.concatenate(explicit_parts, axis=0), full.values))
-        and bool(np.array_equal(np.concatenate(auto_parts, axis=0), full.values))
+        bool(
+            np.array_equal(
+                np.concatenate(explicit_parts, axis=full.get_axis_num("lat")),
+                full.values,
+                equal_nan=True,
+            )
+        )
+        and bool(
+            np.array_equal(
+                np.concatenate(auto_parts, axis=auto_axis),
+                full.values,
+                equal_nan=True,
+            )
+        )
         and bool(mpi.reduce.all(local_ok))
     )
     record(
-        "mpi.xarray.redistribute (explicit/auto)",
+        "mpi.xarray.redistribute real pr (explicit/auto)",
         correct,
         0.0,
         parallel_s,
@@ -461,43 +574,48 @@ def test_xarray_redistribute() -> None:
     )
 
 
-def test_xarray_isel() -> None:
-    """mpi.xarray.isel: global slice and scalar integer indexing."""
-    n_time = max(4 * SIZE + 3, 19)
-    ny = 3
-    full = xr.DataArray(
-        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
-        dims=("time", "y"),
-        coords={"time": np.arange(n_time), "y": np.arange(ny)},
+def test_xarray_isel(ny: int, nx: int) -> None:
+    """mpi.xarray.isel using global latitude indices on real SHiELD precipitation."""
+    full = _load_source_variable(
+        "pr",
+        time=0,
+        lat=slice(0, ny),
+        lon=slice(0, nx),
     )
-    distributed = mpi.xarray.redistribute(full, "time")
-    start = 2
-    stop = n_time - 2
-    scalar_index = n_time // 2
+    distributed = mpi.xarray.redistribute(full, "lat")
+    n_lat = full.sizes["lat"]
+    if n_lat < 3:
+        raise ValueError(
+            "The selected SHiELD latitude range must contain at least 3 rows."
+        )
+
+    start = 1
+    stop = n_lat - 1
+    scalar_index = n_lat // 2
 
     with timed() as box:
-        sliced = mpi.xarray.isel(distributed, time=slice(start, stop))
-        scalar = mpi.xarray.isel(distributed, time=scalar_index)
+        sliced = mpi.xarray.isel(distributed, lat=slice(start, stop))
+        scalar = mpi.xarray.isel(distributed, lat=scalar_index)
     parallel_s = box["seconds"]
 
     sliced_parts = mpi.comm.allgather(sliced.values)
-    assembled = np.concatenate(sliced_parts, axis=0)
-    expected_slice = full.isel(time=slice(start, stop)).values
-    expected_scalar = full.isel(time=scalar_index).values
+    assembled = np.concatenate(sliced_parts, axis=sliced.get_axis_num("lat"))
+    expected_slice = full.isel(lat=slice(start, stop)).values
+    expected_scalar = full.isel(lat=scalar_index).values
     meta = sliced.attrs.get("mpi_meta")
     local_meta_ok = (
         isinstance(meta, dict)
-        and meta.get("dim") == "time"
+        and meta.get("dim") == "lat"
         and int(meta.get("global_size", -1)) == stop - start
     )
     correct = (
-        bool(np.array_equal(assembled, expected_slice))
-        and bool(np.array_equal(scalar.values, expected_scalar))
+        bool(np.array_equal(assembled, expected_slice, equal_nan=True))
+        and bool(np.array_equal(scalar.values, expected_scalar, equal_nan=True))
         and "mpi_meta" not in scalar.attrs
         and bool(mpi.reduce.all(local_meta_ok))
     )
     record(
-        "mpi.xarray.isel (global slice/scalar)",
+        "mpi.xarray.isel real pr (global latitude slice/scalar)",
         correct,
         0.0,
         parallel_s,
@@ -505,40 +623,52 @@ def test_xarray_isel() -> None:
     )
 
 
-def test_xarray_sel() -> None:
-    """mpi.xarray.sel: global coordinate slice and scalar label selection."""
-    n_time = max(4 * SIZE + 3, 19)
-    ny = 3
-    time = np.arange(n_time, dtype=np.int64) * 6
-    full = xr.DataArray(
-        np.arange(n_time * ny, dtype=np.float64).reshape(n_time, ny),
-        dims=("time", "y"),
-        coords={"time": time, "y": np.arange(ny)},
+def test_xarray_sel(ny: int, nx: int) -> None:
+    """mpi.xarray.sel using real SHiELD latitude coordinate labels."""
+    full = _load_source_variable(
+        "pr",
+        time=0,
+        lat=slice(0, ny),
+        lon=slice(0, nx),
     )
-    distributed = mpi.xarray.redistribute(full, "time")
-    start_label = int(time[2])
-    stop_label = int(time[-3])
-    scalar_label = int(time[n_time // 2])
+    distributed = mpi.xarray.redistribute(full, "lat")
+    n_lat = full.sizes["lat"]
+    if n_lat < 3:
+        raise ValueError(
+            "The selected SHiELD latitude range must contain at least 3 rows."
+        )
+
+    start_label = full["lat"].values[1].item()
+    stop_label = full["lat"].values[-2].item()
+    scalar_label = full["lat"].values[n_lat // 2].item()
 
     with timed() as box:
-        sliced = mpi.xarray.sel(distributed, time=slice(start_label, stop_label))
-        scalar = mpi.xarray.sel(distributed, time=scalar_label)
+        sliced = mpi.xarray.sel(distributed, lat=slice(start_label, stop_label))
+        scalar = mpi.xarray.sel(distributed, lat=scalar_label)
+        nearest = mpi.xarray.sel(
+            distributed,
+            lat=scalar_label,
+            method="nearest",
+        )
     parallel_s = box["seconds"]
 
     sliced_parts = mpi.comm.allgather(sliced.values)
-    assembled = np.concatenate(sliced_parts, axis=0)
-    expected_slice = full.sel(time=slice(start_label, stop_label)).values
-    expected_scalar = full.sel(time=scalar_label).values
+    assembled = np.concatenate(sliced_parts, axis=sliced.get_axis_num("lat"))
+    expected_slice = full.sel(lat=slice(start_label, stop_label)).values
+    expected_scalar = full.sel(lat=scalar_label).values
+    expected_nearest = full.sel(lat=scalar_label, method="nearest").values
     meta = sliced.attrs.get("mpi_meta")
-    local_meta_ok = isinstance(meta, dict) and meta.get("dim") == "time"
+    local_meta_ok = isinstance(meta, dict) and meta.get("dim") == "lat"
     correct = (
-        bool(np.array_equal(assembled, expected_slice))
-        and bool(np.array_equal(scalar.values, expected_scalar))
+        bool(np.array_equal(assembled, expected_slice, equal_nan=True))
+        and bool(np.array_equal(scalar.values, expected_scalar, equal_nan=True))
+        and bool(np.array_equal(nearest.values, expected_nearest, equal_nan=True))
         and "mpi_meta" not in scalar.attrs
+        and "mpi_meta" not in nearest.attrs
         and bool(mpi.reduce.all(local_meta_ok))
     )
     record(
-        "mpi.xarray.sel (global slice/scalar)",
+        "mpi.xarray.sel real pr (global latitude slice/scalar)",
         correct,
         0.0,
         parallel_s,
@@ -546,51 +676,37 @@ def test_xarray_sel() -> None:
     )
 
 
-def test_xarray_reduction(n_events_total: int, ny: int, nx: int, op_name: str) -> None:
-    """Numeric mpi.xarray reductions vs xarray on the assembled global array."""
-    per_rank = max(1, n_events_total // SIZE)
-
-    def make_local(rank: int) -> xr.DataArray:
-        rng = np.random.default_rng(7000 + rank)
-        if op_name == "prod":
-            data = 1.0 + 1.0e-3 * rng.standard_normal((per_rank, ny, nx))
-        else:
-            data = rng.standard_normal((per_rank, ny, nx))
-        data = data.astype(np.float64)
-        data[0, 0, 0] = np.nan
-        return xr.DataArray(
-            data,
-            dims=("event", "y", "x"),
-            attrs={"units": "1"},
-        )
-
-    local = make_local(RANK)
+def test_xarray_reduction(n_levels_max: int, ny: int, nx: int, op_name: str) -> None:
+    """Numeric mpi.xarray reductions using the real SHiELD temperature profile."""
+    full = _load_source_variable(
+        "t",
+        time=0,
+        plev=slice(0, n_levels_max),
+        lat=slice(0, ny),
+        lon=slice(0, nx),
+    )
+    distributed = mpi.xarray.redistribute(full, "plev")
     op = getattr(mpi.xarray, op_name)
     kwargs = {"skipna": True, "keep_attrs": True}
     if op_name in {"sum", "prod"}:
         kwargs["min_count"] = 1
 
     with timed() as box:
-        result = op(local, dim="event", **kwargs)
+        result = op(distributed, dim="plev", **kwargs)
     parallel_s = box["seconds"]
 
     def serial_fn() -> np.ndarray:
-        parts = [make_local(rank).values for rank in range(SIZE)]
-        full = xr.DataArray(
-            np.concatenate(parts, axis=0),
-            dims=("event", "y", "x"),
-        )
         serial_kwargs = {"skipna": True}
         if op_name in {"sum", "prod"}:
             serial_kwargs["min_count"] = 1
-        return getattr(full, op_name)(dim="event", **serial_kwargs).values
+        return getattr(full, op_name)(dim="plev", **serial_kwargs).values
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    root_result = op(local, dim="event", mode="root", root=0, **kwargs)
+    root_result = op(distributed, dim="plev", mode="root", root=0, **kwargs)
     all_mode_ok = (
         result is not None
         and bool(np.allclose(result.values, expected, rtol=1.0e-9, equal_nan=True))
-        and result.attrs.get("units") == "1"
+        and result.attrs.get("units") == full.attrs.get("units")
     )
     root_mode_ok = (
         root_result is not None
@@ -600,7 +716,7 @@ def test_xarray_reduction(n_events_total: int, ny: int, nx: int, op_name: str) -
     )
     correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
     record(
-        f"mpi.xarray.{op_name} ({n_events_total} events, {ny}x{nx} field)",
+        f"mpi.xarray.{op_name} real t over {full.sizes['plev']} pressure levels",
         correct,
         serial_s,
         parallel_s,
@@ -608,37 +724,30 @@ def test_xarray_reduction(n_events_total: int, ny: int, nx: int, op_name: str) -
 
 
 def test_xarray_logical_reduction(
-    n_events_total: int,
-    ny: int,
+    n_lat_max: int,
     nx: int,
     op_name: str,
 ) -> None:
-    """Logical mpi.xarray.any/all vs xarray on the assembled global array."""
-    per_rank = max(1, n_events_total // SIZE)
-
-    def make_local(rank: int) -> xr.DataArray:
-        rng = np.random.default_rng(8000 + rank)
-        data = rng.random((per_rank, ny, nx)) > 0.5
-        data[0, 0, 0] = rank == 0
-        return xr.DataArray(data, dims=("event", "y", "x"))
-
-    local = make_local(RANK)
+    """Logical mpi.xarray.any/all using the real SHiELD sea-land-ice mask."""
+    mask = _load_source_variable(
+        "slmsk",
+        time=0,
+        lat=slice(0, n_lat_max),
+        lon=slice(0, nx),
+    )
+    full = mask == 1
+    distributed = mpi.xarray.redistribute(full, "lat")
     op = getattr(mpi.xarray, op_name)
 
     with timed() as box:
-        result = op(local, dim="event")
+        result = op(distributed, dim="lat")
     parallel_s = box["seconds"]
 
     def serial_fn() -> np.ndarray:
-        parts = [make_local(rank).values for rank in range(SIZE)]
-        full = xr.DataArray(
-            np.concatenate(parts, axis=0),
-            dims=("event", "y", "x"),
-        )
-        return getattr(full, op_name)(dim="event").values
+        return getattr(full, op_name)(dim="lat").values
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    root_result = op(local, dim="event", mode="root", root=0)
+    root_result = op(distributed, dim="lat", mode="root", root=0)
     all_mode_ok = result is not None and bool(np.array_equal(result.values, expected))
     root_mode_ok = (
         root_result is not None and bool(np.array_equal(root_result.values, expected))
@@ -647,44 +756,95 @@ def test_xarray_logical_reduction(
     )
     correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
     record(
-        f"mpi.xarray.{op_name} ({n_events_total} Boolean events, {ny}x{nx})",
+        f"mpi.xarray.{op_name} real slmsk land mask ({full.sizes['lat']} latitudes)",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_xarray_dataset_reduction() -> None:
-    """Dataset reduction keeps variables that do not use the partition dimension."""
-    n_event = max(2 * SIZE + 1, 9)
-    ny = 4
-    event = np.arange(n_event)
-    y = np.arange(ny)
-    signal = 1.0 + np.arange(n_event * ny, dtype=np.float64).reshape(n_event, ny)
-    static = np.linspace(10.0, 40.0, ny)
-    full = xr.Dataset(
-        {
-            "signal": xr.DataArray(signal, dims=("event", "y")),
-            "static": xr.DataArray(static, dims=("y",)),
-        },
-        coords={"event": event, "y": y},
+def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
+    """Dataset reductions using real distributed t2m plus real static plev values."""
+    t2m = _load_source_variable(
+        "t2m",
+        time=0,
+        lat=slice(0, ny),
+        lon=slice(0, nx),
     )
-    distributed = mpi.xarray.redistribute(full, "event")
+    plev_values = _load_source_variable("plev").rename("plev_values")
+    full = xr.merge([t2m.to_dataset(name="t2m"), plev_values.to_dataset()])
+    distributed = mpi.xarray.redistribute(full, "lat")
 
     with timed() as box:
-        result = mpi.xarray.sum(distributed, dim="event")
+        result = mpi.xarray.sum(distributed, dim="lat")
+        mean_result = mpi.xarray.mean(distributed, dim=("lat", "lon"))
     parallel_s = box["seconds"]
 
-    expected = full.sum(dim="event")
+    expected = full.sum(dim="lat")
+    expected_mean = full.mean(dim=("lat", "lon"))
     correct = (
         result is not None
-        and bool(np.allclose(result["signal"].values, expected["signal"].values))
-        and bool(np.array_equal(result["static"].values, expected["static"].values))
+        and mean_result is not None
+        and bool(
+            np.allclose(
+                result["t2m"].values,
+                expected["t2m"].values,
+                equal_nan=True,
+            )
+        )
+        and bool(
+            np.array_equal(
+                result["plev_values"].values,
+                expected["plev_values"].values,
+            )
+        )
+        and bool(
+            np.allclose(
+                mean_result["t2m"].values,
+                expected_mean["t2m"].values,
+                equal_nan=True,
+            )
+        )
+        and bool(
+            np.array_equal(
+                mean_result["plev_values"].values,
+                expected_mean["plev_values"].values,
+            )
+        )
         and "mpi_meta" not in result.attrs
+        and "mpi_meta" not in mean_result.attrs
+    )
+
+    profile = _load_source_variable(
+        "t",
+        time=0,
+        plev=slice(0, max(1, SIZE - 1)),
+        lat=0,
+        lon=0,
+    )
+    profile_distributed = mpi.xarray.redistribute(profile, "plev")
+    minimum = mpi.xarray.min(profile_distributed, dim="plev")
+    maximum = mpi.xarray.max(profile_distributed, dim="plev")
+    correct = (
+        correct
+        and minimum is not None
+        and maximum is not None
+        and bool(
+            np.isclose(
+                float(minimum.item()),
+                float(profile.min(skipna=True).item()),
+            )
+        )
+        and bool(
+            np.isclose(
+                float(maximum.item()),
+                float(profile.max(skipna=True).item()),
+            )
+        )
     )
     correct = bool(mpi.reduce.all(correct))
     record(
-        "mpi.xarray.sum Dataset (distributed + static variables)",
+        "mpi.xarray Dataset reductions (real distributed/static variables)",
         correct,
         0.0,
         parallel_s,
@@ -692,42 +852,38 @@ def test_xarray_dataset_reduction() -> None:
     )
 
 
-def test_xarray_redistribute_on(n_events_total: int, ny: int, nx: int) -> None:
-    """Reduction result can be redistributed along a remaining dimension."""
-    per_rank = max(1, n_events_total // SIZE)
+def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
+    """Redistribute a real reduction result along the remaining longitude dimension."""
+    full = _load_source_variable(
+        "t2m",
+        time=0,
+        lat=slice(0, n_lat_max),
+        lon=slice(0, nx),
+    )
+    distributed = mpi.xarray.redistribute(full, "lat")
 
-    def make_local(rank: int) -> xr.DataArray:
-        rng = np.random.default_rng(8500 + rank)
-        data = rng.standard_normal((per_rank, ny, nx)).astype(np.float64)
-        return xr.DataArray(data, dims=("event", "y", "x"))
-
-    local = make_local(RANK)
     with timed() as box:
-        result = mpi.xarray.mean(local, dim="event", redistribute_on="y")
+        result = mpi.xarray.mean(distributed, dim="lat", redistribute_on="lon")
     parallel_s = box["seconds"]
 
     parts = mpi.comm.allgather(result.values)
-    assembled = np.concatenate(parts, axis=0)
+    assembled = np.concatenate(parts, axis=result.get_axis_num("lon"))
 
     def serial_fn() -> np.ndarray:
-        full = xr.DataArray(
-            np.concatenate([make_local(rank).values for rank in range(SIZE)], axis=0),
-            dims=("event", "y", "x"),
-        )
-        return full.mean(dim="event").values
+        return full.mean(dim="lat").values
 
     expected, serial_s = run_serial_baseline(serial_fn)
     meta = result.attrs.get("mpi_meta")
     local_meta_ok = (
         isinstance(meta, dict)
-        and meta.get("dim") == "y"
-        and int(meta.get("global_size", -1)) == ny
+        and meta.get("dim") == "lon"
+        and int(meta.get("global_size", -1)) == full.sizes["lon"]
     )
-    correct = bool(np.allclose(assembled, expected, rtol=1.0e-9)) and bool(
-        mpi.reduce.all(local_meta_ok)
-    )
+    correct = bool(
+        np.allclose(assembled, expected, rtol=1.0e-9, equal_nan=True)
+    ) and bool(mpi.reduce.all(local_meta_ok))
     record(
-        "mpi.xarray.mean(..., redistribute_on='y')",
+        "mpi.xarray.mean(real t2m, redistribute_on='lon')",
         correct,
         serial_s,
         parallel_s,
@@ -740,24 +896,38 @@ def test_xarray_redistribute_on(n_events_total: int, ny: int, nx: int) -> None:
 
 
 def test_scatterv(n_total: int) -> None:
-    counts = [n_total // SIZE + (1 if r < n_total % SIZE else 0) for r in range(SIZE)]
-    total = sum(counts)
+    """Scatter rows from a real SHiELD t2m field."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source_ds:
+        n_lat = int(source_ds.sizes["lat"])
+        n_lon = min(3, int(source_ds.sizes["lon"]))
+        dtype = np.dtype(source_ds["t2m"].dtype)
+
+    total = min(n_lat, max(1, n_total // max(1, n_lon)))
+    counts = [total // SIZE + (1 if rank < total % SIZE else 0) for rank in range(SIZE)]
 
     with timed() as box:
         source = None
         if RANK == 0:
-            source = np.arange(total * 3, dtype=np.float64).reshape(total, 3)
-        recv = mpi.scatterv(source, counts, (counts[RANK], 3), np.float64, root=0)
+            source = _load_source_variable(
+                "t2m",
+                time=0,
+                lat=slice(0, total),
+                lon=slice(0, n_lon),
+            ).values
+        recv = mpi.scatterv(source, counts, (counts[RANK], n_lon), dtype, root=0)
     parallel_s = box["seconds"]
 
     start = sum(counts[:RANK])
-    expected_local = np.arange(total * 3, dtype=np.float64).reshape(total, 3)[
-        start : start + counts[RANK]
-    ]
-    correct = bool(np.allclose(recv, expected_local))
+    expected_local = _load_source_variable(
+        "t2m",
+        time=0,
+        lat=slice(start, start + counts[RANK]),
+        lon=slice(0, n_lon),
+    ).values
+    correct = bool(np.array_equal(recv, expected_local, equal_nan=True))
     record(
-        f"mpi.scatterv ({total} rows across {SIZE} rank(s))",
-        correct,
+        f"mpi.scatterv real t2m ({total} rows across {SIZE} rank(s))",
+        bool(mpi.reduce.all(correct)),
         0.0,
         parallel_s,
         note="data movement, no serial-compute equivalent",
@@ -770,46 +940,44 @@ def test_scatterv(n_total: int) -> None:
 
 
 def test_weighted_mean(n_lat_total: int, n_lon: int) -> None:
-    """Cosine-latitude weighted global mean via distributed partial sums.
+    """Cosine-latitude weighted mean of the real SHiELD 2 m temperature field."""
+    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+        n_lat = min(int(source.sizes["lat"]), n_lat_total)
+        n_lon_used = min(int(source.sizes["lon"]), n_lon)
 
-    Each rank holds a disjoint latitude band, computes its own weighted
-    partial sums with ordinary xarray arithmetic, and mpi.reduce.sum
-    combines the numerator and denominator across ranks before dividing --
-    demonstrating xarray operations composed with mpi.reduce, not just
-    mpi.reduce in isolation.
-    """
-    per_rank = max(1, n_lat_total // SIZE)
-
-    def make_local(rank: int) -> xr.DataArray:
-        lat0 = rank * per_rank
-        lat = np.linspace(-90.0, 90.0, n_lat_total)[lat0 : lat0 + per_rank]
-        rng = np.random.default_rng(9000 + rank)
-        data = rng.standard_normal((per_rank, n_lon)).astype(np.float64)
-        return xr.DataArray(
-            data, dims=("lat", "lon"), coords={"lat": lat, "lon": np.arange(n_lon)}
-        )
-
-    local = make_local(RANK)
+    start, stop = _rank_bounds(n_lat)
+    local = _load_source_variable(
+        "t2m",
+        time=0,
+        lat=slice(start, stop),
+        lon=slice(0, n_lon_used),
+    )
 
     with timed() as box:
         weights = np.cos(np.deg2rad(local["lat"]))
-        local_weighted_sum = (local * weights).sum()
-        local_weight_sum = (xr.ones_like(local) * weights).sum()
+        local_weighted_sum = (local * weights).sum(skipna=True)
+        local_weight_sum = (xr.ones_like(local) * weights).where(local.notnull()).sum()
         global_weighted_sum = mpi.reduce.sum(float(local_weighted_sum))
         global_weight_sum = mpi.reduce.sum(float(local_weight_sum))
         weighted_mean = global_weighted_sum / global_weight_sum
     parallel_s = box["seconds"]
 
     def serial_fn() -> float:
-        parts = [make_local(r) for r in range(SIZE)]
-        full = xr.concat(parts, dim="lat")
-        w = np.cos(np.deg2rad(full["lat"]))
-        return float((full * w).sum() / (xr.ones_like(full) * w).sum())
+        full = _load_source_variable(
+            "t2m",
+            time=0,
+            lat=slice(0, n_lat),
+            lon=slice(0, n_lon_used),
+        )
+        weights = np.cos(np.deg2rad(full["lat"]))
+        numerator = (full * weights).sum(skipna=True)
+        denominator = (xr.ones_like(full) * weights).where(full.notnull()).sum()
+        return float(numerator / denominator)
 
     expected, serial_s = run_serial_baseline(serial_fn)
-    correct = bool(np.isclose(weighted_mean, expected, rtol=1e-8))
+    correct = bool(np.isclose(weighted_mean, expected, rtol=1.0e-8, equal_nan=True))
     record(
-        f"cosine-lat weighted mean ({n_lat_total}x{n_lon}, xarray + mpi.reduce)",
+        f"cosine-lat weighted mean real t2m ({n_lat}x{n_lon_used})",
         correct,
         serial_s,
         parallel_s,
@@ -877,7 +1045,8 @@ def test_mpi_decorator() -> None:
     except (mpi.MPIError, ValueError) as exc:
         ok_error_propagation = True
         mpi.log(
-            f"  @mpi error propagation  : caught {type(exc).__name__} on every rank: {exc}"
+            "  @mpi error propagation  : caught "
+            f"{type(exc).__name__} on every rank: {exc}"
         )
 
     overall = ok_root_only and ok_all_ranks and ok_broadcast and ok_error_propagation
@@ -895,7 +1064,8 @@ def test_mpi_decorator() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
+def test_netcdf_write(out_dir: str) -> None:
+    """Compare parallel and serial writes of selected variables from the SHiELD file."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
@@ -905,27 +1075,27 @@ def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
         )
         return
 
-    mpi.log("\n--- NetCDF write: parallel collective vs serial ---")
+    mpi.log("\n--- NetCDF write: selected real SHiELD data, parallel vs serial ---")
 
-    def make_full_dataset() -> xr.Dataset:
-        rng = np.random.default_rng(42)
-        times = pd.date_range("2020-01-01", periods=n_time, freq="6h")
-        return xr.Dataset(
-            {
-                "precipitation": xr.DataArray(
-                    rng.random((n_time, ny, nx)).astype(np.float32),
-                    dims=("time", "y", "x"),
-                    coords={"time": times},
-                    attrs={"units": "mm/day", "long_name": "precipitation rate"},
-                )
-            }
-        )
+    full: xr.Dataset | None = None
+    error: BaseException | None = None
+    if RANK == 0:
+        try:
+            full = _load_source_dataset(
+                ("pr", "t", "slmsk"),
+                plev=slice(0, 5),
+                lat=slice(0, 128),
+                lon=slice(0, 128),
+            )
+        except BaseException as exc:
+            error = exc
+    mpi.raise_if_error(error, "load selected real NetCDF source")
 
     parallel_path = os.path.join(out_dir, "climtools_test_parallel.nc")
     serial_path = os.path.join(out_dir, "climtools_test_serial.nc")
 
     with timed() as box:
-        ds = make_full_dataset() if RANK == 0 else xgeo.empty_dataset()
+        ds = full if RANK == 0 else xgeo.empty_dataset()
         xgeo.to_netcdf(
             ds,
             parallel_path,
@@ -937,40 +1107,51 @@ def test_netcdf_write(n_time: int, ny: int, nx: int, out_dir: str) -> None:
     parallel_s = box["seconds"]
 
     def serial_fn() -> None:
-        full = make_full_dataset()
-        xgeo.to_netcdf(full, serial_path, unlimited_dim="time", show_progress=False)
+        if full is None:
+            raise AssertionError("Rank 0 did not load the NetCDF source.")
+        xgeo.to_netcdf(
+            full,
+            serial_path,
+            unlimited_dim="time",
+            show_progress=False,
+        )
 
     _, serial_s = run_serial_baseline(serial_fn)
 
     correct = True
+    integrity_note = ""
     if RANK == 0:
-        with xr.open_dataset(parallel_path) as a, xr.open_dataset(serial_path) as b:
-            correct = bool(
-                np.allclose(a["precipitation"].values, b["precipitation"].values)
-            ) and np.array_equal(a["time"].values, b["time"].values)
-    correct = mpi.comm.bcast(correct, root=0)
+        try:
+            with (
+                xr.open_dataset(serial_path) as expected,
+                xr.open_dataset(parallel_path) as actual,
+            ):
+                expected.load()
+                actual.load()
+                xr.testing.assert_identical(actual, expected)
+        except AssertionError as exc:
+            correct = False
+            integrity_note = str(exc)
+
+    correct, integrity_note = mpi.comm.bcast((correct, integrity_note), root=0)
     record(
-        f"NetCDF write ({n_time} steps, {ny}x{nx}, float32)",
+        "NetCDF write (selected real SHiELD variables)",
         correct,
         serial_s,
         parallel_s,
+        note=integrity_note or "xr.testing.assert_identical",
     )
 
+    mpi.comm.barrier()
+    if RANK == 0:
+        for path in (serial_path, parallel_path):
+            if os.path.exists(path):
+                os.remove(path)
+    mpi.comm.barrier()
 
-def test_netcdf_distributed_roundtrip(
-    n_time: int,
-    ny: int,
-    nx: int,
-    out_dir: str,
-) -> None:
-    """Compare distributed MPI NetCDF output with ordinary xarray I/O.
 
-    The source is opened independently through ordinary ``xarray`` and
-    ``mpi.xarray``. The distributed object is written without gathering its
-    partitioned data back to rank 0. The resulting files are then loaded with
-    ordinary xarray and compared for complete data, coordinate, and attribute
-    integrity. Wall-clock write times are also reported.
-    """
+def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
+    """Compare distributed and serial writes of selected real SHiELD variables."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
@@ -980,54 +1161,59 @@ def test_netcdf_distributed_roundtrip(
         )
         return
 
-    source_path = os.path.join(out_dir, "climtools_test_distributed_source.nc")
     serial_path = os.path.join(out_dir, "climtools_test_distributed_serial.nc")
     parallel_path = os.path.join(out_dir, "climtools_test_distributed_parallel.nc")
 
-    def make_source() -> xr.Dataset:
-        rng = np.random.default_rng(24601)
-        times = pd.date_range("1980-01-01", periods=n_time, freq="6h")
-        lat = np.linspace(-90.0, 90.0, ny, dtype=np.float64)
-        lon = np.linspace(0.0, 360.0, nx, endpoint=False, dtype=np.float64)
-        return xr.Dataset(
-            data_vars={
-                "precipitation": (
-                    ("time", "lat", "lon"),
-                    rng.random((n_time, ny, nx), dtype=np.float32),
-                    {"units": "mm/day", "long_name": "precipitation rate"},
-                ),
-                "temperature": (
-                    ("time", "lat", "lon"),
-                    (250.0 + 40.0 * rng.random((n_time, ny, nx), dtype=np.float32)),
-                    {"units": "K"},
-                ),
-                "orography": (
-                    ("lat", "lon"),
-                    np.arange(ny * nx, dtype=np.float32).reshape(ny, nx),
-                    {"units": "m"},
-                ),
-            },
-            coords={"time": times, "lat": lat, "lon": lon},
-            attrs={"title": "distributed NetCDF integrity test"},
-        )
-
+    serial_data: xr.Dataset | None = None
+    error: BaseException | None = None
     if RANK == 0:
-        source = make_source()
-        source.to_netcdf(source_path)
-    mpi.comm.barrier()
+        try:
+            serial_data = _load_source_dataset(
+                ("pr", "t", "slmsk"),
+                plev=slice(0, 5),
+                lat=slice(0, 128),
+                lon=slice(0, 128),
+            )
+        except BaseException as exc:
+            error = exc
+    mpi.raise_if_error(error, "load selected serial NetCDF source")
+
+    n_time = None if serial_data is None else int(serial_data.sizes["time"])
+    n_time = mpi.comm.bcast(n_time, root=0)
 
     def serial_fn() -> None:
-        with xr.open_dataset(source_path) as normal:
-            normal.load()
-            normal.to_netcdf(serial_path)
+        if serial_data is None:
+            raise AssertionError("Rank 0 did not load the NetCDF source.")
+        xgeo.to_netcdf(
+            serial_data,
+            serial_path,
+            unlimited_dim="time",
+            show_progress=False,
+        )
 
     _, serial_s = run_serial_baseline(serial_fn)
+    serial_data = None
     mpi.comm.barrier()
 
-    distributed = mpi.xarray.open_dataset(
-        source_path,
-        partition_dim="time",
-    )
+    distributed: xr.Dataset | None = None
+    error = None
+    try:
+        distributed = mpi.xarray.open_dataset(
+            str(DEFAULT_NETCDF_SOURCE),
+            partition_dim="time",
+        )[["pr", "t", "slmsk"]]
+        distributed = distributed.isel(
+            plev=slice(0, 5),
+            lat=slice(0, 128),
+            lon=slice(0, 128),
+        )
+        distributed.load()
+    except BaseException as exc:
+        error = exc
+    mpi.raise_if_error(error, "open selected distributed NetCDF source")
+    if distributed is None:
+        raise AssertionError("Distributed Dataset was not created.")
+
     meta = distributed.attrs.get("mpi_meta")
     local_meta_ok = (
         isinstance(meta, dict)
@@ -1039,6 +1225,7 @@ def test_netcdf_distributed_roundtrip(
         xgeo.to_netcdf(
             distributed,
             parallel_path,
+            unlimited_dim="time",
             parallel=True,
             allow_serial=(SIZE == 1),
         )
@@ -1076,7 +1263,7 @@ def test_netcdf_distributed_roundtrip(
         root=0,
     )
     record(
-        f"distributed NetCDF round-trip ({n_time} steps, {ny}x{nx})",
+        "distributed NetCDF round-trip (selected real SHiELD variables)",
         correct,
         serial_s,
         parallel_s,
@@ -1085,7 +1272,107 @@ def test_netcdf_distributed_roundtrip(
 
     mpi.comm.barrier()
     if RANK == 0:
-        for path in (source_path, serial_path, parallel_path):
+        for path in (serial_path, parallel_path):
+            if os.path.exists(path):
+                os.remove(path)
+    mpi.comm.barrier()
+
+
+def test_netcdf_distributed_dataarray(out_dir: str) -> None:
+    """Round-trip a selected real SHiELD precipitation DataArray in distributed mode."""
+    import netCDF4
+
+    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
+        mpi.log(
+            "\n--- Distributed DataArray NetCDF test SKIPPED: netCDF4 lacks "
+            "parallel4 support ---"
+        )
+        return
+
+    serial_path = os.path.join(out_dir, "climtools_test_pr_serial.nc")
+    parallel_path = os.path.join(out_dir, "climtools_test_pr_parallel.nc")
+
+    serial_pr: xr.DataArray | None = None
+    error: BaseException | None = None
+    if RANK == 0:
+        try:
+            serial_pr = _load_source_variable(
+                "pr",
+                lat=slice(0, 256),
+                lon=slice(0, 256),
+            )
+        except BaseException as exc:
+            error = exc
+    mpi.raise_if_error(error, "load selected serial precipitation DataArray")
+
+    @mpi(broadcast=True)
+    def write_serial_pr() -> None:
+        if serial_pr is None:
+            raise AssertionError("Rank 0 did not load precipitation.")
+        xgeo.to_netcdf(
+            serial_pr,
+            serial_path,
+            unlimited_dim="time",
+            show_progress=False,
+        )
+
+    write_serial_pr()
+
+    distributed_ds: xr.Dataset | None = None
+    error = None
+    try:
+        distributed_ds = mpi.xarray.open_dataset(
+            str(DEFAULT_NETCDF_SOURCE),
+            partition_dim="time",
+        )[["pr"]]
+        distributed_ds = distributed_ds.isel(
+            lat=slice(0, 256),
+            lon=slice(0, 256),
+        )
+        distributed_ds["pr"].load()
+    except BaseException as exc:
+        error = exc
+    mpi.raise_if_error(error, "open selected distributed precipitation DataArray")
+    if distributed_ds is None:
+        raise AssertionError("Distributed Dataset was not created.")
+
+    distributed_pr = distributed_ds["pr"]
+    xgeo.to_netcdf(
+        distributed_pr,
+        parallel_path,
+        unlimited_dim="time",
+        parallel=True,
+        allow_serial=(SIZE == 1),
+    )
+    distributed_ds.close()
+
+    correct = True
+    integrity_note = ""
+    if RANK == 0:
+        try:
+            with (
+                xr.open_dataset(serial_path) as expected,
+                xr.open_dataset(parallel_path) as actual,
+            ):
+                expected.load()
+                actual.load()
+                xr.testing.assert_identical(actual, expected)
+        except AssertionError as exc:
+            correct = False
+            integrity_note = str(exc)
+
+    correct, integrity_note = mpi.comm.bcast((correct, integrity_note), root=0)
+    record(
+        "distributed NetCDF DataArray round-trip (selected real SHiELD pr)",
+        correct,
+        0.0,
+        0.0,
+        note=integrity_note or "correctness-focused",
+    )
+
+    mpi.comm.barrier()
+    if RANK == 0:
+        for path in (serial_path, parallel_path):
             if os.path.exists(path):
                 os.remove(path)
     mpi.comm.barrier()
@@ -1099,20 +1386,25 @@ def test_netcdf_distributed_roundtrip(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="climtools MPI test/benchmark suite")
     parser.add_argument(
-        "--n-events", type=int, default=2_000_000, help="mpi.reduce tests"
+        "--n-events",
+        type=int,
+        default=2_000_000,
+        help="maximum number of real source values used by reduce/scatter tests",
     )
     parser.add_argument("--grid-ny", type=int, default=180)
     parser.add_argument("--grid-nx", type=int, default=360)
     parser.add_argument(
-        "--xarray-events", type=int, default=5_000, help="events for mpi.xarray tests"
+        "--xarray-events",
+        type=int,
+        default=5_000,
+        help=(
+            "maximum real source pressure levels/latitude rows used by mpi.xarray tests"
+        ),
     )
     parser.add_argument("--xarray-ny", type=int, default=40)
     parser.add_argument("--xarray-nx", type=int, default=40)
     parser.add_argument("--n-lat", type=int, default=180, help="weighted-mean test")
     parser.add_argument("--n-lon", type=int, default=360)
-    parser.add_argument("--netcdf-steps", type=int, default=200)
-    parser.add_argument("--netcdf-ny", type=int, default=200)
-    parser.add_argument("--netcdf-nx", type=int, default=200)
     parser.add_argument(
         "--out-dir", type=str, default=str(Path.home() / "scratch" / "io_mpi_test")
     )
@@ -1159,6 +1451,7 @@ def print_summary() -> None:
 
 def main() -> None:
     args = parse_args()
+    _require_source()
 
     if RANK == 0:
         os.makedirs(args.out_dir, exist_ok=True)
@@ -1184,10 +1477,10 @@ def main() -> None:
     safe_run(test_reduce_operations)
 
     mpi.log("\n--- mpi.xarray ---")
-    safe_run(test_xarray_open_dataset, args.out_dir)
-    safe_run(test_xarray_redistribute)
-    safe_run(test_xarray_isel)
-    safe_run(test_xarray_sel)
+    safe_run(test_xarray_open_dataset)
+    safe_run(test_xarray_redistribute, args.xarray_ny, args.xarray_nx)
+    safe_run(test_xarray_isel, args.xarray_ny, args.xarray_nx)
+    safe_run(test_xarray_sel, args.xarray_ny, args.xarray_nx)
     for op_name in ("sum", "prod", "mean", "max", "min"):
         safe_run(
             test_xarray_reduction,
@@ -1200,15 +1493,13 @@ def main() -> None:
         safe_run(
             test_xarray_logical_reduction,
             args.xarray_events,
-            args.xarray_ny,
             args.xarray_nx,
             op_name,
         )
-    safe_run(test_xarray_dataset_reduction)
+    safe_run(test_xarray_dataset_reduction, args.xarray_ny, args.xarray_nx)
     safe_run(
         test_xarray_redistribute_on,
         args.xarray_events,
-        args.xarray_ny,
         args.xarray_nx,
     )
 
@@ -1221,18 +1512,13 @@ def main() -> None:
     safe_run(test_mpi_decorator)
 
     if not args.skip_netcdf:
+        safe_run(test_netcdf_write, args.out_dir)
         safe_run(
-            test_netcdf_write,
-            args.netcdf_steps,
-            args.netcdf_ny,
-            args.netcdf_nx,
+            test_netcdf_distributed_roundtrip,
             args.out_dir,
         )
         safe_run(
-            test_netcdf_distributed_roundtrip,
-            args.netcdf_steps,
-            args.netcdf_ny,
-            args.netcdf_nx,
+            test_netcdf_distributed_dataarray,
             args.out_dir,
         )
 

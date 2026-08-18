@@ -357,7 +357,7 @@ class ReduceAccessor:
         result = mpi_comm_reduce(
             self._runtime, boolean_value, _MPI.LOR, mode=mode, root=root
         )
-        if np.ndim(value) == 0 and result is not None:
+        if not is_dataset(value) and np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
@@ -397,7 +397,7 @@ class ReduceAccessor:
         result = mpi_comm_reduce(
             self._runtime, boolean_value, _MPI.LAND, mode=mode, root=root
         )
-        if np.ndim(value) == 0 and result is not None:
+        if not is_dataset(value) and np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
@@ -408,8 +408,8 @@ class MPIRuntime:
     The runtime owns one intracommunicator and exposes it directly through
     :attr:`comm`, preserving the native :class:`mpi4py.MPI.Intracomm` type,
     method signatures, IDE completion, and third-party interoperability.
-    Direct MPI reductions are grouped under :attr:`reduce`, while distributed
-    xarray-style dimension reductions are grouped under :attr:`xreduce`.
+    Direct MPI reductions are grouped under :attr:`reduce`, while MPI-aware
+    xarray operations are grouped under :attr:`xarray`.
 
     Parameters
     ----------
@@ -427,8 +427,8 @@ class MPIRuntime:
         Native intracommunicator used by the runtime.
     reduce : ReduceAccessor
         Direct element-wise reductions across MPI ranks.
-    xreduce : XarrayReduceAccessor
-        Distributed xarray-style reductions over named dimensions.
+    xarray : XarrayMPI
+        MPI-aware xarray indexing, redistribution, and named-dimension reductions.
     """
 
     MPI = _MPI
@@ -441,7 +441,7 @@ class MPIRuntime:
 
     @property
     def xarray(self) -> XarrayMPI:
-        """Return MPI-aware xarray operations."""
+        """Return MPI-aware xarray indexing, redistribution, and reductions."""
         return self._xarray
 
     @property
@@ -474,9 +474,9 @@ class MPIRuntime:
         self,
         message: str,
         *args: Any,
-        root: int | None = 0,
+        root: int = 0,
         timestamp: bool = False,
-        prefix: bool = False,
+        prefix: bool = True,
         logger: Callable[..., None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -491,13 +491,13 @@ class MPIRuntime:
             Positional arguments passed to ``logger``. If ``logger`` is None,
             these trigger percent-formatting of ``message`` before printing.
         root : int, optional
-            Rank allowed to emit the message. Default is 0. If None, log all.
+            Rank allowed to emit the message. Default is 0. If -1, log all.
         timestamp : bool, optional
             If True, prepends a standard ISO-like timestamp to the message.
             Only applies when falling back to the built-in print. Default is False.
         prefix : bool, optional
-            If True, prepends an MPI rank indicator (e.g., "[MPI]") to the message
-            for both the built-in print and custom loggers. Default is False.
+            If True, prepends an MPI rank indicator to the message
+            for both the built-in print and custom loggers. Default is True.
         logger : callable, optional
             Callable used to emit the message. Default is None, which falls back
             to the built-in :func:`print`.
@@ -508,12 +508,13 @@ class MPIRuntime:
         -------
         None
         """
-        if root is not None and not self.is_root(root):
+        if root != -1 and not self.is_root(root):
             return
 
-        current_rank = root if root is not None else self.rank
+        current_rank = root if root != -1 else self.comm.rank
 
-        mpi_str = f"[MPI RANK {current_rank}]"
+        # Space-pad the rank using the calculated length
+        mpi_str = f"[MPI RANK {current_rank:{len(str(self.comm.size))}d}]"
 
         if logger is None:
             # Apply string formatting if args exist
@@ -616,18 +617,6 @@ class MPIRuntime:
             ``mean``, ``any``, and ``all`` operations.
         """
         return self._reduce
-
-    @property
-    def xreduce(self) -> XarrayReduceAccessor:
-        """Return distributed xarray-style reduction operations.
-
-        Returns
-        -------
-        XarrayReduceAccessor
-            Named-dimension ``sum``, ``prod``, ``min``, ``max``, ``mean``,
-            ``any``, and ``all`` operations.
-        """
-        return self._xreduce
 
     def datatype(self, dtype: DTypeLike) -> _MPI.Datatype:
         """Return the MPI datatype corresponding to a NumPy dtype.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Hashable, Iterable, Mapping
 from numbers import Integral
 from types import EllipsisType
@@ -138,6 +139,13 @@ def _native_chunk_size(data: xr.Dataset, dim: Hashable) -> int | None:
     return None
 
 
+def _usable_native_chunk(length: int, native_chunk: int | None) -> bool:
+    """Return whether a native chunk provides a useful on-disk partition."""
+    if length <= 1 or native_chunk is None or native_chunk <= 1:
+        return False
+    return math.ceil(length / native_chunk) > 1
+
+
 def _effective_chunk_size(
     length: int,
     native_chunk: int | None,
@@ -147,11 +155,8 @@ def _effective_chunk_size(
     if length <= 0:
         return 1
 
-    useful_ranks = min(length, mpi_size)
-    if native_chunk is not None and native_chunk > 0:
-        chunk_count = math.ceil(length / native_chunk)
-        if chunk_count >= useful_ranks:
-            return native_chunk
+    if _usable_native_chunk(length, native_chunk):
+        return cast("int", native_chunk)
 
     return max(1, math.ceil(length / mpi_size))
 
@@ -165,6 +170,21 @@ def _chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
             mpi_size,
         )
         for dim, length in data.sizes.items()
+    }
+
+
+def _open_chunk_overrides(
+    data: xr.Dataset,
+    chunk_info: Mapping[str, int],
+) -> dict[str, int]:
+    """Return only chunk overrides that cannot use useful native chunks."""
+    return {
+        str(dim): int(chunk_info[str(dim)])
+        for dim, length in data.sizes.items()
+        if not _usable_native_chunk(
+            int(length),
+            _native_chunk_size(data, dim),
+        )
     }
 
 
@@ -268,7 +288,23 @@ class XarrayMPI:
                     + f"{list(metadata.dims)!r}."
                 )
             chunk_info = _chunk_info(metadata, self._runtime.comm.size)
+            open_chunk_overrides = _open_chunk_overrides(metadata, chunk_info)
             global_size = int(metadata.sizes[partition_dim])
+            longest_size = max(int(length) for length in metadata.sizes.values())
+            if self._runtime.comm.rank == 0 and global_size < longest_size:
+                longest_dims = [
+                    str(dim)
+                    for dim, length in metadata.sizes.items()
+                    if int(length) == longest_size
+                ]
+                warnings.warn(
+                    f"partition_dim {partition_dim!r} has length {global_size}, "
+                    + "but it should be a longest dataset dimension. "
+                    + f"Longest dimension(s) {longest_dims!r} have length "
+                    + f"{longest_size}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         partition_chunk = chunk_info[str(partition_dim)]
         start, stop = _chunk_bounds(
@@ -280,7 +316,7 @@ class XarrayMPI:
 
         open_chunks = chunks
         if open_chunks is None:
-            open_chunks = {dim: size for dim, size in chunk_info.items()}
+            open_chunks = open_chunk_overrides
 
         data = _open_dataset(
             filename_or_obj,
@@ -570,6 +606,71 @@ class XarrayMPI:
         tolerance: Any,
         drop: bool,
     ) -> xr.Dataset | xr.DataArray:
+        if method is not None:
+            meta = get_mpi_meta(value)
+            if meta is None:
+                return value.sel(
+                    {dim: label, **other_indexers},
+                    method=method,
+                    tolerance=tolerance,
+                    drop=drop,
+                )
+
+            if dim in value.coords:
+                local_coord = np.asarray(value[dim].values)
+            else:
+                local_coord = np.arange(int(meta["start"]), int(meta["stop"]))
+            coord_parts = self._runtime.comm.allgather(local_coord)
+            global_coord = np.concatenate(coord_parts)
+            locator = xr.DataArray(
+                np.arange(global_coord.size, dtype=np.int64),
+                dims=(dim,),
+                coords={dim: global_coord},
+            )
+            selected = locator.sel(
+                {dim: label},
+                method=method,
+                tolerance=tolerance,
+            )
+            if selected.ndim != 0:
+                raise NotImplementedError(
+                    "Inexact distributed sel requires a unique one-dimensional index."
+                )
+            global_index = int(selected.item())
+
+            bounds = self._runtime.comm.allgather(
+                (int(meta["start"]), int(meta["stop"]))
+            )
+            owner = next(
+                rank
+                for rank, (start, stop) in enumerate(bounds)
+                if start <= global_index < stop
+            )
+
+            result = None
+            error: BaseException | None = None
+            if self._runtime.comm.rank == owner:
+                try:
+                    local_index = global_index - int(meta["start"])
+                    result = strip_mpi_meta(value).isel(
+                        {dim: local_index},
+                        drop=drop,
+                    )
+                    if other_indexers:
+                        result = result.sel(
+                            other_indexers,
+                            method=method,
+                            tolerance=tolerance,
+                            drop=drop,
+                        )
+                except BaseException as exc:
+                    error = exc
+            self._runtime.raise_if_error(error, "distributed scalar selection")
+            return cast(
+                "xr.Dataset | xr.DataArray",
+                self._runtime.comm.bcast(result, root=owner),
+            )
+
         result = None
         found = False
         try:
@@ -587,6 +688,10 @@ class XarrayMPI:
         owners = [rank for rank, state in enumerate(found_ranks) if state]
         if not owners:
             raise KeyError(f"No rank contains label {label!r} on {dim!r}.")
+        if len(owners) > 1:
+            raise NotImplementedError(
+                "Distributed scalar sel requires labels to be owned by one rank."
+            )
         owner = owners[0]
         payload = result if self._runtime.comm.rank == owner else None
         return cast(
@@ -798,6 +903,38 @@ class XarrayMPI:
             result = global_sum / global_count
         result = result.where(global_count != 0)
         return result.astype(self._mean_dtype(value.dtype), keep_attrs=True)
+
+    @staticmethod
+    def _empty_extreme_partial(
+        value: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        *,
+        minimum: bool,
+        keep_attrs: bool | None,
+    ) -> xr.DataArray:
+        kind = value.dtype.kind
+        if kind == "b":
+            identity: Any = True if minimum else False
+        elif kind in "iu":
+            limits = np.iinfo(value.dtype)
+            identity = limits.max if minimum else limits.min
+        elif kind == "f":
+            identity = np.asarray(
+                np.inf if minimum else -np.inf,
+                dtype=value.dtype,
+            ).item()
+        elif kind == "c":
+            name = "minimum" if minimum else "maximum"
+            raise TypeError(f"MPI {name} is not defined for complex xarray data.")
+        else:
+            raise TypeError(f"Unsupported MPI xarray dtype: {value.dtype}.")
+
+        template = value.sum(
+            dim=dims,
+            skipna=False,
+            keep_attrs=keep_attrs,
+        )
+        return xr.full_like(template, identity, dtype=value.dtype)
 
     def _combine_extreme(
         self,
@@ -1028,7 +1165,11 @@ class XarrayMPI:
             if not variable_dims:
                 continue
             if not self._variable_is_distributed(variable, old_meta):
-                updates[name] = local_sum[name]
+                updates[name] = variable.mean(
+                    dim=variable_dims,
+                    skipna=skipna,
+                    keep_attrs=keep_attrs,
+                )
                 continue
             result = self._combine_mean(
                 variable,
@@ -1108,7 +1249,47 @@ class XarrayMPI:
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = self._validate_distribution(value, dims)
         method = value.min if minimum else value.max
-        local = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
+        distributed_dim = None if old_meta is None else old_meta["dim"]
+        local_partition_empty = (
+            distributed_dim is not None
+            and distributed_dim in dims
+            and int(value.sizes[distributed_dim]) == 0
+        )
+
+        if local_partition_empty and isinstance(value, xr.DataArray):
+            local = self._empty_extreme_partial(
+                value,
+                dims,
+                minimum=minimum,
+                keep_attrs=keep_attrs,
+            )
+        elif local_partition_empty:
+            local = value.sum(
+                dim=local_dim,
+                skipna=False,
+                keep_attrs=keep_attrs,
+            )
+            for name in local.data_vars:
+                variable = value[name]
+                variable_dims = self._variable_dims(variable, dims)
+                if not variable_dims:
+                    continue
+                if distributed_dim in variable_dims:
+                    local[name] = self._empty_extreme_partial(
+                        variable,
+                        variable_dims,
+                        minimum=minimum,
+                        keep_attrs=keep_attrs,
+                    )
+                else:
+                    variable_method = variable.min if minimum else variable.max
+                    local[name] = variable_method(
+                        dim=variable_dims,
+                        skipna=skipna,
+                        keep_attrs=keep_attrs,
+                    )
+        else:
+            local = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
 
         if isinstance(value, xr.DataArray):
             if not dims:

@@ -171,7 +171,7 @@ def write_distributed(
 ) -> None:
     """Collectively write rank-local slabs from an already distributed Dataset."""
 
-    mpi.log(f"Saving file to >> {path}")  # for testing
+    mpi.log(f"Saving file to >> {path}", prefix=True, root=-1)  # for testing
 
     partition_dim = str(meta["dim"])
     start = int(meta["start"])
