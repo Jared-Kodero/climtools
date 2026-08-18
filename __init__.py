@@ -37,7 +37,7 @@ import dask.diagnostics
 
 from .accessors.xarray_accessors import *
 from .core.progress import DaskProgressBar, SerialProgressBar
-from .core.tools import apply_widget_css, n_cpus, redirect_streams
+from .core.tools import LockFile, apply_widget_css, n_cpus, redirect_streams
 
 if TYPE_CHECKING:
     from typing import Any
@@ -56,6 +56,7 @@ warnings.filterwarnings("always", module=r"climtools\..*")
 
 __all__ = [
     "DaskProgressBar",
+    "LockFile",
     "SerialProgressBar",
     "calc",
     "cdo",

@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import warnings
 from collections.abc import Hashable, Iterable, Mapping
 from numbers import Integral
 from types import EllipsisType
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import numpy as np
 import xarray as xr
@@ -21,6 +22,37 @@ if TYPE_CHECKING:
 
 MPI_META = "mpi_meta"
 _MPI_REDUCIBLE_KINDS = "biufc"
+
+# Verify that every rank entered a reduction with the same per-variable plan
+# before any buffer collective is posted. The check costs one small object
+# allgather per reduction and converts an otherwise silent deadlock into an
+# immediate exception. Set to False only for micro-benchmarking.
+CHECK_COLLECTIVE_AGREEMENT = True
+
+
+class _PlanEntry(NamedTuple):
+    """One variable's rank-independent contribution to a reduction.
+
+    Attributes
+    ----------
+    name : hashable
+        Variable name.
+    dims : tuple of hashable
+        Reduced dimensions present on this variable.
+    distributed : bool
+        Whether the variable carries the active MPI partition dimension and
+        therefore requires a cross-rank collective.
+    dtype : numpy.dtype
+        Variable dtype, preserved through the reduction without promotion.
+    shape : tuple of tuple
+        Global ``(dimension, length)`` pairs surviving the reduction.
+    """
+
+    name: Hashable
+    dims: tuple[Hashable, ...]
+    distributed: bool
+    dtype: np.dtype[Any]
+    shape: tuple[tuple[str, int], ...]
 
 
 def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
@@ -698,6 +730,8 @@ class XarrayMPI:
             "xr.Dataset | xr.DataArray", self._runtime.comm.bcast(payload, root=owner)
         )
 
+    # -- collective planning -------------------------------------------------
+
     def _validate_collective(
         self,
         mode: Literal["all", "root"],
@@ -754,6 +788,23 @@ class XarrayMPI:
     def _mean_dtype(dtype: np.dtype[Any]) -> np.dtype[Any]:
         return np.asarray(np.mean(np.zeros(1, dtype=dtype))).dtype
 
+    @staticmethod
+    def _check_reducible(dtype: np.dtype[Any], operation: str) -> None:
+        """Reject dtypes with no meaningful MPI reduction for an operation.
+
+        The check uses only the declared dtype, which is identical on every
+        rank, so an unsupported variable raises on all ranks before any
+        collective is posted rather than on the subset of ranks that happen
+        to reach the buffer collective first.
+        """
+        if operation in ("any", "all"):
+            return
+        if dtype.kind not in _MPI_REDUCIBLE_KINDS:
+            raise TypeError(f"Unsupported MPI xarray dtype: {dtype}.")
+        if operation in ("min", "max") and dtype.kind == "c":
+            name = "minimum" if operation == "min" else "maximum"
+            raise TypeError(f"MPI {name} is not defined for complex xarray data.")
+
     def _validate_distribution(
         self,
         value: xr.Dataset | xr.DataArray,
@@ -767,6 +818,102 @@ class XarrayMPI:
                 + "Use the ordinary xarray reduction for other dimensions."
             )
         return meta
+
+    def _agree(self, signature: tuple[Any, ...]) -> None:
+        """Verify that every rank entered the same reduction plan.
+
+        The plan is derived only from metadata that is identical on every
+        rank, so a disagreement is a programming error that would otherwise
+        block forever inside the following buffer collectives. One small
+        object allgather turns that deadlock into an immediate, diagnosable
+        exception on every rank.
+        """
+        if not CHECK_COLLECTIVE_AGREEMENT or self._runtime.comm.size == 1:
+            return
+        digest = hashlib.blake2b(repr(signature).encode(), digest_size=16).digest()
+        digests = self._runtime.comm.allgather(digest)
+        if len(set(digests)) == 1:
+            return
+        disagreeing = [
+            rank for rank, value in enumerate(digests) if value != digests[0]
+        ]
+        raise self._runtime.MPIError(
+            "MPI ranks entered different xarray reduction plans. Ranks "
+            + f"{disagreeing} disagree with rank 0, which would deadlock the "
+            + "following collective reduction."
+        )
+
+    def _plan(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        dims: tuple[Hashable, ...],
+        meta: Mapping[str, Any] | None,
+        *,
+        operation: str,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> tuple[_PlanEntry, ...]:
+        """Return the rank-independent per-variable reduction plan.
+
+        Every field is taken from names, dims, dtypes, and global sizes, all
+        of which are identical on every rank for a partitioned object. The
+        plan therefore fixes the number and shape of the collectives before
+        any rank-local data is touched, which is what keeps the collective
+        sequence identical on ranks holding an empty partition.
+        """
+        if isinstance(value, xr.DataArray):
+            items: tuple[tuple[Hashable, xr.DataArray], ...] = ((value.name, value),)
+        else:
+            items = tuple((name, value[name]) for name in value.data_vars)
+
+        entries = []
+        for name, variable in items:
+            variable_dims = self._variable_dims(variable, dims)
+            if variable_dims:
+                self._check_reducible(variable.dtype, operation)
+            entries.append(
+                _PlanEntry(
+                    name=name,
+                    dims=variable_dims,
+                    distributed=self._variable_is_distributed(variable, meta),
+                    dtype=variable.dtype,
+                    shape=tuple(
+                        (str(dim), int(value.sizes[dim]))
+                        for dim in variable.dims
+                        if dim not in variable_dims
+                    ),
+                )
+            )
+
+        plan = tuple(entries)
+        self._agree(
+            (
+                operation,
+                mode,
+                root,
+                tuple(str(dim) for dim in dims),
+                tuple(
+                    (
+                        str(entry.name),
+                        tuple(str(dim) for dim in entry.dims),
+                        entry.distributed,
+                        str(entry.dtype),
+                        entry.shape,
+                    )
+                    for entry in plan
+                ),
+            )
+        )
+        return plan
+
+    def _partition_is_empty(self, value: xr.Dataset | xr.DataArray, meta: Any) -> bool:
+        """Return whether this rank owns no elements of the partition."""
+        if meta is None:
+            return False
+        dim = meta["dim"]
+        return dim in value.dims and int(value.sizes[dim]) == 0
+
+    # -- collective primitives -----------------------------------------------
 
     def _comm_reduce(
         self,
@@ -782,11 +929,18 @@ class XarrayMPI:
         if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
             raise TypeError(f"Unsupported MPI xarray dtype: {send.dtype}.")
 
+        # Allocate the receive buffer with the send buffer's own dtype and a
+        # C-contiguous layout. np.empty_like would inherit the source memory
+        # order, which can differ from the contiguous copy actually sent.
         if mode == "all":
-            recv = np.empty_like(send)
+            recv = np.empty(send.shape, dtype=send.dtype)
             self._runtime.comm.Allreduce(send, recv, op=op)
         else:
-            recv = np.empty_like(send) if self._runtime.comm.rank == root else None
+            recv = (
+                np.empty(send.shape, dtype=send.dtype)
+                if self._runtime.comm.rank == root
+                else None
+            )
             self._runtime.comm.Reduce(send, recv, op=op, root=root)
             if recv is None:
                 return None
@@ -820,38 +974,56 @@ class XarrayMPI:
             return None
         return value
 
+    @staticmethod
+    def _reduced_dataset(
+        value: xr.Dataset,
+        dims: tuple[Hashable, ...],
+        variables: Mapping[Hashable, xr.DataArray],
+    ) -> xr.Dataset:
+        """Assemble a reduced Dataset from per-variable results.
+
+        The Dataset is built from the plan rather than from a whole-Dataset
+        local reduction, because different xarray reductions retain different
+        variables. Rebuilding from the plan keeps the variable set identical
+        on every rank.
+        """
+        reduced = set(dims)
+        coords = {
+            name: coord
+            for name, coord in value.coords.items()
+            if not reduced & set(coord.dims)
+        }
+        return xr.Dataset(dict(variables), coords=coords, attrs=dict(value.attrs))
+
     def _dataset_result(
         self,
-        local: xr.Dataset,
-        updates: Mapping[str, xr.DataArray],
+        value: xr.Dataset,
+        dims: tuple[Hashable, ...],
+        variables: Mapping[Hashable, xr.DataArray],
         *,
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.Dataset | None:
         if mode == "root" and self._runtime.comm.rank != root:
             return None
-        data = {
-            name: updates[name] if name in updates else local[name]
-            for name in local.data_vars
-        }
-        return local.copy(data=data)
+        return self._reduced_dataset(value, dims, variables)
 
     def _finish(
         self,
         result: xr.Dataset | xr.DataArray | None,
         *,
         old_meta: Mapping[str, Any] | None,
-        redistribute_on: str,
+        redistribute_on: Hashable | Literal["auto"] | None,
         mode: Literal["all", "root"],
     ) -> xr.Dataset | xr.DataArray | None:
+        if redistribute_on is not None and mode != "all":
+            raise ValueError("redistribute_on requires mode='all'.")
         if result is None:
             return None
 
         result = strip_mpi_meta(result)
         if redistribute_on is None:
             return result
-        if mode != "all":
-            raise ValueError("redistribute_on requires mode='all'.")
 
         chunk_info = (
             _prune_chunk_info(old_meta["chunk_info"], result)
@@ -863,6 +1035,8 @@ class XarrayMPI:
             redistribute_on,
             chunk_info=chunk_info,
         )
+
+    # -- per-variable combination --------------------------------------------
 
     def _combine_sum_or_prod(
         self,
@@ -883,7 +1057,14 @@ class XarrayMPI:
         if result is None:
             return None
         if global_count is not None:
-            result = result.where(global_count >= min_count)
+            # where() introduces NaN, which requires a floating result. Restore
+            # the partial's own dtype so a float32 field stays float32.
+            masked = result.where(global_count >= min_count)
+            result = (
+                masked
+                if masked.dtype == result.dtype or result.dtype.kind not in "fc"
+                else masked.astype(result.dtype, keep_attrs=True)
+            )
         return result
 
     def _combine_mean(
@@ -899,10 +1080,23 @@ class XarrayMPI:
         global_count = self._count(value, dims, mode=mode, root=root)
         if global_sum is None or global_count is None:
             return None
+
+        # Divide in the dtype numpy.mean would produce for this input. Dividing
+        # the float32 sum by the int64 count directly would promote the whole
+        # array to float64 and then cast it back, costing two full-width
+        # temporaries for a result that is float32 either way.
+        target = self._mean_dtype(value.dtype)
+        divisor = (
+            global_count.astype(target, keep_attrs=False)
+            if target.kind in "fc"
+            else global_count
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
-            result = global_sum / global_count
+            result = global_sum / divisor
         result = result.where(global_count != 0)
-        return result.astype(self._mean_dtype(value.dtype), keep_attrs=True)
+        if result.dtype != target:
+            result = result.astype(target, keep_attrs=True)
+        return result
 
     @staticmethod
     def _empty_extreme_partial(
@@ -912,6 +1106,7 @@ class XarrayMPI:
         minimum: bool,
         keep_attrs: bool | None,
     ) -> xr.DataArray:
+        """Return the reduction identity for a rank owning no elements."""
         kind = value.dtype.kind
         if kind == "b":
             identity: Any = True if minimum else False
@@ -923,11 +1118,9 @@ class XarrayMPI:
                 np.inf if minimum else -np.inf,
                 dtype=value.dtype,
             ).item()
-        elif kind == "c":
-            name = "minimum" if minimum else "maximum"
-            raise TypeError(f"MPI {name} is not defined for complex xarray data.")
         else:
-            raise TypeError(f"Unsupported MPI xarray dtype: {value.dtype}.")
+            name = "minimum" if minimum else "maximum"
+            raise TypeError(f"MPI {name} is not defined for {value.dtype} data.")
 
         template = value.sum(
             dim=dims,
@@ -935,6 +1128,27 @@ class XarrayMPI:
             keep_attrs=keep_attrs,
         )
         return xr.full_like(template, identity, dtype=value.dtype)
+
+    def _local_extreme(
+        self,
+        variable: xr.DataArray,
+        variable_dims: tuple[Hashable, ...],
+        *,
+        empty: bool,
+        minimum: bool,
+        skipna: bool | None,
+        keep_attrs: bool | None,
+    ) -> xr.DataArray:
+        """Return this rank's local extreme, including for an empty partition."""
+        if empty:
+            return self._empty_extreme_partial(
+                variable,
+                variable_dims,
+                minimum=minimum,
+                keep_attrs=keep_attrs,
+            )
+        method = variable.min if minimum else variable.max
+        return method(dim=variable_dims, skipna=skipna, keep_attrs=keep_attrs)
 
     def _combine_extreme(
         self,
@@ -948,11 +1162,6 @@ class XarrayMPI:
         root: int,
     ) -> xr.DataArray | None:
         kind = partial.dtype.kind
-        if kind == "c":
-            name = "minimum" if minimum else "maximum"
-            raise TypeError(f"MPI {name} is not defined for complex xarray data.")
-        if kind not in "biuf":
-            raise TypeError(f"Unsupported MPI xarray dtype: {partial.dtype}.")
         if kind == "b":
             return self._comm_reduce(
                 partial,
@@ -975,6 +1184,8 @@ class XarrayMPI:
         else:
             local_mask = value.isnull().any(dim=dims, keep_attrs=False)
             safe_partial = partial.where(~local_mask, other=identity)
+        if safe_partial.dtype != partial.dtype:
+            safe_partial = safe_partial.astype(partial.dtype, keep_attrs=True)
 
         result = self._comm_reduce(safe_partial, op, mode=mode, root=root)
         global_mask = self._comm_reduce(
@@ -985,9 +1196,16 @@ class XarrayMPI:
         )
         if result is None or global_mask is None:
             return None
-        if self._skipna_enabled(value.dtype, skipna):
-            return result.where(global_mask)
-        return result.where(~global_mask)
+        masked = (
+            result.where(global_mask)
+            if self._skipna_enabled(value.dtype, skipna)
+            else result.where(~global_mask)
+        )
+        if masked.dtype != result.dtype:
+            masked = masked.astype(result.dtype, keep_attrs=True)
+        return masked
+
+    # -- public reductions ---------------------------------------------------
 
     def sum(
         self,
@@ -1051,22 +1269,31 @@ class XarrayMPI:
         skipna: bool | None,
         min_count: int | None,
         keep_attrs: bool | None,
-        redistribute_on: str,
+        redistribute_on: Hashable | Literal["auto"] | None,
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.Dataset | xr.DataArray | None:
+        operation = "prod" if product else "sum"
         self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = self._validate_distribution(value, dims)
-        method = value.prod if product else value.sum
-        local = method(
-            dim=local_dim,
-            skipna=skipna,
-            min_count=None,
-            keep_attrs=keep_attrs,
+        plan = self._plan(
+            value,
+            dims,
+            old_meta,
+            operation=operation,
+            mode=mode,
+            root=root,
         )
 
         if isinstance(value, xr.DataArray):
+            method = value.prod if product else value.sum
+            local = method(
+                dim=local_dim,
+                skipna=skipna,
+                min_count=None,
+                keep_attrs=keep_attrs,
+            )
             if not dims:
                 return self._local_result(local, mode=mode, root=root)
             result = self._combine_sum_or_prod(
@@ -1086,19 +1313,26 @@ class XarrayMPI:
                 mode=mode,
             )
 
-        updates: dict[str, xr.DataArray] = {}
-        for name in local.data_vars:
-            variable = value[name]
-            variable_dims = self._variable_dims(variable, dims)
-            if not variable_dims:
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = variable
                 continue
-            if not self._variable_is_distributed(variable, old_meta):
-                updates[name] = local[name]
+            method = variable.prod if product else variable.sum
+            local = method(
+                dim=entry.dims,
+                skipna=skipna,
+                min_count=None,
+                keep_attrs=keep_attrs,
+            )
+            if not entry.distributed:
+                variables[entry.name] = local
                 continue
             result = self._combine_sum_or_prod(
                 variable,
-                local[name],
-                variable_dims,
+                local,
+                entry.dims,
                 op,
                 skipna=skipna,
                 min_count=min_count,
@@ -1106,9 +1340,9 @@ class XarrayMPI:
                 root=root,
             )
             if result is not None:
-                updates[name] = result
+                variables[entry.name] = result
         return self._finish(
-            self._dataset_result(local, updates, mode=mode, root=root),
+            self._dataset_result(value, dims, variables, mode=mode, root=root),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
             mode=mode,
@@ -1129,11 +1363,13 @@ class XarrayMPI:
         self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = self._validate_distribution(value, dims)
-        local_sum = value.sum(
-            dim=local_dim,
-            skipna=skipna,
-            min_count=None,
-            keep_attrs=keep_attrs,
+        plan = self._plan(
+            value,
+            dims,
+            old_meta,
+            operation="mean",
+            mode=mode,
+            root=root,
         )
 
         if isinstance(value, xr.DataArray):
@@ -1144,6 +1380,12 @@ class XarrayMPI:
                     keep_attrs=keep_attrs,
                 )
                 return self._local_result(local_mean, mode=mode, root=root)
+            local_sum = value.sum(
+                dim=local_dim,
+                skipna=skipna,
+                min_count=None,
+                keep_attrs=keep_attrs,
+            )
             result = self._combine_mean(
                 value,
                 local_sum,
@@ -1158,30 +1400,36 @@ class XarrayMPI:
                 mode=mode,
             )
 
-        updates: dict[str, xr.DataArray] = {}
-        for name in local_sum.data_vars:
-            variable = value[name]
-            variable_dims = self._variable_dims(variable, dims)
-            if not variable_dims:
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = variable
                 continue
-            if not self._variable_is_distributed(variable, old_meta):
-                updates[name] = variable.mean(
-                    dim=variable_dims,
+            if not entry.distributed:
+                variables[entry.name] = variable.mean(
+                    dim=entry.dims,
                     skipna=skipna,
                     keep_attrs=keep_attrs,
                 )
                 continue
+            local_sum = variable.sum(
+                dim=entry.dims,
+                skipna=skipna,
+                min_count=None,
+                keep_attrs=keep_attrs,
+            )
             result = self._combine_mean(
                 variable,
-                local_sum[name],
-                variable_dims,
+                local_sum,
+                entry.dims,
                 mode=mode,
                 root=root,
             )
             if result is not None:
-                updates[name] = result
+                variables[entry.name] = result
         return self._finish(
-            self._dataset_result(local_sum, updates, mode=mode, root=root),
+            self._dataset_result(value, dims, variables, mode=mode, root=root),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
             mode=mode,
@@ -1241,59 +1489,40 @@ class XarrayMPI:
         minimum: bool,
         skipna: bool | None,
         keep_attrs: bool | None,
-        redistribute_on: str,
+        redistribute_on: Hashable | Literal["auto"] | None,
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.Dataset | xr.DataArray | None:
+        operation = "min" if minimum else "max"
         self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = self._validate_distribution(value, dims)
-        method = value.min if minimum else value.max
-        distributed_dim = None if old_meta is None else old_meta["dim"]
-        local_partition_empty = (
-            distributed_dim is not None
-            and distributed_dim in dims
-            and int(value.sizes[distributed_dim]) == 0
+        plan = self._plan(
+            value,
+            dims,
+            old_meta,
+            operation=operation,
+            mode=mode,
+            root=root,
         )
-
-        if local_partition_empty and isinstance(value, xr.DataArray):
-            local = self._empty_extreme_partial(
-                value,
-                dims,
-                minimum=minimum,
-                keep_attrs=keep_attrs,
-            )
-        elif local_partition_empty:
-            local = value.sum(
-                dim=local_dim,
-                skipna=False,
-                keep_attrs=keep_attrs,
-            )
-            for name in local.data_vars:
-                variable = value[name]
-                variable_dims = self._variable_dims(variable, dims)
-                if not variable_dims:
-                    continue
-                if distributed_dim in variable_dims:
-                    local[name] = self._empty_extreme_partial(
-                        variable,
-                        variable_dims,
-                        minimum=minimum,
-                        keep_attrs=keep_attrs,
-                    )
-                else:
-                    variable_method = variable.min if minimum else variable.max
-                    local[name] = variable_method(
-                        dim=variable_dims,
-                        skipna=skipna,
-                        keep_attrs=keep_attrs,
-                    )
-        else:
-            local = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
+        empty_partition = self._partition_is_empty(value, old_meta)
 
         if isinstance(value, xr.DataArray):
             if not dims:
-                return self._local_result(local, mode=mode, root=root)
+                method = value.min if minimum else value.max
+                return self._local_result(
+                    method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs),
+                    mode=mode,
+                    root=root,
+                )
+            local = self._local_extreme(
+                value,
+                dims,
+                empty=empty_partition,
+                minimum=minimum,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            )
             result = self._combine_extreme(
                 value,
                 local,
@@ -1310,28 +1539,36 @@ class XarrayMPI:
                 mode=mode,
             )
 
-        updates: dict[str, xr.DataArray] = {}
-        for name in local.data_vars:
-            variable = value[name]
-            variable_dims = self._variable_dims(variable, dims)
-            if not variable_dims:
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = variable
                 continue
-            if not self._variable_is_distributed(variable, old_meta):
-                updates[name] = local[name]
+            local = self._local_extreme(
+                variable,
+                entry.dims,
+                empty=empty_partition and entry.distributed,
+                minimum=minimum,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            )
+            if not entry.distributed:
+                variables[entry.name] = local
                 continue
             result = self._combine_extreme(
                 variable,
-                local[name],
-                variable_dims,
+                local,
+                entry.dims,
                 minimum=minimum,
                 skipna=skipna,
                 mode=mode,
                 root=root,
             )
             if result is not None:
-                updates[name] = result
+                variables[entry.name] = result
         return self._finish(
-            self._dataset_result(local, updates, mode=mode, root=root),
+            self._dataset_result(value, dims, variables, mode=mode, root=root),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
             mode=mode,
@@ -1389,17 +1626,26 @@ class XarrayMPI:
         op: _MPI.Op,
         all_values: bool,
         keep_attrs: bool | None,
-        redistribute_on: str,
+        redistribute_on: Hashable | Literal["auto"] | None,
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.Dataset | xr.DataArray | None:
+        operation = "all" if all_values else "any"
         self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = self._validate_distribution(value, dims)
-        method = value.all if all_values else value.any
-        local = method(dim=local_dim, keep_attrs=keep_attrs)
+        plan = self._plan(
+            value,
+            dims,
+            old_meta,
+            operation=operation,
+            mode=mode,
+            root=root,
+        )
 
         if isinstance(value, xr.DataArray):
+            method = value.all if all_values else value.any
+            local = method(dim=local_dim, keep_attrs=keep_attrs)
             if not dims:
                 return self._local_result(local, mode=mode, root=root)
             result = self._comm_reduce(local, op, mode=mode, root=root)
@@ -1410,20 +1656,22 @@ class XarrayMPI:
                 mode=mode,
             )
 
-        updates: dict[str, xr.DataArray] = {}
-        for name in local.data_vars:
-            variable = value[name]
-            variable_dims = self._variable_dims(variable, dims)
-            if not variable_dims:
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = variable
                 continue
-            if not self._variable_is_distributed(variable, old_meta):
-                updates[name] = local[name]
+            method = variable.all if all_values else variable.any
+            local = method(dim=entry.dims, keep_attrs=keep_attrs)
+            if not entry.distributed:
+                variables[entry.name] = local
                 continue
-            result = self._comm_reduce(local[name], op, mode=mode, root=root)
+            result = self._comm_reduce(local, op, mode=mode, root=root)
             if result is not None:
-                updates[name] = result
+                variables[entry.name] = result
         return self._finish(
-            self._dataset_result(local, updates, mode=mode, root=root),
+            self._dataset_result(value, dims, variables, mode=mode, root=root),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
             mode=mode,

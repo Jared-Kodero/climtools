@@ -118,6 +118,20 @@ def to_netcdf(
         mpi_meta = get_mpi_meta(data)
         distributed = mpi_meta is not None
 
+        # Ranks must agree on the write path. If one rank saw valid mpi_meta
+        # and another did not, the two paths post different collectives and
+        # the writer would block instead of reporting the inconsistency.
+        agreed = mpi.comm.allgather(distributed)
+        if any(agreed) and not all(agreed):
+            disagreeing = [
+                rank for rank, state in enumerate(agreed) if state != agreed[0]
+            ]
+            raise mpi.MPIError(
+                "MPI ranks disagree about whether the object is distributed; "
+                + f"ranks {disagreeing} differ from rank 0. Parallel NetCDF "
+                + "output requires the same distribution state on every rank."
+            )
+
         if distributed:
             distributed_dim = str(mpi_meta["dim"])
             if partition_dim is not None and partition_dim != distributed_dim:

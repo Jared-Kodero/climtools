@@ -312,25 +312,41 @@ def to_netcdf_parallel(
             "netCDF4-python is not linked with parallel NetCDF-4/HDF5 support."
         )
 
-    local_ds: xr.Dataset | None
-    if isinstance(data, xr.DataArray):
-        if data.name is None:
-            raise ValueError("DataArray must have a name for NetCDF output.")
-        local_ds = data.to_dataset()
-    elif isinstance(data, xr.Dataset):
-        local_ds = data
-    elif data is None:
-        local_ds = None
-    else:
-        raise TypeError("data must be an xarray Dataset, DataArray, or None.")
+    # Rank-local validation is collected rather than raised. Only rank 0 holds
+    # real data on the scatter path, so raising here would abort one rank while
+    # every other rank waited in the following collectives.
+    local_ds: xr.Dataset | None = None
+    error: BaseException | None = None
+    try:
+        if isinstance(data, xr.DataArray):
+            if data.name is None:
+                raise ValueError("DataArray must have a name for NetCDF output.")
+            local_ds = data.to_dataset()
+        elif isinstance(data, xr.Dataset):
+            local_ds = data
+        elif data is not None:
+            raise TypeError("data must be an xarray Dataset, DataArray, or None.")
+    except BaseException as exc:
+        error = exc
+    mpi.raise_if_error(error, "parallel NetCDF input validation")
 
     local_meta = get_mpi_meta(local_ds) if local_ds is not None else None
     distributed = local_meta is not None
 
+    # The distributed and scatter paths post different collectives, so every
+    # rank must take the same one. Disagreement is reported instead of hanging.
+    agreed = mpi.comm.allgather(distributed)
+    if any(agreed) and not all(agreed):
+        disagreeing = [rank for rank, state in enumerate(agreed) if state != agreed[0]]
+        raise NetCDFWriteError(
+            "MPI ranks disagree about whether the object carries mpi_meta; "
+            + f"ranks {disagreeing} differ from rank 0."
+        )
+
     root_data: dict[str, dict[str, Any]] | None = None
     schema: dict[str, Any] | None = None
     output_path: str | None = None
-    error: BaseException | None = None
+    error = None
 
     if distributed:
         if local_ds is None or local_meta is None:
@@ -338,10 +354,11 @@ def to_netcdf_parallel(
 
         distributed_dim = str(local_meta["dim"])
         if partition_dim is not None and partition_dim != distributed_dim:
-            raise ValueError(
+            error = ValueError(
                 f"partition_dim {partition_dim!r} does not match "
                 + f"distributed dimension {distributed_dim!r}."
             )
+        mpi.raise_if_error(error, "parallel NetCDF partition dimension")
         partition_dim = distributed_dim
 
         # No data gather/scatter. Rank 0 only constructs the schema from its

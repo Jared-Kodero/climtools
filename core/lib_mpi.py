@@ -66,6 +66,32 @@ def is_dataset(value: Any) -> bool:
     return isinstance(value, xr.Dataset)
 
 
+def _divide_by_ranks(value: Any, size: int) -> Any:
+    """Divide a reduced value by the rank count without widening its dtype.
+
+    A float32 array divided by a Python int stays float32, but the divisor is
+    built in the value's own dtype so the result cannot be promoted on any
+    NumPy promotion rule. Integer and Boolean inputs keep NumPy's own mean
+    semantics, which produce a floating result.
+
+    Parameters
+    ----------
+    value : Any
+        Reduced scalar, NumPy array, or xarray object.
+    size : int
+        Number of MPI ranks contributing to the reduction.
+
+    Returns
+    -------
+    Any
+        ``value`` divided by ``size``.
+    """
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None and np.dtype(dtype).kind in "fc":
+        return value / np.dtype(dtype).type(size)
+    return value / size
+
+
 def mpi_comm_reduce(
     runtime: MPIRuntime,
     value: T,
@@ -110,6 +136,14 @@ def mpi_comm_reduce(
             raise ValueError(f"root {root} is outside [0, {comm.size}).")
 
     if is_dataset(value):
+        # Validate every variable before posting any collective. The dtypes are
+        # identical on every rank, so an unsupported variable now raises on all
+        # ranks at the same point instead of leaving some ranks blocked inside
+        # a collective that the failing rank never reaches.
+        for da in value.data_vars.values():
+            dtype = np.asarray(da.values).dtype
+            if dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
+                raise MPIError(f"Unsupported MPI NumPy dtype: {dtype}.")
         reduced_vars = {
             name: mpi_comm_reduce(runtime, da, op, mode=mode, root=root)
             for name, da in value.data_vars.items()
@@ -144,12 +178,15 @@ def mpi_comm_reduce(
     # "Communication of buffer-like objects". Vector collectives such as
     # scatterv still need the datatype spelled out explicitly; that
     # inference does not extend to them.
+    # Allocate the receive buffer with the send buffer's own dtype and a
+    # C-contiguous layout. np.empty_like inherits the source memory order,
+    # which can differ from the contiguous copy actually being sent.
     if mode == "all":
-        recv = np.empty_like(send)
+        recv = np.empty(send.shape, dtype=send.dtype)
         comm.Allreduce(send, recv, op=op)
         return cast("T", recv)
 
-    recv = np.empty_like(send) if comm.rank == root else None
+    recv = np.empty(send.shape, dtype=send.dtype) if comm.rank == root else None
     comm.Reduce(send, recv, op=op, root=root)
     return cast("T | None", recv)
 
@@ -319,7 +356,7 @@ class ReduceAccessor:
         result = self.sum(value, mode=mode, root=root)
         if result is None:
             return None
-        return result / self._runtime.comm.size
+        return _divide_by_ranks(result, self._runtime.comm.size)
 
     def any(
         self,
@@ -596,6 +633,13 @@ class MPIRuntime:
         if self.is_root(root):
             if array is None:
                 raise ValueError("array cannot be None on the scatter root.")
+            source_dtype = np.asarray(array).dtype
+            if source_dtype != np.dtype(dtype):
+                raise MPIError(
+                    f"scatterv source dtype {source_dtype} does not match the "
+                    + f"requested dtype {np.dtype(dtype)}. Pass the array's own "
+                    + "dtype; silent conversion would copy the whole buffer."
+                )
             send = [
                 np.ascontiguousarray(array, dtype=dtype),
                 element_counts,

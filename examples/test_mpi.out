@@ -1,0 +1,325 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 5073493
+##  Job Name : test.sh
+##  Nodelist : node2408
+##      CPUs : 8
+##  Mem/Node : 512000 MB
+## Directory : /oscar/home/jkodero/research/climtools/examples
+##   Job Started : Tue Aug 18 05:07:06 PM EDT 2026
+###############################################################################
+2026-08-18 17:07:20 - [MPI RANK 0] [SETUP] validating SHiELD source visibility
+2026-08-18 17:07:20 - [MPI RANK 0] [SETUP] preparing output directory
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] climtools MPI test suite -- 8 rank(s), mpi.launched=True
+[MPI RANK 0] mpi4py initializes MPI on import and finalizes automatically at exit; see the mpi4py Overview docs (https://mpi4py.readthedocs.io/en/stable/overview.html) for the underlying collective/error-handling semantics climtools.mpi builds on.
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] 
+--- mpi runtime helpers ---
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: START
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: checking rank helpers and supported MPI datatype mappings
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: recording result
+[MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: DONE
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: START
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: checking mpi.log formatting, rank filtering, and timestamp output
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: checking mpi.raise_if_error no-error/all-rank/subset-rank paths
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: recording result
+[MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts               serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: DONE
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: START
+2026-08-18 17:07:20 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking scalar and non-contiguous reductions
+2026-08-18 17:07:24 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking reduce-to-nonzero-root behavior
+2026-08-18 17:07:24 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking invalid reduction arguments and unsupported dtypes
+2026-08-18 17:07:24 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: recording result
+[MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:24 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: DONE
+[MPI RANK 0] 
+--- mpi.reduce ---
+2026-08-18 17:07:24 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: START
+2026-08-18 17:07:29 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: entering timed parallel section
+2026-08-18 17:07:29 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: running serial baseline
+2026-08-18 17:07:30 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (280200 real pr values)  serial=  0.2303s  parallel=  0.0547s  speedup= 4.21x
+2026-08-18 17:07:30 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: DONE
+2026-08-18 17:07:30 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: START
+2026-08-18 17:07:30 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: entering timed parallel section
+2026-08-18 17:07:30 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: running serial baseline
+2026-08-18 17:07:32 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real pr fields (180x360, 8 rank selections) serial=  2.4226s  parallel=  0.0498s  speedup=48.68x
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: DONE
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: START
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: entering timed parallel section
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: running serial baseline
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real t2m DataArray (dims/attrs kept) serial=  0.7636s  parallel=  0.0019s  speedup=399.83x  (correctness-focused)
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: DONE
+2026-08-18 17:07:33 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: START
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.sum all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.sum root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0259s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.prod all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.prod root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.prod real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0260s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.min all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.min root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.min real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0002s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.max all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.max root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.max real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.mean all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.mean root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.mean real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.any all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.any root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.any real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.all all mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.all root mode
+2026-08-18 17:07:35 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.all real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:36 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.any/all real slmsk Dataset          serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:36 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: DONE
+[MPI RANK 0] 
+--- mpi.xarray ---
+2026-08-18 17:07:36 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: START
+2026-08-18 17:07:36 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: entering timed parallel section
+[MPI RANK 0] 
+DATASET ON RANK 0/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 59, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 472B 37.01 37.04 37.07 37.1 ... 38.69 38.72 38.75
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 59, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 0, 'stop': 59, ...
+partition_dim=lat
+start_idx=0, start_value=37.014989293361886
+end_idx=58, end_value=38.75374732334047
+stop_idx_exclusive=59
+[MPI RANK 2] 
+DATASET ON RANK 2/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 59, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 472B 40.55 40.58 40.61 40.64 ... 42.23 42.26 42.29
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 59, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 118, 'stop': 17...
+partition_dim=lat
+start_idx=118, start_value=40.5524625267666
+end_idx=176, end_value=42.29122055674518
+stop_idx_exclusive=177
+[MPI RANK 6] 
+DATASET ON RANK 6/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 58, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 464B 47.54 47.57 47.6 47.63 ... 49.19 49.22 49.25
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 58, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 351, 'stop': 40...
+partition_dim=lat
+start_idx=351, start_value=47.53747323340471
+end_idx=408, end_value=49.24625267665953
+stop_idx_exclusive=409
+[MPI RANK 4] 
+DATASET ON RANK 4/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 58, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 464B 44.06 44.09 44.12 44.15 ... 45.71 45.74 45.77
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 58, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 235, 'stop': 29...
+partition_dim=lat
+start_idx=235, start_value=44.059957173447536
+end_idx=292, end_value=45.768736616702355
+stop_idx_exclusive=293
+[MPI RANK 3] 
+DATASET ON RANK 3/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 58, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 464B 42.32 42.35 42.38 42.41 ... 43.97 44.0 44.03
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 57, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 177, 'stop': 23...
+partition_dim=lat
+start_idx=177, start_value=42.32119914346895
+end_idx=234, end_value=44.02997858672377
+stop_idx_exclusive=235
+[MPI RANK 7] 
+DATASET ON RANK 7/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 58, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 464B 49.28 49.31 49.34 49.37 ... 50.93 50.96 50.99
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 58, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 409, 'stop': 46...
+partition_dim=lat
+start_idx=409, start_value=49.276231263383295
+end_idx=466, end_value=50.985010706638114
+stop_idx_exclusive=467
+[MPI RANK 1] 
+DATASET ON RANK 1/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 59, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 472B 38.78 38.81 38.84 38.87 ... 40.46 40.49 40.52
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 59, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 59, 'stop': 118...
+partition_dim=lat
+start_idx=59, start_value=38.78372591006424
+end_idx=117, end_value=40.522483940042825
+stop_idx_exclusive=118
+[MPI RANK 5] 
+DATASET ON RANK 5/8:
+<xarray.Dataset> Size: 10MB
+Dimensions:  (time: 72, lat: 58, lon: 600)
+Coordinates:
+  * time     (time) datetime64[ns] 576B 2024-08-14T01:00:00 ... 2024-08-17
+  * lat      (lat) float64 464B 45.8 45.83 45.86 45.89 ... 47.45 47.48 47.51
+  * lon      (lon) float64 5kB -77.98 -77.95 -77.92 ... -60.08 -60.05 -60.02
+Data variables:
+    pr       (time, lat, lon) float32 10MB dask.array<chunksize=(36, 58, 300), meta=np.ndarray>
+Attributes:
+    tile_type:    NEST
+    resolution:   0.03 degrees
+    case:         
+    description:  2024081400Z_C96.NESTED.R4X2.R2X1.CNTRL/MEM01
+    mpi_meta:     {'dim': 'lat', 'global_size': 467, 'start': 293, 'stop': 35...
+partition_dim=lat
+start_idx=293, start_value=45.79871520342613
+end_idx=350, end_value=47.50749464668094
+stop_idx_exclusive=351
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: checking open_dataset partition-dimension validation
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: running serial baseline
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (real pr, partitioned latitude) serial=  0.0976s  parallel=  1.1779s  speedup= 0.08x
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: DONE
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: START
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: entering timed parallel section
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute real pr (explicit/auto) serial=  0.0000s  parallel=  0.0232s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: DONE
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: START
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: entering timed parallel section
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.isel real pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.0012s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: DONE
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: START
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: entering timed parallel section
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.sel real pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.1145s  speedup=  n/a   (correctness-focused)
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: DONE
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: START
+2026-08-18 17:07:38 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: preparing mpi.xarray.sum source data
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: entering timed parallel section
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: running serial baseline
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.sum real t over 31 pressure levels  serial=  0.0015s  parallel=  0.0750s  speedup= 0.02x
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: DONE
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: START
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: preparing mpi.xarray.prod source data
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: entering timed parallel section
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: running serial baseline
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.prod real t over 31 pressure levels serial=  0.0004s  parallel=  0.0780s  speedup= 0.01x
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: DONE
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: START
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: preparing mpi.xarray.mean source data
+2026-08-18 17:07:39 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: entering timed parallel section
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: running serial baseline
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.mean real t over 31 pressure levels serial=  0.0003s  parallel=  0.0780s  speedup= 0.00x
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: DONE
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: START
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: preparing mpi.xarray.max source data
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: entering timed parallel section
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: running serial baseline
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.max real t over 31 pressure levels  serial=  0.0003s  parallel=  0.0732s  speedup= 0.00x
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: DONE
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: START
+2026-08-18 17:07:40 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: preparing mpi.xarray.min source data
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: entering timed parallel section
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: running serial baseline
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.min real t over 31 pressure levels  serial=  0.0003s  parallel=  0.0773s  speedup= 0.00x
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: DONE
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: START
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: preparing mpi.xarray.any source data
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: entering timed parallel section
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: running serial baseline
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.any real slmsk land mask (467 latitudes) serial=  0.0003s  parallel=  0.0810s  speedup= 0.00x
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: DONE
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: START
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: preparing mpi.xarray.all source data
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: entering timed parallel section
+2026-08-18 17:07:41 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: running serial baseline
+2026-08-18 17:07:42 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.all real slmsk land mask (467 latitudes) serial=  0.0002s  parallel=  0.0764s  speedup= 0.00x
+2026-08-18 17:07:42 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: DONE
+2026-08-18 17:07:42 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: START
+2026-08-18 17:07:42 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: entering timed parallel section
+srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
+[2026-08-18T18:35:28.834] error: *** STEP 5073493.0 ON node2408 CANCELLED AT 2026-08-18T18:35:28 DUE to SIGNAL Terminated ***
+[2026-08-18T18:35:28.835] error: *** JOB 5073493 ON node2408 CANCELLED AT 2026-08-18T18:35:28 DUE to SIGNAL Terminated ***

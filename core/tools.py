@@ -39,6 +39,52 @@ class AttrDict(dict):
     __delattr__ = dict.__delitem__
 
 
+import fcntl
+import os
+import time
+
+
+class LockFile:
+    """A context manager class for file locking with sleep and timeout."""
+
+    def __init__(self, filepath, timeout=None, delay=0.1):
+        self.filepath = filepath
+        self.timeout = timeout
+        self.delay = delay
+        self.fd = None
+
+    def __enter__(self):
+        start_time = time.time()
+        # Open the file descriptor
+        self.fd = os.open(self.filepath, os.O_RDWR | os.O_CREAT)
+
+        while True:
+            try:
+                # Try to acquire an exclusive, non-blocking lock
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self  # Lock acquired, enter the 'with' block
+
+            except (OSError, BlockingIOError):
+                # Lock is held by another process; check timeout and sleep
+                if (
+                    self.timeout is not None
+                    and (time.time() - start_time) >= self.timeout
+                ):
+                    os.close(self.fd)
+                    raise TimeoutError(
+                        f"Could not acquire lock on {self.filepath} within {self.timeout}s"
+                    )
+
+                time.sleep(self.delay)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.fd is not None:
+            # Release the lock and close the file descriptor safely
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+
+
 @contextmanager
 def redirect_streams(
     stdout: Path | None = None,
