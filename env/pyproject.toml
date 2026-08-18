@@ -15,7 +15,7 @@ authors = [{ name = "Jared M Kodero" }]
 # transitively pulled in by another dependency). netCDF4 and mpi4py in
 # particular must be built against a parallel-enabled HDF5/NetCDF-C stack
 # for `climtools.xgeo.to_netcdf(..., parallel=True)`; see
-# scripts/setup_env.sh, which builds that stack from HPC environment
+# env/setup_env.sh, which builds that stack from HPC environment
 # modules or from source (never a distro package manager, which is not
 # available on HPC login/compute nodes).
 dependencies = [

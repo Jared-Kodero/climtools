@@ -253,7 +253,7 @@ def dataset_to_netcdf(
     for start in data_slices:
         stop = min(start + batch_size, n_items)
 
-        append_to_netcdf(
+        append(
             file,
             data.isel({dim0: slice(start, stop)}),
             dim=dim0,
@@ -326,7 +326,7 @@ def dataarray_to_netcdf(
             ncvar[:] = da.values
 
 
-def append_to_netcdf(
+def append(
     file: str | PathLike[str],
     data: xr.Dataset,
     dim: str = "time",
@@ -499,7 +499,7 @@ def createVariable(
 
 
 __all__ = [
-    "append_to_netcdf",
+    "append",
     "createVariable",
     "dataarray_to_netcdf",
     "dataset_to_netcdf",

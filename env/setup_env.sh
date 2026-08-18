@@ -12,7 +12,7 @@
 #      compiler.
 #
 # Usage:
-#   scripts/setup_env.sh [env_name]
+#   env/setup_env.sh [env_name]
 #
 # With no active conda environment or virtualenv, creates and activates a
 # conda environment named env_name (default "climtools") from
@@ -199,12 +199,21 @@ build_source_stack() {
 # netCDF4-python 1.7.x ships compat shims for symbols some netcdf-c 4.9.x
 # builds already declare unconditionally (bzip2/blosc filter stubs,
 # nc_rc_get/nc_rc_set), which fails the build with a redeclaration or
-# undefined-symbol error. Patch them out defensively; a no-op against
-# netCDF4-python versions that do not have the issue.
+# undefined-symbol error. It also bundles a copy of the nc_complex library
+# in which pfnc_inq_varndims/pfnc_inq_vardimid are declared `inline` in the
+# header with no matching out-of-line definition anywhere in nc_complex.c
+# (unlike every other nc_complex.h function, which has one); under C99
+# inline semantics that leaves an unresolved symbol at link time
+# (`undefined symbol: pfnc_inq_varndims`) whenever the compiler does not
+# happen to inline every call site. Patch all of these out defensively;
+# each patch is a no-op against netCDF4-python/nc_complex versions that do
+# not have the corresponding issue.
 patch_netcdf4_python_compat() {
     local compat_header="$1/include/netcdf-compat.h"
-    [[ -f "${compat_header}" ]] || return 0
-    python3 - "${compat_header}" << 'PYEOF'
+    local nc_complex_header="$1/external/nc_complex/include/nc_complex/nc_complex.h"
+
+    if [[ -f "${compat_header}" ]]; then
+        python3 - "${compat_header}" << 'PYEOF'
 import re
 import sys
 
@@ -223,6 +232,24 @@ text = text.replace(
 if text != original:
     open(path, "w").write(text)
 PYEOF
+    fi
+
+    if [[ -f "${nc_complex_header}" ]]; then
+        python3 - "${nc_complex_header}" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+original = text
+for name in ("pfnc_inq_varndims", "pfnc_inq_vardimid"):
+    text = text.replace(
+        f"NC_COMPLEX_EXPORT inline int {name}(",
+        f"static inline int {name}(",
+    )
+if text != original:
+    open(path, "w").write(text)
+PYEOF
+    fi
 }
 
 build_parallel_io_stack() {

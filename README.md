@@ -16,7 +16,7 @@ statistics, NetCDF-writing and theming helpers.
 | `climtools.calc`  | Trends, correlations and difference-of-means testing.                     |
 | `climtools.cmaps` | Colormaps spanning local IPCC tables, matplotlib and cmocean.             |
 | `climtools.cdo`   | Thin xarray-aware wrapper over the CDO command-line tool.                 |
-| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce` for collective reductions, backing parallel NetCDF-4 output. |
+| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xreduce` for collective reductions, backing parallel NetCDF-4 output. |
 
 ## Installation
 
@@ -34,7 +34,7 @@ pip install ./climtools
 # or conda: creates/uses the active environment, builds the parallel
 # MPI/NetCDF stack, applies the rest of climtools's dependencies, and
 # installs climtools itself, in one step
-scripts/setup_env.sh [env_name]
+env/setup_env.sh [env_name]
 ```
 
 `pyproject.toml` lists every third-party package climtools's own source
@@ -49,13 +49,24 @@ on `PATH` separately (`environment.yml` installs them from conda-forge).
 Parallel NetCDF-4 output
 (`climtools.xgeo.to_netcdf(..., parallel=True)`) needs `netCDF4` and
 `mpi4py` built against a parallel-enabled MPI/HDF5/NetCDF-C stack.
-`scripts/setup_env.sh` builds that stack automatically, without ever using a
+`env/setup_env.sh` builds that stack automatically, without ever using a
 distro package manager (apt/yum builds are not available on HPC login or
 compute nodes, which is what this stack is for): it first tries `module
 load`-ing a matching MPI and `netcdf-mpi` module pair, and falls back to
 compiling HDF5 and netCDF-C from source against the active MPI compiler.
-Everything else in climtools works with the ordinary serial `netCDF4` and
-`mpi4py` wheels from PyPI or conda-forge.
+Building `netCDF4`-python itself against certain netcdf-c 4.9.x builds (for
+example Ubuntu's packaged netcdf-c 4.9.0) hits three known upstream
+packaging issues — a redeclared bzip2/blosc filter shim, a
+`nc_rc_get`/`nc_rc_set` version guard that assumes those symbols exist
+starting at 4.9.0 when they were actually added later, and two
+`nc_complex` functions (`pfnc_inq_varndims`, `pfnc_inq_vardimid`) declared
+`inline` with no matching out-of-line definition anywhere in that vendored
+library, which can leave an unresolved symbol at link time depending on
+whether the compiler inlines every call site. `setup_env.sh` patches all
+three defensively (a no-op against `netCDF4`/`nc_complex` versions that do
+not have the corresponding issue) before building. Everything else in
+climtools works with the ordinary serial `netCDF4` and `mpi4py` wheels from
+PyPI or conda-forge.
 
 ## Usage
 
@@ -82,9 +93,9 @@ plot = t2m.xgeo.plot.geo(method="contourf", cmap=cmaps.temp_div(), gridlines=Tru
     t2m.xgeo.plot.geo(
         method="contourf", cmap=cmaps.temp_div(), levels=21, gridlines=True
     )
-    .add.contour(z500, colors="k", clabel=True)   # line contours, labelled
-    .add.quiver(u10, v10, subsample=4)             # vector overlay
-    .add.significance(p_value)                     # stippling where p < 0.05
+    .add.contour(z500, colors="k", clabel=True)  # line contours, labelled
+    .add.quiver(u10, v10, subsample=4)  # vector overlay
+    .add.significance(p_value)  # stippling where p < 0.05
 )
 ```
 
@@ -100,8 +111,7 @@ Chaining geospatial operations reads in execution order:
 
 ```python
 (
-    ds.t2m
-    .xgeo.remap(target_grid, method="conservative")
+    ds.t2m.xgeo.remap(target_grid, method="conservative")
     .xgeo.mask(valid_value=1)
     .xgeo.add_local_solar_time()
     .mean("time")
@@ -120,6 +130,19 @@ An animation over a dimension is encoded as MP4 (requires `ffmpeg`):
 ```python
 t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 ```
+
+## Examples
+
+`examples/` contains four scripts, all runnable directly (`python
+examples/<script>.py`) or under an MPI launcher (`mpirun -n N python
+examples/<script>.py`):
+
+| Script                             | Demonstrates                                                                 |
+| ----------------------------------- | ----------------------------------------------------------------------------- |
+| `native.py`                         | Minimal serial-vs-parallel NetCDF write comparison, verified by read-back. Start here for the smallest possible `to_netcdf(..., parallel=True)` example. |
+| `time_composites.py`                | A full MPI-distributed analysis pipeline: independent cases are assigned one-per-rank round-robin over `mpi.comm.rank`/`.size`, each case is written with the ordinary serial writer (not the collective one, since each rank's case finishes on its own schedule), and a `mpi.comm.barrier()` synchronizes ranks before any rank cleans up shared scratch space. |
+| `serial_time_composites.py`         | The same event-detection and compositing computation as `time_composites.py`, with no MPI at all — a reference implementation for correctness comparison and for environments without a parallel-enabled MPI/NetCDF stack. |
+| `work.sh`                           | An HPC batch-submission script (`sbatch`) running the MPI and serial versions back to back for comparison. |
 
 ## Parallel output
 
@@ -146,7 +169,7 @@ def main():
 
     # Element-wise collective reduction. Works on scalars, NumPy arrays, and
     # xarray DataArrays/Datasets alike; dims, coords, and attrs are kept.
-    composite = mpi.reduce.sum(local)                      # same result on every rank
+    composite = mpi.reduce.sum(local)  # same result on every rank
     # composite = mpi.reduce.sum(local, mode="root", root=0)  # result on rank 0 only, None elsewhere
 
     # Rank 0 must hold the complete Dataset or DataArray; every other rank
@@ -176,9 +199,7 @@ The same script runs unchanged on a single rank without a launcher, by
 passing `allow_serial=True` to `to_netcdf`; `mpi.reduce` degrades to a no-op
 reduction over one rank. `mpi4py` is a hard dependency of `climtools.mpi` and
 of the NetCDF writer, so it must be installed (see
-[Installation](#installation)) even for single-rank runs, and MPI
-initializes as a side effect of importing it, not deferred until a
-collective call.
+[Installation](#installation)) even for single-rank runs.
 
 `mpi.reduce` also exposes `prod`, `min`, `max`, `any`, and `all`, all
 following the same signature as `sum`. Every reduction accepts `mode="all"`
@@ -189,9 +210,57 @@ native `mpi4py.MPI.Intracomm`, so anything not covered above — point-to-point
 reached directly as `mpi.comm.<method>` with full mpi4py signatures and IDE
 completion.
 
+`mpi.xreduce` reduces an xarray `DataArray`/`Dataset` along a named
+dimension that is itself split across ranks — the counterpart to
+`mpi.reduce` for when the split is expressed as a dimension rather than as
+independent whole-array partials:
+
+```python
+# Each rank holds a different slice of the "event" dimension.
+local_mean = mpi.xreduce.mean(local_events, dim="event")  # same result on every rank
+```
+
+`local_mean` is identical to calling plain `xarray`'s
+`assembled.mean(dim="event")` on the fully assembled array — `xreduce`
+combines each rank's local xarray reduction with one collective rather than
+requiring the full array in one place first. `xreduce` exposes `sum`, `prod`,
+`min`, `max`, `mean`, `any`, and `all`, with `skipna`/`min_count` applied
+consistently across the whole distributed dimension (not per rank): a value
+is only dropped by `min_count` once the count is summed across every rank
+that holds a share of `dim`, and `skipna=False` propagates a NaN present on
+any rank to the combined result, not just NaNs local to the current rank.
+
+Every one of `mpi.reduce`/`mpi.xreduce`/`mpi.scatterv`/`to_netcdf(...,
+parallel=True)` and the raw `mpi.comm.<method>` calls above is
+MPI-collective: every rank in `mpi.comm` must reach the same call, in the
+same order, or the call blocks forever waiting for ranks that never arrive.
+This is what makes the `to_netcdf(..., parallel=True)` calling convention
+above matter — passing real data only on rank 0 and `empty_dataset()`
+elsewhere keeps every rank calling the writer at the same point, even though
+only one of them supplies data. Work that inherently runs at different
+paces per rank (for example, independent cases assigned one-per-rank) should
+use ordinary serial `to_netcdf()` for anything each rank writes on its own,
+and only bring ranks back through a shared collective (`mpi.comm.barrier()`,
+`mpi.reduce`, `mpi.xreduce`, or a collective write) at points where every
+rank is guaranteed to have arrived — see `examples/time_composites.py`
+(above) for a script structured this way.
+
 Parallel output requires `netCDF4` and `mpi4py` built against a
 parallel-enabled MPI/HDF5/NetCDF-C stack; see
-[Installation](#installation) and `scripts/setup_env.sh`.
+[Installation](#installation) and `env/setup_env.sh`.
+
+mpi4py itself initializes MPI (`MPI_Init`/`MPI_Init_thread`) as a side
+effect of `import mpi4py.MPI`, not on first collective call, and registers
+`MPI_Finalize` to run automatically at process exit, so climtools code never
+calls either explicitly. mpi4py also sets the `ERRORS_RETURN` error handler
+on `COMM_WORLD` by default (rather than MPI's default
+`ERRORS_ARE_FATAL`), so a failing raw `mpi.comm.<method>` call raises a
+catchable `mpi4py.MPI.Exception` (a `RuntimeError` subclass) instead of
+aborting the process outright; `climtools.mpi.MPIError` is climtools's own
+exception type, raised by `mpi.reduce`/`mpi.xreduce`/the `@mpi` decorator/the
+NetCDF writer for climtools-level validation and synchronized-failure
+reporting; see the [mpi4py Overview](https://mpi4py.readthedocs.io/en/stable/overview.html)
+for further detail on both.
 
 ## Notes
 

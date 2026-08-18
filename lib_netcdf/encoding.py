@@ -1,10 +1,15 @@
 """CF encoding helpers shared by the serial and parallel NetCDF writers.
 
-The serial writer encodes time itself, because it hands raw numeric buffers to
-``netCDF4``. The parallel writer does not use these helpers on the way in: it
-negotiates one set of CF units across all ranks first, then applies xarray's
-own encoders. Encoding twice would fix each rank's units independently and
-defeat that negotiation.
+Both writers call :func:`encode_time`/:func:`is_time_like` from this module.
+The serial writer encodes each batch as it is appended, because it hands raw
+numeric buffers to ``netCDF4``. The parallel writer encodes once, on rank 0,
+while building the file schema: only rank 0 ever holds the real Dataset or
+DataArray (every other rank supplies :func:`~climtools.core.xgeo.empty_dataset`
+in its place, per the ``climtools.mpi`` calling convention), so there is a
+single time axis to encode and no cross-rank negotiation of CF units is
+needed. The resulting numeric values and ``units``/``calendar`` attrs are
+included in the schema broadcast to every rank alongside the rest of the
+file layout.
 """
 
 from __future__ import annotations

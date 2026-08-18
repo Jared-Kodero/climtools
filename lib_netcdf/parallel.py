@@ -302,6 +302,21 @@ def to_netcdf_parallel(
                     + f"{sorted(unknown_chunks)}."
                 )
 
+            if partition_dim is not None:
+                unsupported = sorted(
+                    name
+                    for name, spec in variables.items()
+                    if not spec["coord"]
+                    and partition_dim in spec["dims"]
+                    and spec["dtype"] == "str"
+                )
+                if unsupported:
+                    raise NetCDFWriteError(
+                        "Partitioned string variable(s) "
+                        + f"{unsupported} are unsupported because netCDF4 "
+                        + "parallel I/O cannot write VLEN data types."
+                    )
+
             output_path = str(Path(path).expanduser().resolve(strict=False))
             schema = {
                 "attrs": dict(ds.attrs),

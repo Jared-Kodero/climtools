@@ -1,12 +1,12 @@
 """Minimal serial and parallel NetCDF write example, verified by read-back.
 
-Run serially::
+``main()`` always runs both demos in one process: the MPI-collective parallel
+write first (across every launched rank), then the plain serial write (rank 0
+only). Run with a single process for the serial-only path, or under an MPI
+launcher to also exercise the collective path::
 
     python native.py
-
-Run with MPI-collective parallel output::
-
-    mpirun -n 4 python native.py --parallel
+    mpirun -n 4 python native.py
 
 The parallel writer requires netCDF4-python built against a parallel-enabled
 HDF5/netCDF-C (``netCDF4.__has_parallel4_support__``). On a single rank, pass
@@ -21,49 +21,68 @@ import numpy as np
 import xarray as xr
 
 from climtools import mpi
+from climtools.core.xgeo import empty_dataset
 
 
 def create_precipitation_dataset() -> xr.Dataset:
-    """Build a synthetic (time, lat, lon) precipitation dataset."""
-    nt, nlat, nlon = 100, 91, 180
-    rng = np.random.default_rng(0)
-    return xr.Dataset(
-        data_vars={
-            "precipitation": (
-                ("time", "lat", "lon"),
-                rng.random((nt, nlat, nlon)).astype(np.float32),
-                {"units": "mm day-1", "long_name": "precipitation rate"},
-            ),
-        },
-        coords={
-            "time": (
-                "time",
-                np.arange(nt, dtype=np.float64),
-                {"units": "days since 2000-01-01"},
-            ),
-            "lat": ("lat", np.linspace(-90.0, 90.0, nlat, dtype=np.float32)),
-            "lon": ("lon", np.linspace(0.0, 358.0, nlon, dtype=np.float32)),
-        },
-        attrs={"title": "climtools NetCDF write example: precipitation"},
-    )
+    # """Build a synthetic (time, lat, lon) precipitation dataset."""
+    # nt, nlat, nlon = 100, 91, 180
+    # rng = np.random.default_rng(0)
+    # return xr.Dataset(
+    #     data_vars={
+    #         "precipitation": (
+    #             ("time", "lat", "lon"),
+    #             rng.random((nt, nlat, nlon)).astype(np.float32),
+    #             {"units": "mm day-1", "long_name": "precipitation rate"},
+    #         ),
+    #     },
+    #     coords={
+    #         "time": (
+    #             "time",
+    #             np.arange(nt, dtype=np.float64),
+    #             {"units": "days since 2000-01-01"},
+    #         ),
+    #         "lat": ("lat", np.linspace(-90.0, 90.0, nlat, dtype=np.float32)),
+    #         "lon": ("lon", np.linspace(0.0, 358.0, nlon, dtype=np.float32)),
+    #     },
+    #     attrs={"title": "climtools NetCDF write example: precipitation"},
+    # )
+
+    path = "/users/jkodero/research/models/gfdl_shield/archive/2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/case/fv3_hist.nest04.nc"
+    return xr.open_dataset(path)[["pr"]]
 
 
 def run_serial(out_dir: Path) -> None:
-    """Write and verify a serial NetCDF file. Rank 0 only."""
+    """Write and verify a serial NetCDF file. Rank 0 only.
+
+    Serial NetCDF I/O is not MPI-collective, so every rank would otherwise
+    race to create the same file when this runs under ``mpirun -n N``; the
+    rank guard below is what makes "rank 0 only" true rather than aspirational.
+    """
+    if mpi.comm.rank != 0:
+        return
+
     ds = create_precipitation_dataset()
     path = out_dir / "pr_serial.nc"
+    path.unlink(missing_ok=True)
 
-    mpi.log(f"writing {path} serially")
+    mpi.log(f"writing {path} serially netcdf4 lib")
     started = time.perf_counter()
     ds.xgeo.to_netcdf(path, unlimited_dim="time", show_progress=False)
-    mpi.log(f"serial write done in {time.perf_counter() - started:.3f} s")
+    mpi.log(f"serial netcdf4 lib write done in {time.perf_counter() - started:.3f} s")
 
     with xr.open_dataset(path) as check:
-        if not np.array_equal(
-            check["precipitation"].values, ds["precipitation"].values
-        ):
+        if not np.array_equal(check["pr"].values, ds["pr"].values):
             raise AssertionError(f"{path}: data mismatch after serial write")
     mpi.log(f"{path}: verified")
+
+    path = out_dir / "pr_xarray.nc"
+    path.unlink(missing_ok=True)
+
+    mpi.log(f"writing {path} xarray")
+    started = time.perf_counter()
+    ds.to_netcdf(path)
+    mpi.log(f"serial xarray done in {time.perf_counter() - started:.3f} s")
 
 
 def run_parallel(out_dir: Path) -> None:
@@ -73,10 +92,13 @@ def run_parallel(out_dir: Path) -> None:
     :func:`climtools.xgeo.empty_dataset` so the ``.xgeo`` accessor is still
     available. Its contents are unused: the writer scatters rank 0's buffers.
     """
+    path = out_dir / "pr_parallel.nc"
     if mpi.comm.rank == 0:
         ds = create_precipitation_dataset()
+        path.unlink(missing_ok=True)
+    else:
+        ds = empty_dataset()
 
-    path = out_dir / "pr_parallel.nc"
     mpi.log(f"writing {path} in parallel across {mpi.comm.size} rank(s)")
     started = time.perf_counter()
     ds.xgeo.to_netcdf(
@@ -90,9 +112,9 @@ def run_parallel(out_dir: Path) -> None:
     mpi.log(f"parallel write done in {time.perf_counter() - started:.3f} s")
 
     if mpi.comm.rank == 0:
-        reference = create_precipitation_dataset()["precipitation"].values
+        reference = create_precipitation_dataset()["pr"].values
         with xr.open_dataset(path) as check:
-            if not np.array_equal(check["precipitation"].values, reference):
+            if not np.array_equal(check["pr"].values, reference):
                 raise AssertionError(f"{path}: data mismatch after parallel write")
         mpi.log(f"{path}: verified")
 

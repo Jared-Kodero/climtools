@@ -260,7 +260,7 @@ class GeoBase:
         )
 
     # -- NetCDF output -----------------------------------------------------
-    def append_to_netcdf(
+    def append(
         self,
         file: str | Path,
         dim: str = "time",
@@ -272,7 +272,7 @@ class GeoBase:
     ) -> None:
         """Append the bound Dataset to an existing file along an unlimited dimension.
 
-        See :func:`climtools.xgeo.append_to_netcdf` for the full description.
+        See :func:`climtools.xgeo.append` for the full description.
 
         Parameters
         ----------
@@ -296,7 +296,7 @@ class GeoBase:
         -------
         None
         """
-        return xgeo.append_to_netcdf(
+        return xgeo.append(
             file=Path(file),
             data=self._obj,
             dim=dim,

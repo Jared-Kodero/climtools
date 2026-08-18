@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from ..lib_netcdf.netcdf import (
-        append_to_netcdf,
+        append,
         dataset_is_empty,
         empty_dataset,
         to_netcdf,
@@ -32,7 +32,7 @@ __all__ = [
     "SerialProgressBar",
     "SetupDask",
     "add_local_solar_time",
-    "append_to_netcdf",
+    "append",
     "calc",
     "cmaps",
     "dataset_is_empty",
@@ -53,7 +53,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": (".xarray_utils", "SetupDask"),
     "add_local_solar_time": (".xarray_utils", "add_local_solar_time"),
-    "append_to_netcdf": ("..lib_netcdf.netcdf", "append_to_netcdf"),
+    "append": ("..lib_netcdf.netcdf", "append"),
     "empty_dataset": ("..lib_netcdf.netcdf", "empty_dataset"),
     "dataset_is_empty": ("..lib_netcdf.netcdf", "dataset_is_empty"),
     "calc": (".calc_stats", None),

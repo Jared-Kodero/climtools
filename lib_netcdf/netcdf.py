@@ -6,9 +6,9 @@ from typing import Any
 import xarray as xr
 
 from .parallel import to_netcdf_parallel
-from .serial import append_to_netcdf, to_netcdf_serial
+from .serial import append, to_netcdf_serial
 
-__all__ = ["append_to_netcdf", "dataset_is_empty", "empty_dataset", "to_netcdf"]
+__all__ = ["append", "dataset_is_empty", "empty_dataset", "to_netcdf"]
 
 _NO_DATA_ATTR = "_climtools_no_data"
 

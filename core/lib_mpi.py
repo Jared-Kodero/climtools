@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import datetime
 import functools
 import os
 from collections.abc import Callable, Hashable, Iterable, Sequence
@@ -1058,25 +1059,35 @@ class MPIRuntime:
         message: str,
         *args: Any,
         root: int = 0,
-        logger: Callable[..., None] = print,
+        timestamp: bool = False,
+        prefix: bool = False,
+        logger: Callable[..., None] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Emit a message from one rank.
+        """
+        Emit a message from a specific MPI rank.
 
         Parameters
         ----------
         message : str
-            Message or format string passed to ``logger``.
+            Message or format string to be logged.
         *args : Any
-            Positional arguments passed to ``logger``. With the default
-            ``print`` logger, positional arguments trigger percent-formatting
-            of ``message`` before printing.
+            Positional arguments passed to ``logger``. If ``logger`` is None,
+            these trigger percent-formatting of ``message`` before printing.
         root : int, optional
             Rank allowed to emit the message. Default is 0.
+        timestamp : bool, optional
+            If True, prepends a standard ISO-like timestamp to the message.
+            Only applies when falling back to the built-in print. Default is False.
+        prefix : bool, optional
+            If True, prepends an MPI rank indicator (e.g., "[MPI]") to the message.
+            This flag only toggles the prefix for the default :func:`print`.
+            Custom loggers will always receive the prefix. Default is False.
         logger : callable, optional
-            Callable used to emit the message. Default is :func:`print`.
+            Callable used to emit the message. Default is None, which falls back
+            to the built-in :func:`print`.
         **kwargs : Any
-            Keyword arguments forwarded to ``logger``.
+            Keyword arguments forwarded to the ``logger`` (or :func:`print`).
 
         Returns
         -------
@@ -1084,9 +1095,30 @@ class MPIRuntime:
         """
         if not self.is_root(root):
             return
-        if logger is print and args:
-            logger(message % args, **kwargs)
+
+        # Generate the MPI string once
+        mpi_str = f"[MPI RANK {root}]" if root != 0 else "[MPI]"
+
+        if logger is None:
+            # Apply string formatting if args exist
+            if args:
+                message = message % args
+
+            # Build the prefix dynamically based on boolean flags for print
+            msg_prefix = ""
+            if timestamp:
+                time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                msg_prefix += f"{time_str} - "
+
+            if prefix:
+                msg_prefix += f"{mpi_str} "
+            # Print the final assembled string
+            print(f"{msg_prefix}{message}", **kwargs)
+
         else:
+            # MPI prefix goes to the custom logger without checking the flag
+            if prefix:
+                message = f"{mpi_str} {message}"
             logger(message, *args, **kwargs)
 
     def scatterv(
