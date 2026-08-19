@@ -3,9 +3,9 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=500G
 #SBATCH -t 12:00:00
-#SBATCH -o test_mpi.out
+#SBATCH -o test_mpi.log
 
-set -euo pipefail
+
 
 conda activate mother
 

@@ -532,6 +532,7 @@ class MPIRuntime:
         self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
         self._reduce: ReduceAccessor = ReduceAccessor(self)
         self._xarray: XarrayMPI = XarrayMPI(self)
+        install_abort_excepthook()
 
     @property
     def xarray(self) -> XarrayMPI:
@@ -919,7 +920,6 @@ class MPIRuntime:
         return wrapper
 
 
-install_abort_excepthook()
 mpi: MPIRuntime = MPIRuntime()
 
 __all__ = ["mpi"]
