@@ -1,0 +1,464 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 5076943
+##  Job Name : test.sh
+##  Nodelist : node2414
+##      CPUs : 8
+##  Mem/Node : 512000 MB
+## Directory : /oscar/home/jkodero/research/climtools/examples
+##   Job Started : Tue Aug 18 09:59:55 PM EDT 2026
+###############################################################################
+2026-08-18 22:00:02 - [MPI RANK 0] [SETUP] validating SHiELD source visibility
+2026-08-18 22:00:02 - [MPI RANK 0] [SETUP] preparing output directory
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] climtools MPI test suite -- 8 rank(s), mpi.launched=True
+[MPI RANK 0] mpi4py initializes MPI on import and finalizes automatically at exit; see the mpi4py Overview docs (https://mpi4py.readthedocs.io/en/stable/overview.html) for the underlying collective/error-handling semantics climtools.mpi builds on.
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] 
+--- mpi runtime helpers ---
+2026-08-18 22:00:02 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: START
+2026-08-18 22:00:02 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: checking rank helpers and supported MPI datatype mappings
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: recording result
+[MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 01 test_runtime_helpers: DONE
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: START
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: checking mpi.log formatting, rank filtering, and timestamp output
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: checking mpi.raise_if_error no-error/all-rank/subset-rank paths
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: recording result
+[MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts               serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 02 test_runtime_logging_and_errors: DONE
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: START
+2026-08-18 22:00:03 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking scalar and non-contiguous reductions
+2026-08-18 22:00:06 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking reduce-to-nonzero-root behavior
+2026-08-18 22:00:06 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: checking invalid reduction arguments and unsupported dtypes
+2026-08-18 22:00:06 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: recording result
+[MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:06 - [MPI RANK 0] [PROGRESS] test 03 test_runtime_contracts: DONE
+[MPI RANK 0] 
+--- mpi.reduce ---
+2026-08-18 22:00:07 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: START
+2026-08-18 22:00:11 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: entering timed parallel section
+2026-08-18 22:00:12 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: running serial baseline
+2026-08-18 22:00:12 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (280200 real pr values)  serial=  0.2569s  parallel=  0.0637s  speedup= 4.03x
+2026-08-18 22:00:12 - [MPI RANK 0] [PROGRESS] test 04 test_reduce_sum_scalar: DONE
+2026-08-18 22:00:12 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: START
+2026-08-18 22:00:12 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: entering timed parallel section
+2026-08-18 22:00:13 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: running serial baseline
+2026-08-18 22:00:14 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real pr fields (180x360, 8 rank selections) serial=  1.2320s  parallel=  0.0026s  speedup=471.01x
+2026-08-18 22:00:14 - [MPI RANK 0] [PROGRESS] test 05 test_reduce_composite: DONE
+2026-08-18 22:00:14 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: START
+2026-08-18 22:00:14 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: entering timed parallel section
+2026-08-18 22:00:15 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: running serial baseline
+2026-08-18 22:00:16 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real t2m DataArray (dims/attrs kept) serial=  1.7697s  parallel=  0.0780s  speedup=22.70x  (correctness-focused)
+2026-08-18 22:00:17 - [MPI RANK 0] [PROGRESS] test 06 test_reduce_xarray_object: DONE
+2026-08-18 22:00:17 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: START
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.sum all mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.sum root mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.sum real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0550s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.prod all mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.prod root mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.prod real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0520s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.min all mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.min root mode
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.min real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0520s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:18 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.max all mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.max root mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.max real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0520s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.mean all mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.mean root mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.mean real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0002s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.any all mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.any root mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.any real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: running mpi.reduce.all all mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: checking mpi.reduce.all root mode
+2026-08-18 22:00:19 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.all real SHiELD values (all/root modes) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:20 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: recording result
+[MPI RANK 0] [OK  ] mpi.reduce.any/all real slmsk Dataset          serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:20 - [MPI RANK 0] [PROGRESS] test 07 test_reduce_operations: DONE
+[MPI RANK 0] 
+--- mpi.xarray ---
+2026-08-18 22:00:20 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: START
+2026-08-18 22:00:20 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: entering timed parallel section
+[PARTITION RANK 0/8] partition_dim=lat idx_start=0 idx_end=58 value_start=37.014989293361886 value_end=38.75374732334047
+[PARTITION RANK 1/8] partition_dim=lat idx_start=59 idx_end=117 value_start=38.78372591006424 value_end=40.522483940042825
+[PARTITION RANK 2/8] partition_dim=lat idx_start=118 idx_end=176 value_start=40.5524625267666 value_end=42.29122055674518
+[PARTITION RANK 3/8] partition_dim=lat idx_start=177 idx_end=234 value_start=42.32119914346895 value_end=44.02997858672377
+[PARTITION RANK 4/8] partition_dim=lat idx_start=235 idx_end=292 value_start=44.059957173447536 value_end=45.768736616702355
+[PARTITION RANK 5/8] partition_dim=lat idx_start=293 idx_end=350 value_start=45.79871520342613 value_end=47.50749464668094
+[PARTITION RANK 6/8] partition_dim=lat idx_start=351 idx_end=408 value_start=47.53747323340471 value_end=49.24625267665953
+[PARTITION RANK 7/8] partition_dim=lat idx_start=409 idx_end=466 value_start=49.276231263383295 value_end=50.985010706638114
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: checking open_dataset partition-dimension validation
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: running serial baseline
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (real pr, partitioned latitude) serial=  0.0512s  parallel=  1.1125s  speedup= 0.05x
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 08 test_xarray_open_dataset: DONE
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: START
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: entering timed parallel section
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute real pr (explicit/auto) serial=  0.0000s  parallel=  0.0492s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:22 - [MPI RANK 0] [PROGRESS] test 09 test_xarray_redistribute: DONE
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: START
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: entering timed parallel section
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.isel real pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.0774s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 10 test_xarray_isel: DONE
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: START
+2026-08-18 22:00:23 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: entering timed parallel section
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.sel real pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.2252s  speedup=  n/a   (correctness-focused)
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 11 test_xarray_sel: DONE
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: START
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: preparing mpi.xarray.sum source data
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: entering timed parallel section
+2026-08-18 22:00:24 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: running serial baseline
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.sum real t over 31 pressure levels  serial=  0.0006s  parallel=  0.1710s  speedup= 0.00x
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 12 test_xarray_reduction: DONE
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: START
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: preparing mpi.xarray.prod source data
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: entering timed parallel section
+2026-08-18 22:00:25 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: running serial baseline
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.prod real t over 31 pressure levels serial=  0.0005s  parallel=  0.1854s  speedup= 0.00x
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 13 test_xarray_reduction: DONE
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: START
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: preparing mpi.xarray.mean source data
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: entering timed parallel section
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: running serial baseline
+2026-08-18 22:00:26 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.mean real t over 31 pressure levels serial=  0.0003s  parallel=  0.1316s  speedup= 0.00x
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 14 test_xarray_reduction: DONE
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: START
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: preparing mpi.xarray.max source data
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: entering timed parallel section
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: running serial baseline
+2026-08-18 22:00:27 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.max real t over 31 pressure levels  serial=  0.0003s  parallel=  0.1485s  speedup= 0.00x
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 15 test_xarray_reduction: DONE
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: START
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: preparing mpi.xarray.min source data
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: entering timed parallel section
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: running serial baseline
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.min real t over 31 pressure levels  serial=  0.0003s  parallel=  0.1670s  speedup= 0.00x
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 16 test_xarray_reduction: DONE
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: START
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: preparing mpi.xarray.any source data
+2026-08-18 22:00:28 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: entering timed parallel section
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: running serial baseline
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.any real slmsk land mask (467 latitudes) serial=  0.0003s  parallel=  0.1382s  speedup= 0.00x
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 17 test_xarray_logical_reduction: DONE
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: START
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: preparing mpi.xarray.all source data
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: entering timed parallel section
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: running serial baseline
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: recording result
+[MPI RANK 0] [OK  ] mpi.xarray.all real slmsk land mask (467 latitudes) serial=  0.0001s  parallel=  0.0009s  speedup= 0.12x
+2026-08-18 22:00:29 - [MPI RANK 0] [PROGRESS] test 18 test_xarray_logical_reduction: DONE
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: START
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: entering timed parallel section
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: reducing Dataset sum
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: reducing Dataset mean
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: checking Dataset reduction results
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: preparing empty-partition extreme reductions
+2026-08-18 22:00:30 - [MPI RANK 0] [PROGRESS] test 19 test_xarray_dataset_reduction: reducing empty-partition minimum
+
+[MPI RANK 0] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007fc56a998640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007fc551354640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007fc551b55640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007fc5e743f300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 883 in raise_if_error
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 940 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1203 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 4] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007f486cde2640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+
+[MPI RANK 5] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007fbc8cdb1640 [climtools-mpi-w] (most recent call first):
+
+[MPI RANK 2] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007f6ed3c7e640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f4853273640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007fbc73537640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+
+[MPI RANK 6] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007f1a6d8fc640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1a53a4c640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f6eba163640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f6eba964640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f4853a74640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f48e8fc5300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 883 in raise_if_error
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 940 in _comm_reduce
+Thread 0x00007fbc73d38640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007fbd09abc300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 949 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1202 in _combine_extreme
+Thread 0x00007f1a5424d640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1ae9fd2300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 883 in raise_if_error
+Thread 0x00007f6f506ea300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 883 in raise_if_error
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 940 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1203 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1203 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 940 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1203 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 1] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007f006d8fc640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f005359b640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f0053d9c640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f00e9b22300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 949 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1202 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 3] WATCHDOG: no progress for 120 s at inside test_xarray_dataset_reduction. Stack for this rank follows.
+Current thread 0x00007f1c159fc640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 811 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1bfacd9640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1bfb4de640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1bfbce3640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1bfc4e4640 [ThreadPoolExecu] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f1c9267e300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 949 in _comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1202 in _combine_extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1538 in _extreme
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xarray_mpi.py", line 1462 in min
+  File "test.py", line 1314 in test_xarray_dataset_reduction
+  File "test.py", line 252 in safe_run
+  File "test.py", line 2841 in main
+  File "test.py", line 2887 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+[MPI RANK 0] WATCHDOG: aborting MPI_COMM_WORLD.
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
+[2026-08-18T22:02:35.043] error: *** STEP 5076943.0 ON node2414 CANCELLED AT 2026-08-18T22:02:35 DUE to SIGNAL Killed ***
+srun: error: node2414: task 0: Exited with exit code 1
+srun: Terminating StepId=5076943.0
+srun: error: node2414: tasks 1-7: Killed

@@ -789,7 +789,7 @@ class MPIRuntime:
         """
         if timeout is None:
             try:
-                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 0.0)
+                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 60)
             except ValueError:
                 timeout = 0.0
         if timeout <= 0.0:
