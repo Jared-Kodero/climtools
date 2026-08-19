@@ -1,0 +1,32 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 5082246
+##  Job Name : test.sh
+##  Nodelist : node2410
+##      CPUs : 8
+##  Mem/Node : 512000 MB
+## Directory : /oscar/home/jkodero/research/climtools/examples
+##   Job Started : Wed Aug 19 12:29:20 PM EDT 2026
+###############################################################################
+2026-08-19 12:29:41 - [MPI RANK 0] [SETUP] validating test dataset visibility
+2026-08-19 12:29:41 - [MPI RANK 0] [SETUP FAILED] test dataset is not visible on every rank: /users/jkodero/scratch/io_mpi_test/mock_in.nc
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 7 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 6 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
+[2026-08-19T12:29:41.583] error: *** STEP 5082246.0 ON node2410 CANCELLED AT 2026-08-19T12:29:41 DUE to SIGNAL Killed ***
+srun: error: node2410: tasks 0-5: Killed
+srun: Terminating StepId=5082246.0
+srun: error: node2410: tasks 6-7: Exited with exit code 1

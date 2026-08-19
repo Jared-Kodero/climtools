@@ -93,7 +93,9 @@ def timer(
     return decorate(function)
 
 
-def build_mock_dataset(n_time_steps: int = DEFAULT_TIME_STEPS) -> xr.Dataset:
+def build_mock_dataset(
+    n_time_steps: int = DEFAULT_TIME_STEPS, path: Path | None = None
+) -> xr.Dataset:
     """Build the deterministic NetCDF dataset used by the MPI test suite.
 
     Parameters
@@ -151,7 +153,7 @@ def build_mock_dataset(n_time_steps: int = DEFAULT_TIME_STEPS) -> xr.Dataset:
     lon_index = np.arange(MOCK_LONGITUDE_COUNT)[None, :]
     sea_land_mask = ((lat_index + lon_index) % 3).astype(np.int8)
 
-    return xr.Dataset(
+    ds = xr.Dataset(
         data_vars={
             "pr": (
                 ("time", "lat", "lon"),
@@ -186,6 +188,8 @@ def build_mock_dataset(n_time_steps: int = DEFAULT_TIME_STEPS) -> xr.Dataset:
         },
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
+
+    ds.to_netcdf(path, format="NETCDF4")
 
 
 def relative_tolerance_for_dtype(*values: Any, factor: float = 64.0) -> float:
@@ -836,10 +840,10 @@ def test_reduce_all_operations() -> None:
         op = getattr(mpi.reduce, op_name)
 
         @timer
-        def parallel_reduce() -> Any:
+        def parallel_reduce(op, value) -> Any:
             return op(value)
 
-        result, parallel_s = parallel_reduce()
+        result, parallel_s = parallel_reduce(op, value)
 
         root_result = op(value, mode="root", root=0)
         tolerance = relative_tolerance_for_dtype(expected)
@@ -2859,10 +2863,16 @@ def main(n_time_steps: int = DEFAULT_TIME_STEPS) -> None:
         if OUTPUT_DIR.exists():
             shutil.rmtree(OUTPUT_DIR)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        build_mock_dataset(n_time_steps).to_netcdf(TEST_DATA_PATH, format="NETCDF4")
+        build_mock_dataset(n_time_steps, path=TEST_DATA_PATH)
+
+    # ADD A BARRIER HERE
+    # Wait for Rank 0 to finish writing the file before other ranks proceed.
+    # (Adjust the syntax below depending on the specific MPI wrapper you are using)
+    mpi.comm.Barrier()
 
     mpi.log("[SETUP] validating test dataset visibility", timestamp=True, flush=True)
     visible = TEST_DATA_PATH.is_file()
+
     if not bool(mpi.reduce.all(visible)):
         mpi.log(
             "[SETUP FAILED] test dataset is not visible on every rank: "
