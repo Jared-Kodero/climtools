@@ -293,15 +293,6 @@ if [[ "${is_conda}" == "1" && -n "${CONDA_PREFIX:-}" ]]; then
 #!/usr/bin/env bash
 export _CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:-}"
 
-# HPC-X ships HCOLL and UCC collective offload enabled by default. Both
-# replace Open MPI's own reduction algorithms, and a fault in the offload
-# path can let part of a communicator return from Allreduce while the rest
-# block indefinitely, with every rank contributing an identical buffer.
-# climtools's reductions are latency-bound rather than bandwidth-bound, so
-# the offload buys nothing here; turn it off for correctness.
-# export OMPI_MCA_coll_hcoll_enable=0
-# export OMPI_MCA_coll_ucc_enable=0
-
 $([[ -n "${mpi_module_name}" ]] && printf 'module load %q\n' "${mpi_module_name}")
 $([[ -n "${netcdf_module_name}" ]] && printf 'module load %q\n' "${netcdf_module_name}")
 export LD_LIBRARY_PATH=$(printf '%q' "${LD_LIBRARY_PATH:-}")"\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"

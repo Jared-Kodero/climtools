@@ -7,6 +7,7 @@ import hashlib
 import math
 import warnings
 from collections.abc import Hashable, Iterable, Mapping
+from functools import cache
 from numbers import Integral
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 import numpy as np
 import xarray as xr
 from mpi4py import MPI as _MPI
+from mpi4py.util import dtlib as _dtlib
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,6 +23,29 @@ if TYPE_CHECKING:
     from .lib_mpi import MPIRuntime
 
 MPI_META = "mpi_meta"
+_OP_LIST: tuple[tuple[Any, str], ...] = (
+    (_MPI.SUM, "SUM"),
+    (_MPI.PROD, "PROD"),
+    (_MPI.MIN, "MIN"),
+    (_MPI.MAX, "MAX"),
+    (_MPI.LAND, "LAND"),
+    (_MPI.LOR, "LOR"),
+)
+
+
+def _op_name(op: _MPI.Op) -> str:
+    """Return a picklable, rank-stable label for a reduction operation.
+
+    mpi4py Op handles are unhashable and their repr embeds an address that
+    differs between ranks, so neither can be compared across ranks. The
+    label can be.
+    """
+    for candidate, name in _OP_LIST:
+        if op == candidate:
+            return name
+    return "OP"
+
+
 _MPI_REDUCIBLE_KINDS = "biufc"
 
 # Verify that every rank entered a reduction with the same per-variable plan
@@ -28,6 +53,74 @@ _MPI_REDUCIBLE_KINDS = "biufc"
 # allgather per reduction and converts an otherwise silent deadlock into an
 # immediate exception. Set to False only for micro-benchmarking.
 CHECK_COLLECTIVE_AGREEMENT = True
+
+
+@cache
+def _mpi_representable(dtype_string: str) -> bool:
+    """Return whether a NumPy dtype has a usable predefined MPI datatype.
+
+    Membership in mpi4py's type dictionary is not sufficient. float16 maps to
+    MPI_SHORT_FLOAT, which most implementations do not provide, so the handle
+    exists but every use of it fails with MPI_ERR_TYPE. Querying its size is
+    the cheapest way to find out whether the running MPI actually supports
+    it, and the answer depends only on the dtype, so it is identical on every
+    rank and safe to decide locally.
+    """
+    dtype = np.dtype(dtype_string)
+    try:
+        datatype = _dtlib.from_numpy_dtype(dtype)
+    except BaseException:
+        return False
+    try:
+        return int(datatype.Get_size()) > 0
+    except BaseException:
+        return False
+
+
+@cache
+def _partial_dtype(
+    dtype_string: str,
+    operation: str,
+    skipna: bool | None,
+) -> np.dtype[Any]:
+    """Return the dtype xarray produces for one rank's partial reduction.
+
+    The reduction dtype is probed on a zero-size array of the requested
+    dtype rather than predicted from NumPy promotion rules, so it always
+    matches what the real reduction returns for the installed xarray and
+    NumPy versions. It depends only on the dtype, the operation and
+    ``skipna``, all of which are identical on every rank, so every rank
+    derives the same answer. Casting each rank's partial to this dtype
+    before the buffer collective is what guarantees that ranks holding an
+    empty partition post the same datatype as ranks holding data.
+
+    Parameters
+    ----------
+    dtype_string : str
+        NumPy dtype string of the variable being reduced.
+    operation : {"sum", "prod", "min", "max", "count", "any", "all"}
+        Reduction whose rank-local partial dtype is requested.
+    skipna : bool or None
+        Skip-NaN behaviour requested for the reduction.
+
+    Returns
+    -------
+    numpy.dtype
+        Dtype of the rank-local partial for this reduction.
+    """
+    probe = xr.DataArray(np.zeros((1,), dtype=np.dtype(dtype_string)), dims=("_probe",))
+    if operation == "count":
+        return cast("np.dtype[Any]", probe.count(dim="_probe").dtype)
+    if operation in ("any", "all"):
+        method = probe.all if operation == "all" else probe.any
+        return cast("np.dtype[Any]", method(dim="_probe").dtype)
+
+    method = getattr(probe, operation)
+    if operation in ("sum", "prod"):
+        result = method(dim="_probe", skipna=skipna, min_count=None)
+    else:
+        result = method(dim="_probe", skipna=skipna)
+    return cast("np.dtype[Any]", result.dtype)
 
 
 class _PlanEntry(NamedTuple):
@@ -801,6 +894,15 @@ class XarrayMPI:
             return
         if dtype.kind not in _MPI_REDUCIBLE_KINDS:
             raise TypeError(f"Unsupported MPI xarray dtype: {dtype}.")
+        if not _mpi_representable(dtype.str):
+            # float16 and long double have a reducible NumPy kind but no
+            # predefined MPI datatype. Rejecting them here raises on every
+            # rank before any collective, instead of failing inside
+            # Allreduce with MPI_ERR_TYPE once buffers are already posted.
+            raise TypeError(
+                f"Unsupported MPI xarray dtype: {dtype}. "
+                + "No predefined MPI datatype represents it."
+            )
         if operation in ("min", "max") and dtype.kind == "c":
             name = "minimum" if operation == "min" else "maximum"
             raise TypeError(f"MPI {name} is not defined for complex xarray data.")
@@ -906,6 +1008,23 @@ class XarrayMPI:
         )
         return plan
 
+    @staticmethod
+    def _guarded(
+        function: Any,
+    ) -> tuple[Any, BaseException | None]:
+        """Run a rank-local computation, deferring any failure.
+
+        A rank-local computation that raises between two collectives removes
+        that rank from the collective sequence while the others continue,
+        which is a deadlock rather than an error. Deferring the exception
+        lets the rank stay in the sequence until the next collective
+        synchronizes and re-raises it on every rank.
+        """
+        try:
+            return function(), None
+        except BaseException as exc:
+            return None, exc
+
     def _partition_is_empty(self, value: xr.Dataset | xr.DataArray, meta: Any) -> bool:
         """Return whether this rank owns no elements of the partition."""
         if meta is None:
@@ -917,27 +1036,88 @@ class XarrayMPI:
 
     def _comm_reduce(
         self,
-        value: xr.DataArray,
+        value: xr.DataArray | None,
         op: _MPI.Op,
         *,
         mode: Literal["all", "root"],
         root: int,
+        expect_dtype: np.dtype[Any] | None = None,
+        error: BaseException | None = None,
+        phase: str = "MPI xarray reduction buffer preparation",
     ) -> xr.DataArray | None:
+        """Reduce one rank-local buffer across the communicator.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or None
+            Rank-local partial. None is permitted only when ``error`` is set,
+            which happens when the rank-local computation preceding this
+            collective already failed.
+        op : mpi4py.MPI.Op
+            Reduction operation.
+        mode : {"all", "root"}
+            Result placement.
+        root : int
+            Destination rank when ``mode`` is "root".
+        expect_dtype : numpy.dtype, optional
+            Dtype every rank must post. It is derived from the reduced
+            variable's declared dtype, which is identical on every rank, so
+            casting to it removes any dependence of the buffer datatype on
+            rank-local data such as an empty partition.
+        error : BaseException, optional
+            Error already pending on this rank. It is synchronized by the
+            all-gather below, so a rank-local failure raises on every rank
+            instead of removing this rank from the collective sequence.
+        phase : str, optional
+            Label used in synchronized error messages.
+
+        Returns
+        -------
+        xarray.DataArray or None
+            Reduced result, or None off-root when ``mode`` is "root".
+        """
         send: np.ndarray[Any, Any] | None = None
-        error: BaseException | None = None
-        try:
-            send = np.asarray(value.values)
-            if not send.flags.c_contiguous:
-                send = np.ascontiguousarray(send)
-            if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
-                raise TypeError(f"Unsupported MPI xarray dtype: {send.dtype}.")
-        except BaseException as exc:
-            error = exc
+        if error is None:
+            try:
+                if value is None:
+                    raise AssertionError("MPI xarray reduction buffer is missing.")
+                send = np.asarray(value.values)
+                if expect_dtype is not None and send.dtype != np.dtype(expect_dtype):
+                    send = send.astype(expect_dtype)
+                if not send.flags.c_contiguous:
+                    send = np.ascontiguousarray(send)
+                if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
+                    raise TypeError(f"Unsupported MPI xarray dtype: {send.dtype}.")
+                if not _mpi_representable(send.dtype.str):
+                    raise TypeError(
+                        f"Unsupported MPI xarray dtype: {send.dtype}. "
+                        + "No predefined MPI datatype represents it."
+                    )
+            except BaseException as exc:
+                error = exc
+                send = None
+
+        # The signature travels inside the all-gather that synchronizes
+        # errors, so verifying that every rank posts the same operation,
+        # placement, datatype and shape costs no extra communication. A
+        # divergent sequence then raises on every rank instead of leaving
+        # some ranks blocked in a buffer collective the others never post.
+        signature = (
+            None
+            if send is None
+            else (
+                _op_name(op),
+                mode,
+                int(root),
+                send.dtype.str,
+                tuple(int(length) for length in send.shape),
+            )
+        )
 
         # Materializing a lazy rank-local result can fail on only one rank.
         # Synchronize that failure before any rank posts Allreduce/Reduce, or
         # the remaining ranks can block forever in the buffer collective.
-        self._runtime.raise_if_error(error, "MPI xarray reduction buffer preparation")
+        self._runtime.raise_if_error(error, phase, signature)
         if send is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
@@ -967,11 +1147,20 @@ class XarrayMPI:
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.DataArray | None:
+        count: xr.DataArray | None = None
+        error: BaseException | None = None
+        try:
+            count = value.count(dim=dims, keep_attrs=False)
+        except BaseException as exc:
+            error = exc
         return self._comm_reduce(
-            value.count(dim=dims, keep_attrs=False),
+            count,
             _MPI.SUM,
             mode=mode,
             root=root,
+            expect_dtype=_partial_dtype(value.dtype.str, "count", None),
+            error=error,
+            phase="MPI xarray count reduction",
         )
 
     def _local_result(
@@ -1061,8 +1250,21 @@ class XarrayMPI:
         min_count: int | None,
         mode: Literal["all", "root"],
         root: int,
+        error: BaseException | None = None,
     ) -> xr.DataArray | None:
-        result = self._comm_reduce(partial, op, mode=mode, root=root)
+        result = self._comm_reduce(
+            partial,
+            op,
+            mode=mode,
+            root=root,
+            expect_dtype=_partial_dtype(
+                value.dtype.str,
+                "prod" if _op_name(op) == "PROD" else "sum",
+                skipna,
+            ),
+            error=error,
+            phase="MPI xarray sum/prod reduction",
+        )
         global_count = None
         if min_count is not None and self._skipna_enabled(value.dtype, skipna):
             global_count = self._count(value, dims, mode=mode, root=root)
@@ -1082,13 +1284,23 @@ class XarrayMPI:
     def _combine_mean(
         self,
         value: xr.DataArray,
-        partial_sum: xr.DataArray,
+        partial_sum: xr.DataArray | None,
         dims: tuple[Hashable, ...],
         *,
+        skipna: bool | None = None,
         mode: Literal["all", "root"],
         root: int,
+        error: BaseException | None = None,
     ) -> xr.DataArray | None:
-        global_sum = self._comm_reduce(partial_sum, _MPI.SUM, mode=mode, root=root)
+        global_sum = self._comm_reduce(
+            partial_sum,
+            _MPI.SUM,
+            mode=mode,
+            root=root,
+            expect_dtype=_partial_dtype(value.dtype.str, "sum", skipna),
+            error=error,
+            phase="MPI xarray mean reduction",
+        )
         global_count = self._count(value, dims, mode=mode, root=root)
         if global_sum is None or global_count is None:
             return None
@@ -1165,46 +1377,84 @@ class XarrayMPI:
     def _combine_extreme(
         self,
         value: xr.DataArray,
-        partial: xr.DataArray,
+        partial: xr.DataArray | None,
         dims: tuple[Hashable, ...],
         *,
         minimum: bool,
         skipna: bool | None,
         mode: Literal["all", "root"],
         root: int,
+        error: BaseException | None = None,
     ) -> xr.DataArray | None:
-        kind = partial.dtype.kind
+        # The number of collectives is decided from the reduced variable's
+        # declared dtype, which the plan has already agreed on, never from
+        # the rank-local partial. A rank owning an empty partition builds its
+        # partial through a different code path from a rank owning data, so
+        # branching on the partial's dtype can make those ranks post
+        # different numbers of collectives and desynchronize the run.
+        operation = "min" if minimum else "max"
+        expect_dtype = _partial_dtype(value.dtype.str, operation, skipna)
+        kind = value.dtype.kind
         if kind == "b":
             return self._comm_reduce(
                 partial,
                 _MPI.LAND if minimum else _MPI.LOR,
                 mode=mode,
                 root=root,
+                expect_dtype=expect_dtype,
+                error=error,
+                phase=f"MPI xarray {operation} reduction",
             )
 
         op = _MPI.MIN if minimum else _MPI.MAX
         if kind != "f":
-            return self._comm_reduce(partial, op, mode=mode, root=root)
+            return self._comm_reduce(
+                partial,
+                op,
+                mode=mode,
+                root=root,
+                expect_dtype=expect_dtype,
+                error=error,
+                phase=f"MPI xarray {operation} reduction",
+            )
 
-        identity = np.asarray(
-            np.inf if minimum else -np.inf,
-            dtype=partial.dtype,
-        ).item()
-        if self._skipna_enabled(value.dtype, skipna):
-            local_mask = value.count(dim=dims, keep_attrs=False) > 0
-            safe_partial = partial.where(local_mask, other=identity)
-        else:
-            local_mask = value.isnull().any(dim=dims, keep_attrs=False)
-            safe_partial = partial.where(~local_mask, other=identity)
-        if safe_partial.dtype != partial.dtype:
-            safe_partial = safe_partial.astype(partial.dtype, keep_attrs=True)
+        safe_partial: xr.DataArray | None = None
+        local_mask: xr.DataArray | None = None
+        if error is None:
+            try:
+                identity = np.asarray(
+                    np.inf if minimum else -np.inf,
+                    dtype=expect_dtype,
+                ).item()
+                if self._skipna_enabled(value.dtype, skipna):
+                    local_mask = value.count(dim=dims, keep_attrs=False) > 0
+                    safe_partial = partial.where(local_mask, other=identity)
+                else:
+                    local_mask = value.isnull().any(dim=dims, keep_attrs=False)
+                    safe_partial = partial.where(~local_mask, other=identity)
+                if safe_partial.dtype != expect_dtype:
+                    safe_partial = safe_partial.astype(expect_dtype, keep_attrs=True)
+            except BaseException as exc:
+                error = exc
+                safe_partial = None
+                local_mask = None
 
-        result = self._comm_reduce(safe_partial, op, mode=mode, root=root)
+        result = self._comm_reduce(
+            safe_partial,
+            op,
+            mode=mode,
+            root=root,
+            expect_dtype=expect_dtype,
+            error=error,
+            phase=f"MPI xarray {operation} reduction",
+        )
         global_mask = self._comm_reduce(
             local_mask,
             _MPI.LOR,
             mode=mode,
             root=root,
+            expect_dtype=np.dtype(bool),
+            phase=f"MPI xarray {operation} validity mask",
         )
         if result is None or global_mask is None:
             return None
@@ -1300,13 +1550,17 @@ class XarrayMPI:
 
         if isinstance(value, xr.DataArray):
             method = value.prod if product else value.sum
-            local = method(
-                dim=local_dim,
-                skipna=skipna,
-                min_count=None,
-                keep_attrs=keep_attrs,
+            local, local_error = self._guarded(
+                lambda: method(
+                    dim=local_dim,
+                    skipna=skipna,
+                    min_count=None,
+                    keep_attrs=keep_attrs,
+                )
             )
             if not dims:
+                if local_error is not None:
+                    raise local_error
                 return self._local_result(local, mode=mode, root=root)
             result = self._combine_sum_or_prod(
                 value,
@@ -1317,6 +1571,7 @@ class XarrayMPI:
                 min_count=min_count,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             return self._finish(
                 result,
@@ -1332,13 +1587,17 @@ class XarrayMPI:
                 variables[entry.name] = variable
                 continue
             method = variable.prod if product else variable.sum
-            local = method(
-                dim=entry.dims,
-                skipna=skipna,
-                min_count=None,
-                keep_attrs=keep_attrs,
+            local, local_error = self._guarded(
+                lambda method=method, entry=entry: method(
+                    dim=entry.dims,
+                    skipna=skipna,
+                    min_count=None,
+                    keep_attrs=keep_attrs,
+                )
             )
             if not entry.distributed:
+                if local_error is not None:
+                    raise local_error
                 variables[entry.name] = local
                 continue
             result = self._combine_sum_or_prod(
@@ -1350,6 +1609,7 @@ class XarrayMPI:
                 min_count=min_count,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             if result is not None:
                 variables[entry.name] = result
@@ -1392,18 +1652,22 @@ class XarrayMPI:
                     keep_attrs=keep_attrs,
                 )
                 return self._local_result(local_mean, mode=mode, root=root)
-            local_sum = value.sum(
-                dim=local_dim,
-                skipna=skipna,
-                min_count=None,
-                keep_attrs=keep_attrs,
+            local_sum, local_error = self._guarded(
+                lambda: value.sum(
+                    dim=local_dim,
+                    skipna=skipna,
+                    min_count=None,
+                    keep_attrs=keep_attrs,
+                )
             )
             result = self._combine_mean(
                 value,
                 local_sum,
                 dims,
+                skipna=skipna,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             return self._finish(
                 result,
@@ -1425,18 +1689,22 @@ class XarrayMPI:
                     keep_attrs=keep_attrs,
                 )
                 continue
-            local_sum = variable.sum(
-                dim=entry.dims,
-                skipna=skipna,
-                min_count=None,
-                keep_attrs=keep_attrs,
+            local_sum, local_error = self._guarded(
+                lambda variable=variable, entry=entry: variable.sum(
+                    dim=entry.dims,
+                    skipna=skipna,
+                    min_count=None,
+                    keep_attrs=keep_attrs,
+                )
             )
             result = self._combine_mean(
                 variable,
                 local_sum,
                 entry.dims,
+                skipna=skipna,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             if result is not None:
                 variables[entry.name] = result
@@ -1527,13 +1795,15 @@ class XarrayMPI:
                     mode=mode,
                     root=root,
                 )
-            local = self._local_extreme(
-                value,
-                dims,
-                empty=empty_partition,
-                minimum=minimum,
-                skipna=skipna,
-                keep_attrs=keep_attrs,
+            local, local_error = self._guarded(
+                lambda: self._local_extreme(
+                    value,
+                    dims,
+                    empty=empty_partition,
+                    minimum=minimum,
+                    skipna=skipna,
+                    keep_attrs=keep_attrs,
+                )
             )
             result = self._combine_extreme(
                 value,
@@ -1543,6 +1813,7 @@ class XarrayMPI:
                 skipna=skipna,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             return self._finish(
                 result,
@@ -1557,15 +1828,19 @@ class XarrayMPI:
             if not entry.dims:
                 variables[entry.name] = variable
                 continue
-            local = self._local_extreme(
-                variable,
-                entry.dims,
-                empty=empty_partition and entry.distributed,
-                minimum=minimum,
-                skipna=skipna,
-                keep_attrs=keep_attrs,
+            local, local_error = self._guarded(
+                lambda variable=variable, entry=entry: self._local_extreme(
+                    variable,
+                    entry.dims,
+                    empty=empty_partition and entry.distributed,
+                    minimum=minimum,
+                    skipna=skipna,
+                    keep_attrs=keep_attrs,
+                )
             )
             if not entry.distributed:
+                if local_error is not None:
+                    raise local_error
                 variables[entry.name] = local
                 continue
             result = self._combine_extreme(
@@ -1576,6 +1851,7 @@ class XarrayMPI:
                 skipna=skipna,
                 mode=mode,
                 root=root,
+                error=local_error,
             )
             if result is not None:
                 variables[entry.name] = result
@@ -1657,10 +1933,22 @@ class XarrayMPI:
 
         if isinstance(value, xr.DataArray):
             method = value.all if all_values else value.any
-            local = method(dim=local_dim, keep_attrs=keep_attrs)
+            local, local_error = self._guarded(
+                lambda: method(dim=local_dim, keep_attrs=keep_attrs)
+            )
             if not dims:
+                if local_error is not None:
+                    raise local_error
                 return self._local_result(local, mode=mode, root=root)
-            result = self._comm_reduce(local, op, mode=mode, root=root)
+            result = self._comm_reduce(
+                local,
+                op,
+                mode=mode,
+                root=root,
+                expect_dtype=_partial_dtype(value.dtype.str, operation, None),
+                error=local_error,
+                phase=f"MPI xarray {operation} reduction",
+            )
             return self._finish(
                 result,
                 old_meta=old_meta,
@@ -1675,11 +1963,25 @@ class XarrayMPI:
                 variables[entry.name] = variable
                 continue
             method = variable.all if all_values else variable.any
-            local = method(dim=entry.dims, keep_attrs=keep_attrs)
+            local, local_error = self._guarded(
+                lambda method=method, entry=entry: method(
+                    dim=entry.dims, keep_attrs=keep_attrs
+                )
+            )
             if not entry.distributed:
+                if local_error is not None:
+                    raise local_error
                 variables[entry.name] = local
                 continue
-            result = self._comm_reduce(local, op, mode=mode, root=root)
+            result = self._comm_reduce(
+                local,
+                op,
+                mode=mode,
+                root=root,
+                expect_dtype=_partial_dtype(variable.dtype.str, operation, None),
+                error=local_error,
+                phase=f"MPI xarray {operation} reduction",
+            )
             if result is not None:
                 variables[entry.name] = result
         return self._finish(

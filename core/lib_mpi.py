@@ -825,9 +825,50 @@ class MPIRuntime:
         finally:
             finished.set()
 
-    def raise_if_error(self, error: BaseException | None, phase: str) -> None:
-        """Raise a synchronized error on all ranks if any rank failed."""
-        failed = self.comm.allgather(error is not None)
+    def raise_if_error(
+        self,
+        error: BaseException | None,
+        phase: str,
+        signature: Any = None,
+    ) -> None:
+        """Raise a synchronized error on all ranks if any rank failed.
+
+        Parameters
+        ----------
+        error : BaseException or None
+            This rank's pending error, if any.
+        phase : str
+            Label reported in the synchronized error message.
+        signature : Any, optional
+            Description of the collective this rank is about to post, such as
+            the operation, mode, root, dtype and shape of a reduction buffer.
+            When given, every rank's signature is compared inside the same
+            all-gather that synchronizes errors, so a divergent collective
+            sequence raises immediately on all ranks instead of blocking
+            forever inside the following buffer collective. The comparison is
+            free in communication terms because it reuses an all-gather that
+            is posted regardless.
+        """
+        gathered = self.comm.allgather((error is not None, signature))
+        failed = [state for state, _ in gathered]
+
+        if signature is not None and not builtins.any(failed):
+            signatures = [item for _, item in gathered]
+            if builtins.any(item != signatures[0] for item in signatures):
+                disagreeing = [
+                    index
+                    for index, item in enumerate(signatures)
+                    if item != signatures[0]
+                ]
+                raise MPIError(
+                    f"MPI ranks posted different collectives during {phase}. "
+                    + f"Ranks {disagreeing} disagree with rank 0 "
+                    + f"({signatures[0]!r} on rank 0, "
+                    + f"{signatures[disagreeing[0]]!r} on rank "
+                    + f"{disagreeing[0]}), which would deadlock the following "
+                    + "collective."
+                )
+
         if not builtins.any(failed):
             return
 

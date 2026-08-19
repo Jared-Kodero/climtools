@@ -141,8 +141,72 @@ include `-m mpi4py`:
 | File        | Demonstrates                                                                 |
 | ----------- | ---------------------------------------------------------------------------- |
 | `native.py` | Minimal serial-vs-parallel NetCDF write comparison, verified by read-back. Start here for the smallest possible `to_netcdf(..., parallel=True)` example. Builds a synthetic precipitation field by default; set `CLIMTOOLS_EXAMPLE_NETCDF` to a file with a `pr` variable to use real data instead. |
-| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray`, `mpi.scatterv` and the NetCDF writers. Reads the SHiELD source file named by `DEFAULT_NETCDF_SOURCE`, which must be visible from every rank. |
-| `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks. |
+| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray`, `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` sets the size of that file. |
+| `test1.py`  | Parallel NetCDF write benchmark across three source placements: rank-0-only (scattered), distributed from the start, and read back through a distributed open. Sizes are set with `--time-steps`, `--lat` and `--lon`. Skips the collective write cleanly when netCDF4 lacks parallel4 support. |
+| `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks, with the environment settings the suite requires. |
+
+### Data placement covered by the suite
+
+Distributed reductions behave differently depending on where the data starts
+and how it is partitioned, so the suite covers each placement explicitly:
+
+- **Replicated**: every rank holds the whole object, `mpi.xarray.redistribute`
+  partitions it.
+- **Rank-0-only**: one rank reads or generates the field and the others hold
+  nothing. Both routes out of that state are checked, broadcasting followed by
+  partitioning, and `mpi.scatterv` of leading-axis slabs.
+- **Distributed open**: `mpi.xarray.open_dataset` partitions lazily on
+  effective chunk bounds, so the rank-local partial is materialized inside the
+  reduction.
+- **Empty partitions**: whenever the partitioned dimension is shorter than the
+  communicator, trailing ranks own no elements. These ranks build their
+  partials through a different code path, which makes this the configuration
+  most likely to expose an asymmetric collective sequence. Lengths below, at
+  and above the rank count are all exercised, in both result placements.
+
+### Collective symmetry
+
+`test_collective_sequence_symmetry` records the sequence of collectives each
+rank posts during every reduction and compares those sequences across ranks.
+Ranks that post different collectives can appear to succeed under one MPI
+implementation and deadlock under another, because whether a mismatched buffer
+collective completes depends on the algorithm the library selects. Comparing
+the sequences directly makes that class of defect fail deterministically in
+the suite rather than in a production run.
+
+The same guarantee is enforced at runtime. Every reduction buffer collective
+carries a signature (operation, placement, root, dtype, shape) inside the
+all-gather that already synchronizes rank-local errors, so a divergence raises
+`MPIError` naming the disagreeing ranks instead of blocking. The check costs no
+additional communication.
+
+### Running the suite on a cluster
+
+Two environment settings matter and are set in `test.sh`:
+
+```bash
+# Required. HDF5 advisory locks block rather than fail on a parallel
+# filesystem, which can stall a subset of ranks inside open_dataset.
+export HDF5_USE_FILE_LOCKING=FALSE
+
+# Diagnostic only, off by default. Disables HCOLL/UCC collective offload.
+export CLIMTOOLS_NO_COLL_OFFLOAD=1
+```
+
+Collective offload is left at the site default. A correct program must not
+depend on which collective algorithm the MPI library selects, and the suite
+verifies that every rank posts an identical collective sequence, so offload is
+not a correctness risk; disabling it costs performance on multi-node
+reductions. Use `CLIMTOOLS_NO_COLL_OFFLOAD=1` only when bisecting a suspected
+hang. If disabling offload changes the outcome, that is a collective-symmetry
+bug to investigate, not a setting to keep.
+
+Launch with `python -m mpi4py`, never a bare `python`, so an exception on a
+subset of ranks aborts the job instead of leaving it blocked in
+`MPI_Finalize`. Reductions are guarded by `mpi.watchdog`, which dumps every
+rank's stack after a period without progress and then aborts; the guard covers
+the error-synchronization step as well as the work itself, so a rank that runs
+ahead of the others still reports where it is.
 
 ## Parallel output
 

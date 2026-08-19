@@ -1,5 +1,24 @@
-"""Parallel NetCDF4 write benchmark with diagnostic, timestamped logging."""
+"""Parallel NetCDF4 write benchmark with diagnostic, timestamped logging.
 
+Three source placements are exercised, because they stress different parts of
+the parallel write path:
+
+- rank-0-only: one rank holds the whole field and scatters leading-axis slabs
+  before the collective write;
+- distributed: every rank builds only its own slab, with no scatter at all;
+- distributed open: the slabs are read back through
+  ``mpi.xarray.open_dataset``, which partitions on effective chunk bounds and
+  can therefore leave trailing ranks empty when the partition dimension is
+  shorter than the communicator.
+
+Sizes are configurable so the script can run on a laptop as well as on a
+compute node::
+
+    mpirun -n 8 python -m mpi4py test1.py
+    mpirun -n 8 python -m mpi4py test1.py --time-steps 64 --lat 181 --lon 360
+"""
+
+import argparse
 import shutil
 import time
 import warnings
@@ -28,9 +47,24 @@ def log(message: str) -> None:
     print(f"[{stamp}] [{rank_str}] | {message}", flush=True)
 
 
-def create_mock_dataset(path) -> xr.Dataset:
-    """Called only by rank 0. float32, (3600, 721, 1440)."""
-    nt, nlat, nlon = 3600, 721, 1440
+def parallel_netcdf_available() -> bool:
+    """Return whether netCDF4 was built against an MPI-enabled netcdf-c.
+
+    Without it the collective write paths raise on every rank. Detecting that
+    once, up front, turns an MPI_ABORT partway through a collective into a
+    clean skip.
+    """
+    try:
+        return bool(__import__("netCDF4").__has_parallel4_support__)
+    except Exception:
+        return False
+
+
+PARALLEL_NETCDF = parallel_netcdf_available()
+
+
+def create_mock_dataset(path, nt: int = 3600, nlat: int = 721, nlon: int = 1440):
+    """Build the mock file. Called only by rank 0."""
 
     ds = xr.Dataset(
         data_vars={
@@ -260,9 +294,135 @@ def save_parallel(ds: xr.Dataset | None, path: str) -> None:
         comm.Abort(1)
 
 
+def partition_bounds(length: int, rank_index: int, n_ranks: int) -> tuple[int, int]:
+    """Return this rank's half-open slab bounds on the leading axis."""
+    quotient, remainder = divmod(length, n_ranks)
+    start = rank_index * quotient + min(rank_index, remainder)
+    return start, start + quotient + int(rank_index < remainder)
+
+
+def save_distributed(path: str, shape: tuple[int, int, int]) -> None:
+    """Write from data that is distributed from the start, with no scatter.
+
+    Every rank generates only its own slab, so nothing is ever replicated and
+    no rank holds the whole field. Ranks whose slab is empty still enter every
+    collective, which is the case that breaks first if a write path makes its
+    collective sequence depend on local data.
+    """
+    n0, n1, n2 = shape
+    t_start, t_end = partition_bounds(n0, rank, size)
+    local_n0 = t_end - t_start
+
+    local_data = np.empty((local_n0, n1, n2), dtype=np.float32)
+    for offset in range(local_n0):
+        local_data[offset] = float(t_start + offset)
+
+    log(f"Distributed source: owns idx [{t_start}:{t_end}) ({local_n0} of {n0})")
+
+    if rank == 0:
+        with Dataset(path, mode="w", format="NETCDF4") as nc:
+            nc.createDimension("time", n0)
+            nc.createDimension("lat", n1)
+            nc.createDimension("lon", n2)
+            nc.createVariable("mock", np.float32, ("time", "lat", "lon"))
+
+    comm.Barrier()
+
+    start = time.perf_counter()
+    with Dataset(path, mode="r+", parallel=True, comm=comm, info=MPI.Info()) as nc:
+        data_var = nc.variables["mock"]
+        data_var.set_collective(True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=DeprecationWarning,
+                message=".*Setting the shape on a NumPy array.*",
+            )
+            if local_n0:
+                data_var[t_start:t_end, :, :] = local_data
+    comm.Barrier()
+
+    if rank == 0:
+        log(f"Distributed write of {path} done in {time.perf_counter() - start:.4f} s")
+
+    # Every rank verifies only the slab it wrote. Failures are reduced so the
+    # job fails together rather than one rank aborting mid-collective.
+    passed = True
+    message = ""
+    try:
+        with Dataset(path, mode="r", parallel=True, comm=comm, info=MPI.Info()) as nc:
+            data_var = nc.variables["mock"]
+            data_var.set_collective(True)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                readback = data_var[t_start:t_end, :, :]
+            if local_n0 and not np.array_equal(readback, local_data):
+                raise AssertionError(f"{path}: slab [{t_start}:{t_end}) mismatch")
+    except Exception as exc:
+        passed = False
+        message = str(exc)
+
+    if not passed:
+        log(f"VERIFICATION FAILED: {message}")
+
+    local_flag = np.array([1 if passed else 0], dtype=np.int32)
+    global_flag = np.zeros_like(local_flag)
+    comm.Allreduce(local_flag, global_flag, op=MPI.LAND)
+    if rank == 0:
+        log(
+            f"{path}: distributed verification "
+            + ("PASSED" if bool(global_flag[0]) else "FAILED")
+        )
+    if not bool(global_flag[0]):
+        comm.Abort(1)
+
+
+def read_distributed(path: str) -> None:
+    """Read the written file back in distributed mode and reduce it.
+
+    This is the round trip that matters in practice: open partitioned, reduce
+    across ranks, and compare against the serial answer. It also covers the
+    empty-partition case whenever the partition dimension is shorter than the
+    communicator.
+    """
+    import climtools
+    from climtools import mpi as ct_mpi
+
+    del climtools
+
+    distributed = ct_mpi.xarray.open_dataset(path, partition_dim="time")
+    local_size = int(distributed.sizes["time"])
+    log(f"Distributed open: owns {local_size} time step(s)")
+
+    total = ct_mpi.xarray.sum(distributed["mock"], dim="time")
+    minimum = ct_mpi.xarray.min(distributed["mock"], dim="time")
+    distributed.close()
+
+    with xr.open_dataset(path) as serial:
+        expected_sum = serial["mock"].sum(dim="time").values
+        expected_min = serial["mock"].min(dim="time").values
+
+    ok = bool(
+        np.allclose(total.values, expected_sum, rtol=1e-5)
+        and np.allclose(minimum.values, expected_min, rtol=1e-5)
+    )
+    if not bool(ct_mpi.reduce.all(ok)):
+        log("Distributed read-back verification FAILED")
+        comm.Abort(1)
+    if rank == 0:
+        log(f"{path}: distributed read-back verification PASSED")
+
+
 def main() -> None:
     if rank == 0:
         log("Started execution")
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--time-steps", type=int, default=3600)
+    parser.add_argument("--lat", type=int, default=721)
+    parser.add_argument("--lon", type=int, default=1440)
+    arguments = parser.parse_args()
+    shape = (arguments.time_steps, arguments.lat, arguments.lon)
 
     out_dir = Path.home() / "scratch" / "io_mpi_test"
 
@@ -270,12 +430,26 @@ def main() -> None:
         if out_dir.exists():
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        ds = create_mock_dataset(out_dir / "mock_in.nc")
+        ds = create_mock_dataset(out_dir / "mock_in.nc", *shape)
     else:
         ds = None
 
+    # Rank 0 alone creates the directory, so every other rank must wait for it
+    # before touching any path beneath it.
+    comm.Barrier()
+
     save_native(ds, out_dir / "mock_serial_out.nc")
-    save_parallel(ds, out_dir / "mock_parallel_out.nc")
+
+    if PARALLEL_NETCDF:
+        save_parallel(ds, out_dir / "mock_parallel_out.nc")
+        save_distributed(str(out_dir / "mock_distributed_out.nc"), shape)
+        read_distributed(str(out_dir / "mock_distributed_out.nc"))
+    else:
+        if rank == 0:
+            log("SKIP: netCDF4 lacks parallel4 support; serial paths only")
+            create_mock_dataset(out_dir / "mock_distributed_out.nc", *shape)
+        comm.Barrier()
+        read_distributed(str(out_dir / "mock_distributed_out.nc"))
 
     if rank == 0:
         log("All datasets written and verified")
