@@ -32,7 +32,6 @@ from typing import Any
 
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
 
 DEFAULT_TIME_STEPS = 3600
@@ -188,6 +187,8 @@ def build_mock_dataset(
         },
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
+
+    path.unlink(missing_ok=True)
 
     ds.to_netcdf(path, format="NETCDF4")
 
@@ -2862,6 +2863,7 @@ def main(n_time_steps: int = DEFAULT_TIME_STEPS) -> None:
     if RANK == 0:
         if OUTPUT_DIR.exists():
             shutil.rmtree(OUTPUT_DIR)
+
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         build_mock_dataset(n_time_steps, path=TEST_DATA_PATH)
 

@@ -756,7 +756,7 @@ class MPIRuntime:
         timeout: float = 600.0,
         *,
         abort: bool = True,
-    ) -> Generator[None, None, None]:
+    ) -> Generator:
         """Dump every rank's stack if the enclosed block stops making progress.
 
         A bounded barrier cannot observe a rank already blocked inside a

@@ -7,6 +7,8 @@
 
 conda activate mother
 
+module list  # determine versions of netcdf and open mpi the stuff is linked againts
+
 # `python -m mpi4py`, not a bare `python`: an unhandled exception on a subset
 # of ranks otherwise leaves the job blocked in MPI_Finalize until the
 # scheduler kills it. See
