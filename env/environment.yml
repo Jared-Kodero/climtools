@@ -1,12 +1,12 @@
 # Full climtools runtime environment. Every package below is imported
 # somewhere in climtools's own source, or (cdo, nco, ffmpeg) invoked as a
 # subprocess. Excludes mpi4py and netCDF4: those are built and pinned in
-# place by scripts/setup_env.sh against a parallel-enabled MPI/HDF5/NetCDF-C
+# place by env/setup_env.sh against a parallel-enabled MPI/HDF5/NetCDF-C
 # stack (HPC environment modules, or a source build — never a distro
 # package manager, which is not available on HPC login/compute nodes), and
 # re-solving them here would silently replace that build with a serial one.
 #
-# Applied automatically by scripts/setup_env.sh; to apply by hand instead:
+# Applied automatically by env/setup_env.sh; to apply by hand instead:
 #
 #   conda env update -n climtools -f environment.yml
 #

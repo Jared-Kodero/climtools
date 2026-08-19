@@ -7,6 +7,8 @@ import builtins
 import datetime
 import functools
 import os
+import sys
+import time
 from collections.abc import Callable, Sequence
 from numbers import Integral
 from typing import Any, Literal, ParamSpec, TypeVar, cast
@@ -43,6 +45,61 @@ _LAUNCH_ENV = (
 
 class MPIError(Exception):
     """MPI runtime or synchronized distributed-execution error."""
+
+
+def install_abort_excepthook() -> bool:
+    """Abort ``MPI_COMM_WORLD`` on an unhandled exception.
+
+    mpi4py calls ``MPI_Init_thread`` on import and registers ``MPI_Finalize``
+    to run at interpreter exit. An unhandled exception on a subset of ranks
+    therefore does not terminate the job: the failing ranks block in
+    ``MPI_Finalize`` waiting for the others, while the others block in the
+    collective the failing ranks never reached. mpi4py's documented remedy is
+    to launch with ``python -m mpi4py``, whose finalizer hook calls
+    ``MPI_Abort``; see
+    https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks
+
+    That remedy depends on the launch command, which climtools does not
+    control, so the same hook is installed here as a fallback for scripts
+    started with a plain ``python``. Set ``CLIMTOOLS_MPI_ABORT_ON_EXCEPTION=0``
+    to disable.
+
+    Returns
+    -------
+    bool
+        True if this call installed the hook.
+    """
+    if os.environ.get("CLIMTOOLS_MPI_ABORT_ON_EXCEPTION", "1") == "0":
+        return False
+    # Already running under `python -m mpi4py`, which installs its own hook.
+    if getattr(sys.excepthook, "__module__", "") == "mpi4py.run":
+        return False
+    if getattr(sys.excepthook, "_climtools_mpi_abort", False):
+        return False
+    if not mpi_alive(_MPI.COMM_WORLD):
+        return False
+
+    previous = sys.excepthook
+
+    def _abort_excepthook(
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        traceback: Any,
+    ) -> None:
+        try:
+            previous(exc_type, exc_value, traceback)
+            sys.stderr.write(
+                f"[MPI RANK {_MPI.COMM_WORLD.Get_rank()}] unhandled "
+                + f"{exc_type.__name__}; aborting MPI_COMM_WORLD so the "
+                + "remaining ranks do not deadlock in the next collective.\n"
+            )
+            sys.stderr.flush()
+        finally:
+            _MPI.COMM_WORLD.Abort(1)
+
+    _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
+    sys.excepthook = _abort_excepthook
+    return True
 
 
 def mpi_alive(comm: _MPI.Comm) -> bool:
@@ -567,7 +624,12 @@ class MPIRuntime:
             if prefix:
                 msg_prefix += f"{mpi_str} "
 
-            # Print the final assembled string
+            # Print the final assembled string. Flush by default: rank
+            # output under a batch launcher is redirected to a file and is
+            # therefore block-buffered, so an un-flushed log leaves the last
+            # message before a hang sitting in the buffer and makes the
+            # deadlock appear to be somewhere it is not.
+            kwargs.setdefault("flush", True)
             print(f"{msg_prefix}{message}", **kwargs)
 
         else:
@@ -683,6 +745,52 @@ class MPIRuntime:
             return _dtlib.from_numpy_dtype(key)
         except (KeyError, ValueError) as exc:
             raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
+
+    def sync(self, phase: str = "", timeout: float | None = None) -> None:
+        """Barrier that reports and aborts instead of blocking forever.
+
+        A plain ``comm.barrier()`` has no timeout: if one rank never arrives,
+        every other rank blocks until the batch scheduler kills the job, with
+        no indication of where. This posts a non-blocking barrier and polls it,
+        so a straggler produces a diagnosable abort instead of a silent hang.
+
+        Parameters
+        ----------
+        phase : str, optional
+            Label reported if the barrier times out.
+        timeout : float, optional
+            Seconds to wait before aborting. If None, read from the
+            ``CLIMTOOLS_MPI_SYNC_TIMEOUT`` environment variable; a value of
+            zero or an unset variable falls back to a plain blocking barrier.
+
+        Returns
+        -------
+        None
+        """
+        if self.comm.size == 1:
+            return
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("CLIMTOOLS_MPI_SYNC_TIMEOUT", "") or 0.0)
+            except ValueError:
+                timeout = 0.0
+        if timeout <= 0.0:
+            self.comm.barrier()
+            return
+
+        request = self.comm.Ibarrier()
+        deadline = time.monotonic() + timeout
+        while not request.Test():
+            if time.monotonic() >= deadline:
+                sys.stderr.write(
+                    f"[MPI RANK {self.comm.rank}] collective timeout after "
+                    + f"{timeout:g} s at {phase or 'unnamed phase'}: at least "
+                    + "one rank never reached this barrier. Aborting "
+                    + "MPI_COMM_WORLD to avoid an unbounded deadlock.\n"
+                )
+                sys.stderr.flush()
+                self.comm.Abort(1)
+            time.sleep(0.05)
 
     def raise_if_error(self, error: BaseException | None, phase: str) -> None:
         """Raise a synchronized error on all ranks if any rank failed."""
@@ -811,6 +919,7 @@ class MPIRuntime:
         return wrapper
 
 
+install_abort_excepthook()
 mpi: MPIRuntime = MPIRuntime()
 
 __all__ = ["mpi"]

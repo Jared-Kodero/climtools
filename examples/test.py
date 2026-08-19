@@ -236,6 +236,11 @@ def safe_run(fn: Callable[..., None], *args: Any, **kwargs: Any) -> None:
     CURRENT_TEST_NUMBER += 1
     CURRENT_TEST_NAME = fn.__name__
     before = len(RESULTS)
+
+    # Bound the entry barrier. A rank that never arrives (a straggling
+    # collective, or a blocked NetCDF read on a locking filesystem) would
+    # otherwise leave every other rank blocked with no indication of where.
+    mpi.sync(f"entry barrier for {fn.__name__}")
     progress("START")
 
     error: BaseException | None = None
@@ -243,6 +248,13 @@ def safe_run(fn: Callable[..., None], *args: Any, **kwargs: Any) -> None:
         fn(*args, **kwargs)
     except BaseException as exc:
         error = exc
+
+    # raise_if_error is itself collective, so it only synchronizes failures
+    # that every rank reaches. A rank that raised part-way through a
+    # multi-collective operation arrives here while the others are still
+    # blocked inside that operation; bound the wait so the mismatch aborts
+    # with a diagnostic rather than deadlocking.
+    mpi.sync(f"exit barrier for {fn.__name__}")
 
     synchronized_error: BaseException | None = None
     try:
@@ -299,7 +311,13 @@ def _load_source_variable(
     variable: str,
     **indexers: int | slice,
 ) -> xr.DataArray:
-    """Load only the requested selection of one variable from the SHiELD file."""
+    """Load only the requested selection of one variable from the SHiELD file.
+
+    Every rank opens the same file concurrently. HDF5 takes POSIX advisory
+    locks by default, which can block indefinitely on a parallel filesystem;
+    ``examples/test.sh`` exports ``HDF5_USE_FILE_LOCKING=FALSE`` for this
+    reason.
+    """
     with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
         data = source[variable]
         valid_indexers = {

@@ -14,6 +14,7 @@ HDF5/netCDF-C (``netCDF4.__has_parallel4_support__``). On a single rank, pass
 launch; see :func:`climtools.xgeo.to_netcdf`.
 """
 
+import os
 import time
 from pathlib import Path
 
@@ -23,31 +24,40 @@ from climtools import mpi, xgeo
 
 
 def create_precipitation_dataset() -> xr.Dataset:
-    # """Build a synthetic (time, lat, lon) precipitation dataset."""
-    # nt, nlat, nlon = 100, 91, 180
-    # rng = np.random.default_rng(0)
-    # return xr.Dataset(
-    #     data_vars={
-    #         "precipitation": (
-    #             ("time", "lat", "lon"),
-    #             rng.random((nt, nlat, nlon)).astype(np.float32),
-    #             {"units": "mm day-1", "long_name": "precipitation rate"},
-    #         ),
-    #     },
-    #     coords={
-    #         "time": (
-    #             "time",
-    #             np.arange(nt, dtype=np.float64),
-    #             {"units": "days since 2000-01-01"},
-    #         ),
-    #         "lat": ("lat", np.linspace(-90.0, 90.0, nlat, dtype=np.float32)),
-    #         "lon": ("lon", np.linspace(0.0, 358.0, nlon, dtype=np.float32)),
-    #     },
-    #     attrs={"title": "climtools NetCDF write example: precipitation"},
-    # )
+    """Return the example (time, lat, lon) precipitation dataset.
 
-    path = "/users/jkodero/research/models/gfdl_shield/archive/2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/case/fv3_hist.nest04.nc"
-    return xr.open_dataset(path)[["pr"]]
+    Reads ``CLIMTOOLS_EXAMPLE_NETCDF`` if it is set and points at a readable
+    file, otherwise builds a synthetic field so the example runs anywhere.
+    """
+    source = os.environ.get("CLIMTOOLS_EXAMPLE_NETCDF")
+    if source:
+        path = Path(source)
+        if not path.is_file():
+            raise FileNotFoundError(f"CLIMTOOLS_EXAMPLE_NETCDF is not readable: {path}")
+        with xr.open_dataset(path) as handle:
+            return handle[["pr"]].load()
+
+    nt, nlat, nlon = 100, 91, 180
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        data_vars={
+            "pr": (
+                ("time", "lat", "lon"),
+                rng.random((nt, nlat, nlon)).astype(np.float32),
+                {"units": "mm day-1", "long_name": "precipitation rate"},
+            ),
+        },
+        coords={
+            "time": (
+                "time",
+                np.arange(nt, dtype=np.float64),
+                {"units": "days since 2000-01-01"},
+            ),
+            "lat": ("lat", np.linspace(-90.0, 90.0, nlat, dtype=np.float32)),
+            "lon": ("lon", np.linspace(0.0, 358.0, nlon, dtype=np.float32)),
+        },
+        attrs={"title": "climtools NetCDF write example: precipitation"},
+    )
 
 
 def run_serial(out_dir: Path) -> None:
@@ -110,7 +120,10 @@ def run_parallel(out_dir: Path) -> None:
     mpi.log(f"parallel write done in {time.perf_counter() - started:.3f} s")
 
     if mpi.comm.rank == 0:
-        reference = create_precipitation_dataset()["pr"].values
+        # Reuse the buffers that were written rather than rebuilding the
+        # dataset: a second read of an external source is not guaranteed to
+        # reproduce the same values, which would make the check unsound.
+        reference = ds["pr"].values
         with xr.open_dataset(path) as check:
             if not np.array_equal(check["pr"].values, reference):
                 raise AssertionError(f"{path}: data mismatch after parallel write")

@@ -16,7 +16,7 @@ statistics, NetCDF-writing and theming helpers.
 | `climtools.calc`  | Trends, correlations and difference-of-means testing.                     |
 | `climtools.cmaps` | Colormaps spanning local IPCC tables, matplotlib and cmocean.             |
 | `climtools.cdo`   | Thin xarray-aware wrapper over the CDO command-line tool.                 |
-| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xreduce` for collective reductions, backing parallel NetCDF-4 output. |
+| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xarray` for collective reductions, backing parallel NetCDF-4 output. |
 
 ## Installation
 
@@ -133,16 +133,16 @@ t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 
 ## Examples
 
-`examples/` contains four scripts, all runnable directly (`python
-examples/<script>.py`) or under an MPI launcher (`mpirun -n N python
-examples/<script>.py`):
+`examples/` contains three files. The Python scripts run directly (`python
+examples/<script>.py`) or under an MPI launcher; see
+[Running under MPI](#running-under-mpi) for why the launcher line should
+include `-m mpi4py`:
 
-| Script                             | Demonstrates                                                                 |
-| ----------------------------------- | ----------------------------------------------------------------------------- |
-| `native.py`                         | Minimal serial-vs-parallel NetCDF write comparison, verified by read-back. Start here for the smallest possible `to_netcdf(..., parallel=True)` example. |
-| `time_composites.py`                | A full MPI-distributed analysis pipeline: independent cases are assigned one-per-rank round-robin over `mpi.comm.rank`/`.size`, each case is written with the ordinary serial writer (not the collective one, since each rank's case finishes on its own schedule), and a `mpi.comm.barrier()` synchronizes ranks before any rank cleans up shared scratch space. |
-| `serial_time_composites.py`         | The same event-detection and compositing computation as `time_composites.py`, with no MPI at all — a reference implementation for correctness comparison and for environments without a parallel-enabled MPI/NetCDF stack. |
-| `work.sh`                           | An HPC batch-submission script (`sbatch`) running the MPI and serial versions back to back for comparison. |
+| File        | Demonstrates                                                                 |
+| ----------- | ---------------------------------------------------------------------------- |
+| `native.py` | Minimal serial-vs-parallel NetCDF write comparison, verified by read-back. Start here for the smallest possible `to_netcdf(..., parallel=True)` example. Builds a synthetic precipitation field by default; set `CLIMTOOLS_EXAMPLE_NETCDF` to a file with a `pr` variable to use real data instead. |
+| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray`, `mpi.scatterv` and the NetCDF writers. Reads the SHiELD source file named by `DEFAULT_NETCDF_SOURCE`, which must be visible from every rank. |
+| `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks. |
 
 ## Parallel output
 
@@ -191,9 +191,37 @@ main()
 ```
 
 ```bash
-mpirun -n 8 python script.py
-srun --ntasks=8 --mpi=pmix python script.py
+mpirun -n 8 python -m mpi4py script.py
+srun --ntasks=8 --mpi=pmix python -m mpi4py script.py
 ```
+
+### Running under MPI
+
+Launch with `python -m mpi4py`, not a bare `python`. mpi4py calls
+`MPI_Init_thread` when `mpi4py.MPI` is imported and registers `MPI_Finalize`
+to run at interpreter exit, so an unhandled exception on a subset of ranks
+does not terminate the job: the failing ranks block in `MPI_Finalize` waiting
+for the others, and the others block in the collective the failing ranks never
+reached. `python -m mpi4py` installs a finalizer hook that calls `MPI_Abort`
+instead, converting that deadlock into a non-zero exit
+([mpi4py: Exceptions and deadlocks](https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks)).
+
+Because the launch command is outside climtools's control, importing
+`climtools.mpi` under an MPI launcher installs the equivalent `sys.excepthook`
+as a fallback. Set `CLIMTOOLS_MPI_ABORT_ON_EXCEPTION=0` to disable it; it is a
+no-op when `python -m mpi4py` already installed its own hook, and on
+single-rank runs with no launcher.
+
+Neither hook helps when a rank is merely slow or blocked rather than failing.
+For that, `mpi.sync(phase)` is a barrier with a bound: set
+`CLIMTOOLS_MPI_SYNC_TIMEOUT` to a number of seconds and a rank that never
+arrives produces a labelled `MPI_Abort` instead of an unbounded wait. Unset or
+zero, `mpi.sync` is an ordinary `comm.barrier()`.
+
+On Lustre or GPFS, also export `HDF5_USE_FILE_LOCKING=FALSE`. HDF5 takes POSIX
+advisory locks by default, and many ranks opening the same NetCDF file
+concurrently can block there indefinitely, which presents as a hang with no
+traceback on any rank.
 
 The same script runs unchanged on a single rank without a launcher, by
 passing `allow_serial=True` to `to_netcdf`; `mpi.reduce` degrades to a no-op
@@ -210,27 +238,27 @@ native `mpi4py.MPI.Intracomm`, so anything not covered above — point-to-point
 reached directly as `mpi.comm.<method>` with full mpi4py signatures and IDE
 completion.
 
-`mpi.xreduce` reduces an xarray `DataArray`/`Dataset` along a named
+`mpi.xarray` reduces an xarray `DataArray`/`Dataset` along a named
 dimension that is itself split across ranks — the counterpart to
 `mpi.reduce` for when the split is expressed as a dimension rather than as
 independent whole-array partials:
 
 ```python
 # Each rank holds a different slice of the "event" dimension.
-local_mean = mpi.xreduce.mean(local_events, dim="event")  # same result on every rank
+local_mean = mpi.xarray.mean(local_events, dim="event")  # same result on every rank
 ```
 
 `local_mean` is identical to calling plain `xarray`'s
-`assembled.mean(dim="event")` on the fully assembled array — `xreduce`
+`assembled.mean(dim="event")` on the fully assembled array — `mpi.xarray`
 combines each rank's local xarray reduction with one collective rather than
-requiring the full array in one place first. `xreduce` exposes `sum`, `prod`,
+requiring the full array in one place first. `mpi.xarray` exposes `sum`, `prod`,
 `min`, `max`, `mean`, `any`, and `all`, with `skipna`/`min_count` applied
 consistently across the whole distributed dimension (not per rank): a value
 is only dropped by `min_count` once the count is summed across every rank
 that holds a share of `dim`, and `skipna=False` propagates a NaN present on
 any rank to the combined result, not just NaNs local to the current rank.
 
-Every one of `mpi.reduce`/`mpi.xreduce`/`mpi.scatterv`/`to_netcdf(...,
+Every one of `mpi.reduce`/`mpi.xarray`/`mpi.scatterv`/`to_netcdf(...,
 parallel=True)` and the raw `mpi.comm.<method>` calls above is
 MPI-collective: every rank in `mpi.comm` must reach the same call, in the
 same order, or the call blocks forever waiting for ranks that never arrive.
@@ -241,7 +269,7 @@ only one of them supplies data. Work that inherently runs at different
 paces per rank (for example, independent cases assigned one-per-rank) should
 use ordinary serial `to_netcdf()` for anything each rank writes on its own,
 and only bring ranks back through a shared collective (`mpi.comm.barrier()`,
-`mpi.reduce`, `mpi.xreduce`, or a collective write) at points where every
+`mpi.reduce`, `mpi.xarray`, or a collective write) at points where every
 rank is guaranteed to have arrived — see `examples/time_composites.py`
 (above) for a script structured this way.
 
@@ -257,7 +285,7 @@ on `COMM_WORLD` by default (rather than MPI's default
 `ERRORS_ARE_FATAL`), so a failing raw `mpi.comm.<method>` call raises a
 catchable `mpi4py.MPI.Exception` (a `RuntimeError` subclass) instead of
 aborting the process outright; `climtools.mpi.MPIError` is climtools's own
-exception type, raised by `mpi.reduce`/`mpi.xreduce`/the `@mpi` decorator/the
+exception type, raised by `mpi.reduce`/`mpi.xarray`/the `@mpi` decorator/the
 NetCDF writer for climtools-level validation and synchronized-failure
 reporting; see the [mpi4py Overview](https://mpi4py.readthedocs.io/en/stable/overview.html)
 for further detail on both.
