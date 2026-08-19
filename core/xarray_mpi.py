@@ -923,11 +923,23 @@ class XarrayMPI:
         mode: Literal["all", "root"],
         root: int,
     ) -> xr.DataArray | None:
-        send = np.asarray(value.values)
-        if not send.flags.c_contiguous:
-            send = np.ascontiguousarray(send)
-        if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
-            raise TypeError(f"Unsupported MPI xarray dtype: {send.dtype}.")
+        send: np.ndarray[Any, Any] | None = None
+        error: BaseException | None = None
+        try:
+            send = np.asarray(value.values)
+            if not send.flags.c_contiguous:
+                send = np.ascontiguousarray(send)
+            if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
+                raise TypeError(f"Unsupported MPI xarray dtype: {send.dtype}.")
+        except BaseException as exc:
+            error = exc
+
+        # Materializing a lazy rank-local result can fail on only one rank.
+        # Synchronize that failure before any rank posts Allreduce/Reduce, or
+        # the remaining ranks can block forever in the buffer collective.
+        self._runtime.raise_if_error(error, "MPI xarray reduction buffer preparation")
+        if send is None:
+            raise AssertionError("MPI xarray reduction buffer is missing.")
 
         # Allocate the receive buffer with the send buffer's own dtype and a
         # C-contiguous layout. np.empty_like would inherit the source memory

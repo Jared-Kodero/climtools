@@ -86,7 +86,17 @@ def timed():
     box = {"seconds": 0.0}
     mpi.comm.barrier()
     start = mpi.MPI.Wtime()
-    yield box
+
+    error: BaseException | None = None
+    try:
+        yield box
+    except BaseException as exc:
+        error = exc
+
+    # Synchronize Python exceptions before the closing barrier. Without this,
+    # one failing rank skips the barrier while successful ranks wait in it,
+    # hiding the original exception behind an MPI deadlock.
+    mpi.raise_if_error(error, "timed block")
     mpi.comm.barrier()
     local_elapsed = mpi.MPI.Wtime() - start
     box["seconds"] = mpi.reduce.max(local_elapsed)
@@ -886,17 +896,19 @@ def test_xarray_open_dataset() -> None:
         start_value = None
         end_value = None
 
-    mpi.log(
-        f"\nDATASET ON RANK {RANK}/{SIZE}:\n"
-        + f"{distributed}\n"
-        + f"partition_dim={partition_dim}\n"
-        + f"start_idx={start_idx}, start_value={start_value}\n"
-        + f"end_idx={end_idx}, end_value={end_value}\n"
-        + f"stop_idx_exclusive={stop_idx}",
-        root=-1,
-        prefix=True,
-        flush=True,
+    partition_rows = mpi.comm.allgather(
+        (partition_dim, start_idx, end_idx, start_value, end_value)
     )
+    if RANK == 0:
+        for rank, row in enumerate(partition_rows):
+            dim, idx_start, idx_end, value_start, value_end = row
+            mpi.log(
+                f"[PARTITION RANK {rank}/{SIZE}] partition_dim={dim} "
+                + f"idx_start={idx_start} idx_end={idx_end} "
+                + f"value_start={value_start} value_end={value_end}",
+                prefix=False,
+                flush=True,
+            )
 
     local = distributed["pr"].isel(time=0).values.copy()
     variable_meta = distributed["pr"].attrs.get("mpi_meta")
@@ -1221,10 +1233,13 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
 
     progress("entering timed parallel section")
     with timed() as box:
+        progress("reducing Dataset sum")
         result = mpi.xarray.sum(distributed, dim="lat")
+        progress("reducing Dataset mean")
         mean_result = mpi.xarray.mean(distributed, dim=("lat", "lon"))
     parallel_s = box["seconds"]
 
+    progress("checking Dataset reduction results")
     expected = full.sum(dim="lat")
     expected_mean = full.mean(dim=("lat", "lon"))
     correct = (
@@ -1264,6 +1279,7 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
         and "mpi_meta" not in mean_result.attrs
     )
 
+    progress("preparing empty-partition extreme reductions")
     profile = _load_source_variable(
         "t",
         time=0,
@@ -1272,7 +1288,9 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
         lon=0,
     )
     profile_distributed = mpi.xarray.redistribute(profile, "plev")
+    progress("reducing empty-partition minimum")
     minimum = mpi.xarray.min(profile_distributed, dim="plev")
+    progress("reducing empty-partition maximum")
     maximum = mpi.xarray.max(profile_distributed, dim="plev")
     correct = (
         correct
