@@ -18,8 +18,6 @@ from mpi4py import MPI as _MPI
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from numpy.typing import DTypeLike
-
     from .lib_mpi import MPIRuntime
 
 MPI_META = "mpi_meta"
@@ -180,7 +178,7 @@ def _usable_native_chunk(length: int, native_chunk: int | None) -> bool:
     return math.ceil(length / native_chunk) > 1
 
 
-def _effective_chunk_size(
+def get_effective_chunk_size(
     length: int,
     native_chunk: int | None,
     mpi_size: int,
@@ -195,10 +193,10 @@ def _effective_chunk_size(
     return max(1, math.ceil(length / mpi_size))
 
 
-def _chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
+def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     """Calculate effective chunk sizes for all Dataset dimensions."""
     return {
-        str(dim): _effective_chunk_size(
+        str(dim): get_effective_chunk_size(
             int(length),
             _native_chunk_size(data, dim),
             mpi_size,
@@ -207,7 +205,7 @@ def _chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     }
 
 
-def _open_chunk_overrides(
+def get_chunk_overrides(
     data: xr.Dataset,
     chunk_info: Mapping[str, int],
 ) -> dict[str, int]:
@@ -228,7 +226,7 @@ def _balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
     return start, start + quotient + int(rank < remainder)
 
 
-def _chunk_bounds(
+def get_chunk_bounds(
     length: int,
     chunk_size: int,
     rank: int,
@@ -250,7 +248,7 @@ def _chunk_bounds(
     return start, stop
 
 
-def _prune_chunk_info(
+def prune_chunk_info(
     chunk_info: Mapping[str, int],
     value: xr.Dataset | xr.DataArray,
 ) -> dict[str, int]:
@@ -261,7 +259,7 @@ def _prune_chunk_info(
     }
 
 
-def _is_scalar_indexer(indexer: Any) -> bool:
+def indexer_is_scalar(indexer: Any) -> bool:
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
 
@@ -321,8 +319,8 @@ class XarrayMPI:
                     f"partition_dim {partition_dim!r} is not in "
                     + f"{list(metadata.dims)!r}."
                 )
-            chunk_info = _chunk_info(metadata, self._runtime.comm.size)
-            open_chunk_overrides = _open_chunk_overrides(metadata, chunk_info)
+            chunk_info = get_chunk_info(metadata, self._runtime.comm.size)
+            open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
             global_size = int(metadata.sizes[partition_dim])
             longest_size = max(int(length) for length in metadata.sizes.values())
             if self._runtime.comm.rank == 0 and global_size < longest_size:
@@ -341,7 +339,7 @@ class XarrayMPI:
                 )
 
         partition_chunk = chunk_info[str(partition_dim)]
-        start, stop = _chunk_bounds(
+        start, stop = get_chunk_bounds(
             global_size,
             partition_chunk,
             self._runtime.comm.rank,
@@ -417,28 +415,28 @@ class XarrayMPI:
         chunk_size = int(
             info.get(
                 str(dim),
-                _effective_chunk_size(length, None, self._runtime.comm.size),
+                get_effective_chunk_size(length, None, self._runtime.comm.size),
             )
         )
-        chunk_size = _effective_chunk_size(
+        chunk_size = get_effective_chunk_size(
             length,
             chunk_size,
             self._runtime.comm.size,
         )
         info[str(dim)] = chunk_size
 
-        start, stop = _chunk_bounds(
+        start, stop = get_chunk_bounds(
             length,
             chunk_size,
             self._runtime.comm.rank,
             self._runtime.comm.size,
         )
         output = strip_mpi_meta(value).isel({dim: slice(start, stop)})
-        info = _prune_chunk_info(info, output)
+        info = prune_chunk_info(info, output)
         for other_dim, other_length in output.sizes.items():
             info.setdefault(
                 str(other_dim),
-                _effective_chunk_size(
+                get_effective_chunk_size(
                     int(other_length),
                     None,
                     self._runtime.comm.size,
@@ -479,8 +477,8 @@ class XarrayMPI:
             return value.isel(supplied)
 
         distributed_indexer = supplied.pop(dim)
-        if _is_scalar_indexer(distributed_indexer):
-            return self._isel_scalar(value, dim, int(distributed_indexer), supplied)
+        if indexer_is_scalar(distributed_indexer):
+            return self.isel_scalar(value, dim, int(distributed_indexer), supplied)
 
         if not isinstance(distributed_indexer, slice):
             raise NotImplementedError(
@@ -507,7 +505,7 @@ class XarrayMPI:
         new_start = sum(counts[: self._runtime.comm.rank])
         new_stop = new_start + counts[self._runtime.comm.rank]
         new_global_size = sum(counts)
-        chunk_info = _prune_chunk_info(meta["chunk_info"], output)
+        chunk_info = prune_chunk_info(meta["chunk_info"], output)
         set_mpi_meta(
             output,
             dim=dim,
@@ -518,7 +516,7 @@ class XarrayMPI:
         )
         return output
 
-    def _isel_scalar(
+    def isel_scalar(
         self,
         value: xr.Dataset | xr.DataArray,
         dim: Hashable,
@@ -591,8 +589,8 @@ class XarrayMPI:
             )
 
         distributed_indexer = supplied.pop(dim)
-        if _is_scalar_indexer(distributed_indexer):
-            return self._sel_scalar(
+        if indexer_is_scalar(distributed_indexer):
+            return self.sel_scalar(
                 value,
                 dim,
                 distributed_indexer,
@@ -618,7 +616,7 @@ class XarrayMPI:
         counts = self._runtime.comm.allgather(int(output.sizes[dim]))
         new_start = sum(counts[: self._runtime.comm.rank])
         new_stop = new_start + counts[self._runtime.comm.rank]
-        chunk_info = _prune_chunk_info(meta["chunk_info"], output)
+        chunk_info = prune_chunk_info(meta["chunk_info"], output)
         set_mpi_meta(
             output,
             dim=dim,
@@ -629,7 +627,7 @@ class XarrayMPI:
         )
         return output
 
-    def _sel_scalar(
+    def sel_scalar(
         self,
         value: xr.Dataset | xr.DataArray,
         dim: Hashable,
@@ -924,21 +922,11 @@ class XarrayMPI:
         *,
         mode: Literal["all", "root"],
         root: int,
-        dtype: DTypeLike | None = None,
     ) -> xr.DataArray | None:
         send: np.ndarray[Any, Any] | None = None
         error: BaseException | None = None
         try:
             send = np.asarray(value.values)
-            if dtype is not None and send.dtype != np.dtype(dtype):
-                # A rank-local xarray operation can promote the dtype on a
-                # subset of ranks: a rank holding an empty partition reaches
-                # its local result through a different code path from a rank
-                # holding data, and xarray's promotion rules for that path
-                # differ between library versions. The caller's dtype comes
-                # from the reduction plan and is identical on every rank, so
-                # coerce to it before the buffer collective is posted.
-                send = send.astype(np.dtype(dtype))
             if not send.flags.c_contiguous:
                 send = np.ascontiguousarray(send)
             if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
@@ -946,45 +934,10 @@ class XarrayMPI:
         except BaseException as exc:
             error = exc
 
-        # One allgather carrying both the failure flag and the buffer
-        # signature, checked before any rank posts Allreduce/Reduce.
-        #
-        # Materializing a lazy rank-local result can fail on only one rank,
-        # and a rank-local dtype or shape divergence is just as damaging:
-        # MPI requires every rank to contribute the same datatype and count,
-        # and Open MPI's reduction algorithms respond to a mismatch by
-        # letting some ranks return while the rest block forever. Both
-        # failures are therefore converted into the same exception on every
-        # rank, which leaves the communicator usable and names the cause.
-        signature = (
-            None
-            if send is None
-            else (str(send.dtype), tuple(int(length) for length in send.shape))
-        )
-        detail = None if error is None else f"{type(error).__name__}: {error}"
-        reports = self._runtime.comm.allgather((detail, signature))
-
-        failures = [(rank, text) for rank, (text, _) in enumerate(reports) if text]
-        if failures:
-            rank, text = failures[0]
-            if error is not None and len(failures) == self._runtime.comm.size:
-                raise error
-            raise self._runtime.MPIError(
-                f"Rank {rank} failed preparing an MPI xarray reduction "
-                + f"buffer with {text}."
-            )
-
-        signatures = [entry for _, entry in reports]
-        if len(set(signatures)) != 1:
-            listing = ", ".join(
-                f"rank {rank}: dtype={entry[0]} shape={entry[1]}"
-                for rank, entry in enumerate(signatures)
-            )
-            raise self._runtime.MPIError(
-                "MPI ranks prepared different reduction buffers, which would "
-                + f"deadlock the following collective ({listing})."
-            )
-
+        # Materializing a lazy rank-local result can fail on only one rank.
+        # Synchronize that failure before any rank posts Allreduce/Reduce, or
+        # the remaining ranks can block forever in the buffer collective.
+        self._runtime.raise_if_error(error, "MPI xarray reduction buffer preparation")
         if send is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
@@ -1019,7 +972,6 @@ class XarrayMPI:
             _MPI.SUM,
             mode=mode,
             root=root,
-            dtype=np.int64,
         )
 
     def _local_result(
@@ -1086,7 +1038,7 @@ class XarrayMPI:
             return result
 
         chunk_info = (
-            _prune_chunk_info(old_meta["chunk_info"], result)
+            prune_chunk_info(old_meta["chunk_info"], result)
             if old_meta is not None
             else {}
         )
@@ -1169,7 +1121,7 @@ class XarrayMPI:
         """Return the reduction identity for a rank owning no elements."""
         kind = value.dtype.kind
         if kind == "b":
-            identity: Any = True if minimum else False
+            identity: Any = bool(minimum)
         elif kind in "iu":
             limits = np.iinfo(value.dtype)
             identity = limits.max if minimum else limits.min
@@ -1228,18 +1180,11 @@ class XarrayMPI:
                 _MPI.LAND if minimum else _MPI.LOR,
                 mode=mode,
                 root=root,
-                dtype=value.dtype,
             )
 
         op = _MPI.MIN if minimum else _MPI.MAX
         if kind != "f":
-            return self._comm_reduce(
-                partial,
-                op,
-                mode=mode,
-                root=root,
-                dtype=value.dtype,
-            )
+            return self._comm_reduce(partial, op, mode=mode, root=root)
 
         identity = np.asarray(
             np.inf if minimum else -np.inf,
@@ -1254,19 +1199,12 @@ class XarrayMPI:
         if safe_partial.dtype != partial.dtype:
             safe_partial = safe_partial.astype(partial.dtype, keep_attrs=True)
 
-        result = self._comm_reduce(
-            safe_partial,
-            op,
-            mode=mode,
-            root=root,
-            dtype=value.dtype,
-        )
+        result = self._comm_reduce(safe_partial, op, mode=mode, root=root)
         global_mask = self._comm_reduce(
             local_mask,
             _MPI.LOR,
             mode=mode,
             root=root,
-            dtype=np.bool_,
         )
         if result is None or global_mask is None:
             return None
