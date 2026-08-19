@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import builtins
 import datetime
+import faulthandler
 import functools
 import os
 import sys
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from numbers import Integral
 from typing import Any, Literal, ParamSpec, TypeVar, cast
 
@@ -746,6 +749,88 @@ class MPIRuntime:
             return _dtlib.from_numpy_dtype(key)
         except (KeyError, ValueError) as exc:
             raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
+
+    @contextmanager
+    def watchdog(
+        self,
+        phase: str = "",
+        timeout: float | None = None,
+        *,
+        abort: bool = True,
+    ) -> Generator[None, None, None]:
+        """Dump every rank's stack if the enclosed block stops making progress.
+
+        :meth:`sync` only bounds the wait at the barrier itself, so it cannot
+        observe a rank already blocked inside a collective: such a rank never
+        reaches the next barrier, and no timeout is ever evaluated. This
+        instead arms a daemon thread inside each rank. mpi4py releases the GIL
+        for the duration of a blocking MPI call, so the thread still runs while
+        the main thread is stuck in ``Allreduce`` or in a blocking read, and it
+        prints that rank's own traceback naming the exact line it is stuck on.
+
+        Every rank dumps independently, so the log identifies both the ranks
+        that arrived and the ranks that did not, which is what distinguishes a
+        mismatched collective sequence from a rank blocked in file I/O.
+
+        Parameters
+        ----------
+        phase : str, optional
+            Label reported with the traceback dump.
+        timeout : float, optional
+            Seconds of no progress before dumping. If None, read from the
+            ``CLIMTOOLS_MPI_WATCHDOG`` environment variable; zero or unset
+            disables the watchdog entirely.
+        abort : bool, optional
+            If True, call ``MPI_Abort`` after dumping. Default is True.
+
+        Yields
+        ------
+        None
+        """
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 0.0)
+            except ValueError:
+                timeout = 0.0
+        if timeout <= 0.0:
+            yield
+            return
+
+        finished = threading.Event()
+        rank = self.comm.rank
+        label = phase or "unnamed phase"
+
+        def _fire() -> None:
+            if finished.wait(timeout):
+                return
+            sys.stderr.write(
+                f"\n[MPI RANK {rank}] WATCHDOG: no progress for {timeout:g} s "
+                + f"at {label}. Stack for this rank follows.\n"
+            )
+            sys.stderr.flush()
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            sys.stderr.flush()
+            # Give every rank a chance to print its own stack before the
+            # first one tears the job down, or the log records only whichever
+            # rank happened to fire first.
+            if abort:
+                time.sleep(5.0 + 0.25 * rank)
+                sys.stderr.write(
+                    f"[MPI RANK {rank}] WATCHDOG: aborting MPI_COMM_WORLD.\n"
+                )
+                sys.stderr.flush()
+                self.comm.Abort(1)
+
+        thread = threading.Thread(
+            target=_fire,
+            name=f"climtools-mpi-watchdog-{rank}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            finished.set()
 
     def sync(self, phase: str = "", timeout: float | None = None) -> None:
         """Barrier that reports and aborts instead of blocking forever.

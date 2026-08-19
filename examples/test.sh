@@ -17,6 +17,9 @@ conda activate mother
 # CLIMTOOLS_MPI_SYNC_TIMEOUT bounds every mpi.sync() barrier so a straggling
 # rank aborts with a diagnostic instead of hanging silently.
 export CLIMTOOLS_MPI_SYNC_TIMEOUT=900
+# Per-rank stack dump if any single test stops making progress. This is
+# the check that catches a rank blocked inside a collective.
+export CLIMTOOLS_MPI_WATCHDOG=120
 export PYTHONUNBUFFERED=1
 
 # Every rank opens the same NetCDF source concurrently. HDF5 takes POSIX

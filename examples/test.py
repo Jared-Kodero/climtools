@@ -245,7 +245,11 @@ def safe_run(fn: Callable[..., None], *args: Any, **kwargs: Any) -> None:
 
     error: BaseException | None = None
     try:
-        fn(*args, **kwargs)
+        # sync() bounds only the barriers around the test. A rank blocked
+        # inside a collective in the test body never reaches the exit barrier,
+        # so the watchdog is what makes that case visible.
+        with mpi.watchdog(f"inside {fn.__name__}"):
+            fn(*args, **kwargs)
     except BaseException as exc:
         error = exc
 
