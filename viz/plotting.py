@@ -108,6 +108,7 @@ class Theme:
         font_scale: float = 1.5,
         line_width: float = 1.5,
         tick_direction: Literal["in", "out"] = "in",
+        markersize: int | None = None,
         legend_frame: bool = False,
         font_size: int | None = None,
         font_family: Literal["sans-serif", "serif"] = "sans-serif",
@@ -127,6 +128,7 @@ class Theme:
         self.interactive = interactive
         self.font_scale = font_scale
         self.line_width = line_width
+        self.markersize = markersize
         self.tick_direction = tick_direction
         self.font_size = font_size
         self.font_family = font_family
@@ -203,6 +205,9 @@ class Theme:
             rc["axes.spines.top"] = False
             rc["axes.spines.right"] = False
 
+        if self.markersize:
+            rc["lines.markersize"] = self.markersize
+
         if fig_size:
             rc["figure.figsize"] = fig_size
 
@@ -274,6 +279,7 @@ def theme(
     tick_direction: Literal["in", "out"] = "in",
     legend_frame: bool = False,
     font_size: int | None = None,
+    markersize: int | None = None,
     column_width: Literal["single", "double"] | None = None,
     latex: bool = False,
     palette: Literal[
@@ -304,6 +310,8 @@ def theme(
         Whether to draw a bounding box frame around legends. Default is False.
     font_size : int or None, optional
         Base font size for text elements. Default is None.
+    markersize: int | None, optional
+        Size of marker objects
     column_width : {"single", "double"} or None, optional
         Target layout width. "single" corresponds to 9 cm and "double" corresponds
         to 18 cm. Overridden when figsize is specified via kwargs. Default is None.

@@ -196,18 +196,6 @@ build_source_stack() {
     log "source build complete, parallel NetCDF-4 confirmed"
 }
 
-# netCDF4-python 1.7.x ships compat shims for symbols some netcdf-c 4.9.x
-# builds already declare unconditionally (bzip2/blosc filter stubs,
-# nc_rc_get/nc_rc_set), which fails the build with a redeclaration or
-# undefined-symbol error. It also bundles a copy of the nc_complex library
-# in which pfnc_inq_varndims/pfnc_inq_vardimid are declared `inline` in the
-# header with no matching out-of-line definition anywhere in nc_complex.c
-# (unlike every other nc_complex.h function, which has one); under C99
-# inline semantics that leaves an unresolved symbol at link time
-# (`undefined symbol: pfnc_inq_varndims`) whenever the compiler does not
-# happen to inline every call site. Patch all of these out defensively;
-# each patch is a no-op against netCDF4-python/nc_complex versions that do
-# not have the corresponding issue.
 patch_netcdf4_python_compat() {
     local compat_header="$1/include/netcdf-compat.h"
     local nc_complex_header="$1/external/nc_complex/include/nc_complex/nc_complex.h"
@@ -304,6 +292,16 @@ if [[ "${is_conda}" == "1" && -n "${CONDA_PREFIX:-}" ]]; then
     cat > "${activate_dir}/climtools-parallel-io.sh" << HOOK
 #!/usr/bin/env bash
 export _CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:-}"
+
+# HPC-X ships HCOLL and UCC collective offload enabled by default. Both
+# replace Open MPI's own reduction algorithms, and a fault in the offload
+# path can let part of a communicator return from Allreduce while the rest
+# block indefinitely, with every rank contributing an identical buffer.
+# climtools's reductions are latency-bound rather than bandwidth-bound, so
+# the offload buys nothing here; turn it off for correctness.
+# export OMPI_MCA_coll_hcoll_enable=0
+# export OMPI_MCA_coll_ucc_enable=0
+
 $([[ -n "${mpi_module_name}" ]] && printf 'module load %q\n' "${mpi_module_name}")
 $([[ -n "${netcdf_module_name}" ]] && printf 'module load %q\n' "${netcdf_module_name}")
 export LD_LIBRARY_PATH=$(printf '%q' "${LD_LIBRARY_PATH:-}")"\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"

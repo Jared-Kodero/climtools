@@ -47,8 +47,13 @@ import time
 class LockFile:
     """A context manager class for file locking with sleep and timeout."""
 
-    def __init__(self, filepath, timeout=None, delay=0.1):
-        self.filepath = filepath
+    def __init__(
+        self,
+        filepath: Path | None = None,
+        timeout: float | None = None,
+        delay: float = 0.1,
+    ):
+        self.filepath = filepath or Path(".lock")
         self.timeout = timeout
         self.delay = delay
         self.fd = None

@@ -1,66 +1,50 @@
-#!/usr/bin/env python3
-"""climtools_test.py -- correctness + speed suite for climtools.mpi.
+"""Correctness and performance tests for :mod:`climtools.mpi` and xgeo.
 
-For every performance-oriented parallel feature this script:
-  1. runs the distributed/parallel version across whatever ranks the
-     script was launched with (mpirun -n N ...),
-  2. runs an equivalent pure-serial baseline on rank 0 alone, over the
-     same total amount of data/work,
-  3. checks the two results agree (within floating-point tolerance), and
-  4. times both and reports the ratio.
+Performance-oriented checks run the distributed implementation on all active MPI
+ranks, run an equivalent serial baseline on rank 0, compare the results, and
+report the elapsed-time ratio. Contract tests cover validation, metadata,
+nonzero roots, empty partitions, error propagation, and NetCDF behavior.
 
-Correctness-only contract tests additionally exercise validation, edge cases,
-metadata, nonzero roots, empty partitions, and NetCDF configuration. Flushed
-timestamped progress messages are emitted before each test and major phase so
-a stalled batch job identifies the active operation before the final summary.
+The suite is self-contained. Rank 0 creates a deterministic NetCDF test dataset
+containing precipitation, temperature, sea-land mask, and pressure-level fields.
+The only configurable input is the number of mock time steps, which defaults to
+3600::
 
-Run:
-
-    # single process, serial fallback -- sanity check only, no real
-    # parallelism, speedups will be ~1x or worse
     python climtools_test.py
-
-    # real multi-rank run -- this is what actually demonstrates speedups
     mpirun -n 8 python climtools_test.py
+    mpirun -n 8 python climtools_test.py --time-steps 7200
 
-    # scale the workload up for a bigger machine
-    mpirun -n 16 python climtools_test.py \
-        --n-events 2000000 --xarray-events 40000
-
-Speedups from mpi.reduce / mpi.xarray / the parallel NetCDF writer only
-show up when ranks genuinely run on separate cores. On a single-core
-machine, or an oversubscribed launch with more ranks than cores, results
-will be flat or even slower, since ranks are then time-sliced rather than
-run concurrently -- that is expected, not a bug.
-
-Requires climtools importable (e.g. run from the parent of the cloned
-repo, or with climtools installed). Parallel NetCDF-4 output additionally
-requires netCDF4 built against a parallel-enabled MPI/HDF5/NetCDF-C stack
-(see climtools/env/setup_env.sh); if that support is missing, the NetCDF
-write tests are skipped automatically when running with more than one rank.
+Parallel NetCDF checks require netCDF4 with parallel HDF5/NetCDF-C support. When
+that capability is unavailable on a multi-rank run, those checks are skipped.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import xarray as xr
+
 from climtools import mpi, xgeo
+
+DEFAULT_TIME_STEPS = 3600
+MOCK_LATITUDE_COUNT = 12
+MOCK_LONGITUDE_COUNT = 16
+MOCK_PRESSURE_LEVEL_COUNT = 6
+
+OUTPUT_DIR = Path.home() / "scratch" / "io_mpi_test"
+TEST_DATA_PATH = OUTPUT_DIR / "mock_in.nc"
 
 RANK: int = mpi.comm.rank
 SIZE: int = mpi.comm.size
-DEFAULT_NETCDF_SOURCE = Path(
-    "/oscar/data/deeps/private/jl322/jkodero/data/models/gfdl_shield/archive/"
-    + "2024081400Z/C96.NESTED.R4x2.R2x1.CNTRL/mem01/case/fv3_hist.nest04.nc"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -68,67 +52,148 @@ DEFAULT_NETCDF_SOURCE = Path(
 # ---------------------------------------------------------------------------
 
 
-@contextmanager
-def timed():
-    """Time a block the same way on every rank, reporting the slowest rank.
+def timer(
+    function: Callable[..., Any] | None = None,
+    *,
+    synchronize: bool = True,
+) -> Callable[..., Any]:
+    """Decorate a function to return ``(result, elapsed_seconds)``.
 
-    Uses the real climtools/mpi4py API throughout, not plain Python
-    timing: `mpi.MPI.Wtime()` (mpi4py's MPI-aware timer, reached exactly
-    the way the README documents -- "anything not covered above ... is
-    reached directly as mpi.comm.<method>"/`mpi.MPI`) for the clock, and
-    `mpi.reduce.max` (the very reduction this suite is testing) to combine
-    each rank's elapsed time into the slowest rank's time -- the wall time
-    a caller waiting on the whole collective actually experiences, not any
-    single rank's local time, which could understate how long the group as
-    a whole took. Barriers before and after make every rank start and stop
-    together.
-    """
-    box = {"seconds": 0.0}
-    mpi.comm.barrier()
-    start = mpi.MPI.Wtime()
-
-    error: BaseException | None = None
-    try:
-        yield box
-    except BaseException as exc:
-        error = exc
-
-    # Synchronize Python exceptions before the closing barrier. Without this,
-    # one failing rank skips the barrier while successful ranks wait in it,
-    # hiding the original exception behind an MPI deadlock.
-    mpi.raise_if_error(error, "timed block")
-    mpi.comm.barrier()
-    local_elapsed = mpi.MPI.Wtime() - start
-    box["seconds"] = mpi.reduce.max(local_elapsed)
-
-
-def run_serial_baseline(fn: Callable[[], Any]) -> tuple[Any, float]:
-    """Run `fn` on rank 0 only and get (result, elapsed) back on every rank.
-
-    This is `@mpi(broadcast=True)` -- "execute on root and broadcast its
-    return value to every rank" -- applied directly, rather than
-    hand-rolling the same root-only-then-broadcast pattern with raw
-    `mpi.comm` calls. Every non-root rank simply waits inside the
-    decorator's own synchronization for root's timed result, which is
-    exactly the single-process cost a script with no MPI at all would pay.
+    Synchronized timing brackets an all-rank operation with barriers and reports
+    the slowest rank. ``synchronize=False`` measures only the calling rank, which
+    is used for serial baselines executed under ``@mpi(broadcast=True)``.
     """
 
-    @mpi(broadcast=True)
-    def _timed_on_root() -> tuple[Any, float]:
-        start = mpi.MPI.Wtime()
-        result = fn()
-        elapsed = mpi.MPI.Wtime() - start
-        return result, elapsed
+    def decorate(func: Callable[..., Any]) -> Callable[..., tuple[Any, float]]:
+        @wraps(func)
+        def timed(*args: Any, **kwargs: Any) -> tuple[Any, float]:
+            if not synchronize:
+                start = mpi.MPI.Wtime()
+                result = func(*args, **kwargs)
+                return result, mpi.MPI.Wtime() - start
 
-    return _timed_on_root()
+            mpi.comm.barrier()
+            start = mpi.MPI.Wtime()
+            result: Any = None
+            error: BaseException | None = None
+            try:
+                result = func(*args, **kwargs)
+            except BaseException as exc:
+                error = exc
+
+            mpi.raise_if_error(error, func.__name__)
+            mpi.comm.barrier()
+            elapsed = mpi.reduce.max(mpi.MPI.Wtime() - start)
+            return result, elapsed
+
+        return timed
+
+    if function is None:
+        return decorate
+    return decorate(function)
 
 
-def dtype_rtol(*values: Any, factor: float = 64.0) -> float:
+def build_mock_dataset(n_time_steps: int = DEFAULT_TIME_STEPS) -> xr.Dataset:
+    """Build the deterministic NetCDF dataset used by the MPI test suite.
+
+    Parameters
+    ----------
+    n_time_steps : int, optional
+        Number of time samples in the mock dataset. The default is 3600.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset containing ``pr``, ``t2m``, ``t``, and ``slmsk`` variables with
+        the dimensions and metadata exercised by the tests.
+    """
+    if isinstance(n_time_steps, bool) or not isinstance(n_time_steps, int):
+        raise TypeError("n_time_steps must be an integer")
+    if n_time_steps < 1:
+        raise ValueError("n_time_steps must be at least 1")
+
+    time = np.arange(n_time_steps, dtype=np.float32)
+    lat = np.linspace(
+        -82.5,
+        82.5,
+        MOCK_LATITUDE_COUNT,
+        dtype=np.float32,
+    )
+    lon = np.linspace(
+        0.0,
+        360.0,
+        MOCK_LONGITUDE_COUNT,
+        endpoint=False,
+        dtype=np.float32,
+    )
+    plev = np.asarray([1000.0, 850.0, 700.0, 500.0, 300.0, 200.0], dtype=np.float32)
+
+    time_phase = (time % 24.0)[:, None, None]
+    lat_rad = np.deg2rad(lat)[None, :, None]
+    lon_rad = np.deg2rad(lon)[None, None, :]
+
+    precipitation = (
+        1.0e-4
+        * (1.25 + np.cos(lat_rad) ** 2)
+        * (1.0 + 0.15 * np.sin(lon_rad))
+        * (1.0 + 0.01 * time_phase)
+    ).astype(np.float32)
+    surface_temperature = (
+        288.0 - 42.0 * np.sin(lat_rad) ** 2 + 2.0 * np.cos(lon_rad) + 0.05 * time_phase
+    ).astype(np.float32)
+
+    pressure_cooling = (7.0 * np.log(1000.0 / plev.astype(np.float64))).astype(
+        np.float32
+    )[None, :, None, None]
+    air_temperature = surface_temperature[:, None, :, :] - pressure_cooling
+
+    lat_index = np.arange(MOCK_LATITUDE_COUNT)[:, None]
+    lon_index = np.arange(MOCK_LONGITUDE_COUNT)[None, :]
+    sea_land_mask = ((lat_index + lon_index) % 3).astype(np.int8)
+
+    return xr.Dataset(
+        data_vars={
+            "pr": (
+                ("time", "lat", "lon"),
+                precipitation,
+                {"units": "kg m-2 s-1", "long_name": "precipitation rate"},
+            ),
+            "t2m": (
+                ("time", "lat", "lon"),
+                surface_temperature,
+                {"units": "K", "long_name": "2 m air temperature"},
+            ),
+            "t": (
+                ("time", "plev", "lat", "lon"),
+                air_temperature.astype(np.float32),
+                {"units": "K", "long_name": "air temperature"},
+            ),
+            "slmsk": (
+                ("lat", "lon"),
+                sea_land_mask,
+                {"units": "1", "long_name": "sea-land-ice mask"},
+            ),
+        },
+        coords={
+            "time": (
+                "time",
+                time.astype(np.float64),
+                {"units": "hours since 2000-01-01 00:00:00"},
+            ),
+            "plev": ("plev", plev, {"units": "hPa", "positive": "down"}),
+            "lat": ("lat", lat, {"units": "degrees_north"}),
+            "lon": ("lon", lon, {"units": "degrees_east"}),
+        },
+        attrs={"title": "climtools MPI deterministic test dataset"},
+    )
+
+
+def relative_tolerance_for_dtype(*values: Any, factor: float = 64.0) -> float:
     """Return a relative tolerance derived from the data's own precision.
 
     Distributed and serial reductions sum the same values in different
     associative orders, so they agree only to the resolution of the dtype
-    being reduced. For float32 SHiELD fields this is 64 * 1.19e-7 ~ 7.6e-6;
+    being reduced. For float32 fields this is 64 * 1.19e-7 ~ 7.6e-6;
     for float64 it is 64 * 2.22e-16 ~ 1.4e-14. Integer and Boolean results
     must match exactly and receive a tolerance of zero.
 
@@ -168,25 +233,10 @@ class Result:
 
 
 RESULTS: list[Result] = []
-CURRENT_TEST_NAME = ""
 CURRENT_TEST_NUMBER = 0
 
 
-def progress(message: str) -> None:
-    """Emit an immediately flushed rank-0 progress message."""
-    label = (
-        f"test {CURRENT_TEST_NUMBER:02d} {CURRENT_TEST_NAME}: "
-        if CURRENT_TEST_NAME
-        else ""
-    )
-    mpi.log(
-        f"[PROGRESS] {label}{message}",
-        timestamp=True,
-        flush=True,
-    )
-
-
-def _raises(
+def call_raises(
     expected: type[BaseException] | tuple[type[BaseException], ...],
     function: Any,
     *args: Any,
@@ -203,7 +253,7 @@ def _raises(
     return False
 
 
-def record(
+def record_result(
     name: str,
     correct: bool,
     serial_s: float,
@@ -212,6 +262,7 @@ def record(
     *,
     skipped: bool = False,
 ) -> None:
+    """Store and log one correctness or performance result."""
     result = Result(name, correct, serial_s, parallel_s, note, skipped)
     RESULTS.append(result)
     status = "SKIP" if skipped else ("OK  " if correct else "FAIL")
@@ -224,91 +275,87 @@ def record(
     )
 
 
-def record_skip(name: str, note: str) -> None:
-    """Record a test that could not run because a required capability is absent."""
-    record(name, True, 0.0, 0.0, note=note, skipped=True)
+def run_test(function: Callable[..., None]) -> Callable[..., None]:
+    """Decorate a test with synchronized execution and result accounting."""
 
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> None:
+        global CURRENT_TEST_NUMBER
 
-def safe_run(fn: Callable[..., None], *args: Any, **kwargs: Any) -> None:
-    """Run a test function on every rank, synchronizing and recording failures."""
-    global CURRENT_TEST_NAME, CURRENT_TEST_NUMBER
-
-    CURRENT_TEST_NUMBER += 1
-    CURRENT_TEST_NAME = fn.__name__
-    before = len(RESULTS)
-    progress("START")
-
-    error: BaseException | None = None
-    try:
-        # A rank blocked inside a collective never reaches the synchronizing
-        # raise_if_error below, so the watchdog is what makes that case visible.
-        with mpi.watchdog(f"inside {fn.__name__}"):
-            fn(*args, **kwargs)
-    except BaseException as exc:
-        error = exc
-
-    synchronized_error: BaseException | None = None
-    try:
-        mpi.raise_if_error(error, fn.__name__)
-    except BaseException as exc:
-        synchronized_error = exc
-
-    if synchronized_error is not None:
-        record(
-            f"{fn.__name__} (uncaught exception)",
-            False,
-            0.0,
-            0.0,
-            note=f"{type(synchronized_error).__name__}: {synchronized_error}",
+        CURRENT_TEST_NUMBER += 1
+        test_name = function.__name__
+        before = len(RESULTS)
+        mpi.log(
+            f"[TEST {CURRENT_TEST_NUMBER:02d}] {test_name}: START",
+            timestamp=True,
+            flush=True,
         )
-        progress("FAILED")
-    elif len(RESULTS) == before:
-        record(
-            f"{fn.__name__} (result accounting)",
-            False,
-            0.0,
-            0.0,
-            note="test completed without recording a result or skip",
-        )
-        progress("FAILED: no result recorded")
-    else:
-        new_results = RESULTS[before:]
-        if any(not result.correct and not result.skipped for result in new_results):
-            progress("DONE with failed check(s)")
-        elif all(result.skipped for result in new_results):
-            progress("SKIPPED")
+
+        error: BaseException | None = None
+        try:
+            with mpi.watchdog(f"inside {function.__name__}"):
+                function(*args, **kwargs)
+        except BaseException as exc:
+            error = exc
+
+        synchronized_error: BaseException | None = None
+        try:
+            mpi.raise_if_error(error, function.__name__)
+        except BaseException as exc:
+            synchronized_error = exc
+
+        if synchronized_error is not None:
+            record_result(
+                f"{function.__name__} (uncaught exception)",
+                False,
+                0.0,
+                0.0,
+                note=f"{type(synchronized_error).__name__}: {synchronized_error}",
+            )
+            status = "FAILED"
+        elif len(RESULTS) == before:
+            record_result(
+                f"{function.__name__} (result accounting)",
+                False,
+                0.0,
+                0.0,
+                note="test completed without recording a result or skip",
+            )
+            status = "FAILED: no result recorded"
         else:
-            progress("DONE")
+            new_results = RESULTS[before:]
+            if any(not result.correct and not result.skipped for result in new_results):
+                status = "DONE with failed check(s)"
+            elif all(result.skipped for result in new_results):
+                status = "SKIPPED"
+            else:
+                status = "DONE"
 
-    CURRENT_TEST_NAME = ""
-
-
-def _require_source() -> None:
-    """Require the configured SHiELD NetCDF file on every MPI rank."""
-    visible = DEFAULT_NETCDF_SOURCE.is_file()
-    if not bool(mpi.reduce.all(visible)):
-        raise FileNotFoundError(
-            "SHiELD NetCDF source is not visible on every rank: "
-            + f"{DEFAULT_NETCDF_SOURCE}"
+        mpi.log(
+            f"[TEST {CURRENT_TEST_NUMBER:02d}] {test_name}: {status}",
+            timestamp=True,
+            flush=True,
         )
 
+    return wrapped
 
-def _rank_bounds(size: int, rank: int = RANK) -> tuple[int, int]:
+
+def partition_bounds(size: int, rank: int = RANK) -> tuple[int, int]:
     """Return this rank's contiguous bounds within a global dimension."""
     return size * rank // SIZE, size * (rank + 1) // SIZE
 
 
-def _load_source_variable(
+def load_test_variable(
     variable: str,
     **indexers: int | slice,
 ) -> xr.DataArray:
-    """Load only the requested selection of one variable from the SHiELD file.
+    """Load a requested variable selection from the generated NetCDF dataset.
 
     Every rank opens the same file concurrently. HDF5 takes POSIX advisory
     locks by default, which can block indefinitely on a parallel filesystem,
     so ``HDF5_USE_FILE_LOCKING=FALSE`` must be set in the environment.
     """
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         data = source[variable]
         valid_indexers = {
             dim: indexer for dim, indexer in indexers.items() if dim in data.dims
@@ -316,12 +363,12 @@ def _load_source_variable(
         return data.isel(valid_indexers).load()
 
 
-def _load_source_dataset(
+def load_test_dataset(
     variables: tuple[str, ...],
     **indexers: int | slice,
 ) -> xr.Dataset:
-    """Load only requested variables and dimension slices from the SHiELD file."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+    """Load selected variables and slices from the generated NetCDF dataset."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         data = source[list(variables)]
         valid_indexers = {
             dim: indexer for dim, indexer in indexers.items() if dim in data.dims
@@ -334,9 +381,9 @@ def _load_source_dataset(
 # ---------------------------------------------------------------------------
 
 
-def test_runtime_helpers() -> None:
+@run_test
+def test_mpi_runtime_helpers() -> None:
     """Check the small MPIRuntime helpers exposed alongside the collectives."""
-    progress("checking rank helpers and supported MPI datatype mappings")
     alternate_root = min(1, SIZE - 1)
     supported_dtypes = (
         np.bool_,
@@ -359,8 +406,7 @@ def test_runtime_helpers() -> None:
         and issubclass(mpi.MPIError, Exception)
     )
     correct = bool(mpi.reduce.all(correct))
-    progress("recording result")
-    record(
+    record_result(
         "mpi runtime helpers (is_root/launched/datatype/MPIError)",
         correct,
         0.0,
@@ -369,9 +415,9 @@ def test_runtime_helpers() -> None:
     )
 
 
-def test_runtime_logging_and_errors() -> None:
+@run_test
+def test_mpi_logging_and_error_propagation() -> None:
     """Check mpi.log behavior and synchronized error propagation."""
-    progress("checking mpi.log formatting, rank filtering, and timestamp output")
     captured: list[str] = []
 
     def capture(message: str, *args: Any, **kwargs: Any) -> None:
@@ -424,14 +470,13 @@ def test_runtime_logging_and_errors() -> None:
         and timestamp_text[16] == ":"
     )
 
-    progress("checking mpi.raise_if_error no-error/all-rank/subset-rank paths")
     no_error_ok = True
     try:
         mpi.raise_if_error(None, "no-error phase")
     except BaseException:
         no_error_ok = False
 
-    all_rank_error_ok = _raises(
+    all_rank_error_ok = call_raises(
         ValueError,
         mpi.raise_if_error,
         ValueError("all-rank failure"),
@@ -465,8 +510,7 @@ def test_runtime_logging_and_errors() -> None:
             and subset_error_ok
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "mpi.log/raise_if_error contracts",
         correct,
         0.0,
@@ -475,9 +519,9 @@ def test_runtime_logging_and_errors() -> None:
     )
 
 
-def test_runtime_contracts() -> None:
+@run_test
+def test_mpi_reduction_contracts() -> None:
     """Exercise reduction validation, non-contiguous buffers, and nonzero roots."""
-    progress("checking scalar and non-contiguous reductions")
     scalar = mpi.reduce.sum(RANK + 1)
     expected_scalar = SIZE * (SIZE + 1) // 2
 
@@ -520,16 +564,20 @@ def test_runtime_contracts() -> None:
         and all_scalar
     )
 
-    progress("checking reduce-to-nonzero-root behavior")
     root = SIZE - 1
     root_result = mpi.reduce.max(float(RANK), mode="root", root=root)
     root_ok = root_result == float(SIZE - 1) if RANK == root else root_result is None
 
-    progress("checking invalid reduction arguments and unsupported dtypes")
     validation_ok = all(
         (
-            _raises(ValueError, mpi.reduce.sum, 1.0, mode="invalid", contains="mode"),
-            _raises(
+            call_raises(
+                ValueError,
+                mpi.reduce.sum,
+                1.0,
+                mode="invalid",
+                contains="mode",
+            ),
+            call_raises(
                 ValueError,
                 mpi.reduce.sum,
                 1.0,
@@ -537,7 +585,7 @@ def test_runtime_contracts() -> None:
                 root=-1,
                 contains="root",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.reduce.sum,
                 1.0,
@@ -545,7 +593,7 @@ def test_runtime_contracts() -> None:
                 root=True,
                 contains="root",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.reduce.sum,
                 1.0,
@@ -553,13 +601,13 @@ def test_runtime_contracts() -> None:
                 root=SIZE,
                 contains="outside",
             ),
-            _raises(
+            call_raises(
                 mpi.MPIError,
                 mpi.reduce.sum,
                 np.asarray(["unsupported"], dtype=object),
                 contains="Unsupported MPI NumPy dtype",
             ),
-            _raises(
+            call_raises(
                 mpi.MPIError,
                 mpi.datatype,
                 np.dtype("U1"),
@@ -578,8 +626,7 @@ def test_runtime_contracts() -> None:
             and validation_ok
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "mpi runtime/reduce contracts (validation/noncontiguous/nonzero root)",
         correct,
         0.0,
@@ -593,52 +640,55 @@ def test_runtime_contracts() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_reduce_sum_scalar(n_total: int) -> None:
-    """Scalar mpi.reduce.sum using real SHiELD precipitation values."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+@run_test
+def test_reduce_scalar_sum(n_total: int) -> None:
+    """Scalar mpi.reduce.sum using mock precipitation values."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         n_lat = int(source.sizes["lat"])
         n_lon = int(source.sizes["lon"])
 
     n_rows = min(n_lat, max(1, (n_total + n_lon - 1) // n_lon))
-    start, stop = _rank_bounds(n_rows)
-    local = _load_source_variable(
+    start, stop = partition_bounds(n_rows)
+    local = load_test_variable(
         "pr",
         time=0,
         lat=slice(start, stop),
     )
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def parallel_sum() -> float:
         local_partial = float(local.sum(skipna=True))
-        combined = mpi.reduce.sum(local_partial)
-    parallel_s = box["seconds"]
+        return mpi.reduce.sum(local_partial)
 
+    combined, parallel_s = parallel_sum()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> float:
-        field = _load_source_variable("pr", time=0, lat=slice(0, n_rows))
+        field = load_test_variable("pr", time=0, lat=slice(0, n_rows))
         return float(field.sum(skipna=True))
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     correct = bool(
         np.isclose(
             combined,
             expected,
-            rtol=dtype_rtol(local.values),
+            rtol=relative_tolerance_for_dtype(local.values),
             equal_nan=True,
         )
     )
-    progress("recording result")
-    record(
-        f"mpi.reduce.sum scalar ({n_rows * n_lon} real pr values)",
+    record_result(
+        f"mpi.reduce.sum scalar ({n_rows * n_lon} mock pr values)",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_reduce_composite(n_events_total: int, ny: int, nx: int) -> None:
-    """mpi.reduce.sum on real SHiELD precipitation fields from rank-selected times."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+@run_test
+def test_reduce_array_sum(n_events_total: int, ny: int, nx: int) -> None:
+    """mpi.reduce.sum on mock precipitation fields from rank-selected times."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         n_time = int(source.sizes["time"])
         n_lat = min(int(source.sizes["lat"]), ny)
         n_lon = min(int(source.sizes["lon"]), nx)
@@ -648,7 +698,7 @@ def test_reduce_composite(n_events_total: int, ny: int, nx: int) -> None:
         n_lat = max(1, min(n_lat, max_points_per_rank // max(1, n_lon)))
 
     def load_rank_field(rank: int) -> np.ndarray:
-        field = _load_source_variable(
+        field = load_test_variable(
             "pr",
             time=rank % n_time,
             lat=slice(0, n_lat),
@@ -658,39 +708,48 @@ def test_reduce_composite(n_events_total: int, ny: int, nx: int) -> None:
 
     local = load_rank_field(RANK)
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        combined = mpi.reduce.sum(local)
-    parallel_s = box["seconds"]
+    @timer
+    def parallel_sum() -> Any:
+        return mpi.reduce.sum(local)
 
+    combined, parallel_s = parallel_sum()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> np.ndarray:
         fields = [load_rank_field(rank) for rank in range(SIZE)]
         return np.sum(np.stack(fields, axis=0), axis=0)
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     correct = (
-        bool(np.allclose(combined, expected, rtol=dtype_rtol(local), equal_nan=True))
+        bool(
+            np.allclose(
+                combined,
+                expected,
+                rtol=relative_tolerance_for_dtype(local),
+                equal_nan=True,
+            )
+        )
         and combined.dtype == local.dtype
     )
-    progress("recording result")
-    record(
-        f"mpi.reduce.sum real pr fields ({n_lat}x{n_lon}, {SIZE} rank selections)",
+    record_result(
+        f"mpi.reduce.sum mock pr fields ({n_lat}x{n_lon}, {SIZE} rank selections)",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_reduce_xarray_object(ny: int, nx: int) -> None:
-    """mpi.reduce.sum on a real SHiELD xarray DataArray with metadata preserved."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+@run_test
+def test_reduce_dataarray_sum(ny: int, nx: int) -> None:
+    """mpi.reduce.sum on a mock xarray DataArray with metadata preserved."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         n_time = int(source.sizes["time"])
         n_lat = min(int(source.sizes["lat"]), ny)
         n_lon = min(int(source.sizes["lon"]), nx)
 
     def load_rank_field(rank: int) -> xr.DataArray:
-        return _load_source_variable(
+        return load_test_variable(
             "t2m",
             time=rank % n_time,
             lat=slice(0, n_lat),
@@ -699,28 +758,29 @@ def test_reduce_xarray_object(ny: int, nx: int) -> None:
 
     local = load_rank_field(RANK)
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        combined = mpi.reduce.sum(local)
-    parallel_s = box["seconds"]
+    @timer
+    def parallel_sum() -> Any:
+        return mpi.reduce.sum(local)
 
+    combined, parallel_s = parallel_sum()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> np.ndarray:
         fields = [load_rank_field(rank).values for rank in range(SIZE)]
         return np.sum(np.stack(fields, axis=0), axis=0)
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     correct = bool(
         np.allclose(
             combined.values,
             expected,
-            rtol=dtype_rtol(local.values),
+            rtol=relative_tolerance_for_dtype(local.values),
             equal_nan=True,
         )
     ) and combined.attrs.get("units") == local.attrs.get("units")
-    progress("recording result")
-    record(
-        "mpi.reduce.sum real t2m DataArray (dims/attrs kept)",
+    record_result(
+        "mpi.reduce.sum mock t2m DataArray (dims/attrs kept)",
         correct,
         serial_s,
         parallel_s,
@@ -728,9 +788,10 @@ def test_reduce_xarray_object(ny: int, nx: int) -> None:
     )
 
 
-def test_reduce_operations() -> None:
-    """Exercise every mpi.reduce operation using real SHiELD values."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+@run_test
+def test_reduce_all_operations() -> None:
+    """Exercise every mpi.reduce operation using mock values."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         n_time = int(source.sizes["time"])
         n_lat = int(source.sizes["lat"])
         n_lon = int(source.sizes["lon"])
@@ -739,7 +800,7 @@ def test_reduce_operations() -> None:
     logical_width = min(3, n_lon)
 
     def load_numeric(rank: int) -> np.ndarray:
-        data = _load_source_variable(
+        data = load_test_variable(
             "t2m",
             time=rank % n_time,
             lat=rank % n_lat,
@@ -748,7 +809,7 @@ def test_reduce_operations() -> None:
         return np.asarray(data.values)
 
     def load_logical(rank: int) -> np.ndarray:
-        mask = _load_source_variable(
+        mask = load_test_variable(
             "slmsk",
             time=rank % n_time,
             lat=rank % n_lat,
@@ -773,14 +834,15 @@ def test_reduce_operations() -> None:
 
     for op_name, value, expected in cases:
         op = getattr(mpi.reduce, op_name)
-        progress(f"running mpi.reduce.{op_name} all mode")
-        with timed() as box:
-            result = op(value)
-        parallel_s = box["seconds"]
 
-        progress(f"checking mpi.reduce.{op_name} root mode")
+        @timer
+        def parallel_reduce() -> Any:
+            return op(value)
+
+        result, parallel_s = parallel_reduce()
+
         root_result = op(value, mode="root", root=0)
-        tolerance = dtype_rtol(expected)
+        tolerance = relative_tolerance_for_dtype(expected)
         all_mode_ok = bool(
             np.allclose(result, expected, rtol=tolerance, equal_nan=True)
         )
@@ -790,16 +852,15 @@ def test_reduce_operations() -> None:
             else root_result is None
         )
         correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
-        progress("recording result")
-        record(
-            f"mpi.reduce.{op_name} real SHiELD values (all/root modes)",
+        record_result(
+            f"mpi.reduce.{op_name} mock values (all/root modes)",
             correct,
             0.0,
             parallel_s,
             note="correctness-focused",
         )
 
-    mask = _load_source_variable(
+    mask = load_test_variable(
         "slmsk",
         time=RANK % n_time,
         lat=RANK % n_lat,
@@ -816,7 +877,7 @@ def test_reduce_operations() -> None:
 
     land_stack = np.stack(
         [
-            _load_source_variable(
+            load_test_variable(
                 "slmsk",
                 time=rank % n_time,
                 lat=rank % n_lat,
@@ -829,7 +890,7 @@ def test_reduce_operations() -> None:
     )
     nonsea_stack = np.stack(
         [
-            _load_source_variable(
+            load_test_variable(
                 "slmsk",
                 time=rank % n_time,
                 lat=rank % n_lat,
@@ -848,9 +909,8 @@ def test_reduce_operations() -> None:
         and bool(np.array_equal(dataset_all["land"].values, land_stack.all(axis=0)))
         and bool(np.array_equal(dataset_all["nonsea"].values, nonsea_stack.all(axis=0)))
     )
-    progress("recording result")
-    record(
-        "mpi.reduce.any/all real slmsk Dataset",
+    record_result(
+        "mpi.reduce.any/all mock slmsk Dataset",
         bool(mpi.reduce.all(dataset_ok)),
         0.0,
         0.0,
@@ -863,16 +923,20 @@ def test_reduce_operations() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_xarray_open_dataset() -> None:
-    """mpi.xarray.open_dataset on the real SHiELD file partitioned by latitude."""
-    progress("entering timed parallel section")
-    with timed() as box:
+@run_test
+def test_distributed_open_dataset() -> None:
+    """mpi.xarray.open_dataset on the mock file partitioned by latitude."""
+
+    @timer
+    def open_distributed_dataset() -> xr.Dataset:
         distributed = mpi.xarray.open_dataset(
-            str(DEFAULT_NETCDF_SOURCE),
+            str(TEST_DATA_PATH),
             partition_dim="lat",
         )[["pr"]]
         distributed["pr"].isel(time=0).load()
-    parallel_s = box["seconds"]
+        return distributed
+
+    distributed, parallel_s = open_distributed_dataset()
 
     meta = distributed.attrs.get("mpi_meta")
     if isinstance(meta, dict):
@@ -926,7 +990,7 @@ def test_xarray_open_dataset() -> None:
 
     parts = mpi.comm.allgather(local)
     assembled = np.concatenate(parts, axis=local_lat_axis)
-    expected = _load_source_variable("pr", time=0).values
+    expected = load_test_variable("pr", time=0).values
     local_meta_ok = (
         isinstance(meta, dict)
         and meta.get("dim") == "lat"
@@ -940,44 +1004,45 @@ def test_xarray_open_dataset() -> None:
         mpi.reduce.all(local_meta_ok)
     )
 
-    progress("checking open_dataset partition-dimension validation")
-    open_validation_ok = _raises(
+    open_validation_ok = call_raises(
         ValueError,
         mpi.xarray.open_dataset,
-        str(DEFAULT_NETCDF_SOURCE),
+        str(TEST_DATA_PATH),
         partition_dim="missing",
         contains="partition_dim",
     )
     correct = correct and bool(mpi.reduce.all(open_validation_ok))
 
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> float:
-        field = _load_source_variable("pr", time=0)
+        field = load_test_variable("pr", time=0)
         return float(field.sum(skipna=True))
 
-    progress("running serial baseline")
-    _, serial_s = run_serial_baseline(serial_fn)
-    progress("recording result")
-    record(
-        "mpi.xarray.open_dataset (real pr, partitioned latitude)",
+    _, serial_s = serial_fn()
+    record_result(
+        "mpi.xarray.open_dataset (mock pr, partitioned latitude)",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_xarray_redistribute(ny: int, nx: int) -> None:
-    """mpi.xarray.redistribute using a real SHiELD precipitation field."""
-    full = _load_source_variable(
+@run_test
+def test_distributed_redistribution(ny: int, nx: int) -> None:
+    """mpi.xarray.redistribute using a mock precipitation field."""
+    full = load_test_variable(
         "pr",
         time=0,
         lat=slice(0, ny),
         lon=slice(0, nx),
     )
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        distributed = mpi.xarray.redistribute(full, "lat")
-    parallel_s = box["seconds"]
+    @timer
+    def redistribute_latitude() -> xr.DataArray:
+        return mpi.xarray.redistribute(full, "lat")
+
+    distributed, parallel_s = redistribute_latitude()
     auto = mpi.xarray.redistribute(full, "auto")
 
     explicit_parts = mpi.comm.allgather(distributed.values)
@@ -1012,9 +1077,8 @@ def test_xarray_redistribute(ny: int, nx: int) -> None:
         )
         and bool(mpi.reduce.all(local_ok))
     )
-    progress("recording result")
-    record(
-        "mpi.xarray.redistribute real pr (explicit/auto)",
+    record_result(
+        "mpi.xarray.redistribute mock pr (explicit/auto)",
         correct,
         0.0,
         parallel_s,
@@ -1022,9 +1086,10 @@ def test_xarray_redistribute(ny: int, nx: int) -> None:
     )
 
 
-def test_xarray_isel(ny: int, nx: int) -> None:
-    """mpi.xarray.isel using global latitude indices on real SHiELD precipitation."""
-    full = _load_source_variable(
+@run_test
+def test_distributed_isel(ny: int, nx: int) -> None:
+    """mpi.xarray.isel using global latitude indices on mock precipitation."""
+    full = load_test_variable(
         "pr",
         time=0,
         lat=slice(0, ny),
@@ -1034,18 +1099,20 @@ def test_xarray_isel(ny: int, nx: int) -> None:
     n_lat = full.sizes["lat"]
     if n_lat < 3:
         raise ValueError(
-            "The selected SHiELD latitude range must contain at least 3 rows."
+            "The selected mock latitude range must contain at least 3 rows."
         )
 
     start = 1
     stop = n_lat - 1
     scalar_index = n_lat // 2
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def select_global_indices() -> tuple[xr.DataArray, xr.DataArray]:
         sliced = mpi.xarray.isel(distributed, lat=slice(start, stop))
         scalar = mpi.xarray.isel(distributed, lat=scalar_index)
-    parallel_s = box["seconds"]
+        return sliced, scalar
+
+    (sliced, scalar), parallel_s = select_global_indices()
 
     sliced_parts = mpi.comm.allgather(sliced.values)
     assembled = np.concatenate(sliced_parts, axis=sliced.get_axis_num("lat"))
@@ -1063,9 +1130,8 @@ def test_xarray_isel(ny: int, nx: int) -> None:
         and "mpi_meta" not in scalar.attrs
         and bool(mpi.reduce.all(local_meta_ok))
     )
-    progress("recording result")
-    record(
-        "mpi.xarray.isel real pr (global latitude slice/scalar)",
+    record_result(
+        "mpi.xarray.isel mock pr (global latitude slice/scalar)",
         correct,
         0.0,
         parallel_s,
@@ -1073,9 +1139,10 @@ def test_xarray_isel(ny: int, nx: int) -> None:
     )
 
 
-def test_xarray_sel(ny: int, nx: int) -> None:
-    """mpi.xarray.sel using real SHiELD latitude coordinate labels."""
-    full = _load_source_variable(
+@run_test
+def test_distributed_sel(ny: int, nx: int) -> None:
+    """mpi.xarray.sel using mock latitude coordinate labels."""
+    full = load_test_variable(
         "pr",
         time=0,
         lat=slice(0, ny),
@@ -1085,15 +1152,15 @@ def test_xarray_sel(ny: int, nx: int) -> None:
     n_lat = full.sizes["lat"]
     if n_lat < 3:
         raise ValueError(
-            "The selected SHiELD latitude range must contain at least 3 rows."
+            "The selected mock latitude range must contain at least 3 rows."
         )
 
     start_label = full["lat"].values[1].item()
     stop_label = full["lat"].values[-2].item()
     scalar_label = full["lat"].values[n_lat // 2].item()
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def select_global_labels() -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
         sliced = mpi.xarray.sel(distributed, lat=slice(start_label, stop_label))
         scalar = mpi.xarray.sel(distributed, lat=scalar_label)
         nearest = mpi.xarray.sel(
@@ -1101,7 +1168,9 @@ def test_xarray_sel(ny: int, nx: int) -> None:
             lat=scalar_label,
             method="nearest",
         )
-    parallel_s = box["seconds"]
+        return sliced, scalar, nearest
+
+    (sliced, scalar, nearest), parallel_s = select_global_labels()
 
     sliced_parts = mpi.comm.allgather(sliced.values)
     assembled = np.concatenate(sliced_parts, axis=sliced.get_axis_num("lat"))
@@ -1118,9 +1187,8 @@ def test_xarray_sel(ny: int, nx: int) -> None:
         and "mpi_meta" not in nearest.attrs
         and bool(mpi.reduce.all(local_meta_ok))
     )
-    progress("recording result")
-    record(
-        "mpi.xarray.sel real pr (global latitude slice/scalar)",
+    record_result(
+        "mpi.xarray.sel mock pr (global latitude slice/scalar)",
         correct,
         0.0,
         parallel_s,
@@ -1128,10 +1196,15 @@ def test_xarray_sel(ny: int, nx: int) -> None:
     )
 
 
-def test_xarray_reduction(n_levels_max: int, ny: int, nx: int, op_name: str) -> None:
-    """Numeric mpi.xarray reductions using the real SHiELD temperature profile."""
-    progress(f"preparing mpi.xarray.{op_name} source data")
-    full = _load_source_variable(
+@run_test
+def test_distributed_numeric_reduction(
+    n_levels_max: int,
+    ny: int,
+    nx: int,
+    op_name: str,
+) -> None:
+    """Numeric mpi.xarray reductions using the mock temperature profile."""
+    full = load_test_variable(
         "t",
         time=0,
         plev=slice(0, n_levels_max),
@@ -1144,21 +1217,23 @@ def test_xarray_reduction(n_levels_max: int, ny: int, nx: int, op_name: str) -> 
     if op_name in {"sum", "prod"}:
         kwargs["min_count"] = 1
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        result = op(distributed, dim="plev", **kwargs)
-    parallel_s = box["seconds"]
+    @timer
+    def reduce_pressure_levels() -> Any:
+        return op(distributed, dim="plev", **kwargs)
 
+    result, parallel_s = reduce_pressure_levels()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> np.ndarray:
         serial_kwargs = {"skipna": True}
         if op_name in {"sum", "prod"}:
             serial_kwargs["min_count"] = 1
         return getattr(full, op_name)(dim="plev", **serial_kwargs).values
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     root_result = op(distributed, dim="plev", mode="root", root=0, **kwargs)
-    tolerance = dtype_rtol(expected)
+    tolerance = relative_tolerance_for_dtype(expected)
     all_mode_ok = (
         result is not None
         and result.dtype == expected.dtype
@@ -1174,23 +1249,22 @@ def test_xarray_reduction(n_levels_max: int, ny: int, nx: int, op_name: str) -> 
         else root_result is None
     )
     correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
-    progress("recording result")
-    record(
-        f"mpi.xarray.{op_name} real t over {full.sizes['plev']} pressure levels",
+    record_result(
+        f"mpi.xarray.{op_name} mock t over {full.sizes['plev']} pressure levels",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_xarray_logical_reduction(
+@run_test
+def test_distributed_logical_reduction(
     n_lat_max: int,
     nx: int,
     op_name: str,
 ) -> None:
-    """Logical mpi.xarray.any/all using the real SHiELD sea-land-ice mask."""
-    progress(f"preparing mpi.xarray.{op_name} source data")
-    mask = _load_source_variable(
+    """Logical mpi.xarray.any/all using the mock sea-land-ice mask."""
+    mask = load_test_variable(
         "slmsk",
         time=0,
         lat=slice(0, n_lat_max),
@@ -1200,16 +1274,18 @@ def test_xarray_logical_reduction(
     distributed = mpi.xarray.redistribute(full, "lat")
     op = getattr(mpi.xarray, op_name)
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        result = op(distributed, dim="lat")
-    parallel_s = box["seconds"]
+    @timer
+    def reduce_latitudes() -> Any:
+        return op(distributed, dim="lat")
 
+    result, parallel_s = reduce_latitudes()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> np.ndarray:
         return getattr(full, op_name)(dim="lat").values
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     root_result = op(distributed, dim="lat", mode="root", root=0)
     all_mode_ok = result is not None and bool(np.array_equal(result.values, expected))
     root_mode_ok = (
@@ -1218,36 +1294,35 @@ def test_xarray_logical_reduction(
         else root_result is None
     )
     correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
-    progress("recording result")
-    record(
-        f"mpi.xarray.{op_name} real slmsk land mask ({full.sizes['lat']} latitudes)",
+    record_result(
+        f"mpi.xarray.{op_name} mock slmsk land mask ({full.sizes['lat']} latitudes)",
         correct,
         serial_s,
         parallel_s,
     )
 
 
-def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
-    """Dataset reductions using real distributed t2m plus real static plev values."""
-    t2m = _load_source_variable(
+@run_test
+def test_distributed_dataset_reduction(ny: int, nx: int) -> None:
+    """Dataset reductions using mock distributed t2m plus static plev values."""
+    t2m = load_test_variable(
         "t2m",
         time=0,
         lat=slice(0, ny),
         lon=slice(0, nx),
     )
-    plev_values = _load_source_variable("plev").rename("plev_values")
+    plev_values = load_test_variable("plev").rename("plev_values")
     full = xr.merge([t2m.to_dataset(name="t2m"), plev_values.to_dataset()])
     distributed = mpi.xarray.redistribute(full, "lat")
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        progress("reducing Dataset sum")
+    @timer
+    def reduce_dataset() -> tuple[xr.Dataset, xr.Dataset]:
         result = mpi.xarray.sum(distributed, dim="lat")
-        progress("reducing Dataset mean")
         mean_result = mpi.xarray.mean(distributed, dim=("lat", "lon"))
-    parallel_s = box["seconds"]
+        return result, mean_result
 
-    progress("checking Dataset reduction results")
+    (result, mean_result), parallel_s = reduce_dataset()
+
     expected = full.sum(dim="lat")
     expected_mean = full.mean(dim=("lat", "lon"))
     correct = (
@@ -1258,7 +1333,7 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
             np.allclose(
                 result["t2m"].values,
                 expected["t2m"].values,
-                rtol=dtype_rtol(expected["t2m"].values),
+                rtol=relative_tolerance_for_dtype(expected["t2m"].values),
                 equal_nan=True,
             )
         )
@@ -1273,7 +1348,7 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
             np.allclose(
                 mean_result["t2m"].values,
                 expected_mean["t2m"].values,
-                rtol=dtype_rtol(expected_mean["t2m"].values),
+                rtol=relative_tolerance_for_dtype(expected_mean["t2m"].values),
                 equal_nan=True,
             )
         )
@@ -1287,8 +1362,7 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
         and "mpi_meta" not in mean_result.attrs
     )
 
-    progress("preparing empty-partition extreme reductions")
-    profile = _load_source_variable(
+    profile = load_test_variable(
         "t",
         time=0,
         plev=slice(0, max(1, SIZE - 1)),
@@ -1296,9 +1370,7 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
         lon=0,
     )
     profile_distributed = mpi.xarray.redistribute(profile, "plev")
-    progress("reducing empty-partition minimum")
     minimum = mpi.xarray.min(profile_distributed, dim="plev")
-    progress("reducing empty-partition maximum")
     maximum = mpi.xarray.max(profile_distributed, dim="plev")
     correct = (
         correct
@@ -1308,21 +1380,20 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
             np.isclose(
                 float(minimum.item()),
                 float(profile.min(skipna=True).item()),
-                rtol=dtype_rtol(profile.values),
+                rtol=relative_tolerance_for_dtype(profile.values),
             )
         )
         and bool(
             np.isclose(
                 float(maximum.item()),
                 float(profile.max(skipna=True).item()),
-                rtol=dtype_rtol(profile.values),
+                rtol=relative_tolerance_for_dtype(profile.values),
             )
         )
     )
     correct = bool(mpi.reduce.all(correct))
-    progress("recording result")
-    record(
-        "mpi.xarray Dataset reductions (real distributed/static variables)",
+    record_result(
+        "mpi.xarray Dataset reductions (mock distributed/static variables)",
         correct,
         0.0,
         parallel_s,
@@ -1330,7 +1401,8 @@ def test_xarray_dataset_reduction(ny: int, nx: int) -> None:
     )
 
 
-def test_xarray_contracts() -> None:
+@run_test
+def test_distributed_xarray_contracts() -> None:
     """Exercise distributed xarray edge cases and validation with deterministic data."""
     full = xr.DataArray(
         np.arange(30, dtype=np.float64).reshape(5, 6),
@@ -1353,7 +1425,6 @@ def test_xarray_contracts() -> None:
         "chunk_info"
     ) == {"lat": 2, "lon": 3}
 
-    progress("checking global scalar indexing and plain-xarray passthrough")
     negative = mpi.xarray.isel(distributed, lat=-1)
     mapped = mpi.xarray.isel(
         distributed,
@@ -1391,7 +1462,6 @@ def test_xarray_contracts() -> None:
         and scalar_auto.attrs.get("mpi_meta") is None
     )
 
-    progress("checking reduction edge cases, including empty rank partitions")
     total_sum = mpi.xarray.sum(distributed, dim=None)
     ellipsis_sum = mpi.xarray.sum(distributed, dim=...)
     tuple_mean = mpi.xarray.mean(distributed, dim=("lat", "lon"))
@@ -1533,7 +1603,6 @@ def test_xarray_contracts() -> None:
         and bool(empty_partition_ok)
     )
 
-    progress("checking nonzero-root reduction placement")
     root = SIZE - 1
     root_sum = mpi.xarray.sum(distributed, dim="lat", mode="root", root=root)
     root_ok = (
@@ -1543,7 +1612,6 @@ def test_xarray_contracts() -> None:
         else root_sum is None
     )
 
-    progress("checking distributed xarray validation failures")
     complex_full = xr.DataArray(
         np.arange(max(1, SIZE - 1), dtype=np.float64) + 1.0j,
         dims=("sample",),
@@ -1552,28 +1620,28 @@ def test_xarray_contracts() -> None:
     complex_distributed = mpi.xarray.redistribute(complex_full, "sample")
     validation_ok = all(
         (
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.xarray.redistribute,
                 distributed,
                 "lon",
                 contains="already distributed",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.xarray.redistribute,
                 full,
                 "missing",
                 contains="does not exist",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.xarray.sum,
                 distributed,
                 dim="lon",
                 contains="Distributed dimension",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.xarray.sum,
                 distributed,
@@ -1581,7 +1649,7 @@ def test_xarray_contracts() -> None:
                 mode="invalid",
                 contains="mode",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi.xarray.sum,
                 distributed,
@@ -1590,42 +1658,42 @@ def test_xarray_contracts() -> None:
                 root=SIZE,
                 contains="outside",
             ),
-            _raises(
+            call_raises(
                 NotImplementedError,
                 mpi.xarray.isel,
                 distributed,
                 lat=slice(None, None, 2),
                 contains="step 1",
             ),
-            _raises(
+            call_raises(
                 NotImplementedError,
                 mpi.xarray.isel,
                 distributed,
                 lat=[0, 1],
                 contains="slices and scalar",
             ),
-            _raises(
+            call_raises(
                 IndexError,
                 mpi.xarray.isel,
                 distributed,
                 lat=full.sizes["lat"],
                 contains="out of bounds",
             ),
-            _raises(
+            call_raises(
                 NotImplementedError,
                 mpi.xarray.sel,
                 distributed,
                 lat=[-60.0, 0.0],
                 contains="slices and scalar",
             ),
-            _raises(
+            call_raises(
                 KeyError,
                 mpi.xarray.sel,
                 distributed,
                 lat=999.0,
                 contains="No rank contains label",
             ),
-            _raises(
+            call_raises(
                 KeyError,
                 mpi.xarray.sel,
                 distributed,
@@ -1633,21 +1701,21 @@ def test_xarray_contracts() -> None:
                 method="nearest",
                 tolerance=1.0,
             ),
-            _raises(
+            call_raises(
                 TypeError,
                 mpi.xarray.sum,
                 np.arange(3),
                 dim="x",
                 contains="require an xarray",
             ),
-            _raises(
+            call_raises(
                 TypeError,
                 mpi.xarray.min,
                 complex_distributed,
                 dim="sample",
                 contains="minimum",
             ),
-            _raises(
+            call_raises(
                 TypeError,
                 mpi.xarray.max,
                 complex_distributed,
@@ -1660,8 +1728,7 @@ def test_xarray_contracts() -> None:
     correct = bool(
         mpi.reduce.all(indexing_ok and reduction_ok and root_ok and validation_ok)
     )
-    progress("recording result")
-    record(
+    record_result(
         "mpi.xarray contracts (edge reductions/indexing/validation/nonzero root)",
         correct,
         0.0,
@@ -1670,9 +1737,10 @@ def test_xarray_contracts() -> None:
     )
 
 
-def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
-    """Redistribute a real reduction result along the remaining longitude dimension."""
-    full = _load_source_variable(
+@run_test
+def test_reduction_redistribution(n_lat_max: int, nx: int) -> None:
+    """Redistribute a mock-data reduction result along longitude."""
+    full = load_test_variable(
         "t2m",
         time=0,
         lat=slice(0, n_lat_max),
@@ -1680,12 +1748,12 @@ def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
     )
     distributed = mpi.xarray.redistribute(full, "lat")
 
-    progress("entering timed parallel section")
-    with timed() as box:
-        result = mpi.xarray.mean(distributed, dim="lat", redistribute_on="lon")
-    parallel_s = box["seconds"]
+    @timer
+    def reduce_and_redistribute() -> xr.DataArray:
+        return mpi.xarray.mean(distributed, dim="lat", redistribute_on="lon")
 
-    progress("checking redistribute_on='auto'")
+    result, parallel_s = reduce_and_redistribute()
+
     auto_result = mpi.xarray.mean(
         distributed,
         dim="lat",
@@ -1699,11 +1767,12 @@ def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
         axis=auto_result.get_axis_num("lon"),
     )
 
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> np.ndarray:
         return full.mean(dim="lat").values
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     meta = result.attrs.get("mpi_meta")
     auto_meta = auto_result.attrs.get("mpi_meta")
     local_meta_ok = (
@@ -1719,7 +1788,7 @@ def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
             np.allclose(
                 assembled,
                 expected,
-                rtol=dtype_rtol(expected),
+                rtol=relative_tolerance_for_dtype(expected),
                 equal_nan=True,
             )
         )
@@ -1727,15 +1796,14 @@ def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
             np.allclose(
                 auto_assembled,
                 expected,
-                rtol=dtype_rtol(expected),
+                rtol=relative_tolerance_for_dtype(expected),
                 equal_nan=True,
             )
         )
         and bool(mpi.reduce.all(local_meta_ok))
     )
-    progress("recording result")
-    record(
-        "mpi.xarray.mean(real t2m, redistribute_on='lon')",
+    record_result(
+        "mpi.xarray.mean(mock t2m, redistribute_on='lon')",
         correct,
         serial_s,
         parallel_s,
@@ -1747,9 +1815,10 @@ def test_xarray_redistribute_on(n_lat_max: int, nx: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_scatterv(n_total: int) -> None:
-    """Scatter rows from a real SHiELD t2m field."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source_ds:
+@run_test
+def test_scatterv_rows(n_total: int) -> None:
+    """Scatter rows from a mock t2m field."""
+    with xr.open_dataset(TEST_DATA_PATH) as source_ds:
         n_lat = int(source_ds.sizes["lat"])
         n_lon = min(3, int(source_ds.sizes["lon"]))
         dtype = np.dtype(source_ds["t2m"].dtype)
@@ -1757,30 +1826,30 @@ def test_scatterv(n_total: int) -> None:
     total = min(n_lat, max(1, n_total // max(1, n_lon)))
     counts = [total // SIZE + (1 if rank < total % SIZE else 0) for rank in range(SIZE)]
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def scatter_rows() -> np.ndarray:
         source = None
         if RANK == 0:
-            source = _load_source_variable(
+            source = load_test_variable(
                 "t2m",
                 time=0,
                 lat=slice(0, total),
                 lon=slice(0, n_lon),
             ).values
-        recv = mpi.scatterv(source, counts, (counts[RANK], n_lon), dtype, root=0)
-    parallel_s = box["seconds"]
+        return mpi.scatterv(source, counts, (counts[RANK], n_lon), dtype, root=0)
+
+    recv, parallel_s = scatter_rows()
 
     start = sum(counts[:RANK])
-    expected_local = _load_source_variable(
+    expected_local = load_test_variable(
         "t2m",
         time=0,
         lat=slice(start, start + counts[RANK]),
         lon=slice(0, n_lon),
     ).values
     correct = bool(np.array_equal(recv, expected_local, equal_nan=True))
-    progress("recording result")
-    record(
-        f"mpi.scatterv real t2m ({total} rows across {SIZE} rank(s))",
+    record_result(
+        f"mpi.scatterv mock t2m ({total} rows across {SIZE} rank(s))",
         bool(mpi.reduce.all(correct)),
         0.0,
         parallel_s,
@@ -1788,12 +1857,12 @@ def test_scatterv(n_total: int) -> None:
     )
 
 
-def test_scatterv_contracts() -> None:
+@run_test
+def test_scatterv_validation_and_edge_cases() -> None:
     """Exercise scatterv validation, nonzero roots, non-contiguous sends,
     and zero rows.
     """
-    progress("checking scatterv validation failures")
-    invalid_counts_ok = _raises(
+    invalid_counts_ok = call_raises(
         ValueError,
         mpi.scatterv,
         None,
@@ -1802,7 +1871,7 @@ def test_scatterv_contracts() -> None:
         np.float64,
         contains="counts",
     )
-    unsupported_dtype_ok = _raises(
+    unsupported_dtype_ok = call_raises(
         mpi.MPIError,
         mpi.scatterv,
         None,
@@ -1813,7 +1882,7 @@ def test_scatterv_contracts() -> None:
     )
     missing_root_array_ok = True
     if SIZE == 1:
-        missing_root_array_ok = _raises(
+        missing_root_array_ok = call_raises(
             ValueError,
             mpi.scatterv,
             None,
@@ -1823,7 +1892,6 @@ def test_scatterv_contracts() -> None:
             contains="cannot be None",
         )
 
-    progress("checking nonzero-root scatter and zero-length local receives")
     root = SIZE - 1
     total = max(1, SIZE - 1)
     counts = [total // SIZE + (1 if rank < total % SIZE else 0) for rank in range(SIZE)]
@@ -1848,8 +1916,7 @@ def test_scatterv_contracts() -> None:
             and scatter_ok
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows)",
         correct,
         0.0,
@@ -1863,32 +1930,36 @@ def test_scatterv_contracts() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_weighted_mean(n_lat_total: int, n_lon: int) -> None:
-    """Cosine-latitude weighted mean of the real SHiELD 2 m temperature field."""
-    with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
+@run_test
+def test_cosine_weighted_mean(n_lat_total: int, n_lon: int) -> None:
+    """Cosine-latitude weighted mean of the mock 2 m temperature field."""
+    with xr.open_dataset(TEST_DATA_PATH) as source:
         n_lat = min(int(source.sizes["lat"]), n_lat_total)
         n_lon_used = min(int(source.sizes["lon"]), n_lon)
 
-    start, stop = _rank_bounds(n_lat)
-    local = _load_source_variable(
+    start, stop = partition_bounds(n_lat)
+    local = load_test_variable(
         "t2m",
         time=0,
         lat=slice(start, stop),
         lon=slice(0, n_lon_used),
     )
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def parallel_weighted_mean() -> float:
         weights = np.cos(np.deg2rad(local["lat"]))
         local_weighted_sum = (local * weights).sum(skipna=True)
         local_weight_sum = (xr.ones_like(local) * weights).where(local.notnull()).sum()
         global_weighted_sum = mpi.reduce.sum(float(local_weighted_sum))
         global_weight_sum = mpi.reduce.sum(float(local_weight_sum))
-        weighted_mean = global_weighted_sum / global_weight_sum
-    parallel_s = box["seconds"]
+        return global_weighted_sum / global_weight_sum
 
+    weighted_mean, parallel_s = parallel_weighted_mean()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> float:
-        full = _load_source_variable(
+        full = load_test_variable(
             "t2m",
             time=0,
             lat=slice(0, n_lat),
@@ -1899,19 +1970,17 @@ def test_weighted_mean(n_lat_total: int, n_lon: int) -> None:
         denominator = (xr.ones_like(full) * weights).where(full.notnull()).sum()
         return float(numerator / denominator)
 
-    progress("running serial baseline")
-    expected, serial_s = run_serial_baseline(serial_fn)
+    expected, serial_s = serial_fn()
     correct = bool(
         np.isclose(
             weighted_mean,
             expected,
-            rtol=dtype_rtol(local.values),
+            rtol=relative_tolerance_for_dtype(local.values),
             equal_nan=True,
         )
     )
-    progress("recording result")
-    record(
-        f"cosine-lat weighted mean real t2m ({n_lat}x{n_lon_used})",
+    record_result(
+        f"cosine-lat weighted mean mock t2m ({n_lat}x{n_lon_used})",
         correct,
         serial_s,
         parallel_s,
@@ -1923,7 +1992,9 @@ def test_weighted_mean(n_lat_total: int, n_lon: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mpi_decorator() -> None:
+@run_test
+def test_mpi_decorator_modes() -> None:
+    """Exercise root, all-rank, broadcast, error, and validation modes of @mpi."""
     mpi.log("\n--- @mpi decorator usage ---")
 
     # 1) Bare @mpi: runs only on rank 0 (the default root), returns None on
@@ -1983,8 +2054,6 @@ def test_mpi_decorator() -> None:
             + f"{type(exc).__name__} on every rank: {exc}"
         )
 
-    progress("checking nonzero-root decorator and argument validation")
-
     @mpi(broadcast=True, root=SIZE - 1)
     def nonzero_root_setup() -> int:
         return RANK
@@ -1994,7 +2063,7 @@ def test_mpi_decorator() -> None:
     invalid_root_function = mpi(lambda: None, root=SIZE)
     ok_validation = all(
         (
-            _raises(
+            call_raises(
                 ValueError,
                 mpi,
                 lambda: None,
@@ -2002,20 +2071,20 @@ def test_mpi_decorator() -> None:
                 broadcast=True,
                 contains="incompatible",
             ),
-            _raises(
+            call_raises(
                 TypeError,
                 mpi,
                 42,
                 contains="must be callable",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 mpi,
                 lambda: None,
                 root=-1,
                 contains="non-negative",
             ),
-            _raises(
+            call_raises(
                 ValueError,
                 invalid_root_function,
                 contains="outside",
@@ -2035,8 +2104,7 @@ def test_mpi_decorator() -> None:
             and ok_validation
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "@mpi decorator (root/all_ranks/broadcast/error/validation)",
         overall,
         0.0,
@@ -2045,9 +2113,9 @@ def test_mpi_decorator() -> None:
     )
 
 
-def test_xgeo_helpers(out_dir: str) -> None:
+@run_test
+def test_xgeo_interface_contracts(out_dir: str) -> None:
     """Check public xgeo placeholder detection and front-door validation."""
-    progress("checking MPI placeholder semantics")
     placeholder = xgeo.empty_dataset()
     normal_empty = xr.Dataset()
     integer_marker = xr.Dataset(attrs={"_climtools_no_data": 1})
@@ -2069,8 +2137,7 @@ def test_xgeo_helpers(out_dir: str) -> None:
         for name in ("append", "dataset_is_empty", "empty_dataset", "to_netcdf")
     )
 
-    progress("checking xgeo.to_netcdf input and distributed-dimension validation")
-    invalid_type_ok = _raises(
+    invalid_type_ok = call_raises(
         TypeError,
         xgeo.to_netcdf,
         np.arange(3),
@@ -2083,7 +2150,7 @@ def test_xgeo_helpers(out_dir: str) -> None:
         name="field",
     )
     distributed = mpi.xarray.redistribute(full, "time")
-    mismatch_ok = _raises(
+    mismatch_ok = call_raises(
         ValueError,
         xgeo.to_netcdf,
         distributed,
@@ -2099,8 +2166,7 @@ def test_xgeo_helpers(out_dir: str) -> None:
             exports_ok and placeholder_ok and invalid_type_ok and mismatch_ok
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "xgeo helpers/to_netcdf front-door validation",
         correct,
         0.0,
@@ -2109,14 +2175,19 @@ def test_xgeo_helpers(out_dir: str) -> None:
     )
 
 
-def test_netcdf_validation_and_options(out_dir: str) -> None:
+@run_test
+def test_parallel_netcdf_writer_options(out_dir: str) -> None:
     """Check parallel NetCDF validation plus explicit chunk/filter/unlimited options."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
-        record_skip(
+        record_result(
             "parallel NetCDF validation/options",
-            "netCDF4 lacks parallel4 support",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
         )
         return
 
@@ -2141,8 +2212,12 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
     )
     expected_error = (ValueError, mpi.MPIError)
 
-    progress("checking synchronized NetCDF preparation validation")
-    invalid_partition_ok = _raises(
+    mpi.log(
+        "checking synchronized NetCDF preparation validation",
+        timestamp=True,
+        flush=True,
+    )
+    invalid_partition_ok = call_raises(
         expected_error,
         xgeo.to_netcdf,
         data,
@@ -2152,7 +2227,7 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
         allow_serial=(SIZE == 1),
         contains="partition_dim",
     )
-    invalid_compression_ok = _raises(
+    invalid_compression_ok = call_raises(
         expected_error,
         xgeo.to_netcdf,
         data,
@@ -2163,7 +2238,7 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
         allow_serial=(SIZE == 1),
         contains="0 through 9",
     )
-    invalid_unlimited_ok = _raises(
+    invalid_unlimited_ok = call_raises(
         expected_error,
         xgeo.to_netcdf,
         data,
@@ -2179,7 +2254,7 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
     allow_serial_ok = True
     if SIZE == 1:
         unnamed = xr.DataArray(np.arange(4), dims=("time",))
-        unnamed_ok = _raises(
+        unnamed_ok = call_raises(
             ValueError,
             xgeo.to_netcdf,
             unnamed,
@@ -2189,7 +2264,7 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
             allow_serial=True,
             contains="must have a name",
         )
-        allow_serial_ok = _raises(
+        allow_serial_ok = call_raises(
             mpi.MPIError,
             xgeo.to_netcdf,
             data,
@@ -2200,7 +2275,11 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
             contains="one process",
         )
 
-    progress("writing explicit parallel chunk/compression/unlimited configuration")
+    mpi.log(
+        "writing explicit parallel chunk/compression/unlimited configuration",
+        timestamp=True,
+        flush=True,
+    )
     path = Path(out_dir) / "climtools_test_parallel_options.nc"
     xgeo.to_netcdf(
         data,
@@ -2261,7 +2340,11 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
         root=0,
     )
 
-    progress("checking automatic partition selection with compression disabled")
+    mpi.log(
+        "checking automatic partition selection with compression disabled",
+        timestamp=True,
+        flush=True,
+    )
     uncompressed_path = Path(out_dir) / "climtools_test_parallel_uncompressed.nc"
     xgeo.to_netcdf(
         data[["field"]],
@@ -2310,8 +2393,7 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
             and uncompressed_ok
         )
     )
-    progress("recording result")
-    record(
+    record_result(
         "parallel NetCDF validation/options (chunks/filters/unlimited/attrs)",
         correct,
         0.0,
@@ -2319,7 +2401,6 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
         note=integrity_note or "correctness-focused",
     )
 
-    progress("cleaning synthetic NetCDF outputs")
     mpi.comm.barrier()
     if RANK == 0:
         for output in (path, uncompressed_path):
@@ -2333,25 +2414,34 @@ def test_netcdf_validation_and_options(out_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_netcdf_write(out_dir: str) -> None:
-    """Compare parallel and serial writes of selected variables from the SHiELD file."""
+@run_test
+def test_parallel_netcdf_write(out_dir: str) -> None:
+    """Compare parallel and serial writes of selected variables from the mock file."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
-        record_skip(
-            "NetCDF write (selected real SHiELD variables)",
-            "netCDF4 lacks parallel4 support",
+        record_result(
+            "NetCDF write (selected mock variables)",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
         )
         return
 
-    mpi.log("\n--- NetCDF write: selected real SHiELD data, parallel vs serial ---")
+    mpi.log("\n--- NetCDF write: selected mock data, parallel vs serial ---")
 
-    progress("loading selected serial SHiELD source on rank 0")
+    mpi.log(
+        "loading selected serial mock source on rank 0",
+        timestamp=True,
+        flush=True,
+    )
     full: xr.Dataset | None = None
     error: BaseException | None = None
     if RANK == 0:
         try:
-            full = _load_source_dataset(
+            full = load_test_dataset(
                 ("pr", "t", "slmsk"),
                 plev=slice(0, 5),
                 lat=slice(0, 128),
@@ -2359,13 +2449,13 @@ def test_netcdf_write(out_dir: str) -> None:
             )
         except BaseException as exc:
             error = exc
-    mpi.raise_if_error(error, "load selected real NetCDF source")
+    mpi.raise_if_error(error, "load selected mock NetCDF source")
 
     parallel_path = os.path.join(out_dir, "climtools_test_parallel.nc")
     serial_path = os.path.join(out_dir, "climtools_test_serial.nc")
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def write_parallel_dataset() -> None:
         ds = full if RANK == 0 else xgeo.empty_dataset()
         xgeo.to_netcdf(
             ds,
@@ -2375,8 +2465,11 @@ def test_netcdf_write(out_dir: str) -> None:
             parallel=True,
             allow_serial=(SIZE == 1),
         )
-    parallel_s = box["seconds"]
 
+    _, parallel_s = write_parallel_dataset()
+
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> None:
         if full is None:
             raise AssertionError("Rank 0 did not load the NetCDF source.")
@@ -2387,10 +2480,13 @@ def test_netcdf_write(out_dir: str) -> None:
             show_progress=False,
         )
 
-    progress("running serial baseline")
-    _, serial_s = run_serial_baseline(serial_fn)
+    _, serial_s = serial_fn()
 
-    progress("validating parallel output against serial output")
+    mpi.log(
+        "validating parallel output against serial output",
+        timestamp=True,
+        flush=True,
+    )
     correct = True
     integrity_note = ""
     if RANK == 0:
@@ -2407,16 +2503,14 @@ def test_netcdf_write(out_dir: str) -> None:
             integrity_note = str(exc)
 
     correct, integrity_note = mpi.comm.bcast((correct, integrity_note), root=0)
-    progress("recording result")
-    record(
-        "NetCDF write (selected real SHiELD variables)",
+    record_result(
+        "NetCDF write (selected mock variables)",
         correct,
         serial_s,
         parallel_s,
         note=integrity_note or "xr.testing.assert_identical",
     )
 
-    progress("cleaning NetCDF comparison outputs")
     mpi.comm.barrier()
     if RANK == 0:
         for path in (serial_path, parallel_path):
@@ -2425,26 +2519,35 @@ def test_netcdf_write(out_dir: str) -> None:
     mpi.comm.barrier()
 
 
-def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
-    """Compare distributed and serial writes of selected real SHiELD variables."""
+@run_test
+def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
+    """Compare distributed and serial writes of selected mock variables."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
-        record_skip(
-            "distributed NetCDF round-trip (selected real SHiELD variables)",
-            "netCDF4 lacks parallel4 support",
+        record_result(
+            "distributed NetCDF round-trip (selected mock variables)",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
         )
         return
 
     serial_path = os.path.join(out_dir, "climtools_test_distributed_serial.nc")
     parallel_path = os.path.join(out_dir, "climtools_test_distributed_parallel.nc")
 
-    progress("loading serial reference dataset on rank 0")
+    mpi.log(
+        "loading serial reference dataset on rank 0",
+        timestamp=True,
+        flush=True,
+    )
     serial_data: xr.Dataset | None = None
     error: BaseException | None = None
     if RANK == 0:
         try:
-            serial_data = _load_source_dataset(
+            serial_data = load_test_dataset(
                 ("pr", "t", "slmsk"),
                 plev=slice(0, 5),
                 lat=slice(0, 128),
@@ -2457,6 +2560,8 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
     n_time = None if serial_data is None else int(serial_data.sizes["time"])
     n_time = mpi.comm.bcast(n_time, root=0)
 
+    @mpi(broadcast=True)
+    @timer(synchronize=False)
     def serial_fn() -> None:
         if serial_data is None:
             raise AssertionError("Rank 0 did not load the NetCDF source.")
@@ -2467,17 +2572,20 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
             show_progress=False,
         )
 
-    progress("running serial baseline")
-    _, serial_s = run_serial_baseline(serial_fn)
+    _, serial_s = serial_fn()
     serial_data = None
     mpi.comm.barrier()
 
-    progress("opening and loading rank-local distributed dataset")
+    mpi.log(
+        "opening and loading rank-local distributed dataset",
+        timestamp=True,
+        flush=True,
+    )
     distributed: xr.Dataset | None = None
     error = None
     try:
         distributed = mpi.xarray.open_dataset(
-            str(DEFAULT_NETCDF_SOURCE),
+            str(TEST_DATA_PATH),
             partition_dim="time",
         )[["pr", "t", "slmsk"]]
         distributed = distributed.isel(
@@ -2499,8 +2607,8 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
         and int(meta.get("global_size", -1)) == n_time
     )
 
-    progress("entering timed parallel section")
-    with timed() as box:
+    @timer
+    def write_distributed_dataset() -> None:
         xgeo.to_netcdf(
             distributed,
             parallel_path,
@@ -2508,11 +2616,16 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
             parallel=True,
             allow_serial=(SIZE == 1),
         )
-    parallel_s = box["seconds"]
+
+    _, parallel_s = write_distributed_dataset()
     distributed.close()
     mpi.comm.barrier()
 
-    progress("validating distributed output and internal metadata stripping")
+    mpi.log(
+        "validating distributed output and internal metadata stripping",
+        timestamp=True,
+        flush=True,
+    )
     correct = bool(mpi.reduce.all(local_meta_ok))
     integrity_note = ""
 
@@ -2542,16 +2655,14 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
         (correct, integrity_note),
         root=0,
     )
-    progress("recording result")
-    record(
-        "distributed NetCDF round-trip (selected real SHiELD variables)",
+    record_result(
+        "distributed NetCDF round-trip (selected mock variables)",
         correct,
         serial_s,
         parallel_s,
         note=integrity_note or "xr.testing.assert_identical",
     )
 
-    progress("cleaning distributed NetCDF comparison outputs")
     mpi.comm.barrier()
     if RANK == 0:
         for path in (serial_path, parallel_path):
@@ -2560,26 +2671,35 @@ def test_netcdf_distributed_roundtrip(out_dir: str) -> None:
     mpi.comm.barrier()
 
 
-def test_netcdf_distributed_dataarray(out_dir: str) -> None:
-    """Round-trip a selected real SHiELD precipitation DataArray in distributed mode."""
+@run_test
+def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
+    """Round-trip a selected mock precipitation DataArray in distributed mode."""
     import netCDF4
 
     if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
-        record_skip(
-            "distributed NetCDF DataArray round-trip (selected real SHiELD pr)",
-            "netCDF4 lacks parallel4 support",
+        record_result(
+            "distributed NetCDF DataArray round-trip (selected mock pr)",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
         )
         return
 
     serial_path = os.path.join(out_dir, "climtools_test_pr_serial.nc")
     parallel_path = os.path.join(out_dir, "climtools_test_pr_parallel.nc")
 
-    progress("loading serial precipitation reference on rank 0")
+    mpi.log(
+        "loading serial precipitation reference on rank 0",
+        timestamp=True,
+        flush=True,
+    )
     serial_pr: xr.DataArray | None = None
     error: BaseException | None = None
     if RANK == 0:
         try:
-            serial_pr = _load_source_variable(
+            serial_pr = load_test_variable(
                 "pr",
                 lat=slice(0, 256),
                 lon=slice(0, 256),
@@ -2601,12 +2721,16 @@ def test_netcdf_distributed_dataarray(out_dir: str) -> None:
 
     write_serial_pr()
 
-    progress("opening distributed precipitation DataArray")
+    mpi.log(
+        "opening distributed precipitation DataArray",
+        timestamp=True,
+        flush=True,
+    )
     distributed_ds: xr.Dataset | None = None
     error = None
     try:
         distributed_ds = mpi.xarray.open_dataset(
-            str(DEFAULT_NETCDF_SOURCE),
+            str(TEST_DATA_PATH),
             partition_dim="time",
         )[["pr"]]
         distributed_ds = distributed_ds.isel(
@@ -2621,7 +2745,11 @@ def test_netcdf_distributed_dataarray(out_dir: str) -> None:
         raise AssertionError("Distributed Dataset was not created.")
 
     distributed_pr = distributed_ds["pr"]
-    progress("writing distributed precipitation DataArray")
+    mpi.log(
+        "writing distributed precipitation DataArray",
+        timestamp=True,
+        flush=True,
+    )
     xgeo.to_netcdf(
         distributed_pr,
         parallel_path,
@@ -2631,7 +2759,11 @@ def test_netcdf_distributed_dataarray(out_dir: str) -> None:
     )
     distributed_ds.close()
 
-    progress("validating distributed DataArray output")
+    mpi.log(
+        "validating distributed DataArray output",
+        timestamp=True,
+        flush=True,
+    )
     correct = True
     integrity_note = ""
     if RANK == 0:
@@ -2648,16 +2780,14 @@ def test_netcdf_distributed_dataarray(out_dir: str) -> None:
             integrity_note = str(exc)
 
     correct, integrity_note = mpi.comm.bcast((correct, integrity_note), root=0)
-    progress("recording result")
-    record(
-        "distributed NetCDF DataArray round-trip (selected real SHiELD pr)",
+    record_result(
+        "distributed NetCDF DataArray round-trip (selected mock pr)",
         correct,
         0.0,
         0.0,
         note=integrity_note or "correctness-focused",
     )
 
-    progress("cleaning DataArray NetCDF comparison outputs")
     mpi.comm.barrier()
     if RANK == 0:
         for path in (serial_path, parallel_path):
@@ -2671,36 +2801,8 @@ def test_netcdf_distributed_dataarray(out_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="climtools MPI test/benchmark suite")
-    parser.add_argument(
-        "--n-events",
-        type=int,
-        default=2_000_000,
-        help="maximum number of real source values used by reduce/scatter tests",
-    )
-    parser.add_argument("--grid-ny", type=int, default=180)
-    parser.add_argument("--grid-nx", type=int, default=360)
-    parser.add_argument(
-        "--xarray-events",
-        type=int,
-        default=5_000,
-        help=(
-            "maximum real source pressure levels/latitude rows used by mpi.xarray tests"
-        ),
-    )
-    parser.add_argument("--xarray-ny", type=int, default=40)
-    parser.add_argument("--xarray-nx", type=int, default=40)
-    parser.add_argument("--n-lat", type=int, default=180, help="weighted-mean test")
-    parser.add_argument("--n-lon", type=int, default=360)
-    parser.add_argument(
-        "--out-dir", type=str, default=str(Path.home() / "scratch" / "io_mpi_test")
-    )
-    parser.add_argument("--skip-netcdf", action="store_true")
-    return parser.parse_args()
-
-
-def print_summary() -> int:
+def print_test_summary() -> int:
+    """Print the final result table and return the number of failed checks."""
     mpi.log("\n" + "=" * 88)
     mpi.log(f"SUMMARY -- {SIZE} rank(s)")
     mpi.log("=" * 88)
@@ -2751,123 +2853,95 @@ def print_summary() -> int:
     return n_fail
 
 
-def main() -> None:
-    args = parse_args()
-
-    mpi.log("[SETUP] validating SHiELD source visibility", timestamp=True, flush=True)
-    try:
-        _require_source()
-    except BaseException as exc:
-        mpi.log(
-            f"[SETUP FAILED] {type(exc).__name__}: {exc}",
-            timestamp=True,
-            flush=True,
-        )
-        raise SystemExit(1) from exc
-
-    mpi.log("[SETUP] preparing output directory", timestamp=True, flush=True)
-    setup_error: BaseException | None = None
+def main(n_time_steps: int = DEFAULT_TIME_STEPS) -> None:
+    """Create test data and run the complete suite on the active MPI ranks."""
     if RANK == 0:
-        try:
-            os.makedirs(args.out_dir, exist_ok=True)
-        except BaseException as exc:
-            setup_error = exc
-    try:
-        mpi.raise_if_error(setup_error, "create output directory")
-    except BaseException as exc:
+        if OUTPUT_DIR.exists():
+            shutil.rmtree(OUTPUT_DIR)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        build_mock_dataset(n_time_steps).to_netcdf(TEST_DATA_PATH, format="NETCDF4")
+
+    mpi.log("[SETUP] validating test dataset visibility", timestamp=True, flush=True)
+    visible = TEST_DATA_PATH.is_file()
+    if not bool(mpi.reduce.all(visible)):
         mpi.log(
-            f"[SETUP FAILED] {type(exc).__name__}: {exc}",
+            "[SETUP FAILED] test dataset is not visible on every rank: "
+            + f"{TEST_DATA_PATH}",
             timestamp=True,
             flush=True,
         )
-        raise SystemExit(1) from exc
+        raise SystemExit(1)
+
     mpi.comm.barrier()
 
     mpi.log("=" * 88)
     mpi.log(f"climtools MPI test suite -- {SIZE} rank(s), mpi.launched={mpi.launched}")
-    mpi.log(
-        "mpi4py initializes MPI on import and finalizes automatically at exit; "
-        + "see the mpi4py Overview docs (https://mpi4py.readthedocs.io/en/stable/"
-        + "overview.html) for the underlying collective/error-handling semantics "
-        + "climtools.mpi builds on."
-    )
     mpi.log("=" * 88)
 
+    n_points = MOCK_LATITUDE_COUNT * MOCK_LONGITUDE_COUNT
+
     mpi.log("\n--- mpi runtime helpers ---")
-    safe_run(test_runtime_helpers)
-    safe_run(test_runtime_logging_and_errors)
-    safe_run(test_runtime_contracts)
+    test_mpi_runtime_helpers()
+    test_mpi_logging_and_error_propagation()
+    test_mpi_reduction_contracts()
 
     mpi.log("\n--- mpi.reduce ---")
-    safe_run(test_reduce_sum_scalar, args.n_events)
-    safe_run(test_reduce_composite, args.n_events, args.grid_ny, args.grid_nx)
-    safe_run(test_reduce_xarray_object, args.grid_ny, args.grid_nx)
-    safe_run(test_reduce_operations)
+    test_reduce_scalar_sum(n_points)
+    test_reduce_array_sum(n_points, MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_reduce_dataarray_sum(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_reduce_all_operations()
 
     mpi.log("\n--- mpi.xarray ---")
-    safe_run(test_xarray_open_dataset)
-    safe_run(test_xarray_redistribute, args.xarray_ny, args.xarray_nx)
-    safe_run(test_xarray_isel, args.xarray_ny, args.xarray_nx)
-    safe_run(test_xarray_sel, args.xarray_ny, args.xarray_nx)
+    test_distributed_open_dataset()
+    test_distributed_redistribution(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_distributed_isel(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_distributed_sel(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
     for op_name in ("sum", "prod", "mean", "max", "min"):
-        safe_run(
-            test_xarray_reduction,
-            args.xarray_events,
-            args.xarray_ny,
-            args.xarray_nx,
+        test_distributed_numeric_reduction(
+            MOCK_PRESSURE_LEVEL_COUNT,
+            MOCK_LATITUDE_COUNT,
+            MOCK_LONGITUDE_COUNT,
             op_name,
         )
     for op_name in ("any", "all"):
-        safe_run(
-            test_xarray_logical_reduction,
-            args.xarray_events,
-            args.xarray_nx,
+        test_distributed_logical_reduction(
+            MOCK_LATITUDE_COUNT,
+            MOCK_LONGITUDE_COUNT,
             op_name,
         )
-    safe_run(test_xarray_dataset_reduction, args.xarray_ny, args.xarray_nx)
-    safe_run(test_xarray_contracts)
-    safe_run(
-        test_xarray_redistribute_on,
-        args.xarray_events,
-        args.xarray_nx,
-    )
+    test_distributed_dataset_reduction(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_distributed_xarray_contracts()
+    test_reduction_redistribution(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
 
     mpi.log("\n--- mpi.scatterv ---")
-    safe_run(test_scatterv, args.n_events)
-    safe_run(test_scatterv_contracts)
+    test_scatterv_rows(n_points)
+    test_scatterv_validation_and_edge_cases()
 
     mpi.log("\n--- xarray operations + mpi.reduce ---")
-    safe_run(test_weighted_mean, args.n_lat, args.n_lon)
-
-    safe_run(test_mpi_decorator)
+    test_cosine_weighted_mean(MOCK_LATITUDE_COUNT, MOCK_LONGITUDE_COUNT)
+    test_mpi_decorator_modes()
 
     mpi.log("\n--- xgeo NetCDF interface ---")
-    safe_run(test_xgeo_helpers, args.out_dir)
-    if not args.skip_netcdf:
-        safe_run(test_netcdf_validation_and_options, args.out_dir)
-        safe_run(test_netcdf_write, args.out_dir)
-        safe_run(
-            test_netcdf_distributed_roundtrip,
-            args.out_dir,
-        )
-        safe_run(
-            test_netcdf_distributed_dataarray,
-            args.out_dir,
-        )
-    else:
-        for name in (
-            "parallel NetCDF validation/options",
-            "NetCDF write (selected real SHiELD variables)",
-            "distributed NetCDF round-trip (selected real SHiELD variables)",
-            "distributed NetCDF DataArray round-trip (selected real SHiELD pr)",
-        ):
-            record_skip(name, "--skip-netcdf requested")
+    output_dir = str(OUTPUT_DIR)
+    test_xgeo_interface_contracts(output_dir)
+    test_parallel_netcdf_writer_options(output_dir)
+    test_parallel_netcdf_write(output_dir)
+    test_distributed_netcdf_roundtrip(output_dir)
+    test_distributed_dataarray_roundtrip(output_dir)
 
     mpi.comm.barrier()
-    failures = print_summary()
-    if failures:
+    if print_test_summary():
         raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Run the climtools MPI correctness and performance test suite."
+    )
+    parser.add_argument(
+        "--time-steps",
+        type=int,
+        default=DEFAULT_TIME_STEPS,
+        help=f"number of mock time steps (default: {DEFAULT_TIME_STEPS})",
+    )
+    main(int(parser.parse_args().time_steps))

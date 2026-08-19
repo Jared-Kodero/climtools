@@ -1,0 +1,134 @@
+diff --git a/core/xarray_mpi.py b/core/xarray_mpi.py
+index df13036..e928a85 100644
+--- a/core/xarray_mpi.py
++++ b/core/xarray_mpi.py
+@@ -18,6 +18,8 @@ from mpi4py import MPI as _MPI
+ if TYPE_CHECKING:
+     from collections.abc import Callable
+ 
++    from numpy.typing import DTypeLike
++
+     from .lib_mpi import MPIRuntime
+ 
+ MPI_META = "mpi_meta"
+@@ -922,11 +924,21 @@ class XarrayMPI:
+         *,
+         mode: Literal["all", "root"],
+         root: int,
++        dtype: DTypeLike | None = None,
+     ) -> xr.DataArray | None:
+         send: np.ndarray[Any, Any] | None = None
+         error: BaseException | None = None
+         try:
+             send = np.asarray(value.values)
++            if dtype is not None and send.dtype != np.dtype(dtype):
++                # A rank-local xarray operation can promote the dtype on a
++                # subset of ranks: a rank holding an empty partition reaches
++                # its local result through a different code path from a rank
++                # holding data, and the promotion rules along that path differ
++                # between xarray and NumPy versions. The caller's dtype comes
++                # from the reduction plan and is identical on every rank, so
++                # coerce to it before the buffer collective is posted.
++                send = send.astype(np.dtype(dtype))
+             if not send.flags.c_contiguous:
+                 send = np.ascontiguousarray(send)
+             if send.dtype.kind not in _MPI_REDUCIBLE_KINDS:
+@@ -934,10 +946,45 @@ class XarrayMPI:
+         except BaseException as exc:
+             error = exc
+ 
+-        # Materializing a lazy rank-local result can fail on only one rank.
+-        # Synchronize that failure before any rank posts Allreduce/Reduce, or
+-        # the remaining ranks can block forever in the buffer collective.
+-        self._runtime.raise_if_error(error, "MPI xarray reduction buffer preparation")
++        # One allgather carrying both the failure flag and the buffer
++        # signature, inspected before any rank posts Allreduce/Reduce.
++        #
++        # Materializing a lazy rank-local result can fail on only one rank,
++        # and a rank-local dtype or shape divergence is just as damaging: MPI
++        # requires every rank to contribute the same datatype and count, and
++        # a reduction given mismatched buffers is undefined behaviour that
++        # can let some ranks return while the rest block forever. Both
++        # failures therefore raise the same exception on every rank, which
++        # leaves the communicator usable and names the cause.
++        signature = (
++            None
++            if send is None
++            else (str(send.dtype), tuple(int(length) for length in send.shape))
++        )
++        detail = None if error is None else f"{type(error).__name__}: {error}"
++        reports = self._runtime.comm.allgather((detail, signature))
++
++        failures = [(rank, text) for rank, (text, _) in enumerate(reports) if text]
++        if failures:
++            rank, text = failures[0]
++            if error is not None and len(failures) == self._runtime.comm.size:
++                raise error
++            raise self._runtime.MPIError(
++                f"Rank {rank} failed preparing an MPI xarray reduction "
++                + f"buffer with {text}."
++            )
++
++        signatures = [entry for _, entry in reports]
++        if len(set(signatures)) != 1:
++            listing = ", ".join(
++                f"rank {rank}: dtype={entry[0]} shape={entry[1]}"
++                for rank, entry in enumerate(signatures)
++            )
++            raise self._runtime.MPIError(
++                "MPI ranks prepared different reduction buffers, which would "
++                + f"deadlock the following collective ({listing})."
++            )
++
+         if send is None:
+             raise AssertionError("MPI xarray reduction buffer is missing.")
+ 
+@@ -972,6 +1019,7 @@ class XarrayMPI:
+             _MPI.SUM,
+             mode=mode,
+             root=root,
++            dtype=np.int64,
+         )
+ 
+     def _local_result(
+@@ -1180,11 +1228,18 @@ class XarrayMPI:
+                 _MPI.LAND if minimum else _MPI.LOR,
+                 mode=mode,
+                 root=root,
++                dtype=value.dtype,
+             )
+ 
+         op = _MPI.MIN if minimum else _MPI.MAX
+         if kind != "f":
+-            return self._comm_reduce(partial, op, mode=mode, root=root)
++            return self._comm_reduce(
++                partial,
++                op,
++                mode=mode,
++                root=root,
++                dtype=value.dtype,
++            )
+ 
+         identity = np.asarray(
+             np.inf if minimum else -np.inf,
+@@ -1199,12 +1254,19 @@ class XarrayMPI:
+         if safe_partial.dtype != partial.dtype:
+             safe_partial = safe_partial.astype(partial.dtype, keep_attrs=True)
+ 
+-        result = self._comm_reduce(safe_partial, op, mode=mode, root=root)
++        result = self._comm_reduce(
++            safe_partial,
++            op,
++            mode=mode,
++            root=root,
++            dtype=value.dtype,
++        )
+         global_mask = self._comm_reduce(
+             local_mask,
+             _MPI.LOR,
+             mode=mode,
+             root=root,
++            dtype=np.bool_,
+         )
+         if result is None or global_mask is None:
+             return None
