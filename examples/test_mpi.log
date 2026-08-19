@@ -1,11 +1,11 @@
 ## SLURM PROLOG ###############################################################
-##    Job ID : 5084088
+##    Job ID : 5085326
 ##  Job Name : test.sh
 ##  Nodelist : node2405
 ##      CPUs : 8
 ##  Mem/Node : 512000 MB
 ## Directory : /oscar/home/jkodero/research/climtools/examples
-##   Job Started : Wed Aug 19 04:00:59 PM EDT 2026
+##   Job Started : Wed Aug 19 05:39:49 PM EDT 2026
 ###############################################################################
 
 Currently Loaded Modules:
@@ -24,4 +24,234 @@ Currently Loaded Modules:
 
  
 
-2026-08-19 16:01:07 - [MPI RANK 0] Creating mock dataset
+2026-08-19 17:39:57 - [MPI RANK 0] Creating mock dataset
+2026-08-19 17:40:09 - [MPI RANK 0] Mock dataset saved to /users/jkodero/scratch/io_mpi_test/mock_in.nc
+[MPI RANK 0] Configuration Constants:
+  TIME_STEPS:      100
+  RESOLUTION_DEG:  0.25
+  PLEV_STEP:       -50
+  LATITUDE_COUNT:  721
+  LONGITUDE_COUNT: 1440
+  PLEV_COUNT:      21
+  TEST_DATA_PATH:  /users/jkodero/scratch/io_mpi_test/mock_in.nc
+2026-08-19 17:40:09 - [MPI RANK 0] [SETUP] validating test dataset visibility
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] climtools MPI test suite -- 8 rank(s), mpi.launched=True
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] 
+--- mpi runtime helpers ---
+2026-08-19 17:40:09 - [MPI RANK 0] [TEST 01] test_mpi_runtime_helpers: START
+[MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-19 17:40:09 - [MPI RANK 0] [TEST 01] test_mpi_runtime_helpers: DONE
+2026-08-19 17:40:09 - [MPI RANK 0] [TEST 02] test_mpi_logging_and_error_propagation: START
+[MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts               serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-19 17:40:09 - [MPI RANK 0] [TEST 02] test_mpi_logging_and_error_propagation: DONE
+2026-08-19 17:40:09 - [MPI RANK 0] [TEST 03] test_mpi_reduction_contracts: START
+[MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-19 17:40:10 - [MPI RANK 0] [TEST 03] test_mpi_reduction_contracts: DONE
+[MPI RANK 0] 
+--- mpi.reduce ---
+2026-08-19 17:40:10 - [MPI RANK 0] [TEST 04] test_reduce_scalar_sum: START
+[MPI RANK 0] [FAIL] mpi.reduce.sum scalar (1038240 mock pr values) serial=  0.0349s  parallel=  0.1103s  speedup= 0.32x
+2026-08-19 17:40:13 - [MPI RANK 0] [TEST 04] test_reduce_scalar_sum: DONE with failed check(s)
+2026-08-19 17:40:13 - [MPI RANK 0] [TEST 05] test_reduce_array_sum: START
+
+[MPI RANK 6] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007f8bea998640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+
+[MPI RANK 2] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007fd2bdf09640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+
+[MPI RANK 3] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007f8843965640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f88c0dbf300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f8c67024300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+Thread 0x00007fd357ea1300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "<frozen runpy>", line 203 in _run_module_as_main
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 1] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007f4d449c9640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f4dc08e8300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 4] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007f7772e0c640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+
+[MPI RANK 7] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Thread 0x00007f77efc8c300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+Current thread 0x00007faea04b0640 [climtools-mpi-w] (most recent call first):
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Thread 0x00007faf1c736300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+
+[MPI RANK 0] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+Current thread 0x00007fce69299640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Thread 0x00007fcef0be9300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 245 in mpi_comm_reduce
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 299 in sum
+  File "test.py", line 727 in parallel_sum
+  File "test.py", line 84 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+
+[MPI RANK 5] WATCHDOG: no progress for 600 s at inside test_reduce_array_sum. Stack for this rank follows.
+Current thread 0x00007f9ebb7e7640 [climtools-mpi-w] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 804 in _fire
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f9f3824a300 [python] (most recent call first):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 852 in raise_if_error
+  File "test.py", line 88 in timed
+  File "test.py", line 729 in test_reduce_array_sum
+  File "test.py", line 306 in wrapped
+  File "test.py", line 3341 in main
+  File "test.py", line 3396 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 294 in run_path
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+[MPI RANK 0] WATCHDOG: aborting MPI_COMM_WORLD.
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
+[2026-08-19T17:50:18.643] error: *** STEP 5085326.0 ON node2405 CANCELLED AT 2026-08-19T17:50:18 DUE to SIGNAL Killed ***
+srun: error: node2405: task 0: Exited with exit code 1
+srun: Terminating StepId=5085326.0
+srun: error: node2405: tasks 1-7: Killed

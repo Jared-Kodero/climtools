@@ -9,8 +9,8 @@ conda activate mother
 
 module list  # determine versions of netcdf and open mpi the stuff is linked against
 
-# export OMPI_MCA_coll_hcoll_enable=0
-# export OMPI_MCA_coll_ucc_enable=0
+export OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_coll_ucc_enable=0
 
 
 # `python -m mpi4py`, not a bare `python`: an unhandled exception on a subset

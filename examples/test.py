@@ -34,7 +34,7 @@ import xarray as xr
 
 from climtools import mpi, xgeo
 
-TIME_STEPS = 30 * 24
+TIME_STEPS = 100
 RESOLUTION_DEG = 0.25
 PLEV_STEP = -50
 
@@ -3296,6 +3296,16 @@ def main() -> None:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         build_mock_dataset(TEST_DATA_PATH, TIME_STEPS)
 
+        mpi.log(
+            "Configuration Constants:\n"
+            + f"  TIME_STEPS:      {TIME_STEPS}\n"
+            + f"  RESOLUTION_DEG:  {RESOLUTION_DEG}\n"
+            + f"  PLEV_STEP:       {PLEV_STEP}\n"
+            + f"  LATITUDE_COUNT:  {LATITUDE_COUNT}\n"
+            + f"  LONGITUDE_COUNT: {LONGITUDE_COUNT}\n"
+            + f"  PLEV_COUNT:      {PLEV_COUNT}\n"
+            + f"  TEST_DATA_PATH:  {TEST_DATA_PATH}"
+        )
     # ADD A BARRIER HERE
     # Wait for Rank 0 to finish writing the file before other ranks proceed.
     # (Adjust the syntax below depending on the specific MPI wrapper you are using)
