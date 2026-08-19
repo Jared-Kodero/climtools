@@ -778,8 +778,8 @@ class MPIRuntime:
             Label reported with the traceback dump.
         timeout : float, optional
             Seconds of no progress before dumping. If None, read from the
-            ``CLIMTOOLS_MPI_WATCHDOG`` environment variable; zero or unset
-            disables the watchdog entirely.
+            ``CLIMTOOLS_MPI_WATCHDOG`` environment variable, defaulting to
+            600 s. Zero disables the watchdog.
         abort : bool, optional
             If True, call ``MPI_Abort`` after dumping. Default is True.
 
@@ -789,7 +789,7 @@ class MPIRuntime:
         """
         if timeout is None:
             try:
-                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 60)
+                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 600)
             except ValueError:
                 timeout = 0.0
         if timeout <= 0.0:
@@ -831,52 +831,6 @@ class MPIRuntime:
             yield
         finally:
             finished.set()
-
-    def sync(self, phase: str = "", timeout: float | None = None) -> None:
-        """Barrier that reports and aborts instead of blocking forever.
-
-        A plain ``comm.barrier()`` has no timeout: if one rank never arrives,
-        every other rank blocks until the batch scheduler kills the job, with
-        no indication of where. This posts a non-blocking barrier and polls it,
-        so a straggler produces a diagnosable abort instead of a silent hang.
-
-        Parameters
-        ----------
-        phase : str, optional
-            Label reported if the barrier times out.
-        timeout : float, optional
-            Seconds to wait before aborting. If None, read from the
-            ``CLIMTOOLS_MPI_SYNC_TIMEOUT`` environment variable; a value of
-            zero or an unset variable falls back to a plain blocking barrier.
-
-        Returns
-        -------
-        None
-        """
-        if self.comm.size == 1:
-            return
-        if timeout is None:
-            try:
-                timeout = float(os.environ.get("CLIMTOOLS_MPI_SYNC_TIMEOUT", "") or 0.0)
-            except ValueError:
-                timeout = 0.0
-        if timeout <= 0.0:
-            self.comm.barrier()
-            return
-
-        request = self.comm.Ibarrier()
-        deadline = time.monotonic() + timeout
-        while not request.Test():
-            if time.monotonic() >= deadline:
-                sys.stderr.write(
-                    f"[MPI RANK {self.comm.rank}] collective timeout after "
-                    + f"{timeout:g} s at {phase or 'unnamed phase'}: at least "
-                    + "one rank never reached this barrier. Aborting "
-                    + "MPI_COMM_WORLD to avoid an unbounded deadlock.\n"
-                )
-                sys.stderr.flush()
-                self.comm.Abort(1)
-            time.sleep(0.05)
 
     def raise_if_error(self, error: BaseException | None, phase: str) -> None:
         """Raise a synchronized error on all ranks if any rank failed."""

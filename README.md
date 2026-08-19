@@ -212,16 +212,26 @@ as a fallback. Set `CLIMTOOLS_MPI_ABORT_ON_EXCEPTION=0` to disable it; it is a
 no-op when `python -m mpi4py` already installed its own hook, and on
 single-rank runs with no launcher.
 
-Neither hook helps when a rank is merely slow or blocked rather than failing.
-For that, `mpi.sync(phase)` is a barrier with a bound: set
-`CLIMTOOLS_MPI_SYNC_TIMEOUT` to a number of seconds and a rank that never
-arrives produces a labelled `MPI_Abort` instead of an unbounded wait. Unset or
-zero, `mpi.sync` is an ordinary `comm.barrier()`.
+Neither hook helps when a rank is blocked rather than failing, since a blocked
+rank raises nothing. `mpi.watchdog(phase)` covers that case:
 
-On Lustre or GPFS, also export `HDF5_USE_FILE_LOCKING=FALSE`. HDF5 takes POSIX
-advisory locks by default, and many ranks opening the same NetCDF file
-concurrently can block there indefinitely, which presents as a hang with no
-traceback on any rank.
+```python
+with mpi.watchdog("compositing"):
+    result = mpi.xarray.mean(local_events, dim="event")
+```
+
+It arms a daemon thread on every rank. mpi4py releases the GIL for the
+duration of a blocking MPI call, so the thread keeps running while the main
+thread sits in `Allreduce` or in a blocking read, and prints that rank's own
+traceback naming the line it is stuck on before calling `MPI_Abort`. Every
+rank dumps independently, so the log distinguishes the ranks that arrived from
+the ones that did not. The default is 600 s of no progress; override with
+`CLIMTOOLS_MPI_WATCHDOG`, or set it to zero to disable.
+
+On Lustre or GPFS, `HDF5_USE_FILE_LOCKING=FALSE` must be set in the
+environment. HDF5 takes POSIX advisory locks by default, and many ranks
+opening the same NetCDF file concurrently can block there indefinitely, which
+presents as a hang with no traceback on any rank.
 
 The same script runs unchanged on a single rank without a launcher, by
 passing `allow_serial=True` to `to_netcdf`; `mpi.reduce` degrades to a no-op

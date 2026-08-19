@@ -236,29 +236,16 @@ def safe_run(fn: Callable[..., None], *args: Any, **kwargs: Any) -> None:
     CURRENT_TEST_NUMBER += 1
     CURRENT_TEST_NAME = fn.__name__
     before = len(RESULTS)
-
-    # Bound the entry barrier. A rank that never arrives (a straggling
-    # collective, or a blocked NetCDF read on a locking filesystem) would
-    # otherwise leave every other rank blocked with no indication of where.
-    mpi.sync(f"entry barrier for {fn.__name__}")
     progress("START")
 
     error: BaseException | None = None
     try:
-        # sync() bounds only the barriers around the test. A rank blocked
-        # inside a collective in the test body never reaches the exit barrier,
-        # so the watchdog is what makes that case visible.
+        # A rank blocked inside a collective never reaches the synchronizing
+        # raise_if_error below, so the watchdog is what makes that case visible.
         with mpi.watchdog(f"inside {fn.__name__}"):
             fn(*args, **kwargs)
     except BaseException as exc:
         error = exc
-
-    # raise_if_error is itself collective, so it only synchronizes failures
-    # that every rank reaches. A rank that raised part-way through a
-    # multi-collective operation arrives here while the others are still
-    # blocked inside that operation; bound the wait so the mismatch aborts
-    # with a diagnostic rather than deadlocking.
-    mpi.sync(f"exit barrier for {fn.__name__}")
 
     synchronized_error: BaseException | None = None
     try:
@@ -318,9 +305,8 @@ def _load_source_variable(
     """Load only the requested selection of one variable from the SHiELD file.
 
     Every rank opens the same file concurrently. HDF5 takes POSIX advisory
-    locks by default, which can block indefinitely on a parallel filesystem;
-    ``examples/test.sh`` exports ``HDF5_USE_FILE_LOCKING=FALSE`` for this
-    reason.
+    locks by default, which can block indefinitely on a parallel filesystem,
+    so ``HDF5_USE_FILE_LOCKING=FALSE`` must be set in the environment.
     """
     with xr.open_dataset(DEFAULT_NETCDF_SOURCE) as source:
         data = source[variable]
