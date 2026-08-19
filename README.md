@@ -164,6 +164,23 @@ and how it is partitioned, so the suite covers each placement explicitly:
   most likely to expose an asymmetric collective sequence. Lengths below, at
   and above the rank count are all exercised, in both result placements.
 
+### Shared configuration must be rank-invariant
+
+Any value that sizes a collective (slice bounds, buffer shapes, partition
+lengths) has to be derived identically on every rank. Deriving one inside a
+rank-0-only branch leaves the other ranks holding their module defaults, and
+the two failure modes that follow are both hard to read: reductions whose
+buffers still happen to match return silently wrong answers, and reductions
+whose buffers do not match deadlock, with rank 0 blocked in `Allreduce` while
+every other rank waits in the next all-gather. `test.py` therefore reads its
+shape constants back from the generated file on every rank and asserts they
+agree, and `mpi.reduce` compares buffer signatures before posting.
+
+Set `CLIMTOOLS_CHECK_COLLECTIVES=0` to skip the buffer comparison in
+latency-bound production runs. It is on by default, because a mismatched
+buffer is undefined behaviour and costs far more to diagnose than the check
+costs to post.
+
 ### Collective symmetry
 
 `test_collective_sequence_symmetry` records the sequence of collectives each

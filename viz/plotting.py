@@ -203,9 +203,6 @@ class Theme:
             rc["axes.spines.top"] = False
             rc["axes.spines.right"] = False
 
-        if self.markersize:
-            rc["lines.markersize"] = self.markersize
-
         if fig_size:
             rc["figure.figsize"] = fig_size
 

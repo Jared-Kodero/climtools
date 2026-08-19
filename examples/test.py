@@ -20,6 +20,7 @@ that capability is unavailable on a multi-rank run, those checks are skipped.
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 from collections.abc import Callable
@@ -104,10 +105,6 @@ def build_mock_dataset(
 
     mpi.log("Creating mock dataset", timestamp=True, prefix=True)
 
-    global LATITUDE_COUNT
-    global LONGITUDE_COUNT
-    global PLEV_COUNT
-
     if isinstance(n_time_steps, bool) or not isinstance(n_time_steps, int):
         raise TypeError("n_time_steps must be an integer")
     if n_time_steps < 1:
@@ -189,12 +186,49 @@ def build_mock_dataset(
     path.unlink(missing_ok=True)
     ds.to_netcdf(path, format="NETCDF4")
 
-    # FIXED: Update globals safely using the lengths of the newly generated arrays
-    LATITUDE_COUNT = len(lat)
-    LONGITUDE_COUNT = len(lon)
-    PLEV_COUNT = len(plev)
-
     mpi.log(f"Mock dataset saved to {path}", timestamp=True, prefix=True)
+
+
+def load_configuration(path: Path) -> None:
+    """Set the shared shape constants from the written file, on every rank.
+
+    These constants size almost every test, so they must be identical on all
+    ranks. Assigning them inside ``build_mock_dataset`` cannot achieve that,
+    because only rank 0 builds the dataset: every other rank keeps the
+    module-level zeros. The tests then compute different slice bounds per
+    rank, which silently corrupts reductions whose buffers still happen to
+    match, and deadlocks those whose buffers do not.
+
+    Reading the dimensions back from the file makes it a single source of
+    truth that every rank evaluates identically, with no broadcast to keep in
+    sync and no ordering hazard beyond the barrier that already guards the
+    file's existence.
+    """
+    global LATITUDE_COUNT
+    global LONGITUDE_COUNT
+    global PLEV_COUNT
+    global TIME_STEPS
+
+    with xr.open_dataset(path) as source:
+        LATITUDE_COUNT = int(source.sizes["lat"])
+        LONGITUDE_COUNT = int(source.sizes["lon"])
+        PLEV_COUNT = int(source.sizes["plev"])
+        TIME_STEPS = int(source.sizes["time"])
+
+    # A divergence here would misconfigure every downstream test, so it is
+    # checked once, explicitly, rather than being left to surface as a
+    # mismatched collective thousands of lines later.
+    constants = (LATITUDE_COUNT, LONGITUDE_COUNT, PLEV_COUNT, TIME_STEPS)
+    gathered = mpi.comm.allgather(constants)
+    if len(set(gathered)) != 1:
+        disagreeing = [
+            rank for rank, item in enumerate(gathered) if item != gathered[0]
+        ]
+        raise mpi.MPIError(
+            "Test configuration constants differ across ranks. "
+            + f"Rank 0 has {gathered[0]}, ranks {disagreeing} disagree "
+            + f"(rank {disagreeing[0]} has {gathered[disagreeing[0]]})."
+        )
 
 
 def relative_tolerance_for_dtype(*values: Any, factor: float = 64.0) -> float:
@@ -3235,6 +3269,115 @@ def test_reduction_dtype_contracts() -> None:
     )
 
 
+@run_test
+def test_shared_configuration_agreement() -> None:
+    """Every rank must agree on the constants that size the other tests.
+
+    The shape constants decide slice bounds, buffer sizes and partition
+    lengths throughout the suite. If they are derived on one rank only, the
+    remaining ranks silently keep their module defaults: reductions whose
+    buffers still match return wrong answers, and reductions whose buffers do
+    not match deadlock with rank 0 blocked in Allreduce and every other rank
+    waiting in the following all-gather. This checks the constants directly,
+    and checks that the values they produce are themselves rank-invariant.
+    """
+    constants = {
+        "LATITUDE_COUNT": LATITUDE_COUNT,
+        "LONGITUDE_COUNT": LONGITUDE_COUNT,
+        "PLEV_COUNT": PLEV_COUNT,
+        "TIME_STEPS": TIME_STEPS,
+    }
+    gathered = mpi.comm.allgather(tuple(sorted(constants.items())))
+    agreed = len(set(gathered)) == 1
+
+    # None of them may still hold the module-level sentinel, which is what a
+    # rank that never ran the loader would report.
+    populated = all(value > 0 for value in constants.values())
+
+    # The constants must also match the file every rank can see.
+    with xr.open_dataset(TEST_DATA_PATH) as source:
+        matches_file = (
+            LATITUDE_COUNT == int(source.sizes["lat"])
+            and LONGITUDE_COUNT == int(source.sizes["lon"])
+            and PLEV_COUNT == int(source.sizes["plev"])
+            and TIME_STEPS == int(source.sizes["time"])
+        )
+
+    # A derived buffer shape, computed the way the reduction tests compute
+    # theirs, must come out identical on every rank.
+    derived = np.empty(
+        (max(1, LATITUDE_COUNT // SIZE), LONGITUDE_COUNT), dtype=np.float32
+    )
+    shapes = mpi.comm.allgather(derived.shape)
+    derived_agreed = len(set(shapes)) == 1
+
+    correct = bool(
+        mpi.reduce.all(agreed and populated and matches_file and derived_agreed)
+    )
+    note = "correctness-focused" if correct else f"rank {RANK} has {constants}"
+    record_result(
+        "shared configuration constants identical on every rank",
+        correct,
+        0.0,
+        0.0,
+        note=note,
+    )
+
+
+@run_test
+def test_reduce_buffer_agreement() -> None:
+    """A mismatched reduction buffer must raise, not deadlock.
+
+    This is the failure mode that a rank-dependent constant produces. Ranks
+    posting the shorter buffer can return from the collective while the rest
+    block indefinitely, so the guard has to fire before the collective is
+    posted rather than detect the problem afterwards.
+    """
+    if SIZE == 1:
+        record_result(
+            "mismatched reduction buffers raise instead of deadlocking",
+            True,
+            0.0,
+            0.0,
+            note="skipped: needs more than one rank",
+        )
+        return
+
+    # Rank 0 posts a longer buffer, exactly as a rank-0-only constant would
+    # cause. Without the guard this deadlocks.
+    mismatched = np.ones(8 if RANK == 0 else 4, dtype=np.float32)
+    raised = call_raises(
+        mpi.MPIError,
+        mpi.reduce.sum,
+        mismatched,
+        contains="different reduction buffers",
+    )
+
+    # A dtype mismatch is equally undefined and equally caught.
+    wrong_dtype = np.ones(4, dtype=np.float64 if RANK == 0 else np.float32)
+    raised_dtype = call_raises(
+        mpi.MPIError,
+        mpi.reduce.sum,
+        wrong_dtype,
+        contains="different reduction buffers",
+    )
+
+    # Matching buffers must still reduce normally afterwards.
+    matched = np.full(4, float(RANK), dtype=np.float32)
+    total = mpi.reduce.sum(matched)
+    expected = float(sum(range(SIZE)))
+    recovered = bool(np.allclose(total, expected))
+
+    correct = bool(mpi.reduce.all(raised and raised_dtype and recovered))
+    record_result(
+        "mismatched reduction buffers raise instead of deadlocking",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
 def print_test_summary() -> int:
     """Print the final result table and return the number of failed checks."""
     mpi.log("\n" + "=" * 88)
@@ -3287,25 +3430,47 @@ def print_test_summary() -> int:
     return n_fail
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse the sizing options for the generated test dataset.
+
+    The defaults reproduce the full-resolution cluster configuration. Smaller
+    values let the suite run on a workstation, which matters because the
+    collective-symmetry and buffer-agreement checks do not depend on
+    resolution: they need many ranks, not much data.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--time-steps",
+        type=int,
+        default=TIME_STEPS,
+        help=f"time steps in the generated dataset (default {TIME_STEPS})",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=float,
+        default=RESOLUTION_DEG,
+        help=f"grid spacing in degrees (default {RESOLUTION_DEG})",
+    )
+    # Parsing happens identically on every rank from the same argv, so the
+    # resulting values are rank-invariant by construction.
+    return parser.parse_args()
+
+
 def main() -> None:
     """Create test data and run the complete suite on the active MPI ranks."""
+    global TIME_STEPS
+    global RESOLUTION_DEG
+
+    arguments = parse_arguments()
+    TIME_STEPS = arguments.time_steps
+    RESOLUTION_DEG = arguments.resolution
+
     if RANK == 0:
         if OUTPUT_DIR.exists():
             shutil.rmtree(OUTPUT_DIR)
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         build_mock_dataset(TEST_DATA_PATH, TIME_STEPS)
-
-        mpi.log(
-            "Configuration Constants:\n"
-            + f"  TIME_STEPS:      {TIME_STEPS}\n"
-            + f"  RESOLUTION_DEG:  {RESOLUTION_DEG}\n"
-            + f"  PLEV_STEP:       {PLEV_STEP}\n"
-            + f"  LATITUDE_COUNT:  {LATITUDE_COUNT}\n"
-            + f"  LONGITUDE_COUNT: {LONGITUDE_COUNT}\n"
-            + f"  PLEV_COUNT:      {PLEV_COUNT}\n"
-            + f"  TEST_DATA_PATH:  {TEST_DATA_PATH}"
-        )
     # ADD A BARRIER HERE
     # Wait for Rank 0 to finish writing the file before other ranks proceed.
     # (Adjust the syntax below depending on the specific MPI wrapper you are using)
@@ -3325,6 +3490,20 @@ def main() -> None:
 
     mpi.comm.barrier()
 
+    # Every rank derives the shape constants from the file it can now see.
+    load_configuration(TEST_DATA_PATH)
+
+    mpi.log(
+        "Configuration Constants:\n"
+        + f"  TIME_STEPS:      {TIME_STEPS}\n"
+        + f"  RESOLUTION_DEG:  {RESOLUTION_DEG}\n"
+        + f"  PLEV_STEP:       {PLEV_STEP}\n"
+        + f"  LATITUDE_COUNT:  {LATITUDE_COUNT}\n"
+        + f"  LONGITUDE_COUNT: {LONGITUDE_COUNT}\n"
+        + f"  PLEV_COUNT:      {PLEV_COUNT}\n"
+        + f"  TEST_DATA_PATH:  {TEST_DATA_PATH}"
+    )
+
     mpi.log("=" * 88)
     mpi.log(f"climtools MPI test suite -- {SIZE} rank(s), mpi.launched={mpi.launched}")
     mpi.log("=" * 88)
@@ -3332,6 +3511,8 @@ def main() -> None:
     n_points = LATITUDE_COUNT * LONGITUDE_COUNT
 
     mpi.log("\n--- mpi runtime helpers ---")
+    test_shared_configuration_agreement()
+    test_reduce_buffer_agreement()
     test_mpi_runtime_helpers()
     test_mpi_logging_and_error_propagation()
     test_mpi_reduction_contracts()

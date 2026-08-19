@@ -36,6 +36,16 @@ T = TypeVar("T")
 # that is not meaningful for the reductions in this module.
 _REDUCIBLE_DTYPE_KINDS = "biufc"
 
+# Verify that every rank posts the same buffer signature before a reduction.
+# The check costs one small all-gather per array reduction, which is
+# negligible beside the reduction itself but is not free, so it can be
+# disabled for latency-bound production runs by setting
+# CLIMTOOLS_CHECK_COLLECTIVES=0. It is on by default because a mismatched
+# buffer is undefined behaviour: depending on the algorithm the MPI library
+# selects, it either returns silently wrong data or deadlocks, and both are
+# far more expensive to diagnose than the all-gather is to post.
+CHECK_COLLECTIVE_BUFFERS = os.environ.get("CLIMTOOLS_CHECK_COLLECTIVES", "1") != "0"
+
 _LAUNCH_ENV = (
     "OMPI_COMM_WORLD_RANK",
     "PMI_RANK",
@@ -44,6 +54,30 @@ _LAUNCH_ENV = (
     "MV2_COMM_WORLD_RANK",
     "I_MPI_COMM_WORLD_RANK",
 )
+
+
+_OP_LABELS: tuple[tuple[Any, str], ...] = (
+    (_MPI.SUM, "SUM"),
+    (_MPI.PROD, "PROD"),
+    (_MPI.MIN, "MIN"),
+    (_MPI.MAX, "MAX"),
+    (_MPI.LAND, "LAND"),
+    (_MPI.LOR, "LOR"),
+    (_MPI.BAND, "BAND"),
+    (_MPI.BOR, "BOR"),
+)
+
+
+def _op_label(op: _MPI.Op) -> str:
+    """Return a picklable, rank-stable label for a reduction operation.
+
+    Op handles are unhashable and their repr embeds an address that differs
+    between ranks, so neither can be compared across ranks. The label can be.
+    """
+    for candidate, name in _OP_LABELS:
+        if op == candidate:
+            return name
+    return "OP"
 
 
 class MPIError(Exception):
@@ -240,6 +274,32 @@ def mpi_comm_reduce(
     # Allocate the receive buffer with the send buffer's own dtype and a
     # C-contiguous layout. np.empty_like inherits the source memory order,
     # which can differ from the contiguous copy actually being sent.
+    # Allreduce and Reduce require an identical count and datatype on every
+    # rank. A mismatch is undefined behaviour: ranks posting the smaller
+    # buffer can return while the rest block forever, which presents as a
+    # hang with no error and no indication of which rank is inconsistent.
+    # Comparing the signature first turns that into a named exception on
+    # every rank.
+    if CHECK_COLLECTIVE_BUFFERS and comm.size > 1:
+        signature = (
+            _op_label(op),
+            mode,
+            int(root),
+            send.dtype.str,
+            tuple(int(length) for length in send.shape),
+        )
+        gathered = comm.allgather(signature)
+        if len(set(gathered)) != 1:
+            disagreeing = [
+                index for index, item in enumerate(gathered) if item != gathered[0]
+            ]
+            raise MPIError(
+                "MPI ranks posted different reduction buffers. Rank 0 has "
+                + f"{gathered[0]!r}, ranks {disagreeing} disagree "
+                + f"(rank {disagreeing[0]} has {gathered[disagreeing[0]]!r}). "
+                + "This would deadlock or silently corrupt the reduction."
+            )
+
     if mode == "all":
         recv = np.empty(send.shape, dtype=send.dtype)
         comm.Allreduce(send, recv, op=op)
