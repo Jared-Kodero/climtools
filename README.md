@@ -208,9 +208,8 @@ instead, converting that deadlock into a non-zero exit
 
 Because the launch command is outside climtools's control, importing
 `climtools.mpi` under an MPI launcher installs the equivalent `sys.excepthook`
-as a fallback. Set `CLIMTOOLS_MPI_ABORT_ON_EXCEPTION=0` to disable it; it is a
-no-op when `python -m mpi4py` already installed its own hook, and on
-single-rank runs with no launcher.
+as a fallback. It is a no-op when `python -m mpi4py` already installed its own
+hook, and on single-rank runs with no launcher.
 
 Neither hook helps when a rank is blocked rather than failing, since a blocked
 rank raises nothing. `mpi.watchdog(phase)` covers that case:
@@ -225,8 +224,8 @@ duration of a blocking MPI call, so the thread keeps running while the main
 thread sits in `Allreduce` or in a blocking read, and prints that rank's own
 traceback naming the line it is stuck on before calling `MPI_Abort`. Every
 rank dumps independently, so the log distinguishes the ranks that arrived from
-the ones that did not. The default is 600 s of no progress; override with
-`CLIMTOOLS_MPI_WATCHDOG`, or set it to zero to disable.
+the ones that did not. The default is 600 s of no progress; pass `timeout=` to
+change it, or `timeout=0` to leave the block unguarded.
 
 On Lustre or GPFS, `HDF5_USE_FILE_LOCKING=FALSE` must be set in the
 environment. HDF5 takes POSIX advisory locks by default, and many ranks

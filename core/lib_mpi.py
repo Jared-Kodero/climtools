@@ -64,16 +64,15 @@ def install_abort_excepthook() -> bool:
 
     That remedy depends on the launch command, which climtools does not
     control, so the same hook is installed here as a fallback for scripts
-    started with a plain ``python``. Set ``CLIMTOOLS_MPI_ABORT_ON_EXCEPTION=0``
-    to disable.
+    started with a plain ``python``. It is a no-op on a single rank with no
+    launcher, and a no-op under ``python -m mpi4py``, which installs the same
+    hook itself.
 
     Returns
     -------
     bool
         True if this call installed the hook.
     """
-    if os.environ.get("CLIMTOOLS_MPI_ABORT_ON_EXCEPTION", "1") == "0":
-        return False
     # Already running under `python -m mpi4py`, which installs its own hook.
     if getattr(sys.excepthook, "__module__", "") == "mpi4py.run":
         return False
@@ -754,19 +753,19 @@ class MPIRuntime:
     def watchdog(
         self,
         phase: str = "",
-        timeout: float | None = None,
+        timeout: float = 600.0,
         *,
         abort: bool = True,
     ) -> Generator[None, None, None]:
         """Dump every rank's stack if the enclosed block stops making progress.
 
-        :meth:`sync` only bounds the wait at the barrier itself, so it cannot
-        observe a rank already blocked inside a collective: such a rank never
-        reaches the next barrier, and no timeout is ever evaluated. This
-        instead arms a daemon thread inside each rank. mpi4py releases the GIL
-        for the duration of a blocking MPI call, so the thread still runs while
-        the main thread is stuck in ``Allreduce`` or in a blocking read, and it
-        prints that rank's own traceback naming the exact line it is stuck on.
+        A bounded barrier cannot observe a rank already blocked inside a
+        collective, because such a rank never reaches the barrier and no
+        timeout is ever evaluated. This instead arms a daemon thread inside
+        each rank. mpi4py releases the GIL for the duration of a blocking MPI
+        call, so the thread still runs while the main thread is stuck in
+        ``Allreduce`` or in a blocking read, and it prints that rank's own
+        traceback naming the exact line it is stuck on.
 
         Every rank dumps independently, so the log identifies both the ranks
         that arrived and the ranks that did not, which is what distinguishes a
@@ -777,9 +776,8 @@ class MPIRuntime:
         phase : str, optional
             Label reported with the traceback dump.
         timeout : float, optional
-            Seconds of no progress before dumping. If None, read from the
-            ``CLIMTOOLS_MPI_WATCHDOG`` environment variable, defaulting to
-            600 s. Zero disables the watchdog.
+            Seconds of no progress before dumping. Default is 600 s. Zero or
+            negative disables the watchdog, leaving the block unguarded.
         abort : bool, optional
             If True, call ``MPI_Abort`` after dumping. Default is True.
 
@@ -787,11 +785,6 @@ class MPIRuntime:
         ------
         None
         """
-        if timeout is None:
-            try:
-                timeout = float(os.environ.get("CLIMTOOLS_MPI_WATCHDOG", "") or 600)
-            except ValueError:
-                timeout = 0.0
         if timeout <= 0.0:
             yield
             return
