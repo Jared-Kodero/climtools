@@ -23,6 +23,7 @@ from mpi4py.MPI import Intracomm
 from mpi4py.util import dtlib as _dtlib
 from numpy.typing import DTypeLike, NDArray
 
+from .tools import LockFile, tmp
 from .xarray_mpi import XarrayMPI
 
 P = ParamSpec("P")
@@ -594,6 +595,7 @@ class MPIRuntime:
         self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
         self._reduce: ReduceAccessor = ReduceAccessor(self)
         self._xarray: XarrayMPI = XarrayMPI(self)
+        self._mpi_lock = LockFile(tmp / ".mpi.lock")
         install_abort_excepthook()
 
     @property
@@ -693,13 +695,16 @@ class MPIRuntime:
             # message before a hang sitting in the buffer and makes the
             # deadlock appear to be somewhere it is not.
             kwargs.setdefault("flush", True)
-            print(f"{msg_prefix}{message}", **kwargs)
+
+            with self._mpi_lock:
+                print(f"{msg_prefix}{message}", **kwargs)
 
         else:
             # Respect the prefix flag for custom loggers
             if prefix:
                 message = f"{mpi_str} {message}"
-            logger(message, *args, **kwargs)
+            with self._mpi_lock:
+                logger(message, *args, **kwargs)
 
     def scatterv(
         self,
