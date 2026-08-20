@@ -32,7 +32,6 @@ from typing import Any
 
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
 
 TIME_STEPS = 100

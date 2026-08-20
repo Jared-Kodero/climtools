@@ -563,12 +563,26 @@ def log_partition_report(
     ]
 
     if detail:
-        width = max(9, *(len(f"{row[1]}:{row[2]}") for row in rows))
-        lines.append(f"  {'rank':>4}  {'slice':>{width}}  {'n':>6}  first -> last")
+        # Calculate max widths
+        slice_width = max(len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows))
+        first_width = max(len("first"), *(len(str(row[3])) for row in rows))
+        last_width = max(len("last"), *(len(str(row[4])) for row in rows))
+
+        # Apply padding to headers
+        lines.append(
+            f"  {'rank':>4}  {'slice':>{slice_width}}  {'n':>6}  "
+            + f"({'first':>{first_width}}, {'last':>{last_width}})"
+        )
+
+        # Apply padding to row values
         for row in rows:
+            slice_str = f"{row[1]}:{row[2]}"
+            first_str = str(row[3])
+            last_str = str(row[4])
+
             lines.append(
-                f"  {row[0]:>4}  {f'{row[1]}:{row[2]}':>{width}}"
-                + f"  {row[2] - row[1]:>6}  {row[3]} -> {row[4]}"
+                f"  {row[0]:>4}  {slice_str:>{slice_width}}  {row[2] - row[1]:>6}  "
+                + f"({first_str:>{first_width}}, {last_str:>{last_width}})"
             )
 
     runtime.log("\n".join(lines), flush=True)
@@ -601,24 +615,49 @@ class XarrayMPI:
     ) -> xr.Dataset:
         """Open a Dataset lazily and distribute one dimension across ranks.
 
+        This method dynamically dispatches to either :func:`xarray.open_dataset` or
+        :func:`xarray.open_mfdataset` depending on whether ``filename_or_obj`` is a single
+        file/object or a glob pattern/list of files.
+
         Parameters
         ----------
-        filename_or_obj : Any
-            Input accepted by :func:`xarray.open_dataset`.
-        partition_dim : hashable or {"auto"}, optional
+        filename_or_obj : str, path-like, file-like, or list of these
+            Input accepted by :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset`.
+            Strings containing a wildcard ("*") or sequences (e.g., list, tuple) will
+            automatically trigger multi-file loading.
+        partition_dim : Hashable or {"auto"}, optional
             Dimension to distribute. ``"auto"`` selects the longest dimension,
             which is the choice that leaves the fewest ranks idle. Selection is
-            deterministic and identical on every rank.
-        chunks : Any, optional
+            deterministic and identical on every rank. Default is "auto".
+        chunks : int, dict, "auto" or None, optional
             Explicit xarray/Dask chunk specification. If omitted, effective
             chunks are derived from usable native chunks, falling back to
             ``ceil(length / nranks)``.
         log_partitions : bool, optional
             Print one aligned table showing which global interval each rank
             received. Default is True.
+        engine : str, optional
+            Engine to use for reading files. Options include 'netcdf4', 'h5netcdf',
+            'scipy', 'cfgrib', 'zarr', etc. Passed via ``**kwargs``.
+        concat_dim : str, DataArray, Index or list thereof, optional
+            (Multi-file only) Dimension(s) over which to concatenate datasets. Passed
+            via ``**kwargs``.
+        combine : {"by_coords", "nested"}, optional
+            (Multi-file only) Whether to combine datasets by matching coordinates or
+            by their nested structure. Passed via ``**kwargs``.
+        preprocess : callable, optional
+            (Multi-file only) If provided, call this function on each dataset prior to
+            concatenation. Passed via ``**kwargs``.
+        parallel : bool, optional
+            (Multi-file only) If True, the open and preprocess steps will be performed
+            in parallel using ``dask.delayed``. Passed via ``**kwargs``.
+        decode_cf : bool, optional
+            Whether to decode these variables, assuming they were saved according to
+            CF conventions (e.g., ``mask_and_scale``, ``decode_times``). Passed via ``**kwargs``.
         **kwargs : Any
-            Additional arguments passed unchanged to
-            :func:`xarray.open_dataset`.
+            Any additional standard arguments passed unchanged to
+            :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset` (e.g.,
+            ``decode_times``, ``drop_variables``, ``compat``, ``data_vars``).
 
         Returns
         -------
@@ -626,13 +665,13 @@ class XarrayMPI:
             Lazy rank-local Dataset carrying ``mpi_meta``.
         """
 
+        xr.set_options(keep_attrs=True)
+
         use_mfdataset = (
             isinstance(filename_or_obj, str) and "*" in filename_or_obj
         ) or isinstance(filename_or_obj, (list, tuple))
 
-        _open_dataset: Callable = (
-            xr.open_mfdataset if use_mfdataset else xr.open_dataset
-        )
+        open_dataset: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
 
         automatic = partition_dim == "auto"
 
@@ -641,7 +680,7 @@ class XarrayMPI:
         # every rank issues against the same file. On a parallel filesystem
         # that open is the dominant cost of this call, so the single handle is
         # chunked in place instead.
-        data = _open_dataset(filename_or_obj, chunks=None, **kwargs)
+        data: xr.Dataset = open_dataset(filename_or_obj, chunks=None, **kwargs)
         try:
             metadata = data
             if automatic:
