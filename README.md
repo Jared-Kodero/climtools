@@ -16,7 +16,7 @@ statistics, NetCDF-writing and theming helpers.
 | `climtools.calc`  | Trends, correlations and difference-of-means testing.                     |
 | `climtools.cmaps` | Colormaps spanning local IPCC tables, matplotlib and cmocean.             |
 | `climtools.cdo`   | Thin xarray-aware wrapper over the CDO command-line tool.                 |
-| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xarray` for collective reductions, backing parallel NetCDF-4 output. |
+| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xarray` for collective reductions and distributed-aware arithmetic, backing parallel NetCDF-4 output. |
 
 ## Installation
 
@@ -133,15 +133,14 @@ t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 
 ## Examples
 
-`examples/` contains three files. The Python scripts run directly (`python
+`examples/` contains two Python scripts, run directly (`python
 examples/<script>.py`) or under an MPI launcher; see
 [Running under MPI](#running-under-mpi) for why the launcher line should
 include `-m mpi4py`:
 
 | File        | Demonstrates                                                                 |
 | ----------- | ---------------------------------------------------------------------------- |
-| `native.py` | Minimal serial-vs-parallel NetCDF write comparison, verified by read-back. Start here for the smallest possible `to_netcdf(..., parallel=True)` example. Builds a synthetic precipitation field by default; set `CLIMTOOLS_EXAMPLE_NETCDF` to a file with a `pr` variable to use real data instead. |
-| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray`, `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` sets the size of that file. |
+| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (including `apply`/`align`/`evaluate`), `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` and `--resolution` set the size of that file. |
 | `test1.py`  | Parallel NetCDF write benchmark across three source placements: rank-0-only (scattered), distributed from the start, and read back through a distributed open. Sizes are set with `--time-steps`, `--lat` and `--lon`. Skips the collective write cleanly when netCDF4 lacks parallel4 support. |
 | `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks, with the environment settings the suite requires. |
 
@@ -348,6 +347,71 @@ is only dropped by `min_count` once the count is summed across every rank
 that holds a share of `dim`, and `skipna=False` propagates a NaN present on
 any rank to the combined result, not just NaNs local to the current rank.
 
+#### Arithmetic on distributed objects
+
+`mpi.xarray.apply(left, op, right)` combines two operands elementwise
+without any MPI communication. This is only safe when every rank already
+holds matching, aligned local slices, so `apply` checks that first: either
+neither operand is distributed, both are distributed identically (same
+dimension, same global size, same per-rank bounds), or one is distributed
+and the other is replicated (or does not carry that dimension). Anything
+else raises `ValueError` instead of silently combining misaligned data —
+plain xarray's own coordinate-based alignment would otherwise intersect or
+reshape mismatched partitions without warning.
+
+```python
+anomaly = mpi.xarray.apply(t2m_distributed, "-", climatology_distributed)
+```
+
+`op` accepts either a string token (`"+"`, `"-"`, `"*"`, `"/"`, `"//"`,
+`"%"`, `"**"`, `"=="`, `"!="`, `"<"`, `"<="`, `">"`, `">="`, `"&"`, `"|"`,
+`"^"`) or a two-argument callable such as `operator.add`. When either
+operand was distributed, the result carries the same distribution metadata
+forward, so it chains into further `apply` calls or straight into a
+collective reduction (`mpi.xarray.sum`, `.mean`, ...).
+
+`mpi.xarray.align(left, right, dim=None)` is the counterpart to
+`xarray.align`, but for rank ownership rather than coordinate labels: it
+returns `(left, right)` repartitioned so `apply` is guaranteed to accept
+them. Three cases resolve with no data movement between ranks — a
+replicated operand sliced onto an already-distributed partner's exact
+bounds, two replicated operands independently redistributed along the same
+`dim` (deterministic given length/rank/size, so both land on identical
+bounds without coordinating), and two already-identically-distributed
+operands returned unchanged. Two operands already distributed on genuinely
+different partitions is a data-movement problem `align` does not attempt;
+it raises with guidance instead of guessing.
+
+```python
+# a_full is a freshly-loaded replicated climatology; t2m is already
+# distributed along "time" from an earlier reduction.
+climatology, t2m = mpi.xarray.align(a_full, t2m)
+anomaly = mpi.xarray.apply(t2m, "-", climatology)
+```
+
+`mpi.xarray.evaluate(expression, **variables)` parses `expression` as a
+Python expression with the standard library `ast` module and evaluates it
+through `apply`, so ordinary operator precedence and parentheses apply
+(`*`/`/` before `+`/`-`, explicit grouping with `()`), unlike chaining
+`apply` calls by hand. Names in `expression` are bound the same way
+`DataFrame.query` binds column names — as keyword arguments:
+
+```python
+result = mpi.xarray.evaluate("(a + b) * c - d / e", a=ds1, b=ds2, c=ds3, d=ds4, e=ds5)
+```
+
+`ast` was chosen over pandas' query engine deliberately: pandas' engine
+resolves column names against a DataFrame's own namespace and dispatches
+through numexpr or its own evaluator, neither built to accept xarray
+objects as operands or to carry climtools's distribution metadata through
+the computation. `ast` needs no extra dependency, gets Python's exact
+precedence rules from the grammar for free, and routes every operator
+through `apply`, so the same compatibility checks and metadata propagation
+apply here as to a single `apply` call. Only a small, explicit whitelist of
+node types is evaluated — names, literals, and unary/binary/comparison
+operators; attribute access, subscripts, and function calls are rejected
+rather than executed.
+
 Every one of `mpi.reduce`/`mpi.xarray`/`mpi.scatterv`/`to_netcdf(...,
 parallel=True)` and the raw `mpi.comm.<method>` calls above is
 MPI-collective: every rank in `mpi.comm` must reach the same call, in the
@@ -360,8 +424,8 @@ paces per rank (for example, independent cases assigned one-per-rank) should
 use ordinary serial `to_netcdf()` for anything each rank writes on its own,
 and only bring ranks back through a shared collective (`mpi.comm.barrier()`,
 `mpi.reduce`, `mpi.xarray`, or a collective write) at points where every
-rank is guaranteed to have arrived — see `examples/time_composites.py`
-(above) for a script structured this way.
+rank is guaranteed to have arrived — see `examples/test1.py`'s rank-0-only
+source placement (above) for a script structured this way.
 
 Parallel output requires `netCDF4` and `mpi4py` built against a
 parallel-enabled MPI/HDF5/NetCDF-C stack; see

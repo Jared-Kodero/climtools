@@ -21,6 +21,7 @@ that capability is unavailable on a multi-rank run, those checks are skipped.
 from __future__ import annotations
 
 import argparse
+import operator
 import os
 import shutil
 from collections.abc import Callable
@@ -1331,7 +1332,16 @@ def test_distributed_dataset_reduction(ny: int, nx: int) -> None:
     (result, mean_result), parallel_s = reduce_dataset()
 
     expected = full.sum(dim="lat")
-    expected_mean = full.mean(dim=("lat", "lon"))
+    # bottleneck, when installed, silently promotes a Dataset-level
+    # reduction that collapses every remaining dimension to float64 even
+    # though the equivalent DataArray-level reduction stays float32; the
+    # dim="lat" sum above never fully collapses t2m and is unaffected, but
+    # dim=("lat", "lon") here reduces it to a scalar, so the reference is
+    # computed with bottleneck disabled to get the stable, dtype-preserving
+    # answer that mpi.xarray.mean (which never routes through bottleneck's
+    # Dataset path) is expected to match.
+    with xr.set_options(use_bottleneck=False):
+        expected_mean = full.mean(dim=("lat", "lon"))
     correct = (
         result is not None
         and mean_result is not None
@@ -1741,6 +1751,165 @@ def test_distributed_xarray_contracts() -> None:
         0.0,
         0.0,
         note="deterministic edge cases",
+    )
+
+
+@run_test
+def test_distributed_arithmetic() -> None:
+    """mpi.xarray.apply/align/evaluate: locality, compatibility checks, precedence."""
+    a_full = xr.DataArray(
+        np.arange(30, dtype=np.float32).reshape(5, 6),
+        dims=("plev", "lat"),
+        name="a",
+    )
+    b_full = xr.DataArray(
+        (np.arange(30, dtype=np.float32).reshape(5, 6) * 0.5 + 1.0),
+        dims=("plev", "lat"),
+        name="b",
+    )
+    a = mpi.xarray.redistribute(a_full, "plev")
+    b = mpi.xarray.redistribute(b_full, "plev")
+
+    def local_slice(full: xr.DataArray) -> np.ndarray:
+        meta = a.attrs["mpi_meta"]
+        return full.isel(plev=slice(meta["start"], meta["stop"])).values
+
+    # -- apply: matching distributions run locally and tag the result -----
+    added = mpi.xarray.apply(a, "+", b)
+    subtracted = mpi.xarray.apply(a, operator.sub, b)
+    apply_ok = (
+        bool(np.array_equal(added.values, local_slice(a_full) + local_slice(b_full)))
+        and bool(
+            np.array_equal(subtracted.values, local_slice(a_full) - local_slice(b_full))
+        )
+        and added.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+        and subtracted.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+    )
+
+    # -- apply: distributed against a scalar, and against a replicated ----
+    # -- array that does not carry the distributed dimension --------------
+    scaled = mpi.xarray.apply(a, "*", 2.0)
+    weights = xr.DataArray(np.arange(6, dtype=np.float32) + 1.0, dims=("lat",))
+    weighted = mpi.xarray.apply(a, "*", weights)
+    broadcast_ok = bool(
+        np.array_equal(scaled.values, local_slice(a_full) * 2.0)
+    ) and bool(np.array_equal(weighted.values, local_slice(a_full) * weights.values))
+
+    # -- apply: mismatched partitions must raise, not silently combine ----
+    b_by_lat = mpi.xarray.redistribute(b_full, "lat")
+    mismatch_ok = call_raises(
+        ValueError,
+        mpi.xarray.apply,
+        a,
+        "+",
+        b_by_lat,
+        contains="different partitions",
+    )
+
+    # -- align: replicated operand sliced onto a distributed partner ------
+    aligned_a, aligned_b_full = mpi.xarray.align(a, b_full)
+    align_slice_ok = (
+        aligned_a is a
+        and bool(np.array_equal(aligned_b_full.values, local_slice(b_full)))
+        and aligned_b_full.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+    )
+
+    # -- align: two replicated operands jointly distributed along dim -----
+    aligned_c, aligned_d = mpi.xarray.align(a_full, b_full, dim="plev")
+    align_join_ok = (
+        aligned_c.attrs.get("mpi_meta") is not None
+        and aligned_c.attrs.get("mpi_meta") == aligned_d.attrs.get("mpi_meta")
+        and bool(np.array_equal(aligned_c.values, local_slice(a_full)))
+        and bool(np.array_equal(aligned_d.values, local_slice(b_full)))
+    )
+
+    # -- align: already-identical distributions and neither-distributed ---
+    # -- with no dim both return their inputs unchanged --------------------
+    same_a, same_b = mpi.xarray.align(a, b)
+    noop_a, noop_b = mpi.xarray.align(a_full, b_full)
+    align_noop_ok = (
+        same_a is a and same_b is b and noop_a is a_full and noop_b is b_full
+    )
+
+    # -- align: genuinely different partitions cannot be reconciled -------
+    align_mismatch_ok = call_raises(
+        ValueError,
+        mpi.xarray.align,
+        a,
+        b_by_lat,
+        contains="different",
+    )
+
+    align_ok = align_slice_ok and align_join_ok and align_noop_ok and align_mismatch_ok
+
+    # -- evaluate: real operator precedence, not left-to-right -------------
+    precedence_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a + b * a", a=a, b=b).values,
+            local_slice(a_full) + local_slice(b_full) * local_slice(a_full),
+        )
+    )
+    parens_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("(a + b) * a", a=a, b=b).values,
+            (local_slice(a_full) + local_slice(b_full)) * local_slice(a_full),
+        )
+    )
+    unary_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("-a + b", a=a, b=b).values,
+            -local_slice(a_full) + local_slice(b_full),
+        )
+    )
+    literal_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a * 2 + 1", a=a).values,
+            local_slice(a_full) * 2 + 1,
+        )
+    )
+    comparison_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a > b", a=a, b=b).values,
+            local_slice(a_full) > local_slice(b_full),
+        )
+    )
+    chained_reduction = mpi.xarray.sum(
+        mpi.xarray.evaluate("(a + b) - a", a=a, b=b), dim="plev", skipna=True
+    )
+    expected_chained = b_full.sum(dim="plev", skipna=True)
+    chained_ok = bool(
+        np.allclose(
+            chained_reduction.values,
+            expected_chained.values,
+            rtol=relative_tolerance_for_dtype(expected_chained.values),
+        )
+    )
+    unsafe_rejected = all(
+        call_raises((ValueError, NameError), mpi.xarray.evaluate, expression, a=a)
+        for expression in ("a.attrs", "a[0]", "__import__('os')", "a + z")
+    )
+
+    evaluate_ok = (
+        precedence_ok
+        and parens_ok
+        and unary_ok
+        and literal_ok
+        and comparison_ok
+        and chained_ok
+        and unsafe_rejected
+    )
+
+    correct = bool(
+        mpi.reduce.all(
+            apply_ok and broadcast_ok and mismatch_ok and align_ok and evaluate_ok
+        )
+    )
+    record_result(
+        "mpi.xarray apply/align/evaluate (locality, compatibility, precedence)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
     )
 
 
@@ -3203,7 +3372,11 @@ def test_reduction_dtype_contracts() -> None:
         )
     )
 
-    # Empty and non-empty partitions must agree on the reduced dtype.
+    # Empty and non-empty partitions must agree on the reduced dtype. The
+    # reference reduction runs with bottleneck disabled: bottleneck, when
+    # installed, promotes a full (all-dims) float32 min/max reduction to
+    # float64, which would make this reference itself dtype-unstable
+    # across environments rather than testing climtools' own contract.
     for dtype in (np.int8, np.int32, np.float32, np.float64):
         field = xr.DataArray(
             np.arange(max(1, SIZE - 1), dtype=dtype),
@@ -3212,7 +3385,8 @@ def test_reduction_dtype_contracts() -> None:
         distributed = mpi.xarray.redistribute(field, "lat")
         for op_name in ("min", "max"):
             result = getattr(mpi.xarray, op_name)(distributed, dim="lat")
-            expected = getattr(field, op_name)(dim="lat")
+            with xr.set_options(use_bottleneck=False):
+                expected = getattr(field, op_name)(dim="lat")
             checks.append(result is not None and result.dtype == expected.dtype)
             checks.append(
                 result is not None and float(result.item()) == float(expected.item())
@@ -3505,6 +3679,7 @@ def main() -> None:
     test_reduction_dtype_contracts()
     test_collective_sequence_symmetry()
     test_distributed_xarray_contracts()
+    test_distributed_arithmetic()
     test_reduction_redistribution(LATITUDE_COUNT, LONGITUDE_COUNT)
 
     mpi.log("\n--- data placement ---")

@@ -24,7 +24,7 @@ from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
 
 from ..core.tools import get_fsig
-from ..core.xarray_utils import (
+from ..core.xr_utils import (
     add_cyclic_point,
     get_spatial_dims,
     set_edges_to_nan,

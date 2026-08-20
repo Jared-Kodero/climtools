@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from .preprocess_data import preprocess_era5
     from .progress import DaskProgressBar, SerialProgressBar
     from .tools import n_cpus
-    from .xarray_utils import (
+    from .xr_utils import (
         SetupDask,
         add_local_solar_time,
         mask,
@@ -51,20 +51,20 @@ __all__ = [
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "DaskProgressBar": (".progress", "DaskProgressBar"),
     "SerialProgressBar": (".progress", "SerialProgressBar"),
-    "SetupDask": (".xarray_utils", "SetupDask"),
-    "add_local_solar_time": (".xarray_utils", "add_local_solar_time"),
+    "SetupDask": (".xr_utils", "SetupDask"),
+    "add_local_solar_time": (".xr_utils", "add_local_solar_time"),
     "append": ("..lib_netcdf.netcdf", "append"),
     "empty_dataset": ("..lib_netcdf.netcdf", "empty_dataset"),
     "dataset_is_empty": ("..lib_netcdf.netcdf", "dataset_is_empty"),
     "calc": (".calc_stats", None),
     "cmaps": ("..viz.cmaps", None),
-    "mask": (".xarray_utils", "mask"),
+    "mask": (".xr_utils", "mask"),
     "n_cpus": (".tools", "n_cpus"),
     "plot": ("..viz.plotting", None),
     "preprocess_era5": (".preprocess_data", "preprocess_era5"),
-    "remap": (".xarray_utils", "remap"),
-    "sel_transect": (".xarray_utils", "sel_transect"),
-    "to_lon180": (".xarray_utils", "to_lon180"),
+    "remap": (".xr_utils", "remap"),
+    "sel_transect": (".xr_utils", "sel_transect"),
+    "to_lon180": (".xr_utils", "to_lon180"),
     "to_netcdf": ("..lib_netcdf.netcdf", "to_netcdf"),
 }
 

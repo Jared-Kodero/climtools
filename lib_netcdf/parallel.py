@@ -7,10 +7,9 @@ collective NetCDF writes using its recorded global ``start:stop`` interval.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import traceback
-
-import contextlib
 import warnings
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -22,7 +21,7 @@ import xarray as xr
 from mpi4py import MPI
 
 from ..core.lib_mpi import mpi
-from ..core.xarray_mpi import MPI_META, get_mpi_meta
+from ..core.xr_meta import MPI_META, get_mpi_meta
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:

@@ -17,12 +17,19 @@ import xarray as xr
 from mpi4py import MPI as _MPI
 from mpi4py.util import dtlib as _dtlib
 
+from .xr_meta import (
+    get_mpi_meta,
+    log_partition_report,
+    set_mpi_meta,
+    strip_mpi_meta,
+)
+from .xr_ops import ArithmeticMixin
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .lib_mpi import MPIRuntime
 
-MPI_META = "mpi_meta"
 _OP_LIST: tuple[tuple[Any, str], ...] = (
     (_MPI.SUM, "SUM"),
     (_MPI.PROD, "PROD"),
@@ -123,7 +130,7 @@ def _partial_dtype(
     return cast("np.dtype[Any]", result.dtype)
 
 
-class _PlanEntry(NamedTuple):
+class PlanEntry(NamedTuple):
     """One variable's rank-independent contribution to a reduction.
 
     Attributes
@@ -148,145 +155,7 @@ class _PlanEntry(NamedTuple):
     shape: tuple[tuple[str, int], ...]
 
 
-def _validate_mpi_meta(
-    value: xr.Dataset | xr.DataArray,
-    meta: Any,
-) -> dict[str, Any] | None:
-    """Return ``meta`` when it describes a valid partition of ``value``."""
-    if not isinstance(meta, dict):
-        return None
-
-    required = {"dim", "global_size", "start", "stop", "chunk_info"}
-    if not required <= meta.keys():
-        return None
-
-    dim = meta["dim"]
-    if dim not in value.dims:
-        return None
-
-    start = int(meta["start"])
-    stop = int(meta["stop"])
-    global_size = int(meta["global_size"])
-    if start < 0 or stop < start or stop > global_size:
-        return None
-    if int(value.sizes[dim]) != stop - start:
-        return None
-
-    if not isinstance(meta["chunk_info"], dict):
-        return None
-
-    return cast("dict[str, Any]", meta)
-
-
-def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
-    """Return validated MPI distribution metadata.
-
-    The metadata is looked for on the object itself and, for a Dataset, on its
-    variables as a fallback. The fallback exists because
-    :meth:`xarray.DataArray.to_dataset` moves the array's attributes onto the
-    resulting data variable and leaves ``Dataset.attrs`` empty. Inspecting only
-    the top level therefore reported a distributed DataArray as ordinary
-    replicated data as soon as any caller converted it, which silently routed
-    parallel writes through the rank-0 scatter path and produced a file holding
-    only rank 0's slab.
-
-    Variable-level metadata is used only when every variable that carries it
-    agrees, and only when it also describes the Dataset as a whole. Disagreeing
-    variables mean the object was assembled from separately distributed pieces,
-    which no single partition description can represent, so None is returned
-    and the caller treats the object as undistributed rather than acting on an
-    arbitrary choice.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        Object whose distribution metadata is requested.
-
-    Returns
-    -------
-    dict or None
-        Distribution metadata when valid, otherwise None.
-    """
-    meta = _validate_mpi_meta(value, value.attrs.get(MPI_META))
-    if meta is not None:
-        return meta
-
-    if not isinstance(value, xr.Dataset):
-        return None
-
-    candidates: list[dict[str, Any]] = []
-    for variable in value.variables.values():
-        candidate = variable.attrs.get(MPI_META)
-        if isinstance(candidate, dict):
-            candidates.append(candidate)
-
-    if not candidates:
-        return None
-
-    reference = candidates[0]
-    keys = ("dim", "global_size", "start", "stop")
-    for candidate in candidates[1:]:
-        if any(candidate.get(key) != reference.get(key) for key in keys):
-            return None
-
-    return _validate_mpi_meta(value, reference)
-
-
-def set_mpi_meta(
-    value: xr.Dataset | xr.DataArray,
-    *,
-    dim: Hashable,
-    global_size: int,
-    start: int,
-    stop: int,
-    chunk_info: Mapping[Hashable, int],
-) -> None:
-    """Attach MPI distribution metadata.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        Rank-local xarray object.
-    dim : hashable
-        Distributed dimension.
-    global_size : int
-        Global length of ``dim``.
-    start, stop : int
-        Global half-open interval owned by this rank.
-    chunk_info : mapping
-        Effective climtools chunk size for every retained dimension.
-    """
-    meta = {
-        "dim": str(dim),
-        "global_size": int(global_size),
-        "start": int(start),
-        "stop": int(stop),
-        "chunk_info": {
-            str(name): int(size)
-            for name, size in chunk_info.items()
-            if name in value.dims and int(size) > 0
-        },
-    }
-    value.attrs[MPI_META] = meta
-
-    if isinstance(value, xr.Dataset):
-        for variable in value.variables.values():
-            variable.attrs.pop(MPI_META, None)
-            if dim in variable.dims:
-                variable.attrs[MPI_META] = meta.copy()
-
-
-def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
-    """Return a shallow copy without MPI distribution metadata."""
-    output = value.copy(deep=False)
-    output.attrs.pop(MPI_META, None)
-    if isinstance(output, xr.Dataset):
-        for variable in output.variables.values():
-            variable.attrs.pop(MPI_META, None)
-    return output
-
-
-def _native_chunk_size(data: xr.Dataset, dim: Hashable) -> int | None:
+def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
     """Return a representative native on-disk chunk size for a dimension."""
     candidates = [
         variable for variable in data.data_vars.values() if dim in variable.dims
@@ -308,7 +177,7 @@ def _native_chunk_size(data: xr.Dataset, dim: Hashable) -> int | None:
     return None
 
 
-def _usable_native_chunk(length: int, native_chunk: int | None) -> bool:
+def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
     """Return whether a native chunk provides a useful on-disk partition."""
     if length <= 1 or native_chunk is None or native_chunk <= 1:
         return False
@@ -324,7 +193,7 @@ def get_effective_chunk_size(
     if length <= 0:
         return 1
 
-    if _usable_native_chunk(length, native_chunk):
+    if get_usable_native_chunk(length, native_chunk):
         return cast("int", native_chunk)
 
     return max(1, math.ceil(length / mpi_size))
@@ -335,7 +204,7 @@ def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     return {
         str(dim): get_effective_chunk_size(
             int(length),
-            _native_chunk_size(data, dim),
+            get_native_chunk_sizes(data, dim),
             mpi_size,
         )
         for dim, length in data.sizes.items()
@@ -350,14 +219,14 @@ def get_chunk_overrides(
     return {
         str(dim): int(chunk_info[str(dim)])
         for dim, length in data.sizes.items()
-        if not _usable_native_chunk(
+        if not get_usable_native_chunk(
             int(length),
-            _native_chunk_size(data, dim),
+            get_native_chunk_sizes(data, dim),
         )
     }
 
 
-def _balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
+def get_balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
     quotient, remainder = divmod(length, size)
     start = rank * quotient + min(rank, remainder)
     return start, start + quotient + int(rank < remainder)
@@ -375,7 +244,7 @@ def get_chunk_bounds(
 
     chunk_count = math.ceil(length / chunk_size)
     if chunk_count < min(length, size):
-        return _balanced_bounds(length, rank, size)
+        return get_balanced_bounds(length, rank, size)
 
     quotient, remainder = divmod(chunk_count, size)
     first_chunk = rank * quotient + min(rank, remainder)
@@ -452,147 +321,11 @@ def choose_partition_dim(
     return dim
 
 
-def _format_label(value: Any, limit: int = 16) -> str:
-    """Return a short, fixed-width-friendly label for a coordinate value.
-
-    Datetime labels are the reason the previous report scrolled sideways: a
-    numpy datetime64[ns] renders as 29 characters. Seconds and nanoseconds
-    carry no information for a partition boundary, so they are dropped.
-    """
-    if isinstance(value, np.datetime64):
-        text = str(np.datetime64(value, "m"))
-    elif isinstance(value, (np.floating, float)):
-        text = f"{float(value):g}"
-    else:
-        text = str(value)
-    if len(text) > limit:
-        text = text[: limit - 1] + "\u2026"
-    return text
-
-
-def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, str]:
-    """Return the first and last coordinate labels owned along ``dim``."""
-    if dim not in data.coords or int(data.sizes[dim]) == 0:
-        return "-", "-"
-    values = np.asarray(data.coords[dim].values)
-    return _format_label(values[0]), _format_label(values[-1])
-
-
-def _format_bytes(count: float) -> str:
-    """Return a compact binary size label."""
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if count < 1024.0 or unit == "TiB":
-            return f"{count:.0f}{unit}" if unit == "B" else f"{count:.1f}{unit}"
-        count /= 1024.0
-    return f"{count:.1f}TiB"
-
-
-def log_partition_report(
-    runtime: MPIRuntime,
-    data: xr.Dataset | xr.DataArray,
-    dim: Hashable,
-    *,
-    origin: str,
-    global_size: int,
-    start: int,
-    stop: int,
-    automatic: bool = False,
-    detail: bool = True,
-) -> None:
-    """Print a compact description of the rank-local partition layout.
-
-    Every rank contributes its own bounds through a single gather and rank 0
-    prints the result. Logging from every rank instead produces interleaved,
-    unordered lines that are unreadable at scale.
-
-    The report is deliberately narrow. The full local shape is identical on
-    every rank apart from the partitioned dimension, so printing it once in
-    the header conveys the same information as repeating it on every row and
-    keeps the table inside a standard terminal width.
-
-    Parameters
-    ----------
-    runtime : MPIRuntime
-        Runtime owning the communicator.
-    data : xarray.Dataset or xarray.DataArray
-        Rank-local object after partitioning.
-    dim : hashable
-        Partitioned dimension.
-    origin : str
-        Name of the operation that produced the partition.
-    global_size : int
-        Global length of ``dim``.
-    start, stop : int
-        Global half-open interval owned by this rank.
-    automatic : bool, optional
-        Whether ``dim`` was selected automatically.
-    detail : bool, optional
-        Print the per-rank table in addition to the summary line. When False
-        only the two summary lines are printed, which is what long runs that
-        open many files usually want.
-    """
-    comm = runtime.comm
-    first, last = _edge_labels(data, dim)
-    local = (
-        int(comm.rank),
-        int(start),
-        int(stop),
-        first,
-        last,
-        int(data.nbytes),
-    )
-    rows = comm.gather(local, root=0)
-    if comm.rank != 0 or rows is None:
-        return
-
-    counts = [row[2] - row[1] for row in rows]
-    total = sum(row[5] for row in rows)
-    idle = sum(1 for count in counts if count == 0)
-    other = " x ".join(
-        f"{name!s}:{int(length)}" for name, length in data.sizes.items() if name != dim
-    )
-
-    lines = [
-        f"{origin}  dim={str(dim)!r}{' (auto)' if automatic else ''}"
-        + f"  size={global_size}  ranks={comm.size}"
-        + f"  split={min(counts)}-{max(counts)}/rank"
-        + (f"  IDLE={idle}" if idle else ""),
-        f"  held: {other or 'scalar'}"
-        + f"   {_format_bytes(total)} total"
-        + f", {_format_bytes(max(row[5] for row in rows))} peak/rank",
-    ]
-
-    if detail:
-        # Calculate max widths
-        slice_width = max(len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows))
-        first_width = max(len("first"), *(len(str(row[3])) for row in rows))
-        last_width = max(len("last"), *(len(str(row[4])) for row in rows))
-
-        # Apply padding to headers
-        lines.append(
-            f"  {'rank':>4}  {'slice':>{slice_width}}  {'n':>6}  "
-            + f"({'first':>{first_width}}, {'last':>{last_width}})"
-        )
-
-        # Apply padding to row values
-        for row in rows:
-            slice_str = f"{row[1]}:{row[2]}"
-            first_str = str(row[3])
-            last_str = str(row[4])
-
-            lines.append(
-                f"  {row[0]:>4}  {slice_str:>{slice_width}}  {row[2] - row[1]:>6}  "
-                + f"({first_str:>{first_width}}, {last_str:>{last_width}})"
-            )
-
-    runtime.log("\n".join(lines), flush=True)
-
-
 def indexer_is_scalar(indexer: Any) -> bool:
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
 
-class XarrayMPI:
+class XarrayMPI(ArithmeticMixin):
     """MPI-aware distributed xarray operations.
 
     Parameters
@@ -675,50 +408,59 @@ class XarrayMPI:
 
         automatic = partition_dim == "auto"
 
-        # The file is opened once. The previous implementation opened it a
-        # second time to apply chunking, which doubled the metadata reads
-        # every rank issues against the same file. On a parallel filesystem
-        # that open is the dominant cost of this call, so the single handle is
-        # chunked in place instead.
-        data: xr.Dataset = open_dataset(filename_or_obj, chunks=None, **kwargs)
-        try:
-            metadata = data
-            if automatic:
-                partition_dim = choose_partition_dim(
-                    metadata.sizes,
-                    self._runtime.comm.size,
-                )
-            if partition_dim not in metadata.dims:
-                raise ValueError(
-                    f"partition_dim {partition_dim!r} is not in "
-                    + f"{list(metadata.dims)!r}."
-                )
-            chunk_info = get_chunk_info(metadata, self._runtime.comm.size)
-            open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
-            global_size = int(metadata.sizes[partition_dim])
-            longest_size = max(int(length) for length in metadata.sizes.values())
-            if (
-                not automatic
-                and self._runtime.comm.rank == 0
-                and global_size < longest_size
-            ):
-                longest_dims = [
-                    str(dim)
-                    for dim, length in metadata.sizes.items()
-                    if int(length) == longest_size
-                ]
-                warnings.warn(
-                    f"partition_dim {partition_dim!r} has length {global_size}, "
-                    + "but it should be a longest dataset dimension. "
-                    + f"Longest dimension(s) {longest_dims!r} have length "
-                    + f"{longest_size}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-        except BaseException:
-            data.close()
-            raise
+        # 1. RANK 0 EVALUATES METADATA AND BUILDS THE PLAN
+        if self._runtime.comm.rank == 0:
+            with open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
+                if automatic:
+                    partition_dim = choose_partition_dim(
+                        metadata.sizes,
+                        self._runtime.comm.size,
+                    )
+                if partition_dim not in metadata.dims:
+                    raise ValueError(
+                        f"partition_dim {partition_dim!r} is not in "
+                        + f"{list(metadata.dims)!r}."
+                    )
+                chunk_info = get_chunk_info(metadata, self._runtime.comm.size)
+                open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
+                global_size = int(metadata.sizes[partition_dim])
+                longest_size = max(int(length) for length in metadata.sizes.values())
 
+                if not automatic and global_size < longest_size:
+                    longest_dims = [
+                        str(dim)
+                        for dim, length in metadata.sizes.items()
+                        if int(length) == longest_size
+                    ]
+                    warnings.warn(
+                        f"partition_dim {partition_dim!r} has length {global_size}, "
+                        + "but it should be a longest dataset dimension. "
+                        + f"Longest dimension(s) {longest_dims!r} have length "
+                        + f"{longest_size}.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                # Pack the plan into a dictionary for broadcasting
+                plan = {
+                    "partition_dim": partition_dim,
+                    "chunk_info": chunk_info,
+                    "open_chunk_overrides": open_chunk_overrides,
+                    "global_size": global_size,
+                }
+        else:
+            # Non-root ranks wait with an empty variable
+            plan = None
+
+        # 2. BROADCAST THE PLAN TO ALL RANKS
+        plan = self._runtime.comm.bcast(plan, root=0)
+
+        partition_dim = plan["partition_dim"]
+        chunk_info = plan["chunk_info"]
+        open_chunk_overrides = plan["open_chunk_overrides"]
+        global_size = plan["global_size"]
+
+        # 3. EVERY RANK DETERMINISTICALLY CALCULATES ITS LOCAL BOUNDS
         partition_chunk = chunk_info[str(partition_dim)]
         start, stop = get_chunk_bounds(
             global_size,
@@ -731,11 +473,17 @@ class XarrayMPI:
         if open_chunks is None:
             open_chunks = open_chunk_overrides
 
-        # isel first, then chunk: the rank-local slab is what has to be
-        # chunked, and slicing a lazily indexed Dataset costs nothing.
+        # --- SYNCHRONIZE ALL RANKS BEFORE MASS I/O ---
+        self._runtime.comm.Barrier()
+
+        # 4. EVERY RANK OPENS ITS LAZY SLICE OF THE DATA
+        data: xr.Dataset = open_dataset(
+            filename_or_obj,
+            chunks=open_chunks,
+            **kwargs,
+        )
         data = data.isel({partition_dim: slice(start, stop)})
-        if open_chunks is not None:
-            data = data.chunk(open_chunks)
+
         set_mpi_meta(
             data,
             dim=partition_dim,
@@ -1265,7 +1013,7 @@ class XarrayMPI:
         operation: str,
         mode: Literal["all", "root"],
         root: int,
-    ) -> tuple[_PlanEntry, ...]:
+    ) -> tuple[PlanEntry, ...]:
         """Return the rank-independent per-variable reduction plan.
 
         Every field is taken from names, dims, dtypes, and global sizes, all
@@ -1285,7 +1033,7 @@ class XarrayMPI:
             if variable_dims:
                 self._check_reducible(variable.dtype, operation)
             entries.append(
-                _PlanEntry(
+                PlanEntry(
                     name=name,
                     dims=variable_dims,
                     distributed=self._variable_is_distributed(variable, meta),
@@ -1717,8 +1465,19 @@ class XarrayMPI:
         # partial through a different code path from a rank owning data, so
         # branching on the partial's dtype can make those ranks post
         # different numbers of collectives and desynchronize the run.
+        #
+        # Unlike sum/prod/mean, min/max never need dtype promotion: the
+        # extreme of a set of same-dtype values is always one of those
+        # values (or, under skipna=False, a NaN already representable in
+        # that dtype), so the declared variable dtype is the exact and only
+        # correct answer. This is computed directly rather than through
+        # _partial_dtype's zero-size probe, because a full (all-dims)
+        # reduction of a float32 array through xarray's bottleneck-backed
+        # nanmin/nanmax silently promotes the result to float64 when
+        # bottleneck is installed, which the probe would otherwise inherit
+        # and then force onto every rank's buffer.
         operation = "min" if minimum else "max"
-        expect_dtype = _partial_dtype(value.dtype.str, operation, skipna)
+        expect_dtype = value.dtype
         kind = value.dtype.kind
         if kind == "b":
             return self._comm_reduce(

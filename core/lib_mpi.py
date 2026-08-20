@@ -24,7 +24,7 @@ from mpi4py.util import dtlib as _dtlib
 from numpy.typing import DTypeLike, NDArray
 
 from .tools import LockFile, tmp
-from .xarray_mpi import XarrayMPI
+from .xr_mpi import XarrayMPI
 
 P = ParamSpec("P")
 R = TypeVar("R")
