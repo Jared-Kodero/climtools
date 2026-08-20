@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import fcntl
 import getpass
 import inspect
+import logging
 import os
 import socket
 import sys
+import time
 import uuid
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,13 +43,23 @@ class AttrDict(dict):
     __delattr__ = dict.__delitem__
 
 
-import fcntl
-import os
-import time
-
-
 class LockFile:
-    """A context manager class for file locking with sleep and timeout."""
+    """
+    A context manager class for file locking with sleep and timeout mechanisms.
+
+    This class utilizes `fcntl.flock` to acquire an exclusive, non-blocking
+    lock on a specified file. If the lock is held by another process, it will
+    wait and retry based on the provided delay until the timeout is reached.
+
+    Parameters
+    ----------
+    filepath : Path | None, optional
+        The path to the lock file. Defaults to a local ".lock" file if None.
+    timeout : float | None, optional
+        The maximum time in seconds to wait for the lock. If None, it will wait indefinitely.
+    delay : float, optional
+        The time in seconds to sleep between lock acquisition attempts. Defaults to 0.1.
+    """
 
     def __init__(
         self,
@@ -88,6 +102,81 @@ class LockFile:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
             os.close(self.fd)
             self.fd = None
+
+
+class LockedLogger:
+    """
+    A wrapper around `logging.Logger` to synchronize logging output across processes.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+        The standard library logger instance to wrap.
+    lock_file : LockFile
+        An instance of the LockFile context manager to use for synchronization.
+    """
+
+    def __init__(self, logger: logging.Logger, lock_file: LockFile) -> None:
+        self._logger = logger
+        self._lock_file = lock_file
+
+    @wraps(logging.Logger.info)
+    def info(self, *args, **kwargs) -> None:
+        with self._lock_file:
+            self._logger.info(*args, **kwargs)
+
+    @wraps(logging.Logger.warning)
+    def warning(self, *args, **kwargs) -> None:
+        with self._lock_file:
+            self._logger.warning(*args, **kwargs)
+
+    @wraps(logging.Logger.error)
+    def error(self, *args, **kwargs) -> None:
+        with self._lock_file:
+            self._logger.error(*args, **kwargs)
+
+
+def locked_print(
+    *values: Any,
+    lockfile: LockFile | Any | None = None,
+    sep: str | None = " ",
+    end: str | None = "\n",
+    file: TextIO | None = None,
+    flush: bool = False,
+) -> None:
+    """
+    Wraps the standard print function with a lock object to prevent interleaved output.
+
+    Matches standard print signatures for IDE autocomplete.
+
+    Parameters
+    ----------
+    *values : Any
+        The values to be printed.
+    lockfile : LockFile | Any, required
+        An instance of `LockFile`, or any lock object that supports the standard
+        `with` context manager protocol (`__enter__` and `__exit__`).
+    sep : str | None, optional
+        String inserted between values. Defaults to a space.
+    end : str | None, optional
+        String appended after the last value. Defaults to a newline.
+    file : TextIO | None, optional
+        A file-like object (stream) to print to. Defaults to `sys.stdout`.
+    flush : bool, optional
+        Whether to forcefully flush the stream. Defaults to False.
+
+    Raises
+    ------
+    ValueError
+        If no valid lock object is provided via the `lockfile` argument.
+    """
+    if lockfile is None:
+        raise ValueError(
+            "We need a lockfile obj:\n(e.g., climtools.LockFile, threading.Lock...)"
+        )
+
+    with lockfile:
+        print(*values, sep=sep, end=end, file=file, flush=flush)
 
 
 @contextmanager
