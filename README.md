@@ -140,9 +140,20 @@ include `-m mpi4py`:
 
 | File        | Demonstrates                                                                 |
 | ----------- | ---------------------------------------------------------------------------- |
-| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (including `apply`/`align`/`evaluate`), `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` and `--resolution` set the size of that file. |
+| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (including `open_dataset`/`redistribute`/`isel`/`sel`, `apply`/`align`/`evaluate`, and the native-reduction distribution guard), `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` and `--resolution` set the size of that file. |
 | `test1.py`  | Parallel NetCDF write benchmark across three source placements: rank-0-only (scattered), distributed from the start, and read back through a distributed open. Sizes are set with `--time-steps`, `--lat` and `--lon`. Skips the collective write cleanly when netCDF4 lacks parallel4 support. |
 | `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks, with the environment settings the suite requires. |
+
+Every timed check in `test.py` (one that actually measured a serial baseline
+against the distributed implementation, as opposed to a pure correctness
+contract) is tagged in the summary with a plain-language verdict —
+`MPI (faster)`, `Xarray (faster)`, or `tie` (within 5% either way) — so the
+final table answers "was this actually worth distributing" at a glance
+without reading raw timings. Small, in-memory, single-node checks routinely
+come back `Xarray (faster)`: real speedups from `mpi.reduce`/`mpi.xarray`
+show up once the ranks are on separate cores with enough data per rank to
+outweigh collective-call overhead, which is also this repository's
+[Running the suite on a cluster](#running-the-suite-on-a-cluster) case.
 
 ### Data placement covered by the suite
 
@@ -195,6 +206,16 @@ carries a signature (operation, placement, root, dtype, shape) inside the
 all-gather that already synchronizes rank-local errors, so a divergence raises
 `MPIError` naming the disagreeing ranks instead of blocking. The check costs no
 additional communication.
+
+`mpi.reduce.sum`/`.prod`/`.min`/`.max`/`.any`/`.all` on a `Dataset` batch this
+signature check across every variable into a single all-gather rather than
+opening one per variable (the buffer collectives that actually move data
+still run once per variable, since their shapes differ; only the redundant
+per-variable *verification* step is batched). For a Dataset with *V*
+variables this drops the collective count for the check itself from *V*
+separate all-gathers to one, halving the total collective count of the
+reduction (`2V` → `V + 1`) — a latency-bound win that matters for climate
+Datasets, which commonly hold dozens of variables.
 
 ### Running the suite on a cluster
 
@@ -346,6 +367,26 @@ consistently across the whole distributed dimension (not per rank): a value
 is only dropped by `min_count` once the count is summed across every rank
 that holds a share of `dim`, and `skipna=False` propagates a NaN present on
 any rank to the combined result, not just NaNs local to the current rank.
+Every reduction accepts a `DataArray` or a `Dataset` interchangeably — a
+`Dataset` is reduced variable by variable, keeping non-distributed variables
+untouched and static (non-distributed) dimensions intact.
+
+> **Calling `.mean()`/`.sum()`/etc. directly, instead of `mpi.xarray.mean`/
+> `mpi.xarray.sum`, is the most common mistake with a distributed object.**
+> `ds.mean()` on a Dataset that `mpi.xarray.open_dataset`/`redistribute`
+> produced does not fail and does not raise — it silently returns *this
+> rank's own partial reduction* over its own slice of the distributed
+> dimension, not the reduction over the whole dataset. Importing
+> `climtools.mpi` patches `xarray.Dataset`/`xarray.DataArray`'s own
+> `mean`/`sum`/`prod`/`std`/`var`/`min`/`max`/`median`/`any`/`all`/`cumsum`/
+> `cumprod` so that calling one of them directly on an object carrying
+> `mpi_meta`, over a `dim` that includes the distributed dimension, raises a
+> `UserWarning` naming the `mpi.xarray` call to use instead. The computation
+> itself is unchanged — this is a warning about an easy mistake, not a
+> behavior change — and a reduction over a dimension that is *not* the
+> distributed one (for example `distributed.mean(dim="lon")` when the
+> distributed dimension is `"lat"`) is a legitimate, embarrassingly-parallel
+> per-rank operation and stays silent.
 
 #### Arithmetic on distributed objects
 
@@ -381,6 +422,23 @@ bounds without coordinating), and two already-identically-distributed
 operands returned unchanged. Two operands already distributed on genuinely
 different partitions is a data-movement problem `align` does not attempt;
 it raises with guidance instead of guessing.
+
+Matching *lengths* along `dim` is not the same as matching *labels* — two
+operands can have the same length while their `dim` coordinate is offset,
+reordered, or otherwise not simply "the same index sliced the same way",
+which pure position-based slicing cannot see. In both of the no-data-movement
+cases above, `align` now also runs `xarray.align(left, right, join="exact")`
+as a local, communication-free label check (every rank already holds the
+data being compared, so this costs no MPI traffic) before treating the
+operands as combinable, and raises `ValueError` if the labels disagree
+instead of silently handing `apply`/`evaluate` two slices that only look
+aligned by length:
+
+```python
+# Same length along "plev", different physical levels: caught immediately.
+mpi.xarray.align(model_a, model_b, dim="plev")
+# ValueError: left and right disagree on 'plev' coordinate labels ...
+```
 
 ```python
 # a_full is a freshly-loaded replicated climatology; t2m is already

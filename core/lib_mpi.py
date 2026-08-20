@@ -11,7 +11,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Hashable, Sequence
 from contextlib import contextmanager
 from numbers import Integral
 from typing import Any, Literal, ParamSpec, TypeVar, cast
@@ -230,18 +230,69 @@ def mpi_comm_reduce(
             raise ValueError(f"root {root} is outside [0, {comm.size}).")
 
     if is_dataset(value):
-        # Validate every variable before posting any collective. The dtypes are
-        # identical on every rank, so an unsupported variable now raises on all
-        # ranks at the same point instead of leaving some ranks blocked inside
-        # a collective that the failing rank never reaches.
-        for da in value.data_vars.values():
-            dtype = np.asarray(da.values).dtype
-            if dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
-                raise MPIError(f"Unsupported MPI NumPy dtype: {dtype}.")
-        reduced_vars = {
-            name: mpi_comm_reduce(runtime, da, op, mode=mode, root=root)
-            for name, da in value.data_vars.items()
-        }
+        # Validate every variable and stage its send buffer before posting
+        # any collective. The dtypes/shapes are identical on every rank, so
+        # an unsupported variable raises on all ranks at the same point
+        # instead of leaving some ranks blocked inside a collective the
+        # failing rank never reaches.
+        arrays: dict[Hashable, np.ndarray[Any, Any]] = {}
+        for name, da in value.data_vars.items():
+            array = np.asarray(da.values)
+            if array.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
+                raise MPIError(f"Unsupported MPI NumPy dtype: {array.dtype}.")
+            if not array.flags.c_contiguous:
+                array = np.ascontiguousarray(array)
+            arrays[name] = array
+
+        # A Dataset reduces one variable per Allreduce/Reduce call (shapes
+        # differ between variables, so the buffer collectives themselves
+        # cannot be merged), but the buffer-agreement check that precedes
+        # each one is independent of the reduction itself. Checking every
+        # variable's signature inside a single allgather here, instead of
+        # letting each variable's own recursive call open its own allgather,
+        # halves the collective count for a Dataset with many variables
+        # (2 * n_vars -> n_vars + 1), which matters on latency-bound
+        # networks with climate Datasets that commonly hold dozens of
+        # variables.
+        if CHECK_COLLECTIVE_BUFFERS and comm.size > 1 and arrays:
+            signature = tuple(
+                (
+                    str(name),
+                    _op_label(op),
+                    mode,
+                    int(root),
+                    array.dtype.str,
+                    tuple(int(length) for length in array.shape),
+                )
+                for name, array in arrays.items()
+            )
+            gathered = comm.allgather(signature)
+            if len(set(gathered)) != 1:
+                disagreeing = [
+                    index for index, item in enumerate(gathered) if item != gathered[0]
+                ]
+                raise MPIError(
+                    "MPI ranks posted different reduction buffers for a "
+                    + f"Dataset reduction. Rank 0 has {gathered[0]!r}, ranks "
+                    + f"{disagreeing} disagree (rank {disagreeing[0]} has "
+                    + f"{gathered[disagreeing[0]]!r}). This would deadlock or "
+                    + "silently corrupt the reduction."
+                )
+
+        reduced_vars: dict[Hashable, np.ndarray[Any, Any]] = {}
+        for name, array in arrays.items():
+            if mode == "all":
+                recv = np.empty(array.shape, dtype=array.dtype)
+                comm.Allreduce(array, recv, op=op)
+            else:
+                recv = (
+                    np.empty(array.shape, dtype=array.dtype)
+                    if comm.rank == root
+                    else None
+                )
+                comm.Reduce(array, recv, op=op, root=root)
+            reduced_vars[name] = recv
+
         if mode == "root" and comm.rank != root:
             return None
         return cast("T", value.copy(data=reduced_vars))

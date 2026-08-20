@@ -104,8 +104,29 @@ class ArithmeticMixin:
         self,
         other: Any,
         meta: dict[str, Any],
+        partner: xr.Dataset | xr.DataArray | None = None,
     ) -> Any:
-        """Slice a replicated operand onto an already-distributed partner's bounds."""
+        """Slice a replicated operand onto an already-distributed partner's bounds.
+
+        Parameters
+        ----------
+        other : Any
+            Replicated operand to slice. Returned unchanged if it is not an
+            xarray object or does not carry ``meta["dim"]``.
+        meta : dict
+            Distribution metadata of the already-distributed partner.
+        partner : xarray.Dataset or xarray.DataArray, optional
+            The already-distributed partner itself. When given and both
+            objects carry an index along ``dim``, :func:`xarray.align` with
+            ``join="exact"`` cross-checks the coordinate *labels* of the
+            slice against the partner's own labels. This is a local,
+            communication-free check: ``partner`` already holds only this
+            rank's slice, so it catches a replicated operand whose ``dim``
+            coordinate does not correspond label-for-label to the
+            partner's (reordered, offset, or otherwise not simply "the same
+            index sliced the same way"), which same-length position-based
+            slicing alone cannot detect.
+        """
         dim = meta["dim"]
         if not isinstance(other, (xr.Dataset, xr.DataArray)) or dim not in other.dims:
             return other
@@ -122,6 +143,23 @@ class ArithmeticMixin:
                 + "dimension."
             )
         sliced = other.isel({dim: slice(meta["start"], meta["stop"])})
+
+        if (
+            partner is not None
+            and dim in getattr(partner, "indexes", {})
+            and dim in getattr(sliced, "indexes", {})
+        ):
+            try:
+                xr.align(partner, sliced, join="exact")
+            except (ValueError, KeyError) as exc:
+                raise ValueError(
+                    f"Cannot align: the replicated operand's {dim!r} labels "
+                    + "do not match the distributed partner's labels for "
+                    + "this rank's slice, even though both have length "
+                    + f"{meta['stop'] - meta['start']}. xarray.align(..., "
+                    + f"join='exact') reports: {exc}"
+                ) from exc
+
         return self._reattach_meta(sliced, meta)
 
     def align(
@@ -211,13 +249,41 @@ class ArithmeticMixin:
             )
 
         if left_meta is not None:
-            return left, self._align_replicated(right, left_meta)
+            return left, self._align_replicated(right, left_meta, partner=left)
 
         if right_meta is not None:
-            return self._align_replicated(left, right_meta), right
+            return self._align_replicated(left, right_meta, partner=right), right
 
         if dim is None:
             return left, right
+
+        # Neither operand is distributed yet: both are redistributed
+        # independently below, which is a deterministic function of
+        # (length, chunk size, rank, size) and therefore lands both on
+        # identical per-rank *positions* without any coordination. That
+        # guarantee says nothing about whether position i on the left
+        # actually corresponds to the same physical coordinate as position
+        # i on the right. xarray.align(..., join="exact") checks the
+        # coordinate labels along dim while both operands are still fully
+        # replicated (a local, communication-free check, since every rank
+        # holds the same complete data), and raises before any rank commits
+        # to a position-based split that would otherwise silently combine
+        # mismatched slices later in apply()/evaluate().
+        if (
+            isinstance(left, (xr.Dataset, xr.DataArray))
+            and isinstance(right, (xr.Dataset, xr.DataArray))
+            and dim in getattr(left, "indexes", {})
+            and dim in getattr(right, "indexes", {})
+        ):
+            try:
+                xr.align(left, right, join="exact")
+            except (ValueError, KeyError) as exc:
+                raise ValueError(
+                    f"Cannot align: left and right disagree on {dim!r} "
+                    + "coordinate labels, so distributing each "
+                    + "independently would silently combine mismatched "
+                    + f"slices. xarray.align(..., join='exact') reports: {exc}"
+                ) from exc
 
         return (
             self.redistribute(

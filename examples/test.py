@@ -274,6 +274,27 @@ class Result:
             return float("nan")
         return self.serial_s / self.parallel_s
 
+    @property
+    def verdict(self) -> str:
+        """Return a plain-language winner for this check's timing, if any.
+
+        Only meaningful for checks that actually timed a serial baseline
+        against the distributed implementation (:attr:`speedup` is not
+        NaN); correctness-only contracts, which pass ``0.0`` for both
+        timings, return an empty string rather than a misleading "tie".
+        A 5% band around 1x is treated as a tie so timing noise on a
+        lightly loaded or oversubscribed machine doesn't flip the label
+        run to run.
+        """
+        speedup = self.speedup
+        if self.skipped or np.isnan(speedup):
+            return ""
+        if speedup >= 1.05:
+            return "MPI (faster)"
+        if speedup <= 0.95:
+            return "Xarray (faster)"
+        return "tie"
+
 
 RESULTS: list[Result] = []
 CURRENT_TEST_NUMBER = 0
@@ -310,9 +331,10 @@ def record_result(
     RESULTS.append(result)
     status = "SKIP" if skipped else ("OK  " if correct else "FAIL")
     speedup_str = "  n/a " if np.isnan(result.speedup) else f"{result.speedup:5.2f}x"
+    verdict = f"  [{result.verdict}]" if result.verdict else ""
     mpi.log(
         f"[{status}] {name:<46} serial={serial_s:8.4f}s  "
-        + f"parallel={parallel_s:8.4f}s  speedup={speedup_str}"
+        + f"parallel={parallel_s:8.4f}s  speedup={speedup_str}{verdict}"
         + (f"  ({note})" if note else ""),
         flush=True,
     )
@@ -1840,7 +1862,66 @@ def test_distributed_arithmetic() -> None:
         contains="different",
     )
 
-    align_ok = align_slice_ok and align_join_ok and align_noop_ok and align_mismatch_ok
+    # -- align: xr.align coordinate-label cross-check ----------------------
+    # Two operands can have identical *lengths* along dim while their
+    # coordinate *labels* disagree (reversed, offset, or simply a
+    # different index). Position-based slicing alone cannot see that;
+    # xr.align(..., join="exact") can, and align() now runs it as a local
+    # (communication-free) safety check before handing back operands that
+    # apply()/evaluate() would otherwise combine as if they matched.
+    a_full_labeled = a_full.assign_coords(plev=np.arange(5))
+    b_full_reversed = b_full.assign_coords(plev=np.arange(5)[::-1])
+    align_coord_mismatch_ok = call_raises(
+        ValueError,
+        mpi.xarray.align,
+        a_full_labeled,
+        b_full_reversed,
+        "plev",
+    )
+    a_full_same_labels = a_full.assign_coords(plev=np.arange(5))
+    b_full_same_labels = b_full.assign_coords(plev=np.arange(5))
+    aligned_e, aligned_f = mpi.xarray.align(
+        a_full_same_labels, b_full_same_labels, dim="plev"
+    )
+    align_coord_match_ok = aligned_e.attrs.get("mpi_meta") == aligned_f.attrs.get(
+        "mpi_meta"
+    )
+    # Same check on the "replicated onto an already-distributed partner"
+    # path: b's plev labels agree with a's own subset, so alignment must
+    # still succeed once the partner actually carries a plev index.
+    a_labeled = mpi.xarray.redistribute(a_full_labeled, "plev")
+    aligned_g, aligned_h = mpi.xarray.align(a_labeled, b_full_same_labels)
+    align_replicated_match_ok = aligned_g is a_labeled and bool(
+        np.array_equal(
+            aligned_h["plev"].values,
+            a_labeled["plev"].values,
+        )
+    )
+    align_replicated_mismatch_ok = a_labeled.sizes["plev"] == 0 or call_raises(
+        ValueError,
+        mpi.xarray.align,
+        a_labeled,
+        # A constant offset (rather than a simple reversal) guarantees every
+        # position disagrees with a_labeled's own arange(5) labels, for any
+        # rank count. A pure reversal coincides with the original at the
+        # centre index of an odd-length array, so whichever rank owns that
+        # single element under a 1-per-rank partition would see matching
+        # labels and the check would not raise on that rank. A rank that
+        # owns zero elements (more ranks than plev levels) has nothing to
+        # disagree about and is exempted rather than expected to raise.
+        b_full.assign_coords(plev=np.arange(5) + 100),
+    )
+
+    align_ok = (
+        align_slice_ok
+        and align_join_ok
+        and align_noop_ok
+        and align_mismatch_ok
+        and align_coord_mismatch_ok
+        and align_coord_match_ok
+        and align_replicated_match_ok
+        and align_replicated_mismatch_ok
+    )
 
     # -- evaluate: real operator precedence, not left-to-right -------------
     precedence_ok = bool(
@@ -1873,6 +1954,44 @@ def test_distributed_arithmetic() -> None:
             local_slice(a_full) > local_slice(b_full),
         )
     )
+    # -- evaluate: remaining arithmetic/bitwise operators and right --------
+    # -- associativity of ** (Python's own precedence, not left-to-right) --
+    a_int = a.astype(np.int32)
+    b_int = b.astype(np.int32)
+    a_int_full = a_full.astype(np.int32)
+    b_int_full = b_full.astype(np.int32)
+    floordiv_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a // b", a=a_int, b=b_int).values,
+            local_slice(a_int_full) // local_slice(b_int_full),
+        )
+    )
+    mod_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a % b", a=a_int, b=b_int).values,
+            local_slice(a_int_full) % local_slice(b_int_full),
+        )
+    )
+    power_ok = bool(
+        np.allclose(
+            mpi.xarray.evaluate("2 ** a % 5", a=a).values,
+            2.0 ** local_slice(a_full) % 5,
+            rtol=relative_tolerance_for_dtype(local_slice(a_full)),
+        )
+    )
+    bitwise_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("(a & b) | (a ^ b)", a=a_int, b=b_int).values,
+            (local_slice(a_int_full) & local_slice(b_int_full))
+            | (local_slice(a_int_full) ^ local_slice(b_int_full)),
+        )
+    )
+    not_equal_ok = bool(
+        np.array_equal(
+            mpi.xarray.evaluate("a != b", a=a, b=b).values,
+            local_slice(a_full) != local_slice(b_full),
+        )
+    )
     chained_reduction = mpi.xarray.sum(
         mpi.xarray.evaluate("(a + b) - a", a=a, b=b), dim="plev", skipna=True
     )
@@ -1884,9 +2003,43 @@ def test_distributed_arithmetic() -> None:
             rtol=relative_tolerance_for_dtype(expected_chained.values),
         )
     )
+    # -- evaluate: same expression on a Dataset carries every data_var -----
+    # Dataset-vs-Dataset arithmetic in xarray operates per matching
+    # variable *name*, so both operands need the same variable name to
+    # combine (unlike DataArrays, which combine on their raw values
+    # regardless of name); this mirrors a real anomaly-style computation
+    # such as ``field_ds - climatology_ds`` where both datasets carry the
+    # same variable.
+    ds_a = a.rename("field").to_dataset()
+    ds_b = b.rename("field").to_dataset()
+    ds_result = mpi.xarray.evaluate("a + b", a=ds_a, b=ds_b)
+    dataset_ok = (
+        isinstance(ds_result, xr.Dataset)
+        and bool(
+            np.array_equal(
+                ds_result["field"].values,
+                local_slice(a_full) + local_slice(b_full),
+            )
+        )
+        and ds_result.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+    )
     unsafe_rejected = all(
         call_raises((ValueError, NameError), mpi.xarray.evaluate, expression, a=a)
         for expression in ("a.attrs", "a[0]", "__import__('os')", "a + z")
+    )
+    chained_comparison_rejected = call_raises(
+        ValueError,
+        mpi.xarray.evaluate,
+        "a < b < a",
+        contains="Chained comparisons",
+        a=a,
+        b=b,
+    )
+    bad_syntax_rejected = call_raises(
+        ValueError,
+        mpi.xarray.evaluate,
+        "a +",
+        a=a,
     )
 
     evaluate_ok = (
@@ -1895,8 +2048,16 @@ def test_distributed_arithmetic() -> None:
         and unary_ok
         and literal_ok
         and comparison_ok
+        and floordiv_ok
+        and mod_ok
+        and power_ok
+        and bitwise_ok
+        and not_equal_ok
         and chained_ok
+        and dataset_ok
         and unsafe_rejected
+        and chained_comparison_rejected
+        and bad_syntax_rejected
     )
 
     correct = bool(
@@ -1906,6 +2067,92 @@ def test_distributed_arithmetic() -> None:
     )
     record_result(
         "mpi.xarray apply/align/evaluate (locality, compatibility, precedence)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_distributed_reduction_guard(ny: int, nx: int) -> None:
+    """Native xr.Dataset/DataArray reductions warn on a distributed object.
+
+    ``mpi.xarray.open_dataset``/``redistribute`` tag their output with
+    ``mpi_meta``. Calling the ordinary, undistributed ``.mean()`` (etc.)
+    directly on that object silently returns only this rank's own partial
+    reduction, with no error, which is easy to do by mistake and easy not to
+    notice. ``install_reduction_guard`` patches xarray's own reduction
+    methods to warn in exactly that situation, while leaving every other
+    case (non-distributed objects, and reductions that never touch the
+    distributed dimension) completely silent.
+    """
+    import warnings
+
+    full = load_test_variable("t2m", time=0, lat=slice(0, ny), lon=slice(0, nx))
+    distributed = mpi.xarray.redistribute(full, "lat")
+
+    def warns(callback: Callable[[], Any]) -> bool:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            callback()
+        return any(
+            issubclass(item.category, UserWarning)
+            and "mpi.xarray." in str(item.message)
+            for item in caught
+        )
+
+    # Reducing over the distributed dim (explicitly, or via the default
+    # dim=None, which reduces over every dim) must warn.
+    warns_default_dim = warns(lambda: distributed.mean())
+    warns_named_dim = warns(lambda: distributed.sum(dim="lat"))
+    warns_dim_list = warns(lambda: distributed.max(dim=["lat", "lon"]))
+    warns_dataset = warns(lambda: distributed.to_dataset(name="t2m").mean())
+
+    # Reducing over a dim that is NOT the distributed one is a legitimate,
+    # embarrassingly-parallel per-rank operation and must stay silent.
+    no_warn_other_dim = not warns(lambda: distributed.mean(dim="lon"))
+
+    # A plain, non-distributed object must never warn.
+    no_warn_undistributed = not warns(lambda: full.mean())
+
+    # The reduction itself is unaffected: the warning wraps, not replaces,
+    # the original computation.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        local_partial = distributed.mean(dim="lat").values
+    expected_local_partial = (
+        full.isel(
+            lat=slice(
+                distributed.attrs["mpi_meta"]["start"],
+                distributed.attrs["mpi_meta"]["stop"],
+            )
+        )
+        .mean(dim="lat")
+        .values
+    )
+    computation_unaffected = bool(
+        np.allclose(
+            local_partial,
+            expected_local_partial,
+            rtol=relative_tolerance_for_dtype(expected_local_partial),
+            equal_nan=True,
+        )
+    )
+
+    correct = bool(
+        mpi.reduce.all(
+            warns_default_dim
+            and warns_named_dim
+            and warns_dim_list
+            and warns_dataset
+            and no_warn_other_dim
+            and no_warn_undistributed
+            and computation_unaffected
+        )
+    )
+    record_result(
+        "native .mean()/.sum()/etc. warn on a distributed object",
         correct,
         0.0,
         0.0,
@@ -3521,8 +3768,9 @@ def print_test_summary() -> int:
             "  n/a " if np.isnan(result.speedup) else f"{result.speedup:5.2f}x"
         )
         status = "SKIP" if result.skipped else ("OK  " if result.correct else "FAIL")
+        verdict = f"  [{result.verdict}]" if result.verdict else ""
         mpi.log(
-            f"[{status}] {result.name:<52} speedup={speedup_str}  "
+            f"[{status}] {result.name:<52} speedup={speedup_str}{verdict}  "
             + f"serial={result.serial_s:7.4f}s  parallel={result.parallel_s:7.4f}s"
             + (f"  ({result.note})" if result.note else "")
         )
@@ -3530,10 +3778,20 @@ def print_test_summary() -> int:
     n_fail = sum(1 for result in RESULTS if not result.correct and not result.skipped)
     n_skip = sum(1 for result in RESULTS if result.skipped)
     n_pass = len(RESULTS) - n_fail - n_skip
+    n_mpi_faster = sum(1 for result in RESULTS if result.verdict == "MPI (faster)")
+    n_xarray_faster = sum(
+        1 for result in RESULTS if result.verdict == "Xarray (faster)"
+    )
+    n_tie = sum(1 for result in RESULTS if result.verdict == "tie")
     mpi.log(
         f"Results: {n_pass} passed, {n_fail} failed, {n_skip} skipped, "
         + f"{len(RESULTS)} recorded checks."
     )
+    if n_mpi_faster or n_xarray_faster or n_tie:
+        mpi.log(
+            f"Timed checks: {n_mpi_faster} MPI (faster), "
+            + f"{n_xarray_faster} Xarray (faster), {n_tie} tie."
+        )
     if n_fail:
         mpi.log(f"{n_fail} recorded check(s) FAILED.")
     elif n_skip:
@@ -3680,6 +3938,7 @@ def main() -> None:
     test_collective_sequence_symmetry()
     test_distributed_xarray_contracts()
     test_distributed_arithmetic()
+    test_distributed_reduction_guard(LATITUDE_COUNT, LONGITUDE_COUNT)
     test_reduction_redistribution(LATITUDE_COUNT, LONGITUDE_COUNT)
 
     mpi.log("\n--- data placement ---")
