@@ -986,49 +986,9 @@ def test_distributed_open_dataset() -> None:
 
     distributed, parallel_s = open_distributed_dataset()
 
+    # The partition layout is now reported by mpi.xarray.open_dataset itself,
+    # so the suite no longer prints it here.
     meta = distributed.attrs.get("mpi_meta")
-    if isinstance(meta, dict):
-        partition_dim = meta.get("dim")
-        start_idx = int(meta.get("start", -1))
-        stop_idx = int(meta.get("stop", -1))
-        local_size = (
-            int(distributed.sizes.get(partition_dim, 0))
-            if isinstance(partition_dim, str)
-            else 0
-        )
-        coordinate = (
-            distributed[partition_dim]
-            if isinstance(partition_dim, str) and partition_dim in distributed.coords
-            else None
-        )
-        start_value = (
-            coordinate.values[0] if coordinate is not None and local_size else None
-        )
-        end_value = (
-            coordinate.values[-1] if coordinate is not None and local_size else None
-        )
-        end_idx = stop_idx - 1 if local_size else None
-    else:
-        partition_dim = None
-        start_idx = None
-        stop_idx = None
-        end_idx = None
-        start_value = None
-        end_value = None
-
-    partition_rows = mpi.comm.allgather(
-        (partition_dim, start_idx, end_idx, start_value, end_value)
-    )
-    if RANK == 0:
-        for rank, row in enumerate(partition_rows):
-            dim, idx_start, idx_end, value_start, value_end = row
-            mpi.log(
-                f"[PARTITION RANK {rank}/{SIZE}] partition_dim={dim} "
-                + f"idx_start={idx_start} idx_end={idx_end} "
-                + f"value_start={value_start} value_end={value_end}",
-                prefix=False,
-                flush=True,
-            )
 
     local = distributed["pr"].isel(time=0).values.copy()
     variable_meta = distributed["pr"].attrs.get("mpi_meta")

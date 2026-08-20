@@ -352,6 +352,183 @@ def prune_chunk_info(
     }
 
 
+def choose_partition_dim(
+    sizes: Mapping[Hashable, int],
+    mpi_size: int,
+    *,
+    exclude: Iterable[Hashable] = (),
+) -> Hashable:
+    """Select a partition dimension automatically.
+
+    The dimension that keeps the most ranks busy is the longest one, so the
+    primary key is length. Ties are broken by dataset declaration order, which
+    is identical on every rank, so the choice is rank-invariant without any
+    communication. Dimensions of length one are never chosen unless nothing
+    else exists, because partitioning them leaves every rank but one empty.
+
+    Parameters
+    ----------
+    sizes : mapping
+        Dimension name to global length.
+    mpi_size : int
+        Number of ranks the data will be spread over.
+    exclude : iterable of hashable, optional
+        Dimensions that must not be chosen, for example a dimension the caller
+        intends to reduce over.
+
+    Returns
+    -------
+    hashable
+        Chosen dimension.
+
+    Raises
+    ------
+    ValueError
+        If no dimension is available.
+    """
+    blocked = set(exclude)
+    candidates = [
+        (dim, int(length))
+        for dim, length in sizes.items()
+        if dim not in blocked
+    ]
+    if not candidates:
+        raise ValueError("No dimension is available for automatic partitioning.")
+
+    usable = [item for item in candidates if item[1] > 1] or candidates
+    order = {dim: position for position, (dim, _) in enumerate(usable)}
+    dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
+
+    if length < mpi_size:
+        warnings.warn(
+            f"Automatic partition dimension {str(dim)!r} has length {length}, "
+            + f"which is shorter than the {mpi_size} available ranks, so "
+            + f"{mpi_size - length} rank(s) will hold no data.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return dim
+
+
+def _edge_values(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, str]:
+    """Return the first and last coordinate labels owned along ``dim``."""
+    if dim not in data.coords or int(data.sizes[dim]) == 0:
+        return "-", "-"
+    values = np.asarray(data.coords[dim].values)
+    return f"{values[0]}", f"{values[-1]}"
+
+
+def log_partition_report(
+    runtime: MPIRuntime,
+    data: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    origin: str,
+    global_size: int,
+    start: int,
+    stop: int,
+    source: str = "",
+    automatic: bool = False,
+) -> None:
+    """Print one aligned table describing the rank-local partition layout.
+
+    Every rank contributes its own bounds through a single gather, and rank 0
+    prints the table. Logging independently from every rank instead produces
+    interleaved, unordered lines that are unreadable at scale, which is what
+    the equivalent call in the test suite produced.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        Runtime owning the communicator.
+    data : xarray.Dataset or xarray.DataArray
+        Rank-local object after partitioning.
+    dim : hashable
+        Partitioned dimension.
+    origin : str
+        Name of the operation that produced the partition.
+    global_size : int
+        Global length of ``dim``.
+    start, stop : int
+        Global half-open interval owned by this rank.
+    source : str, optional
+        File or object description shown in the header.
+    automatic : bool, optional
+        Whether ``dim`` was selected automatically.
+    """
+    comm = runtime.comm
+    local = {
+        "rank": int(comm.rank),
+        "start": int(start),
+        "stop": int(stop),
+        "count": int(stop - start),
+        "first": _edge_values(data, dim),
+        "shape": ", ".join(
+            f"{str(name)}={int(length)}" for name, length in data.sizes.items()
+        ),
+        "mib": float(data.nbytes) / 1048576.0,
+    }
+    rows = comm.gather(local, root=0)
+    if comm.rank != 0 or rows is None:
+        return
+
+    empty = sum(1 for row in rows if row["count"] == 0)
+    header = (
+        f"{origin}: partition_dim={str(dim)!r}"
+        + (" (auto)" if automatic else "")
+        + f"  global_size={global_size}  ranks={comm.size}"
+        + (f"  idle_ranks={empty}" if empty else "")
+    )
+    if source:
+        header = f"{header}\n  source: {source}"
+
+    widths = {
+        "rank": max(4, len(str(comm.size - 1))),
+        "count": max(5, *(len(str(row["count"])) for row in rows)),
+        "range": max(
+            11,
+            *(len(f"{row['start']}:{row['stop']}") for row in rows),
+        ),
+        "first": max(9, *(len(row["first"][0]) for row in rows)),
+        "last": max(9, *(len(row["first"][1]) for row in rows)),
+    }
+    lines = [
+        header,
+        "  {:>{r}}  {:>{g}}  {:>{c}}  {:>{f}}  {:>{l}}  {:>8}  {}".format(
+            "rank",
+            "global",
+            "count",
+            "first",
+            "last",
+            "MiB",
+            "local shape",
+            r=widths["rank"],
+            g=widths["range"],
+            c=widths["count"],
+            f=widths["first"],
+            l=widths["last"],
+        ),
+    ]
+    for row in rows:
+        lines.append(
+            "  {:>{r}}  {:>{g}}  {:>{c}}  {:>{f}}  {:>{l}}  {:>8.2f}  {}".format(
+                row["rank"],
+                f"{row['start']}:{row['stop']}",
+                row["count"],
+                row["first"][0],
+                row["first"][1],
+                row["mib"],
+                row["shape"],
+                r=widths["rank"],
+                g=widths["range"],
+                c=widths["count"],
+                f=widths["first"],
+                l=widths["last"],
+            )
+        )
+    runtime.log("\n".join(lines), flush=True)
+
+
 def indexer_is_scalar(indexer: Any) -> bool:
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
@@ -372,8 +549,9 @@ class XarrayMPI:
         self,
         filename_or_obj: Any,
         *,
-        partition_dim: Hashable,
+        partition_dim: Hashable | Literal["auto"] = "auto",
         chunks: Any = None,
+        log_partitions: bool = True,
         **kwargs: Any,
     ) -> xr.Dataset:
         """Open a Dataset lazily and distribute one dimension across ranks.
@@ -382,12 +560,17 @@ class XarrayMPI:
         ----------
         filename_or_obj : Any
             Input accepted by :func:`xarray.open_dataset`.
-        partition_dim : hashable
-            Dimension to distribute.
+        partition_dim : hashable or {"auto"}, optional
+            Dimension to distribute. ``"auto"`` selects the longest dimension,
+            which is the choice that leaves the fewest ranks idle. Selection is
+            deterministic and identical on every rank.
         chunks : Any, optional
             Explicit xarray/Dask chunk specification. If omitted, effective
             chunks are derived from usable native chunks, falling back to
             ``ceil(length / nranks)``.
+        log_partitions : bool, optional
+            Print one aligned table showing which global interval each rank
+            received. Default is True.
         **kwargs : Any
             Additional arguments passed unchanged to
             :func:`xarray.open_dataset`.
@@ -406,7 +589,14 @@ class XarrayMPI:
             xr.open_mfdataset if use_mfdataset else xr.open_dataset
         )
 
+        automatic = partition_dim == "auto"
+
         with _open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
+            if automatic:
+                partition_dim = choose_partition_dim(
+                    metadata.sizes,
+                    self._runtime.comm.size,
+                )
             if partition_dim not in metadata.dims:
                 raise ValueError(
                     f"partition_dim {partition_dim!r} is not in "
@@ -416,7 +606,11 @@ class XarrayMPI:
             open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
             global_size = int(metadata.sizes[partition_dim])
             longest_size = max(int(length) for length in metadata.sizes.values())
-            if self._runtime.comm.rank == 0 and global_size < longest_size:
+            if (
+                not automatic
+                and self._runtime.comm.rank == 0
+                and global_size < longest_size
+            ):
                 longest_dims = [
                     str(dim)
                     for dim, length in metadata.sizes.items()
@@ -457,14 +651,27 @@ class XarrayMPI:
             stop=stop,
             chunk_info=chunk_info,
         )
+        if log_partitions:
+            log_partition_report(
+                self._runtime,
+                data,
+                partition_dim,
+                origin="mpi.xarray.open_dataset",
+                global_size=global_size,
+                start=start,
+                stop=stop,
+                source=str(filename_or_obj),
+                automatic=automatic,
+            )
         return data
 
     def redistribute(
         self,
         value: xr.Dataset | xr.DataArray,
-        dim: Hashable | Literal["auto"],
+        dim: Hashable | Literal["auto"] = "auto",
         *,
         chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
     ) -> xr.Dataset | xr.DataArray:
         """Distribute a replicated xarray object across ranks.
 
@@ -495,10 +702,11 @@ class XarrayMPI:
                 + "Reduce or gather its distributed dimension first."
             )
 
-        if dim == "auto":
+        automatic = dim == "auto"
+        if automatic:
             if not value.dims:
                 return strip_mpi_meta(value)
-            dim = max(value.sizes, key=value.sizes.__getitem__)
+            dim = choose_partition_dim(value.sizes, self._runtime.comm.size)
 
         if dim not in value.dims:
             raise ValueError(f"Redistribution dimension {dim!r} does not exist.")
@@ -544,6 +752,17 @@ class XarrayMPI:
             stop=stop,
             chunk_info=info,
         )
+        if log_partitions:
+            log_partition_report(
+                self._runtime,
+                output,
+                dim,
+                origin="mpi.xarray.redistribute",
+                global_size=length,
+                start=start,
+                stop=stop,
+                automatic=automatic,
+            )
         return output
 
     def isel(

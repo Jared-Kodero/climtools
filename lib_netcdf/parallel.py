@@ -7,6 +7,9 @@ collective NetCDF writes using its recorded global ``start:stop`` interval.
 
 from __future__ import annotations
 
+import sys
+import traceback
+
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -137,9 +140,47 @@ def create_file(
         set_attrs(nc, schema["attrs"])
 
 
-def open_in_parallel(path: str, schema: Mapping[str, Any]) -> netCDF4.Dataset:
+def writer_comm(has_data: bool) -> MPI.Comm:
+    """Return a communicator containing only the ranks that own output data.
+
+    netCDF4-python skips ``nc_put_vara`` entirely when a rank's selection is
+    empty (``if dataput.size == 0: continue`` in ``Variable.__setitem__``), so
+    a rank with no data never enters the MPI-IO collective that the remaining
+    ranks are blocking in. Independent access is not an alternative, because
+    netCDF-C rejects it for variables with an unlimited dimension and HDF5
+    rejects it for filtered variables. Excluding empty ranks from the file's
+    communicator is therefore the only correct option: the collective is then
+    posted by exactly the ranks that reach it.
+
+    Parameters
+    ----------
+    has_data : bool
+        Whether the calling rank owns at least one element to write.
+
+    Returns
+    -------
+    mpi4py.MPI.Comm
+        Communicator to open the file with, or ``MPI.COMM_NULL`` on ranks that
+        must not touch the file.
+    """
+    if mpi.comm.size == 1:
+        return mpi.comm if has_data else MPI.COMM_NULL
+    return mpi.comm.Split(1 if has_data else MPI.UNDEFINED, mpi.comm.rank)
+
+
+def free_writer_comm(comm: MPI.Comm) -> None:
+    """Free a communicator produced by :func:`writer_comm`."""
+    if comm != MPI.COMM_NULL and comm != mpi.comm:
+        comm.Free()
+
+
+def open_in_parallel(
+    path: str,
+    schema: Mapping[str, Any],
+    comm: MPI.Comm,
+) -> netCDF4.Dataset:
     info: MPI.Info | None = None
-    if mpi.comm.size > 1:
+    if comm.size > 1:
         info = MPI.Info.Create()
         try:
             for item in (schema["hints"] or "").split(";"):
@@ -155,7 +196,7 @@ def open_in_parallel(path: str, schema: Mapping[str, Any]) -> netCDF4.Dataset:
                 path,
                 mode="r+",
                 parallel=True,
-                comm=mpi.comm,
+                comm=comm,
                 info=info,
             )
         finally:
@@ -171,13 +212,16 @@ def write_distributed(
 ) -> None:
     """Collectively write rank-local slabs from an already distributed Dataset."""
 
-    mpi.log(f"Saving file to >> {path}", prefix=True, root=-1)  # for testing
-
     partition_dim = str(meta["dim"])
     start = int(meta["start"])
     stop = int(meta["stop"])
 
-    with open_in_parallel(path, schema) as nc:
+    comm = writer_comm(stop > start)
+    nc: netCDF4.Dataset | None = None
+    try:
+        if comm == MPI.COMM_NULL:
+            return
+        nc = open_in_parallel(path, schema, comm)
         for name, spec in schema["variables"].items():
             dims = tuple(spec["dims"])
             if partition_dim not in dims:
@@ -188,16 +232,19 @@ def write_distributed(
                     + "netCDF4 parallel I/O cannot write VLEN data types."
                 )
 
-            source = ds[name]
-            values, _ = _normalise_variable(source)
+            values, _ = _normalise_variable(ds[name])
             ncvar = nc.variables[name]
-            if mpi.comm.size > 1:
+            if comm.size > 1:
                 ncvar.set_collective(True)
             index = tuple(
                 slice(start, stop) if dim == partition_dim else slice(None)
                 for dim in dims
             )
             ncvar[index] = values
+    finally:
+        if nc is not None:
+            nc.close()
+        free_writer_comm(comm)
 
 
 def write_partitioned(
@@ -205,7 +252,14 @@ def write_partitioned(
     schema: Mapping[str, Any],
     root_data: Mapping[str, Mapping[str, Any]] | None,
 ) -> None:
-    """Scatter root-owned partitioned buffers and collectively write them."""
+    """Scatter root-owned partitioned buffers and collectively write them.
+
+    ``mpi.scatterv`` is posted on the full communicator by every rank,
+    including those that receive nothing, while the NetCDF writes are posted
+    only on the writer sub-communicator. The two sequences are internally
+    ordered on their own communicators, so they cannot deadlock against one
+    another.
+    """
     partition_dim = schema["partition_dim"]
     if partition_dim is None:
         return
@@ -216,7 +270,12 @@ def write_partitioned(
     start = int(np.sum(counts[: mpi.comm.rank], dtype=np.int64))
     stop = start + int(counts[mpi.comm.rank])
 
-    with open_in_parallel(path, schema) as nc:
+    comm = writer_comm(stop > start)
+    nc: netCDF4.Dataset | None = None
+    try:
+        if comm != MPI.COMM_NULL:
+            nc = open_in_parallel(path, schema, comm)
+
         for name, spec in schema["variables"].items():
             dims = tuple(spec["dims"])
             if partition_dim not in dims:
@@ -243,15 +302,22 @@ def write_partitioned(
                 )
 
             local = mpi.scatterv(send, counts, local_shape, dtype)
+            if nc is None:
+                continue
+
             local = np.moveaxis(local, 0, axis)
             ncvar = nc.variables[name]
-            if mpi.comm.size > 1:
+            if comm.size > 1:
                 ncvar.set_collective(True)
             index = tuple(
                 slice(start, stop) if dim == partition_dim else slice(None)
                 for dim in dims
             )
             ncvar[index] = local
+    finally:
+        if nc is not None:
+            nc.close()
+        free_writer_comm(comm)
 
 
 def to_netcdf_parallel(
@@ -526,6 +592,10 @@ def to_netcdf_parallel(
         else:
             write_partitioned(output_path, schema, root_data)
     except BaseException:
+        # Aborting without a diagnostic leaves the job log with nothing but
+        # "MPI_ABORT was invoked", so the failure is reported first.
+        traceback.print_exc()
+        sys.stderr.flush()
         if mpi.comm.size > 1:
             mpi.comm.Abort(1)
         raise
@@ -534,4 +604,4 @@ def to_netcdf_parallel(
     return output_path
 
 
-__all__ = ["NetCDFWriteError", "to_netcdf_parallel"]
+__all__ = ["NetCDFWriteError", "to_netcdf_parallel", "writer_comm"]
