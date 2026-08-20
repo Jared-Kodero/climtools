@@ -453,7 +453,7 @@ class XarrayMPI(ArithmeticMixin):
                         "open_chunk_overrides": open_chunk_overrides,
                         "global_size": global_size,
                     }
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 error = exc
 
         # Every rank must learn about a rank-0 planning failure through the

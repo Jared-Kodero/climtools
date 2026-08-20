@@ -1,11 +1,11 @@
 ## SLURM PROLOG ###############################################################
-##    Job ID : 5107029
+##    Job ID : 5107502
 ##  Job Name : test.sh
 ##  Nodelist : node2409
 ##      CPUs : 8
 ##  Mem/Node : 512000 MB
 ## Directory : /oscar/home/jkodero/research/climtools/examples
-##   Job Started : Thu Aug 20 02:24:18 PM EDT 2026
+##   Job Started : Thu Aug 20 02:54:06 PM EDT 2026
 ###############################################################################
 
 Currently Loaded Modules:
@@ -24,9 +24,9 @@ Currently Loaded Modules:
 
  
 
-2026-08-20 14:24:30 - [MPI RANK 0] Creating mock dataset
-2026-08-20 14:24:47 - [MPI RANK 0] Mock dataset saved to /users/jkodero/scratch/io_mpi_test/mock_in.nc
-2026-08-20 14:24:47 - [MPI RANK 0] [SETUP] validating test dataset visibility
+2026-08-20 14:54:15 - [MPI RANK 0] Creating mock dataset
+2026-08-20 14:54:30 - [MPI RANK 0] Mock dataset saved to /users/jkodero/scratch/io_mpi_test/mock_in.nc
+2026-08-20 14:54:30 - [MPI RANK 0] [SETUP] validating test dataset visibility
 [MPI RANK 0] Configuration Constants:
   TIME_STEPS:      100
   RESOLUTION_DEG:  0.25
@@ -40,45 +40,45 @@ Currently Loaded Modules:
 [MPI RANK 0] ========================================================================================
 [MPI RANK 0] 
 --- mpi runtime helpers ---
-2026-08-20 14:24:51 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: START
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: START
 [MPI RANK 0] [OK  ] shared configuration constants identical on every rank serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: DONE
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: START
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: START
 [MPI RANK 0] [OK  ] mismatched reduction buffers raise instead of deadlocking serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: DONE
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: START
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: START
 [MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: DONE
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: START
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: START
 [MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts               serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: DONE
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: START
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: START
 [MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: DONE
 [MPI RANK 0] 
 --- mpi.reduce ---
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values) serial=  0.0647s  parallel=  0.0801s  speedup= 0.81x
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: DONE
-2026-08-20 14:24:52 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) serial=  0.4898s  parallel=  0.1001s  speedup= 4.89x
-2026-08-20 14:24:53 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: DONE
-2026-08-20 14:24:53 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept) serial=  0.5571s  parallel=  0.0800s  speedup= 6.96x  (correctness-focused)
-2026-08-20 14:24:53 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: DONE
-2026-08-20 14:24:53 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)    serial=  0.0000s  parallel=  0.0748s  speedup=  n/a   (correctness-focused)
-[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)   serial=  0.0000s  parallel=  0.0003s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values) serial=  0.0619s  parallel=  0.0596s  speedup= 1.04x
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: DONE
+2026-08-20 14:54:34 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) serial=  0.6306s  parallel=  0.0999s  speedup= 6.31x
+2026-08-20 14:54:35 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: DONE
+2026-08-20 14:54:35 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept) serial=  0.5351s  parallel=  0.0814s  speedup= 6.57x  (correctness-focused)
+2026-08-20 14:54:36 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: DONE
+2026-08-20 14:54:36 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)    serial=  0.0000s  parallel=  0.0008s  speedup=  n/a   (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)   serial=  0.0000s  parallel=  0.0002s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.min mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.max mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.mean mock values (all/root modes)   serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.any mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.all mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.any/all mock slmsk Dataset          serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-20 14:24:55 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: DONE
+2026-08-20 14:54:37 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: DONE
 [MPI RANK 0] 
 --- mpi.xarray ---
-2026-08-20 14:24:55 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: START
+2026-08-20 14:54:37 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: START
 [MPI RANK 0] mpi.xarray.open_dataset  dim='lat'  size=721  ranks=8  split=84-91/rank
   held: time:100 x lon:1440 x plev:21   8.9GiB total, 1.1GiB peak/rank
   rank    slice       n  ( first,   last)
@@ -90,585 +90,202 @@ Currently Loaded Modules:
      5  455:546      91  ( 23.75,  46.25)
      6  546:637      91  (  46.5,     69)
      7  637:721      84  ( 69.25,     90)
-
-[MPI RANK 2] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-
-[MPI RANK 5] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-Thread 0x00007f0b46ffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007f3d05ffb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b477fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007f3d067fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b47fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007f3d06ffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b58ffe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007f3d077fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b597ff640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f3d07fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b5a000640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007f3d14c75640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b60a48640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007f3d15476640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0b61662640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007f3d175f2640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007f0b5bbe6640 [climtools-mpi-w] (most recent call first):
-Current thread 0x00007f3d17df3640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0bf158a300 [python] (most recent call first):
-Thread 0x00007f3da8966300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-  File "test.py", line 291 in call_raises
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "test.py", line 340 in wrapped
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3660 in main
-  File "test.py", line 3660 in main
-  File "test.py", line 3711 in <module>
-  File "test.py", line 3711 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "<frozen runpy>", line 203 in _run_module_as_main
-
-[MPI RANK 3] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-
-[MPI RANK 0] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-Thread 0x00007f9dd37fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007fc378ff9640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9dd3fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007fc3797fa640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007f9decc13640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007fc379ffb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9ded414640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007fc37a7fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9dedc15640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-Thread 0x00007fc37affd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9dee416640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007fc37b7fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9deec17640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007fc37bfff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9df4a80640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007fc381a52640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007f9df5281640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007fc381251640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007f9e8662c300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-Thread 0x00007fc412bf9300 [python] (most recent call first):
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 292 in mpi_comm_reduce
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 554 in all
-  File "test.py", line 340 in wrapped
-  File "test.py", line 1022 in test_distributed_open_dataset
-  File "test.py", line 3660 in main
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3711 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "test.py", line 3660 in main
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "test.py", line 3711 in <module>
-  File "<frozen runpy>", line 294 in run_path
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-
-[MPI RANK 4] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-
-[MPI RANK 7] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-
-[MPI RANK 1] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-
-[MPI RANK 6] WATCHDOG: no progress for 600 s at inside test_distributed_open_dataset. Stack for this rank follows.
-Thread 0x00007f1455ffb640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007fa46b7fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007ff7b5ffb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f14567fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007fa46bfff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7b67fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f1456ffd640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007fa484e12640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7b6ffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fa485613640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f14577fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7b77fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f1457fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Thread 0x00007fa485e14640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7b7fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f1464e34640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007fa486615640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7c4af9640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f1465635640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fa48d45d640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7c52fa640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fa48cc5c640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f1467bcb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007f14687e5640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007fa487fff640 [climtools-mpi-w] (most recent call first):
-Thread 0x00007ff7c7890640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007ff7c84aa640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f14f82f4300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fa51dfcf300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff8583d7300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3660 in main
-  File "test.py", line 3711 in <module>
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3660 in main
-  File "test.py", line 3711 in <module>
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3660 in main
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "test.py", line 3711 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-Thread 0x00007ffa767fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa76ffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa777fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa77fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa84be6640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa853e7640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa85be8640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffa87fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Current thread 0x00007ffa8ce3f640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ffb1d180300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/xr_mpi.py", line 456 in open_dataset
-  File "test.py", line 291 in call_raises
-  File "test.py", line 1015 in test_distributed_open_dataset
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3660 in main
-  File "test.py", line 3711 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-[MPI RANK 0] WATCHDOG: aborting MPI_COMM_WORLD.
---------------------------------------------------------------------------
-MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
-with errorcode 1.
-
-NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
-You may or may not see output from other processes, depending on
-exactly when Open MPI kills them.
---------------------------------------------------------------------------
-srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
-[2026-08-20T14:35:00.199] error: *** STEP 5107029.0 ON node2409 CANCELLED AT 2026-08-20T14:35:00 DUE to SIGNAL Killed ***
-srun: error: node2409: task 0: Exited with exit code 1
-srun: Terminating StepId=5107029.0
-srun: error: node2409: tasks 1-7: Killed
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (mock pr, partitioned latitude) serial=  0.0197s  parallel=  0.5901s  speedup= 0.03x
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: DONE
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: START
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute mock pr (explicit/auto) serial=  0.0000s  parallel=  0.0003s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: DONE
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 12] test_distributed_isel: START
+[MPI RANK 0] [OK  ] mpi.xarray.isel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.1620s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 12] test_distributed_isel: DONE
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 13] test_distributed_sel: START
+[MPI RANK 0] [OK  ] mpi.xarray.sel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.0120s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 13] test_distributed_sel: DONE
+2026-08-20 14:54:38 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.sum mock t over 21 pressure levels  serial=  0.0603s  parallel=  0.1458s  speedup= 0.41x
+2026-08-20 14:54:39 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: DONE
+2026-08-20 14:54:39 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.prod mock t over 21 pressure levels serial=  0.0425s  parallel=  0.0611s  speedup= 0.69x
+2026-08-20 14:54:39 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: DONE
+2026-08-20 14:54:39 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.mean mock t over 21 pressure levels serial=  0.0156s  parallel=  0.1936s  speedup= 0.08x
+2026-08-20 14:54:40 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: DONE
+2026-08-20 14:54:40 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.max mock t over 21 pressure levels  serial=  0.0186s  parallel=  0.1650s  speedup= 0.11x
+2026-08-20 14:54:40 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: DONE
+2026-08-20 14:54:40 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.min mock t over 21 pressure levels  serial=  0.0142s  parallel=  0.1142s  speedup= 0.12x
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: DONE
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.any mock slmsk land mask (721 latitudes) serial=  0.0003s  parallel=  0.1259s  speedup= 0.00x
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: DONE
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.all mock slmsk land mask (721 latitudes) serial=  0.0003s  parallel=  0.1220s  speedup= 0.00x
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: DONE
+2026-08-20 14:54:41 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray Dataset reductions (mock distributed/static variables) serial=  0.0000s  parallel=  0.2090s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:42 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: DONE
+2026-08-20 14:54:42 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: START
+[MPI RANK 0] [OK  ] empty-partition reductions (plev lengths [1, 4, 7, 8, 9] over 8 rank(s)) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:48 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: DONE
+2026-08-20 14:54:48 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: START
+[MPI RANK 0] [OK  ] reduction dtype contracts (MPI-representable dtypes, empty partitions) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:48 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: DONE
+2026-08-20 14:54:48 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: START
+[MPI RANK 0] [OK  ] identical collective sequence on every rank (all reductions) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:52 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: DONE
+2026-08-20 14:54:52 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: START
+[MPI RANK 0] [OK  ] mpi.xarray contracts (edge reductions/indexing/validation/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (deterministic edge cases)
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: DONE
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 26] test_distributed_arithmetic: START
+[MPI RANK 0] [OK  ] mpi.xarray apply/align/evaluate (locality, compatibility, precedence) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 26] test_distributed_arithmetic: DONE
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 27] test_reduction_redistribution: START
+[MPI RANK 0] [OK  ] mpi.xarray.mean(mock t2m, redistribute_on='lon') serial=  0.0017s  parallel=  0.1763s  speedup= 0.01x
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 27] test_reduction_redistribution: DONE
+[MPI RANK 0] 
+--- data placement ---
+2026-08-20 14:54:54 - [MPI RANK 0] [TEST 28] test_rank0_source_distribution: START
+[MPI RANK 0] [OK  ] rank-0-only source (broadcast and scatterv routes into distributed form) serial=  0.0000s  parallel=  0.2487s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 28] test_rank0_source_distribution: DONE
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 29] test_distributed_open_reductions: START
+[MPI RANK 0] mpi.xarray.open_dataset  dim='lat'  size=721  ranks=8  split=84-91/rank
+  held: time:100 x lon:1440 x plev:21   8.9GiB total, 1.1GiB peak/rank
+  rank    slice       n  ( first,   last)
+     0     0:91      91  (   -90,  -67.5)
+     1   91:182      91  (-67.25, -44.75)
+     2  182:273      91  ( -44.5,    -22)
+     3  273:364      91  (-21.75,   0.75)
+     4  364:455      91  (     1,   23.5)
+     5  455:546      91  ( 23.75,  46.25)
+     6  546:637      91  (  46.5,     69)
+     7  637:721      84  ( 69.25,     90)
+[MPI RANK 0] [OK  ] mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds) serial=  0.0000s  parallel=  0.3291s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 29] test_distributed_open_reductions: DONE
+[MPI RANK 0] 
+--- mpi.scatterv ---
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 30] test_scatterv_rows: START
+[MPI RANK 0] [OK  ] mpi.scatterv mock t2m (721 rows across 8 rank(s)) serial=  0.0000s  parallel=  0.0919s  speedup=  n/a   (data movement, no serial-compute equivalent)
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 30] test_scatterv_rows: DONE
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 31] test_scatterv_validation_and_edge_cases: START
+[MPI RANK 0] [OK  ] mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 31] test_scatterv_validation_and_edge_cases: DONE
+[MPI RANK 0] 
+--- xarray operations + mpi.reduce ---
+2026-08-20 14:54:55 - [MPI RANK 0] [TEST 32] test_cosine_weighted_mean: START
+[MPI RANK 0] [OK  ] cosine-lat weighted mean mock t2m (721x1440)   serial=  0.0646s  parallel=  0.0380s  speedup= 1.70x
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 32] test_cosine_weighted_mean: DONE
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 33] test_mpi_decorator_modes: START
+[MPI RANK 0] 
+--- @mpi decorator usage ---
+[MPI RANK 0]   @mpi                    (root-only): rank 0 result = 'computed on rank 0'
+[MPI RANK 0]   @mpi(all_ranks=True)    : every rank returns its own rank id
+[MPI RANK 0]   @mpi(broadcast=True)    : every rank sees rank 0's result: {'config_value': 42, 'computed_on_rank': 0}
+[MPI RANK 0]   @mpi error propagation  : caught MPIError on every rank: Rank 0 failed during fails_on_root with ValueError: deliberate failure for this demo
+[MPI RANK 0] [OK  ] @mpi decorator (root/all_ranks/broadcast/error/validation) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (usage demo, not a speed test)
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 33] test_mpi_decorator_modes: DONE
+[MPI RANK 0] 
+--- xgeo NetCDF interface ---
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 34] test_xgeo_interface_contracts: START
+[MPI RANK 0] [OK  ] xgeo helpers/to_netcdf front-door validation   serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 34] test_xgeo_interface_contracts: DONE
+2026-08-20 14:54:56 - [MPI RANK 0] [TEST 35] test_parallel_netcdf_writer_options: START
+2026-08-20 14:54:56 - [MPI RANK 0] checking synchronized NetCDF preparation validation
+2026-08-20 14:54:56 - [MPI RANK 0] writing explicit parallel chunk/compression/unlimited configuration
+2026-08-20 14:54:58 - [MPI RANK 0] checking automatic partition selection with compression disabled
+[MPI RANK 0] [OK  ] parallel NetCDF validation/options (chunks/filters/unlimited/attrs) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:54:59 - [MPI RANK 0] [TEST 35] test_parallel_netcdf_writer_options: DONE
+2026-08-20 14:54:59 - [MPI RANK 0] [TEST 36] test_parallel_netcdf_write: START
+[MPI RANK 0] 
+--- NetCDF write: selected mock data, parallel vs serial ---
+2026-08-20 14:54:59 - [MPI RANK 0] loading selected serial mock source on rank 0
+2026-08-20 14:55:08 - [MPI RANK 0] validating parallel output against serial output
+[MPI RANK 0] [OK  ] NetCDF write (selected mock variables)         serial=  1.5789s  parallel=  3.3170s  speedup= 0.48x  (xr.testing.assert_identical)
+2026-08-20 14:55:09 - [MPI RANK 0] [TEST 36] test_parallel_netcdf_write: DONE
+2026-08-20 14:55:09 - [MPI RANK 0] [TEST 37] test_distributed_netcdf_roundtrip: START
+2026-08-20 14:55:09 - [MPI RANK 0] loading serial reference dataset on rank 0
+2026-08-20 14:55:10 - [MPI RANK 0] opening and loading rank-local distributed dataset
+[MPI RANK 0] mpi.xarray.open_dataset  dim='time'  size=100  ranks=8  split=9-13/rank
+  held: lat:721 x lon:1440 x plev:21   8.9GiB total, 1.2GiB peak/rank
+  rank   slice       n  (           first,             last)
+     0    0:13      13  (1970-01-01T00:00, 1970-01-01T12:00)
+     1   13:26      13  (1970-01-01T13:00, 1970-01-02T01:00)
+     2   26:39      13  (1970-01-02T02:00, 1970-01-02T14:00)
+     3   39:52      13  (1970-01-02T15:00, 1970-01-03T03:00)
+     4   52:65      13  (1970-01-03T04:00, 1970-01-03T16:00)
+     5   65:78      13  (1970-01-03T17:00, 1970-01-04T05:00)
+     6   78:91      13  (1970-01-04T06:00, 1970-01-04T18:00)
+     7  91:100       9  (1970-01-04T19:00, 1970-01-05T03:00)
+2026-08-20 14:55:13 - [MPI RANK 0] validating distributed output and internal metadata stripping
+[MPI RANK 0] [OK  ] distributed NetCDF round-trip (selected mock variables) serial=  1.1450s  parallel=  2.5410s  speedup= 0.45x  (xr.testing.assert_identical)
+2026-08-20 14:55:14 - [MPI RANK 0] [TEST 37] test_distributed_netcdf_roundtrip: DONE
+2026-08-20 14:55:14 - [MPI RANK 0] [TEST 38] test_distributed_dataarray_roundtrip: START
+2026-08-20 14:55:14 - [MPI RANK 0] loading serial precipitation reference on rank 0
+2026-08-20 14:55:16 - [MPI RANK 0] opening distributed precipitation DataArray
+[MPI RANK 0] mpi.xarray.open_dataset  dim='time'  size=100  ranks=8  split=9-13/rank
+  held: lat:721 x lon:1440 x plev:21   8.9GiB total, 1.2GiB peak/rank
+  rank   slice       n  (           first,             last)
+     0    0:13      13  (1970-01-01T00:00, 1970-01-01T12:00)
+     1   13:26      13  (1970-01-01T13:00, 1970-01-02T01:00)
+     2   26:39      13  (1970-01-02T02:00, 1970-01-02T14:00)
+     3   39:52      13  (1970-01-02T15:00, 1970-01-03T03:00)
+     4   52:65      13  (1970-01-03T04:00, 1970-01-03T16:00)
+     5   65:78      13  (1970-01-03T17:00, 1970-01-04T05:00)
+     6   78:91      13  (1970-01-04T06:00, 1970-01-04T18:00)
+     7  91:100       9  (1970-01-04T19:00, 1970-01-05T03:00)
+2026-08-20 14:55:16 - [MPI RANK 0] writing distributed precipitation DataArray
+2026-08-20 14:55:17 - [MPI RANK 0] validating distributed DataArray output
+[MPI RANK 0] [OK  ] distributed NetCDF DataArray round-trip (selected mock pr) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-20 14:55:18 - [MPI RANK 0] [TEST 38] test_distributed_dataarray_roundtrip: DONE
+[MPI RANK 0] 
+========================================================================================
+[MPI RANK 0] SUMMARY -- 8 rank(s)
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] [OK  ] shared configuration constants identical on every rank speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mismatched reduction buffers raise instead of deadlocking speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts                     speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values)       speedup= 1.04x  serial= 0.0619s  parallel= 0.0596s
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) speedup= 6.31x  serial= 0.6306s  parallel= 0.0999s
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept)  speedup= 6.57x  serial= 0.5351s  parallel= 0.0814s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0008s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)         speedup=  n/a   serial= 0.0000s  parallel= 0.0002s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.min mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.max mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.mean mock values (all/root modes)         speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.any mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.all mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.any/all mock slmsk Dataset                speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (mock pr, partitioned latitude) speedup= 0.03x  serial= 0.0197s  parallel= 0.5901s
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute mock pr (explicit/auto)      speedup=  n/a   serial= 0.0000s  parallel= 0.0003s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.isel mock pr (global latitude slice/scalar) speedup=  n/a   serial= 0.0000s  parallel= 0.1620s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.sel mock pr (global latitude slice/scalar) speedup=  n/a   serial= 0.0000s  parallel= 0.0120s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.sum mock t over 21 pressure levels        speedup= 0.41x  serial= 0.0603s  parallel= 0.1458s
+[MPI RANK 0] [OK  ] mpi.xarray.prod mock t over 21 pressure levels       speedup= 0.69x  serial= 0.0425s  parallel= 0.0611s
+[MPI RANK 0] [OK  ] mpi.xarray.mean mock t over 21 pressure levels       speedup= 0.08x  serial= 0.0156s  parallel= 0.1936s
+[MPI RANK 0] [OK  ] mpi.xarray.max mock t over 21 pressure levels        speedup= 0.11x  serial= 0.0186s  parallel= 0.1650s
+[MPI RANK 0] [OK  ] mpi.xarray.min mock t over 21 pressure levels        speedup= 0.12x  serial= 0.0142s  parallel= 0.1142s
+[MPI RANK 0] [OK  ] mpi.xarray.any mock slmsk land mask (721 latitudes)  speedup= 0.00x  serial= 0.0003s  parallel= 0.1259s
+[MPI RANK 0] [OK  ] mpi.xarray.all mock slmsk land mask (721 latitudes)  speedup= 0.00x  serial= 0.0003s  parallel= 0.1220s
+[MPI RANK 0] [OK  ] mpi.xarray Dataset reductions (mock distributed/static variables) speedup=  n/a   serial= 0.0000s  parallel= 0.2090s  (correctness-focused)
+[MPI RANK 0] [OK  ] empty-partition reductions (plev lengths [1, 4, 7, 8, 9] over 8 rank(s)) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] reduction dtype contracts (MPI-representable dtypes, empty partitions) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] identical collective sequence on every rank (all reductions) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray contracts (edge reductions/indexing/validation/nonzero root) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (deterministic edge cases)
+[MPI RANK 0] [OK  ] mpi.xarray apply/align/evaluate (locality, compatibility, precedence) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.mean(mock t2m, redistribute_on='lon')     speedup= 0.01x  serial= 0.0017s  parallel= 0.1763s
+[MPI RANK 0] [OK  ] rank-0-only source (broadcast and scatterv routes into distributed form) speedup=  n/a   serial= 0.0000s  parallel= 0.2487s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds) speedup=  n/a   serial= 0.0000s  parallel= 0.3291s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.scatterv mock t2m (721 rows across 8 rank(s))    speedup=  n/a   serial= 0.0000s  parallel= 0.0919s  (data movement, no serial-compute equivalent)
+[MPI RANK 0] [OK  ] mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] cosine-lat weighted mean mock t2m (721x1440)         speedup= 1.70x  serial= 0.0646s  parallel= 0.0380s
+[MPI RANK 0] [OK  ] @mpi decorator (root/all_ranks/broadcast/error/validation) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (usage demo, not a speed test)
+[MPI RANK 0] [OK  ] xgeo helpers/to_netcdf front-door validation         speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] parallel NetCDF validation/options (chunks/filters/unlimited/attrs) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] NetCDF write (selected mock variables)               speedup= 0.48x  serial= 1.5789s  parallel= 3.3170s  (xr.testing.assert_identical)
+[MPI RANK 0] [OK  ] distributed NetCDF round-trip (selected mock variables) speedup= 0.45x  serial= 1.1450s  parallel= 2.5410s  (xr.testing.assert_identical)
+[MPI RANK 0] [OK  ] distributed NetCDF DataArray round-trip (selected mock pr) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] ----------------------------------------------------------------------------------------
+[MPI RANK 0] Results: 45 passed, 0 failed, 0 skipped, 45 recorded checks.
+[MPI RANK 0] All recorded checks passed.
