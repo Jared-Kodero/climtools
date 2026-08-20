@@ -388,9 +388,7 @@ def choose_partition_dim(
     """
     blocked = set(exclude)
     candidates = [
-        (dim, int(length))
-        for dim, length in sizes.items()
-        if dim not in blocked
+        (dim, int(length)) for dim, length in sizes.items() if dim not in blocked
     ]
     if not candidates:
         raise ValueError("No dimension is available for automatic partitioning.")
@@ -427,7 +425,6 @@ def log_partition_report(
     global_size: int,
     start: int,
     stop: int,
-    source: str = "",
     automatic: bool = False,
 ) -> None:
     """Print one aligned table describing the rank-local partition layout.
@@ -464,7 +461,7 @@ def log_partition_report(
         "count": int(stop - start),
         "first": _edge_values(data, dim),
         "shape": ", ".join(
-            f"{str(name)}={int(length)}" for name, length in data.sizes.items()
+            f"{name!s}={int(length)}" for name, length in data.sizes.items()
         ),
         "mib": float(data.nbytes) / 1048576.0,
     }
@@ -479,8 +476,6 @@ def log_partition_report(
         + f"  global_size={global_size}  ranks={comm.size}"
         + (f"  idle_ranks={empty}" if empty else "")
     )
-    if source:
-        header = f"{header}\n  source: {source}"
 
     widths = {
         "rank": max(4, len(str(comm.size - 1))),
@@ -660,7 +655,6 @@ class XarrayMPI:
                 global_size=global_size,
                 start=start,
                 stop=stop,
-                source=str(filename_or_obj),
                 automatic=automatic,
             )
         return data

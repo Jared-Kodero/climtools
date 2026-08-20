@@ -1,11 +1,11 @@
 ## SLURM PROLOG ###############################################################
-##    Job ID : 5086179
+##    Job ID : 5087635
 ##  Job Name : test.sh
-##  Nodelist : node2405
+##  Nodelist : node2420
 ##      CPUs : 8
 ##  Mem/Node : 512000 MB
 ## Directory : /oscar/home/jkodero/research/climtools/examples
-##   Job Started : Wed Aug 19 06:35:55 PM EDT 2026
+##   Job Started : Wed Aug 19 08:36:33 PM EDT 2026
 ###############################################################################
 
 Currently Loaded Modules:
@@ -24,9 +24,9 @@ Currently Loaded Modules:
 
  
 
-2026-08-19 18:36:03 - [MPI RANK 0] Creating mock dataset
-2026-08-19 18:36:15 - [MPI RANK 0] Mock dataset saved to /users/jkodero/scratch/io_mpi_test/mock_in.nc
-2026-08-19 18:36:16 - [MPI RANK 0] [SETUP] validating test dataset visibility
+2026-08-19 20:36:46 - [MPI RANK 0] Creating mock dataset
+2026-08-19 20:37:01 - [MPI RANK 0] Mock dataset saved to /users/jkodero/scratch/io_mpi_test/mock_in.nc
+2026-08-19 20:37:02 - [MPI RANK 0] [SETUP] validating test dataset visibility
 [MPI RANK 0] Configuration Constants:
   TIME_STEPS:      100
   RESOLUTION_DEG:  0.25
@@ -40,125 +40,139 @@ Currently Loaded Modules:
 [MPI RANK 0] ========================================================================================
 [MPI RANK 0] 
 --- mpi runtime helpers ---
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: START
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: START
 [MPI RANK 0] [OK  ] shared configuration constants identical on every rank serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: START
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 01] test_shared_configuration_agreement: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: START
 [MPI RANK 0] [OK  ] mismatched reduction buffers raise instead of deadlocking serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: START
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 02] test_reduce_buffer_agreement: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: START
 [MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: START
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 03] test_mpi_runtime_helpers: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: START
 [MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts               serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: START
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 04] test_mpi_logging_and_error_propagation: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: START
 [MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 05] test_mpi_reduction_contracts: DONE
 [MPI RANK 0] 
 --- mpi.reduce ---
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values) serial=  0.0517s  parallel=  0.0033s  speedup=15.51x
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) serial=  0.1502s  parallel=  0.0015s  speedup=99.79x
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: DONE
-2026-08-19 18:36:19 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept) serial=  0.1556s  parallel=  0.0653s  speedup= 2.38x  (correctness-focused)
-2026-08-19 18:36:20 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: DONE
-2026-08-19 18:36:20 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: START
-[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)    serial=  0.0000s  parallel=  0.0018s  speedup=  n/a   (correctness-focused)
-[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)   serial=  0.0000s  parallel=  0.0003s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values) serial=  0.0230s  parallel=  0.0041s  speedup= 5.55x
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 06] test_reduce_scalar_sum: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) serial=  0.1450s  parallel=  0.0035s  speedup=41.88x
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 07] test_reduce_array_sum: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept) serial=  0.1846s  parallel=  0.0056s  speedup=32.72x  (correctness-focused)
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 08] test_reduce_dataarray_sum: DONE
+2026-08-19 20:37:07 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: START
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)    serial=  0.0000s  parallel=  0.0004s  speedup=  n/a   (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)   serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.min mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.max mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.mean mock values (all/root modes)   serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.any mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.all mock values (all/root modes)    serial=  0.0000s  parallel=  0.0001s  speedup=  n/a   (correctness-focused)
 [MPI RANK 0] [OK  ] mpi.reduce.any/all mock slmsk Dataset          serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:21 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: DONE
+2026-08-19 20:37:08 - [MPI RANK 0] [TEST 09] test_reduce_all_operations: DONE
 [MPI RANK 0] 
 --- mpi.xarray ---
-2026-08-19 18:36:21 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: START
-[PARTITION RANK 0/8] partition_dim=lat idx_start=0 idx_end=90 value_start=-90.0 value_end=-67.5
-[PARTITION RANK 1/8] partition_dim=lat idx_start=91 idx_end=181 value_start=-67.25 value_end=-44.75
-[PARTITION RANK 2/8] partition_dim=lat idx_start=182 idx_end=272 value_start=-44.5 value_end=-22.0
-[PARTITION RANK 3/8] partition_dim=lat idx_start=273 idx_end=363 value_start=-21.75 value_end=0.75
-[PARTITION RANK 4/8] partition_dim=lat idx_start=364 idx_end=454 value_start=1.0 value_end=23.5
-[PARTITION RANK 5/8] partition_dim=lat idx_start=455 idx_end=545 value_start=23.75 value_end=46.25
-[PARTITION RANK 6/8] partition_dim=lat idx_start=546 idx_end=636 value_start=46.5 value_end=69.0
-[PARTITION RANK 7/8] partition_dim=lat idx_start=637 idx_end=720 value_start=69.25 value_end=90.0
-[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (mock pr, partitioned latitude) serial=  0.0180s  parallel=  0.4924s  speedup= 0.04x
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: DONE
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: START
-[MPI RANK 0] [OK  ] mpi.xarray.redistribute mock pr (explicit/auto) serial=  0.0000s  parallel=  0.0434s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: DONE
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 12] test_distributed_isel: START
-[MPI RANK 0] [OK  ] mpi.xarray.isel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.1329s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 12] test_distributed_isel: DONE
-2026-08-19 18:36:22 - [MPI RANK 0] [TEST 13] test_distributed_sel: START
-[MPI RANK 0] [OK  ] mpi.xarray.sel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.1794s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:23 - [MPI RANK 0] [TEST 13] test_distributed_sel: DONE
-2026-08-19 18:36:23 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: START
-[MPI RANK 0] [OK  ] mpi.xarray.sum mock t over 21 pressure levels  serial=  0.0548s  parallel=  0.1629s  speedup= 0.34x
-2026-08-19 18:36:23 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: DONE
-2026-08-19 18:36:23 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: START
-[MPI RANK 0] [OK  ] mpi.xarray.prod mock t over 21 pressure levels serial=  0.0433s  parallel=  0.1649s  speedup= 0.26x
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: DONE
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: START
-[MPI RANK 0] [OK  ] mpi.xarray.mean mock t over 21 pressure levels serial=  0.0131s  parallel=  0.0400s  speedup= 0.33x
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: DONE
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: START
-[MPI RANK 0] [FAIL] mpi.xarray.max mock t over 21 pressure levels  serial=  0.0151s  parallel=  0.1411s  speedup= 0.11x
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: DONE with failed check(s)
-2026-08-19 18:36:24 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: START
-[MPI RANK 0] [FAIL] mpi.xarray.min mock t over 21 pressure levels  serial=  0.0127s  parallel=  0.2665s  speedup= 0.05x
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: DONE with failed check(s)
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: START
-[MPI RANK 0] [OK  ] mpi.xarray.any mock slmsk land mask (721 latitudes) serial=  0.0001s  parallel=  0.0007s  speedup= 0.18x
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: DONE
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: START
-[MPI RANK 0] [OK  ] mpi.xarray.all mock slmsk land mask (721 latitudes) serial=  0.0007s  parallel=  0.1115s  speedup= 0.01x
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: DONE
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: START
-[MPI RANK 0] [FAIL] mpi.xarray Dataset reductions (mock distributed/static variables) serial=  0.0000s  parallel=  0.1686s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: DONE with failed check(s)
-2026-08-19 18:36:25 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: START
+2026-08-19 20:37:08 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: START
+[MPI RANK 0] mpi.xarray.open_dataset: partition_dim='lat'  global_size=721  ranks=8
+  source: /users/jkodero/scratch/io_mpi_test/mock_in.nc
+  rank       global  count      first       last       MiB  local shape
+     0         0:91     91      -90.0      -67.5   1149.85  time=100, lat=91, lon=1440, plev=21
+     1       91:182     91     -67.25     -44.75   1149.85  time=100, lat=91, lon=1440, plev=21
+     2      182:273     91      -44.5      -22.0   1149.85  time=100, lat=91, lon=1440, plev=21
+     3      273:364     91     -21.75       0.75   1149.85  time=100, lat=91, lon=1440, plev=21
+     4      364:455     91        1.0       23.5   1149.85  time=100, lat=91, lon=1440, plev=21
+     5      455:546     91      23.75      46.25   1149.85  time=100, lat=91, lon=1440, plev=21
+     6      546:637     91       46.5       69.0   1149.85  time=100, lat=91, lon=1440, plev=21
+     7      637:721     84      69.25       90.0   1061.40  time=100, lat=84, lon=1440, plev=21
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (mock pr, partitioned latitude) serial=  0.0215s  parallel=  0.3520s  speedup= 0.06x
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 10] test_distributed_open_dataset: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: START
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute mock pr (explicit/auto) serial=  0.0000s  parallel=  0.0004s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 11] test_distributed_redistribution: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 12] test_distributed_isel: START
+[MPI RANK 0] [OK  ] mpi.xarray.isel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.0023s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 12] test_distributed_isel: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 13] test_distributed_sel: START
+[MPI RANK 0] [OK  ] mpi.xarray.sel mock pr (global latitude slice/scalar) serial=  0.0000s  parallel=  0.0217s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 13] test_distributed_sel: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.sum mock t over 21 pressure levels  serial=  0.0927s  parallel=  0.0384s  speedup= 2.41x
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 14] test_distributed_numeric_reduction: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.prod mock t over 21 pressure levels serial=  0.0661s  parallel=  0.0345s  speedup= 1.92x
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 15] test_distributed_numeric_reduction: DONE
+2026-08-19 20:37:09 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.mean mock t over 21 pressure levels serial=  0.0219s  parallel=  0.0387s  speedup= 0.57x
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 16] test_distributed_numeric_reduction: DONE
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: START
+[MPI RANK 0] [FAIL] mpi.xarray.max mock t over 21 pressure levels  serial=  0.0229s  parallel=  0.0455s  speedup= 0.50x
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 17] test_distributed_numeric_reduction: DONE with failed check(s)
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: START
+[MPI RANK 0] [FAIL] mpi.xarray.min mock t over 21 pressure levels  serial=  0.0170s  parallel=  0.0467s  speedup= 0.36x
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 18] test_distributed_numeric_reduction: DONE with failed check(s)
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.any mock slmsk land mask (721 latitudes) serial=  0.0002s  parallel=  0.0009s  speedup= 0.23x
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 19] test_distributed_logical_reduction: DONE
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: START
+[MPI RANK 0] [OK  ] mpi.xarray.all mock slmsk land mask (721 latitudes) serial=  0.0002s  parallel=  0.0008s  speedup= 0.24x
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 20] test_distributed_logical_reduction: DONE
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: START
+[MPI RANK 0] [FAIL] mpi.xarray Dataset reductions (mock distributed/static variables) serial=  0.0000s  parallel=  0.0062s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 21] test_distributed_dataset_reduction: DONE with failed check(s)
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: START
 [MPI RANK 0] [OK  ] empty-partition reductions (plev lengths [1, 4, 7, 8, 9] over 8 rank(s)) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:27 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: DONE
-2026-08-19 18:36:27 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: START
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 22] test_empty_partition_reductions: DONE
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: START
 [MPI RANK 0] [OK  ] reduction dtype contracts (MPI-representable dtypes, empty partitions) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:27 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: DONE
-2026-08-19 18:36:27 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: START
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 23] test_reduction_dtype_contracts: DONE
+2026-08-19 20:37:10 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: START
 [MPI RANK 0] [OK  ] identical collective sequence on every rank (all reductions) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: START
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 24] test_collective_sequence_symmetry: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: START
 [MPI RANK 0] [OK  ] mpi.xarray contracts (edge reductions/indexing/validation/nonzero root) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (deterministic edge cases)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 26] test_reduction_redistribution: START
-[MPI RANK 0] [OK  ] mpi.xarray.mean(mock t2m, redistribute_on='lon') serial=  0.0033s  parallel=  0.0485s  speedup= 0.07x
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 26] test_reduction_redistribution: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 25] test_distributed_xarray_contracts: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 26] test_reduction_redistribution: START
+[MPI RANK 0] [OK  ] mpi.xarray.mean(mock t2m, redistribute_on='lon') serial=  0.0020s  parallel=  0.0034s  speedup= 0.59x
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 26] test_reduction_redistribution: DONE
 [MPI RANK 0] 
 --- data placement ---
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 27] test_rank0_source_distribution: START
-[MPI RANK 0] [OK  ] rank-0-only source (broadcast and scatterv routes into distributed form) serial=  0.0000s  parallel=  0.0033s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 27] test_rank0_source_distribution: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 28] test_distributed_open_reductions: START
-[MPI RANK 0] [OK  ] mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds) serial=  0.0000s  parallel=  0.1960s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 28] test_distributed_open_reductions: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 27] test_rank0_source_distribution: START
+[MPI RANK 0] [OK  ] rank-0-only source (broadcast and scatterv routes into distributed form) serial=  0.0000s  parallel=  0.0042s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 27] test_rank0_source_distribution: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 28] test_distributed_open_reductions: START
+[MPI RANK 0] mpi.xarray.open_dataset: partition_dim='lat'  global_size=721  ranks=8
+  source: /users/jkodero/scratch/io_mpi_test/mock_in.nc
+  rank       global  count      first       last       MiB  local shape
+     0         0:91     91      -90.0      -67.5   1149.85  time=100, lat=91, lon=1440, plev=21
+     1       91:182     91     -67.25     -44.75   1149.85  time=100, lat=91, lon=1440, plev=21
+     2      182:273     91      -44.5      -22.0   1149.85  time=100, lat=91, lon=1440, plev=21
+     3      273:364     91     -21.75       0.75   1149.85  time=100, lat=91, lon=1440, plev=21
+     4      364:455     91        1.0       23.5   1149.85  time=100, lat=91, lon=1440, plev=21
+     5      455:546     91      23.75      46.25   1149.85  time=100, lat=91, lon=1440, plev=21
+     6      546:637     91       46.5       69.0   1149.85  time=100, lat=91, lon=1440, plev=21
+     7      637:721     84      69.25       90.0   1061.40  time=100, lat=84, lon=1440, plev=21
+[MPI RANK 0] [OK  ] mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds) serial=  0.0000s  parallel=  0.2493s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 28] test_distributed_open_reductions: DONE
 [MPI RANK 0] 
 --- mpi.scatterv ---
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 29] test_scatterv_rows: START
-[MPI RANK 0] [OK  ] mpi.scatterv mock t2m (721 rows across 8 rank(s)) serial=  0.0000s  parallel=  0.0752s  speedup=  n/a   (data movement, no serial-compute equivalent)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 29] test_scatterv_rows: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 30] test_scatterv_validation_and_edge_cases: START
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 29] test_scatterv_rows: START
+[MPI RANK 0] [OK  ] mpi.scatterv mock t2m (721 rows across 8 rank(s)) serial=  0.0000s  parallel=  0.0186s  speedup=  n/a   (data movement, no serial-compute equivalent)
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 29] test_scatterv_rows: DONE
+2026-08-19 20:37:11 - [MPI RANK 0] [TEST 30] test_scatterv_validation_and_edge_cases: START
 [MPI RANK 0] [OK  ] mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 30] test_scatterv_validation_and_edge_cases: DONE
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 30] test_scatterv_validation_and_edge_cases: DONE
 [MPI RANK 0] 
 --- xarray operations + mpi.reduce ---
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 31] test_cosine_weighted_mean: START
-[MPI RANK 0] [OK  ] cosine-lat weighted mean mock t2m (721x1440)   serial=  0.0243s  parallel=  0.0473s  speedup= 0.51x
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 31] test_cosine_weighted_mean: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 32] test_mpi_decorator_modes: START
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 31] test_cosine_weighted_mean: START
+[MPI RANK 0] [OK  ] cosine-lat weighted mean mock t2m (721x1440)   serial=  0.0419s  parallel=  0.0049s  speedup= 8.52x
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 31] test_cosine_weighted_mean: DONE
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 32] test_mpi_decorator_modes: START
 [MPI RANK 0] 
 --- @mpi decorator usage ---
 [MPI RANK 0]   @mpi                    (root-only): rank 0 result = 'computed on rank 0'
@@ -166,626 +180,522 @@ Currently Loaded Modules:
 [MPI RANK 0]   @mpi(broadcast=True)    : every rank sees rank 0's result: {'config_value': 42, 'computed_on_rank': 0}
 [MPI RANK 0]   @mpi error propagation  : caught MPIError on every rank: Rank 0 failed during fails_on_root with ValueError: deliberate failure for this demo
 [MPI RANK 0] [OK  ] @mpi decorator (root/all_ranks/broadcast/error/validation) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (usage demo, not a speed test)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 32] test_mpi_decorator_modes: DONE
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 32] test_mpi_decorator_modes: DONE
 [MPI RANK 0] 
 --- xgeo NetCDF interface ---
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 33] test_xgeo_interface_contracts: START
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 33] test_xgeo_interface_contracts: START
 [MPI RANK 0] [OK  ] xgeo helpers/to_netcdf front-door validation   serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 33] test_xgeo_interface_contracts: DONE
-2026-08-19 18:36:28 - [MPI RANK 0] [TEST 34] test_parallel_netcdf_writer_options: START
-2026-08-19 18:36:28 - [MPI RANK 0] checking synchronized NetCDF preparation validation
-2026-08-19 18:36:28 - [MPI RANK 0] writing explicit parallel chunk/compression/unlimited configuration
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 33] test_xgeo_interface_contracts: DONE
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 34] test_parallel_netcdf_writer_options: START
+2026-08-19 20:37:12 - [MPI RANK 0] checking synchronized NetCDF preparation validation
+2026-08-19 20:37:12 - [MPI RANK 0] writing explicit parallel chunk/compression/unlimited configuration
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:254: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
 As an alternative, you can create a new view using np.reshape (with copy=False if needed).
   ncvar[index] = local
-
-[MPI RANK 4] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Current thread 0x00007f5f4dc04640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f4effd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f4f7fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f4ffff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f64f97640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-
-[MPI RANK 7] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Thread 0x00007f5f6579c640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f65f9d640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Current thread 0x00007fe4358a4640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f67fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5f6d08b640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f5ffdc04300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 254 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-Thread 0x00007fe4137fe640 [ThreadPoolExecu] (most recent call first):
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-Thread 0x00007fe413fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-Thread 0x00007fe42ca98640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe42d299640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe42da9a640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe42e29b640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe42ea9c640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe4350a3640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007fe4c6416300 [python] (most recent call first):
-
-[MPI RANK 1] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-
-[MPI RANK 2] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 254 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-Current thread 0x00007f0719d5f640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-Current thread 0x00007f984e3e3640 [climtools-mpi-w] (most recent call first):
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-Thread 0x00007f06f77fe640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f984effd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f984f7fe640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f06f7fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0710f11640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f984ffff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9864a98640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f0711712640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9865299640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007f0711f13640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f0712714640 [ThreadPoolExecu] (most recent call first):
-Thread 0x00007f9865a9a640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f986629b640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-Thread 0x00007f0712f15640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9867fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-
-[MPI RANK 3] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Thread 0x00007f0719145640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f98fcb9b300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 219 in write_partitioned
-Thread 0x00007f07a9c86300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-Current thread 0x00007f4bb9558640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 219 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-Thread 0x00007f4bd0d03640 [ThreadPoolExecu] (most recent call first):
-  File "test.py", line 3566 in main
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-Thread 0x00007f4bd1504640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-Thread 0x00007f4bd1d05640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f4bd2506640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f4bd2d07640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f4bd3508640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f4be2b57640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-
-[MPI RANK 6] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Thread 0x00007f4be2356640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-Current thread 0x00007ff6e38a0640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f4c736cc300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 219 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-
-Thread 0x00007ff6d8ff9640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6d97fa640 [ThreadPoolExecu] (most recent call first):
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-Thread 0x00007ff6d9ffb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6da7fc640 [ThreadPoolExecu] (most recent call first):
-  File "<frozen runpy>", line 203 in _run_module_as_main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6daffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6db7fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6dbfff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff6e2c86640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007ff7733b4300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 254 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-
-[MPI RANK 5] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Current thread 0x00007f6feab26640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe0ff9640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe17fa640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe1ffb640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe27fc640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe2ffd640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe37fe640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fe3fff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f6fea325640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f707b6a0300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 254 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-
-[MPI RANK 0] WATCHDOG: no progress for 600 s at inside test_parallel_netcdf_writer_options. Stack for this rank follows.
-Current thread 0x00007f9584c13640 [climtools-mpi-w] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/core/lib_mpi.py", line 869 in _fire
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f955ffff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957ca06640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957d207640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957da08640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957e209640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957ea0a640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957f20b640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f957ffff640 [ThreadPoolExecu] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1024 in run
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/threading.py", line 1044 in _bootstrap
-
-Thread 0x00007f9615dbe300 [python] (most recent call first):
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 219 in write_partitioned
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py", line 527 in to_netcdf_parallel
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/netcdf.py", line 146 in to_netcdf
-  File "test.py", line 2332 in test_parallel_netcdf_writer_options
-  File "test.py", line 340 in wrapped
-  File "test.py", line 3566 in main
-  File "test.py", line 3577 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 98 in _run_module_code
-  File "<frozen runpy>", line 294 in run_path
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53 in run_command_line
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320 in main
-  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8 in <module>
-  File "<frozen runpy>", line 88 in _run_code
-  File "<frozen runpy>", line 203 in _run_module_as_main
-[MPI RANK 0] WATCHDOG: aborting MPI_COMM_WORLD.
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+2026-08-19 20:37:12 - [MPI RANK 0] checking automatic partition selection with compression disabled
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+[MPI RANK 0] [OK  ] parallel NetCDF validation/options (chunks/filters/unlimited/attrs) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (correctness-focused)
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 34] test_parallel_netcdf_writer_options: DONE
+2026-08-19 20:37:12 - [MPI RANK 0] [TEST 35] test_parallel_netcdf_write: START
+[MPI RANK 0] 
+--- NetCDF write: selected mock data, parallel vs serial ---
+2026-08-19 20:37:12 - [MPI RANK 0] loading selected serial mock source on rank 0
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:138: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[...] = variable["data"]
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+2026-08-19 20:37:17 - [MPI RANK 0] validating parallel output against serial output
+[MPI RANK 0] [OK  ] NetCDF write (selected mock variables)         serial=  0.7166s  parallel=  0.9966s  speedup= 0.72x  (xr.testing.assert_identical)
+2026-08-19 20:37:17 - [MPI RANK 0] [TEST 35] test_parallel_netcdf_write: DONE
+2026-08-19 20:37:17 - [MPI RANK 0] [TEST 36] test_distributed_netcdf_roundtrip: START
+2026-08-19 20:37:17 - [MPI RANK 0] loading serial reference dataset on rank 0
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+2026-08-19 20:37:18 - [MPI RANK 0] opening and loading rank-local distributed dataset
+[MPI RANK 0] mpi.xarray.open_dataset: partition_dim='time'  global_size=100  ranks=8
+  source: /users/jkodero/scratch/io_mpi_test/mock_in.nc
+  rank       global  count                          first                           last       MiB  local shape
+     0         0:13     13  1970-01-01T00:00:00.000000000  1970-01-01T12:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     1        13:26     13  1970-01-01T13:00:00.000000000  1970-01-02T01:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     2        26:39     13  1970-01-02T02:00:00.000000000  1970-01-02T14:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     3        39:52     13  1970-01-02T15:00:00.000000000  1970-01-03T03:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     4        52:65     13  1970-01-03T04:00:00.000000000  1970-01-03T16:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     5        65:78     13  1970-01-03T17:00:00.000000000  1970-01-04T05:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     6        78:91     13  1970-01-04T06:00:00.000000000  1970-01-04T18:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     7       91:100      9  1970-01-04T19:00:00.000000000  1970-01-05T03:00:00.000000000    820.84  time=9, lat=721, lon=1440, plev=21
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:138: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[...] = variable["data"]
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:243: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = values
+2026-08-19 20:37:19 - [MPI RANK 0] validating distributed output and internal metadata stripping
+[MPI RANK 0] [OK  ] distributed NetCDF round-trip (selected mock variables) serial=  0.7227s  parallel=  0.4379s  speedup= 1.65x  (xr.testing.assert_identical)
+2026-08-19 20:37:19 - [MPI RANK 0] [TEST 36] test_distributed_netcdf_roundtrip: DONE
+2026-08-19 20:37:19 - [MPI RANK 0] [TEST 37] test_distributed_dataarray_roundtrip: START
+2026-08-19 20:37:19 - [MPI RANK 0] loading serial precipitation reference on rank 0
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/serial.py:458: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = arr
+2026-08-19 20:37:20 - [MPI RANK 0] opening distributed precipitation DataArray
+[MPI RANK 0] mpi.xarray.open_dataset: partition_dim='time'  global_size=100  ranks=8
+  source: /users/jkodero/scratch/io_mpi_test/mock_in.nc
+  rank       global  count                          first                           last       MiB  local shape
+     0         0:13     13  1970-01-01T00:00:00.000000000  1970-01-01T12:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     1        13:26     13  1970-01-01T13:00:00.000000000  1970-01-02T01:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     2        26:39     13  1970-01-02T02:00:00.000000000  1970-01-02T14:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     3        39:52     13  1970-01-02T15:00:00.000000000  1970-01-03T03:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     4        52:65     13  1970-01-03T04:00:00.000000000  1970-01-03T16:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     5        65:78     13  1970-01-03T17:00:00.000000000  1970-01-04T05:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     6        78:91     13  1970-01-04T06:00:00.000000000  1970-01-04T18:00:00.000000000   1185.21  time=13, lat=721, lon=1440, plev=21
+     7       91:100      9  1970-01-04T19:00:00.000000000  1970-01-05T03:00:00.000000000    820.84  time=9, lat=721, lon=1440, plev=21
+2026-08-19 20:37:20 - [MPI RANK 0] writing distributed precipitation DataArray
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/climtools/lib_netcdf/parallel.py:316: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  ncvar[index] = local
+2026-08-19 20:37:21 - [MPI RANK 0] validating distributed DataArray output
+[MPI RANK 0] [FAIL] distributed NetCDF DataArray round-trip (selected mock pr) serial=  0.0000s  parallel=  0.0000s  speedup=  n/a   (Left and right Dataset objects are not identical
+Differing dimensions:
+    (time: 13, lat: 256, lon: 256) != (time: 100, lat: 256, lon: 256)
+Differing coordinates:
+L * time     (time) datetime64[ns] 104B 1970-01-01 ... 1970-01-01T12:00:00
+R * time     (time) datetime64[ns] 800B 1970-01-01 ... 1970-01-05T03:00:00
+Differing data variables:
+L   pr       (time, lat, lon) float32 3MB 0.000125 0.0001249 ... 0.0001991
+R   pr       (time, lat, lon) float32 26MB 0.000125 0.0001249 ... 0.0001831
+Differing indexes:
+L   time                 DatetimeIndex(['1970-01-01 00:00:00', '1970-01-01 01:00:00',
+               '1970-01-01 02:00:00', '1970-01-01 03:00:00',
+               '1970-01-01 04:00:00', '1970-01-01 05:00:00',
+               '1970-01-01 06:00:00', '1970-01-01 07:00:00',
+               '1970-01-01 08:00:00', '1970-01-01 09:00:00',
+               '1970-01-01 10:00:00', '1970-01-01 11:00:00',
+               '1970-01-01 12:00:00'],
+              dtype='datetime64[ns]', name='time', freq=None)
+R   time                 DatetimeIndex(['1970-01-01 00:00:00', '1970-01-01 01:00:00',
+               '1970-01-01 02:00:00', '1970-01-01 03:00:00',
+               '1970-01-01 04:00:00', '1970-01-01 05:00:00',
+               '1970-01-01 06:00:00', '1970-01-01 07:00:00',
+               '1970-01-01 08:00:00', '1970-01-01 09:00:00',
+               '1970-01-01 10:00:00', '1970-01-01 11:00:00',
+               '1970-01-01 12:00:00', '1970-01-01 13:00:00',
+               '1970-01-01 14:00:00', '1970-01-01 15:00:00',
+               '1970-01-01 16:00:00', '1970-01-01 17:00:00',
+               '1970-01-01 18:00:00', '1970-01-01 19:00:00',
+               '1970-01-01 20:00:00', '1970-01-01 21:00:00',
+               '1970-01-01 22:00:00', '1970-01-01 23:00:00',
+               '1970-01-02 00:00:00', '1970-01-02 01:00:00',
+               '1970-01-02 02:00:00', '1970-01-02 03:00:00',
+               '1970-01-02 04:00:00', '1970-01-02 05:00:00',
+               '1970-01-02 06:00:00', '1970-01-02 07:00:00',
+               '1970-01-02 08:00:00', '1970-01-02 09:00:00',
+               '1970-01-02 10:00:00', '1970-01-02 11:00:00',
+               '1970-01-02 12:00:00', '1970-01-02 13:00:00',
+               '1970-01-02 14:00:00', '1970-01-02 15:00:00',
+               '1970-01-02 16:00:00', '1970-01-02 17:00:00',
+               '1970-01-02 18:00:00', '1970-01-02 19:00:00',
+               '1970-01-02 20:00:00', '1970-01-02 21:00:00',
+               '1970-01-02 22:00:00', '1970-01-02 23:00:00',
+               '1970-01-03 00:00:00', '1970-01-03 01:00:00',
+               '1970-01-03 02:00:00', '1970-01-03 03:00:00',
+               '1970-01-03 04:00:00', '1970-01-03 05:00:00',
+               '1970-01-03 06:00:00', '1970-01-03 07:00:00',
+               '1970-01-03 08:00:00', '1970-01-03 09:00:00',
+               '1970-01-03 10:00:00', '1970-01-03 11:00:00',
+               '1970-01-03 12:00:00', '1970-01-03 13:00:00',
+               '1970-01-03 14:00:00', '1970-01-03 15:00:00',
+               '1970-01-03 16:00:00', '1970-01-03 17:00:00',
+               '1970-01-03 18:00:00', '1970-01-03 19:00:00',
+               '1970-01-03 20:00:00', '1970-01-03 21:00:00',
+               '1970-01-03 22:00:00', '1970-01-03 23:00:00',
+               '1970-01-04 00:00:00', '1970-01-04 01:00:00',
+               '1970-01-04 02:00:00', '1970-01-04 03:00:00',
+               '1970-01-04 04:00:00', '1970-01-04 05:00:00',
+               '1970-01-04 06:00:00', '1970-01-04 07:00:00',
+               '1970-01-04 08:00:00', '1970-01-04 09:00:00',
+               '1970-01-04 10:00:00', '1970-01-04 11:00:00',
+               '1970-01-04 12:00:00', '1970-01-04 13:00:00',
+               '1970-01-04 14:00:00', '1970-01-04 15:00:00',
+               '1970-01-04 16:00:00', '1970-01-04 17:00:00',
+               '1970-01-04 18:00:00', '1970-01-04 19:00:00',
+               '1970-01-04 20:00:00', '1970-01-04 21:00:00',
+               '1970-01-04 22:00:00', '1970-01-04 23:00:00',
+               '1970-01-05 00:00:00', '1970-01-05 01:00:00',
+               '1970-01-05 02:00:00', '1970-01-05 03:00:00'],
+              dtype='datetime64[ns]', name='time', freq=None))
+2026-08-19 20:37:21 - [MPI RANK 0] [TEST 37] test_distributed_dataarray_roundtrip: DONE with failed check(s)
+[MPI RANK 0] 
+========================================================================================
+[MPI RANK 0] SUMMARY -- 8 rank(s)
+[MPI RANK 0] ========================================================================================
+[MPI RANK 0] [OK  ] shared configuration constants identical on every rank speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mismatched reduction buffers raise instead of deadlocking speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi runtime helpers (is_root/launched/datatype/MPIError) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.log/raise_if_error contracts                     speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi runtime/reduce contracts (validation/noncontiguous/nonzero root) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.sum scalar (1038240 mock pr values)       speedup= 5.55x  serial= 0.0230s  parallel= 0.0041s
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock pr fields (90x1440, 8 rank selections) speedup=41.88x  serial= 0.1450s  parallel= 0.0035s
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock t2m DataArray (dims/attrs kept)  speedup=32.72x  serial= 0.1846s  parallel= 0.0056s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.sum mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0004s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.prod mock values (all/root modes)         speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.min mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.max mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.mean mock values (all/root modes)         speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.any mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.all mock values (all/root modes)          speedup=  n/a   serial= 0.0000s  parallel= 0.0001s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.reduce.any/all mock slmsk Dataset                speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.open_dataset (mock pr, partitioned latitude) speedup= 0.06x  serial= 0.0215s  parallel= 0.3520s
+[MPI RANK 0] [OK  ] mpi.xarray.redistribute mock pr (explicit/auto)      speedup=  n/a   serial= 0.0000s  parallel= 0.0004s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.isel mock pr (global latitude slice/scalar) speedup=  n/a   serial= 0.0000s  parallel= 0.0023s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.sel mock pr (global latitude slice/scalar) speedup=  n/a   serial= 0.0000s  parallel= 0.0217s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray.sum mock t over 21 pressure levels        speedup= 2.41x  serial= 0.0927s  parallel= 0.0384s
+[MPI RANK 0] [OK  ] mpi.xarray.prod mock t over 21 pressure levels       speedup= 1.92x  serial= 0.0661s  parallel= 0.0345s
+[MPI RANK 0] [OK  ] mpi.xarray.mean mock t over 21 pressure levels       speedup= 0.57x  serial= 0.0219s  parallel= 0.0387s
+[MPI RANK 0] [FAIL] mpi.xarray.max mock t over 21 pressure levels        speedup= 0.50x  serial= 0.0229s  parallel= 0.0455s
+[MPI RANK 0] [FAIL] mpi.xarray.min mock t over 21 pressure levels        speedup= 0.36x  serial= 0.0170s  parallel= 0.0467s
+[MPI RANK 0] [OK  ] mpi.xarray.any mock slmsk land mask (721 latitudes)  speedup= 0.23x  serial= 0.0002s  parallel= 0.0009s
+[MPI RANK 0] [OK  ] mpi.xarray.all mock slmsk land mask (721 latitudes)  speedup= 0.24x  serial= 0.0002s  parallel= 0.0008s
+[MPI RANK 0] [FAIL] mpi.xarray Dataset reductions (mock distributed/static variables) speedup=  n/a   serial= 0.0000s  parallel= 0.0062s  (correctness-focused)
+[MPI RANK 0] [OK  ] empty-partition reductions (plev lengths [1, 4, 7, 8, 9] over 8 rank(s)) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] reduction dtype contracts (MPI-representable dtypes, empty partitions) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] identical collective sequence on every rank (all reductions) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray contracts (edge reductions/indexing/validation/nonzero root) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (deterministic edge cases)
+[MPI RANK 0] [OK  ] mpi.xarray.mean(mock t2m, redistribute_on='lon')     speedup= 0.59x  serial= 0.0020s  parallel= 0.0034s
+[MPI RANK 0] [OK  ] rank-0-only source (broadcast and scatterv routes into distributed form) speedup=  n/a   serial= 0.0000s  parallel= 0.0042s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds) speedup=  n/a   serial= 0.0000s  parallel= 0.2493s  (correctness-focused)
+[MPI RANK 0] [OK  ] mpi.scatterv mock t2m (721 rows across 8 rank(s))    speedup=  n/a   serial= 0.0000s  parallel= 0.0186s  (data movement, no serial-compute equivalent)
+[MPI RANK 0] [OK  ] mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] cosine-lat weighted mean mock t2m (721x1440)         speedup= 8.52x  serial= 0.0419s  parallel= 0.0049s
+[MPI RANK 0] [OK  ] @mpi decorator (root/all_ranks/broadcast/error/validation) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (usage demo, not a speed test)
+[MPI RANK 0] [OK  ] xgeo helpers/to_netcdf front-door validation         speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] parallel NetCDF validation/options (chunks/filters/unlimited/attrs) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (correctness-focused)
+[MPI RANK 0] [OK  ] NetCDF write (selected mock variables)               speedup= 0.72x  serial= 0.7166s  parallel= 0.9966s  (xr.testing.assert_identical)
+[MPI RANK 0] [OK  ] distributed NetCDF round-trip (selected mock variables) speedup= 1.65x  serial= 0.7227s  parallel= 0.4379s  (xr.testing.assert_identical)
+[MPI RANK 0] [FAIL] distributed NetCDF DataArray round-trip (selected mock pr) speedup=  n/a   serial= 0.0000s  parallel= 0.0000s  (Left and right Dataset objects are not identical
+Differing dimensions:
+    (time: 13, lat: 256, lon: 256) != (time: 100, lat: 256, lon: 256)
+Differing coordinates:
+L * time     (time) datetime64[ns] 104B 1970-01-01 ... 1970-01-01T12:00:00
+R * time     (time) datetime64[ns] 800B 1970-01-01 ... 1970-01-05T03:00:00
+Differing data variables:
+L   pr       (time, lat, lon) float32 3MB 0.000125 0.0001249 ... 0.0001991
+R   pr       (time, lat, lon) float32 26MB 0.000125 0.0001249 ... 0.0001831
+Differing indexes:
+L   time                 DatetimeIndex(['1970-01-01 00:00:00', '1970-01-01 01:00:00',
+               '1970-01-01 02:00:00', '1970-01-01 03:00:00',
+               '1970-01-01 04:00:00', '1970-01-01 05:00:00',
+               '1970-01-01 06:00:00', '1970-01-01 07:00:00',
+               '1970-01-01 08:00:00', '1970-01-01 09:00:00',
+               '1970-01-01 10:00:00', '1970-01-01 11:00:00',
+               '1970-01-01 12:00:00'],
+              dtype='datetime64[ns]', name='time', freq=None)
+R   time                 DatetimeIndex(['1970-01-01 00:00:00', '1970-01-01 01:00:00',
+               '1970-01-01 02:00:00', '1970-01-01 03:00:00',
+               '1970-01-01 04:00:00', '1970-01-01 05:00:00',
+               '1970-01-01 06:00:00', '1970-01-01 07:00:00',
+               '1970-01-01 08:00:00', '1970-01-01 09:00:00',
+               '1970-01-01 10:00:00', '1970-01-01 11:00:00',
+               '1970-01-01 12:00:00', '1970-01-01 13:00:00',
+               '1970-01-01 14:00:00', '1970-01-01 15:00:00',
+               '1970-01-01 16:00:00', '1970-01-01 17:00:00',
+               '1970-01-01 18:00:00', '1970-01-01 19:00:00',
+               '1970-01-01 20:00:00', '1970-01-01 21:00:00',
+               '1970-01-01 22:00:00', '1970-01-01 23:00:00',
+               '1970-01-02 00:00:00', '1970-01-02 01:00:00',
+               '1970-01-02 02:00:00', '1970-01-02 03:00:00',
+               '1970-01-02 04:00:00', '1970-01-02 05:00:00',
+               '1970-01-02 06:00:00', '1970-01-02 07:00:00',
+               '1970-01-02 08:00:00', '1970-01-02 09:00:00',
+               '1970-01-02 10:00:00', '1970-01-02 11:00:00',
+               '1970-01-02 12:00:00', '1970-01-02 13:00:00',
+               '1970-01-02 14:00:00', '1970-01-02 15:00:00',
+               '1970-01-02 16:00:00', '1970-01-02 17:00:00',
+               '1970-01-02 18:00:00', '1970-01-02 19:00:00',
+               '1970-01-02 20:00:00', '1970-01-02 21:00:00',
+               '1970-01-02 22:00:00', '1970-01-02 23:00:00',
+               '1970-01-03 00:00:00', '1970-01-03 01:00:00',
+               '1970-01-03 02:00:00', '1970-01-03 03:00:00',
+               '1970-01-03 04:00:00', '1970-01-03 05:00:00',
+               '1970-01-03 06:00:00', '1970-01-03 07:00:00',
+               '1970-01-03 08:00:00', '1970-01-03 09:00:00',
+               '1970-01-03 10:00:00', '1970-01-03 11:00:00',
+               '1970-01-03 12:00:00', '1970-01-03 13:00:00',
+               '1970-01-03 14:00:00', '1970-01-03 15:00:00',
+               '1970-01-03 16:00:00', '1970-01-03 17:00:00',
+               '1970-01-03 18:00:00', '1970-01-03 19:00:00',
+               '1970-01-03 20:00:00', '1970-01-03 21:00:00',
+               '1970-01-03 22:00:00', '1970-01-03 23:00:00',
+               '1970-01-04 00:00:00', '1970-01-04 01:00:00',
+               '1970-01-04 02:00:00', '1970-01-04 03:00:00',
+               '1970-01-04 04:00:00', '1970-01-04 05:00:00',
+               '1970-01-04 06:00:00', '1970-01-04 07:00:00',
+               '1970-01-04 08:00:00', '1970-01-04 09:00:00',
+               '1970-01-04 10:00:00', '1970-01-04 11:00:00',
+               '1970-01-04 12:00:00', '1970-01-04 13:00:00',
+               '1970-01-04 14:00:00', '1970-01-04 15:00:00',
+               '1970-01-04 16:00:00', '1970-01-04 17:00:00',
+               '1970-01-04 18:00:00', '1970-01-04 19:00:00',
+               '1970-01-04 20:00:00', '1970-01-04 21:00:00',
+               '1970-01-04 22:00:00', '1970-01-04 23:00:00',
+               '1970-01-05 00:00:00', '1970-01-05 01:00:00',
+               '1970-01-05 02:00:00', '1970-01-05 03:00:00'],
+              dtype='datetime64[ns]', name='time', freq=None))
+[MPI RANK 0] ----------------------------------------------------------------------------------------
+[MPI RANK 0] Results: 40 passed, 4 failed, 0 skipped, 44 recorded checks.
+[MPI RANK 0] 4 recorded check(s) FAILED.
 --------------------------------------------------------------------------
-MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
+MPI_ABORT was invoked on rank 1 in communicator MPI_COMM_WORLD
 with errorcode 1.
 
 NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
 You may or may not see output from other processes, depending on
 exactly when Open MPI kills them.
 --------------------------------------------------------------------------
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 4 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 7 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+[2026-08-19T20:37:21.956] error: *** STEP 5087635.0 ON node2420 CANCELLED AT 2026-08-19T20:37:21 DUE to SIGNAL Killed ***
 srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
-[2026-08-19T18:46:34.008] error: *** STEP 5086179.0 ON node2405 CANCELLED AT 2026-08-19T18:46:34 DUE to SIGNAL Killed ***
-srun: error: node2405: task 0: Exited with exit code 1
-srun: Terminating StepId=5086179.0
-srun: error: node2405: tasks 1-7: Killed
+srun: error: node2420: tasks 0-6: Killed
+srun: Terminating StepId=5087635.0
+srun: error: node2420: task 7: Exited with exit code 1
