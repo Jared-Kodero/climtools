@@ -10,7 +10,9 @@ from __future__ import annotations
 import sys
 import traceback
 
-from collections.abc import Mapping
+import contextlib
+import warnings
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -93,6 +95,63 @@ def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray, str | np.dtyp
     return np.ascontiguousarray(values), values.dtype
 
 
+@contextlib.contextmanager
+def quiet_netcdf4_writes() -> Iterator[None]:
+    """Suppress netCDF4-python's NumPy 2.5 shape-assignment DeprecationWarning.
+
+    ``Variable.__setitem__`` compares the caller's ``data.shape`` tuple against
+    the list returned by ``netCDF4.utils._out_array_shape``. A tuple never
+    equals a list, so every write of a variable with more than one dimension
+    takes the reshape branch, which assigns to ``ndarray.shape``. NumPy 2.5
+    deprecated that assignment, so correct multidimensional writes emit a
+    warning that no caller can avoid by changing the array it passes. The fix
+    landed upstream (Unidata/netcdf4-python issue 1468, now using ``reshape``)
+    but is not in any released version, so the warning is filtered here rather
+    than propagated to every user of climtools.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Setting the shape on a NumPy array has been deprecated",
+            category=DeprecationWarning,
+        )
+        yield
+
+
+def preextend_unlimited(
+    nc: netCDF4.Dataset,
+    schema: Mapping[str, Any],
+    name: str,
+    ncvar: netCDF4.Variable,
+) -> None:
+    """Grow an unlimited dimension to its final length before parallel writes.
+
+    A netCDF variable with an unlimited dimension starts with a zero extent
+    and is grown implicitly by whichever write goes furthest. Under MPI that
+    growth is an ``H5Dset_extent`` call, which HDF5 requires every rank to make
+    collectively with identical arguments. Ranks writing different slabs ask
+    for different extents, so the file ends up sized by one arbitrary rank and
+    the slabs beyond that point are lost. Writing a single element at the last
+    global index here sets the final extent serially, so no rank has to extend
+    anything during the collective phase. That element belongs to the rank that
+    owns the last slab and is overwritten by it.
+    """
+    dims = ncvar.dimensions
+    unlimited = set(schema["unlimited_dim"])
+    if not any(dim in unlimited for dim in dims):
+        return
+
+    index = tuple(
+        int(schema["sizes"][dim]) - 1 if dim in unlimited else 0 for dim in dims
+    )
+    if any(position < 0 for position in index):
+        return
+
+    fill = ncvar.getncattr("_FillValue") if "_FillValue" in ncvar.ncattrs() else 0
+    with quiet_netcdf4_writes():
+        ncvar[index] = fill
+
+
 def create_file(
     path: str,
     schema: Mapping[str, Any],
@@ -135,7 +194,10 @@ def create_file(
 
             partitioned = partition_dim is not None and partition_dim in dims
             if not partitioned:
-                ncvar[...] = variable["data"]
+                with quiet_netcdf4_writes():
+                    ncvar[...] = variable["data"]
+            elif dtype != "str":
+                preextend_unlimited(nc, schema, name, ncvar)
 
         set_attrs(nc, schema["attrs"])
 
@@ -240,7 +302,8 @@ def write_distributed(
                 slice(start, stop) if dim == partition_dim else slice(None)
                 for dim in dims
             )
-            ncvar[index] = values
+            with quiet_netcdf4_writes():
+                ncvar[index] = values
     finally:
         if nc is not None:
             nc.close()
@@ -313,7 +376,8 @@ def write_partitioned(
                 slice(start, stop) if dim == partition_dim else slice(None)
                 for dim in dims
             )
-            ncvar[index] = local
+            with quiet_netcdf4_writes():
+                ncvar[index] = local
     finally:
         if nc is not None:
             nc.close()
@@ -387,6 +451,10 @@ def to_netcdf_parallel(
         if isinstance(data, xr.DataArray):
             if data.name is None:
                 raise ValueError("DataArray must have a name for NetCDF output.")
+            # to_dataset() moves the array's attributes onto the variable and
+            # leaves Dataset.attrs empty. get_mpi_meta falls back to
+            # variable-level metadata for exactly this reason, so the
+            # distributed path is still selected here.
             local_ds = data.to_dataset()
         elif isinstance(data, xr.Dataset):
             local_ds = data

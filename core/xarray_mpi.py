@@ -148,20 +148,11 @@ class _PlanEntry(NamedTuple):
     shape: tuple[tuple[str, int], ...]
 
 
-def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
-    """Return validated MPI distribution metadata.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        Object whose distribution metadata is requested.
-
-    Returns
-    -------
-    dict or None
-        Distribution metadata when valid, otherwise None.
-    """
-    meta = value.attrs.get(MPI_META)
+def _validate_mpi_meta(
+    value: xr.Dataset | xr.DataArray,
+    meta: Any,
+) -> dict[str, Any] | None:
+    """Return ``meta`` when it describes a valid partition of ``value``."""
     if not isinstance(meta, dict):
         return None
 
@@ -181,11 +172,64 @@ def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     if int(value.sizes[dim]) != stop - start:
         return None
 
-    chunk_info = meta["chunk_info"]
-    if not isinstance(chunk_info, dict):
+    if not isinstance(meta["chunk_info"], dict):
         return None
 
     return cast("dict[str, Any]", meta)
+
+
+def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
+    """Return validated MPI distribution metadata.
+
+    The metadata is looked for on the object itself and, for a Dataset, on its
+    variables as a fallback. The fallback exists because
+    :meth:`xarray.DataArray.to_dataset` moves the array's attributes onto the
+    resulting data variable and leaves ``Dataset.attrs`` empty. Inspecting only
+    the top level therefore reported a distributed DataArray as ordinary
+    replicated data as soon as any caller converted it, which silently routed
+    parallel writes through the rank-0 scatter path and produced a file holding
+    only rank 0's slab.
+
+    Variable-level metadata is used only when every variable that carries it
+    agrees, and only when it also describes the Dataset as a whole. Disagreeing
+    variables mean the object was assembled from separately distributed pieces,
+    which no single partition description can represent, so None is returned
+    and the caller treats the object as undistributed rather than acting on an
+    arbitrary choice.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object whose distribution metadata is requested.
+
+    Returns
+    -------
+    dict or None
+        Distribution metadata when valid, otherwise None.
+    """
+    meta = _validate_mpi_meta(value, value.attrs.get(MPI_META))
+    if meta is not None:
+        return meta
+
+    if not isinstance(value, xr.Dataset):
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    for variable in value.variables.values():
+        candidate = variable.attrs.get(MPI_META)
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    reference = candidates[0]
+    keys = ("dim", "global_size", "start", "stop")
+    for candidate in candidates[1:]:
+        if any(candidate.get(key) != reference.get(key) for key in keys):
+            return None
+
+    return _validate_mpi_meta(value, reference)
 
 
 def set_mpi_meta(
@@ -408,12 +452,39 @@ def choose_partition_dim(
     return dim
 
 
-def _edge_values(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, str]:
+def _format_label(value: Any, limit: int = 16) -> str:
+    """Return a short, fixed-width-friendly label for a coordinate value.
+
+    Datetime labels are the reason the previous report scrolled sideways: a
+    numpy datetime64[ns] renders as 29 characters. Seconds and nanoseconds
+    carry no information for a partition boundary, so they are dropped.
+    """
+    if isinstance(value, np.datetime64):
+        text = str(np.datetime64(value, "m"))
+    elif isinstance(value, (np.floating, float)):
+        text = f"{float(value):g}"
+    else:
+        text = str(value)
+    if len(text) > limit:
+        text = text[: limit - 1] + "\u2026"
+    return text
+
+
+def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, str]:
     """Return the first and last coordinate labels owned along ``dim``."""
     if dim not in data.coords or int(data.sizes[dim]) == 0:
         return "-", "-"
     values = np.asarray(data.coords[dim].values)
-    return f"{values[0]}", f"{values[-1]}"
+    return _format_label(values[0]), _format_label(values[-1])
+
+
+def _format_bytes(count: float) -> str:
+    """Return a compact binary size label."""
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if count < 1024.0 or unit == "TiB":
+            return f"{count:.0f}{unit}" if unit == "B" else f"{count:.1f}{unit}"
+        count /= 1024.0
+    return f"{count:.1f}TiB"
 
 
 def log_partition_report(
@@ -426,13 +497,18 @@ def log_partition_report(
     start: int,
     stop: int,
     automatic: bool = False,
+    detail: bool = True,
 ) -> None:
-    """Print one aligned table describing the rank-local partition layout.
+    """Print a compact description of the rank-local partition layout.
 
-    Every rank contributes its own bounds through a single gather, and rank 0
-    prints the table. Logging independently from every rank instead produces
-    interleaved, unordered lines that are unreadable at scale, which is what
-    the equivalent call in the test suite produced.
+    Every rank contributes its own bounds through a single gather and rank 0
+    prints the result. Logging from every rank instead produces interleaved,
+    unordered lines that are unreadable at scale.
+
+    The report is deliberately narrow. The full local shape is identical on
+    every rank apart from the partitioned dimension, so printing it once in
+    the header conveys the same information as repeating it on every row and
+    keeps the table inside a standard terminal width.
 
     Parameters
     ----------
@@ -448,79 +524,53 @@ def log_partition_report(
         Global length of ``dim``.
     start, stop : int
         Global half-open interval owned by this rank.
-    source : str, optional
-        File or object description shown in the header.
     automatic : bool, optional
         Whether ``dim`` was selected automatically.
+    detail : bool, optional
+        Print the per-rank table in addition to the summary line. When False
+        only the two summary lines are printed, which is what long runs that
+        open many files usually want.
     """
     comm = runtime.comm
-    local = {
-        "rank": int(comm.rank),
-        "start": int(start),
-        "stop": int(stop),
-        "count": int(stop - start),
-        "first": _edge_values(data, dim),
-        "shape": ", ".join(
-            f"{name!s}={int(length)}" for name, length in data.sizes.items()
-        ),
-        "mib": float(data.nbytes) / 1048576.0,
-    }
+    first, last = _edge_labels(data, dim)
+    local = (
+        int(comm.rank),
+        int(start),
+        int(stop),
+        first,
+        last,
+        int(data.nbytes),
+    )
     rows = comm.gather(local, root=0)
     if comm.rank != 0 or rows is None:
         return
 
-    empty = sum(1 for row in rows if row["count"] == 0)
-    header = (
-        f"{origin}: partition_dim={str(dim)!r}"
-        + (" (auto)" if automatic else "")
-        + f"  global_size={global_size}  ranks={comm.size}"
-        + (f"  idle_ranks={empty}" if empty else "")
+    counts = [row[2] - row[1] for row in rows]
+    total = sum(row[5] for row in rows)
+    idle = sum(1 for count in counts if count == 0)
+    other = " x ".join(
+        f"{name!s}:{int(length)}" for name, length in data.sizes.items() if name != dim
     )
 
-    widths = {
-        "rank": max(4, len(str(comm.size - 1))),
-        "count": max(5, *(len(str(row["count"])) for row in rows)),
-        "range": max(
-            11,
-            *(len(f"{row['start']}:{row['stop']}") for row in rows),
-        ),
-        "first": max(9, *(len(row["first"][0]) for row in rows)),
-        "last": max(9, *(len(row["first"][1]) for row in rows)),
-    }
     lines = [
-        header,
-        "  {:>{r}}  {:>{g}}  {:>{c}}  {:>{f}}  {:>{l}}  {:>8}  {}".format(
-            "rank",
-            "global",
-            "count",
-            "first",
-            "last",
-            "MiB",
-            "local shape",
-            r=widths["rank"],
-            g=widths["range"],
-            c=widths["count"],
-            f=widths["first"],
-            l=widths["last"],
-        ),
+        f"{origin}  dim={str(dim)!r}{' (auto)' if automatic else ''}"
+        + f"  size={global_size}  ranks={comm.size}"
+        + f"  split={min(counts)}-{max(counts)}/rank"
+        + (f"  IDLE={idle}" if idle else ""),
+        f"  held: {other or 'scalar'}"
+        + f"   {_format_bytes(total)} total"
+        + f", {_format_bytes(max(row[5] for row in rows))} peak/rank",
     ]
-    for row in rows:
-        lines.append(
-            "  {:>{r}}  {:>{g}}  {:>{c}}  {:>{f}}  {:>{l}}  {:>8.2f}  {}".format(
-                row["rank"],
-                f"{row['start']}:{row['stop']}",
-                row["count"],
-                row["first"][0],
-                row["first"][1],
-                row["mib"],
-                row["shape"],
-                r=widths["rank"],
-                g=widths["range"],
-                c=widths["count"],
-                f=widths["first"],
-                l=widths["last"],
+
+    if detail:
+        width = max(9, *(len(f"{row[1]}:{row[2]}") for row in rows))
+        lines.append(f"  {'rank':>4}  {'slice':>{width}}  {'n':>6}  first -> last")
+        for row in rows:
+            lines.append(
+                f"  {row[0]:>4}  {f'{row[1]}:{row[2]}':>{width}}"
+                + f"  {row[2] - row[1]:>6}  {row[3]} -> {row[4]}"
             )
-        )
+
     runtime.log("\n".join(lines), flush=True)
 
 
@@ -586,7 +636,14 @@ class XarrayMPI:
 
         automatic = partition_dim == "auto"
 
-        with _open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
+        # The file is opened once. The previous implementation opened it a
+        # second time to apply chunking, which doubled the metadata reads
+        # every rank issues against the same file. On a parallel filesystem
+        # that open is the dominant cost of this call, so the single handle is
+        # chunked in place instead.
+        data = _open_dataset(filename_or_obj, chunks=None, **kwargs)
+        try:
+            metadata = data
             if automatic:
                 partition_dim = choose_partition_dim(
                     metadata.sizes,
@@ -619,6 +676,9 @@ class XarrayMPI:
                     UserWarning,
                     stacklevel=2,
                 )
+        except BaseException:
+            data.close()
+            raise
 
         partition_chunk = chunk_info[str(partition_dim)]
         start, stop = get_chunk_bounds(
@@ -632,12 +692,11 @@ class XarrayMPI:
         if open_chunks is None:
             open_chunks = open_chunk_overrides
 
-        data = _open_dataset(
-            filename_or_obj,
-            chunks=open_chunks,
-            **kwargs,
-        )
+        # isel first, then chunk: the rank-local slab is what has to be
+        # chunked, and slicing a lazily indexed Dataset costs nothing.
         data = data.isel({partition_dim: slice(start, stop)})
+        if open_chunks is not None:
+            data = data.chunk(open_chunks)
         set_mpi_meta(
             data,
             dim=partition_dim,
@@ -1334,23 +1393,37 @@ class XarrayMPI:
         if send is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
-        # Allocate the receive buffer with the send buffer's own dtype and a
-        # C-contiguous layout. np.empty_like would inherit the source memory
-        # order, which can differ from the contiguous copy actually sent.
+        recv = self._exchange(send, op, mode=mode, root=root)
+        if recv is None:
+            return None
+        return value.copy(data=recv)
+
+    def _exchange(
+        self,
+        send: np.ndarray[Any, Any],
+        op: _MPI.Op,
+        *,
+        mode: Literal["all", "root"],
+        root: int,
+    ) -> np.ndarray[Any, Any] | None:
+        """Post the buffer collective for an already validated send buffer.
+
+        Allocates the receive buffer with the send buffer's own dtype and a
+        C-contiguous layout. numpy.empty_like would inherit the source memory
+        order, which can differ from the contiguous copy actually sent.
+        """
         if mode == "all":
             recv = np.empty(send.shape, dtype=send.dtype)
             self._runtime.comm.Allreduce(send, recv, op=op)
-        else:
-            recv = (
-                np.empty(send.shape, dtype=send.dtype)
-                if self._runtime.comm.rank == root
-                else None
-            )
-            self._runtime.comm.Reduce(send, recv, op=op, root=root)
-            if recv is None:
-                return None
+            return recv
 
-        return value.copy(data=recv)
+        recv = (
+            np.empty(send.shape, dtype=send.dtype)
+            if self._runtime.comm.rank == root
+            else None
+        )
+        self._runtime.comm.Reduce(send, recv, op=op, root=root)
+        return recv
 
     def _count(
         self,
@@ -1631,54 +1704,81 @@ class XarrayMPI:
                 phase=f"MPI xarray {operation} reduction",
             )
 
-        safe_partial: xr.DataArray | None = None
-        local_mask: xr.DataArray | None = None
+        # Floating point needs a validity flag alongside the extreme itself,
+        # because a rank with an empty partition, or with an all-NaN slice
+        # under skipna, must contribute an identity that is then distinguished
+        # from a genuine infinite value in the data. The flag used to travel in
+        # a second boolean collective. It now shares the value buffer: the flag
+        # is encoded so that the same MIN or MAX operation computes the
+        # required ANY or ALL over the ranks. That halves the collectives, and
+        # removes a boolean reduction whose MPI datatype handling is the least
+        # portable part of this path.
+        send: np.ndarray[Any, Any] | None = None
+        template: xr.DataArray | None = None
+        skipna_enabled = self._skipna_enabled(value.dtype, skipna)
+        # ANY valid rank suffices under skipna; without it every rank must be
+        # NaN-free for the result to be defined.
+        flip = -1.0 if ((not minimum) != skipna_enabled) else 1.0
+
         if error is None:
             try:
                 identity = np.asarray(
                     np.inf if minimum else -np.inf,
                     dtype=expect_dtype,
                 ).item()
-                if self._skipna_enabled(value.dtype, skipna):
-                    local_mask = value.count(dim=dims, keep_attrs=False) > 0
-                    safe_partial = partial.where(local_mask, other=identity)
+                if skipna_enabled:
+                    good = value.count(dim=dims, keep_attrs=False) > 0
                 else:
-                    local_mask = value.isnull().any(dim=dims, keep_attrs=False)
-                    safe_partial = partial.where(~local_mask, other=identity)
+                    good = ~value.isnull().any(dim=dims, keep_attrs=False)
+                safe_partial = partial.where(good, other=identity)
                 if safe_partial.dtype != expect_dtype:
                     safe_partial = safe_partial.astype(expect_dtype, keep_attrs=True)
+                template = safe_partial
+
+                values = np.ascontiguousarray(
+                    np.asarray(safe_partial.values, dtype=expect_dtype)
+                )
+                flags = np.where(
+                    np.asarray(good.values, dtype=bool),
+                    np.asarray(flip, dtype=expect_dtype),
+                    np.zeros((), dtype=expect_dtype),
+                )
+                send = np.empty((2, values.size), dtype=expect_dtype)
+                send[0] = np.reshape(values, values.size)
+                send[1] = np.reshape(flags, values.size)
             except BaseException as exc:
                 error = exc
-                safe_partial = None
-                local_mask = None
+                send = None
+                template = None
 
-        result = self._comm_reduce(
-            safe_partial,
-            op,
-            mode=mode,
-            root=root,
-            expect_dtype=expect_dtype,
-            error=error,
-            phase=f"MPI xarray {operation} reduction",
+        signature = (
+            None
+            if send is None
+            else (
+                _op_name(op),
+                mode,
+                int(root),
+                send.dtype.str,
+                tuple(int(length) for length in send.shape),
+            )
         )
-        global_mask = self._comm_reduce(
-            local_mask,
-            _MPI.LOR,
-            mode=mode,
-            root=root,
-            expect_dtype=np.dtype(bool),
-            phase=f"MPI xarray {operation} validity mask",
+        self._runtime.raise_if_error(
+            error,
+            f"MPI xarray {operation} reduction",
+            signature,
         )
-        if result is None or global_mask is None:
+        if send is None or template is None:
+            raise AssertionError("MPI xarray reduction buffer is missing.")
+
+        recv = self._exchange(send, op, mode=mode, root=root)
+        if recv is None:
             return None
-        masked = (
-            result.where(global_mask)
-            if self._skipna_enabled(value.dtype, skipna)
-            else result.where(~global_mask)
-        )
-        if masked.dtype != result.dtype:
-            masked = masked.astype(result.dtype, keep_attrs=True)
-        return masked
+
+        shape = tuple(int(length) for length in template.shape)
+        combined = np.asarray(recv[0]).reshape(shape)
+        valid = (np.asarray(recv[1]).reshape(shape) * flip) > 0
+        masked = np.where(valid, combined, np.asarray(np.nan, dtype=expect_dtype))
+        return template.copy(data=np.asarray(masked, dtype=expect_dtype).reshape(shape))
 
     # -- public reductions ---------------------------------------------------
 

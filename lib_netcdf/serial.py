@@ -15,6 +15,7 @@ import netCDF4
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
+from .parallel import quiet_netcdf4_writes
 from .encoding import encode_dataset_time, encode_time, is_time_like
 
 if TYPE_CHECKING:
@@ -323,7 +324,8 @@ def dataarray_to_netcdf(
                 write_values=False,
             )
 
-            ncvar[:] = da.values
+            with quiet_netcdf4_writes():
+                ncvar[:] = da.values
 
 
 def append(
@@ -455,7 +457,8 @@ def append(
                 slice(offset, offset + n_new) if d == dim else slice(None)
                 for d in ncvar.dimensions
             )
-            ncvar[index] = arr
+            with quiet_netcdf4_writes():
+                ncvar[index] = arr
 
 
 def createVariable(
@@ -493,7 +496,8 @@ def createVariable(
         ncvar.setncattr(attr_name, attr_val)
 
     if write_values:
-        ncvar[:] = da.values
+        with quiet_netcdf4_writes():
+            ncvar[:] = da.values
 
     return ncvar
 
