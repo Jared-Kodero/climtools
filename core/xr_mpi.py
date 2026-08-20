@@ -409,48 +409,58 @@ class XarrayMPI(ArithmeticMixin):
         automatic = partition_dim == "auto"
 
         # 1. RANK 0 EVALUATES METADATA AND BUILDS THE PLAN
+        plan: dict[str, Any] | None = None
+        error: BaseException | None = None
         if self._runtime.comm.rank == 0:
-            with open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
-                if automatic:
-                    partition_dim = choose_partition_dim(
-                        metadata.sizes,
-                        self._runtime.comm.size,
-                    )
-                if partition_dim not in metadata.dims:
-                    raise ValueError(
-                        f"partition_dim {partition_dim!r} is not in "
-                        + f"{list(metadata.dims)!r}."
-                    )
-                chunk_info = get_chunk_info(metadata, self._runtime.comm.size)
-                open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
-                global_size = int(metadata.sizes[partition_dim])
-                longest_size = max(int(length) for length in metadata.sizes.values())
-
-                if not automatic and global_size < longest_size:
-                    longest_dims = [
-                        str(dim)
-                        for dim, length in metadata.sizes.items()
-                        if int(length) == longest_size
-                    ]
-                    warnings.warn(
-                        f"partition_dim {partition_dim!r} has length {global_size}, "
-                        + "but it should be a longest dataset dimension. "
-                        + f"Longest dimension(s) {longest_dims!r} have length "
-                        + f"{longest_size}.",
-                        UserWarning,
-                        stacklevel=2,
+            try:
+                with open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
+                    if automatic:
+                        partition_dim = choose_partition_dim(
+                            metadata.sizes,
+                            self._runtime.comm.size,
+                        )
+                    if partition_dim not in metadata.dims:
+                        raise ValueError(
+                            f"partition_dim {partition_dim!r} is not in "
+                            + f"{list(metadata.dims)!r}."
+                        )
+                    chunk_info = get_chunk_info(metadata, self._runtime.comm.size)
+                    open_chunk_overrides = get_chunk_overrides(metadata, chunk_info)
+                    global_size = int(metadata.sizes[partition_dim])
+                    longest_size = max(
+                        int(length) for length in metadata.sizes.values()
                     )
 
-                # Pack the plan into a dictionary for broadcasting
-                plan = {
-                    "partition_dim": partition_dim,
-                    "chunk_info": chunk_info,
-                    "open_chunk_overrides": open_chunk_overrides,
-                    "global_size": global_size,
-                }
-        else:
-            # Non-root ranks wait with an empty variable
-            plan = None
+                    if not automatic and global_size < longest_size:
+                        longest_dims = [
+                            str(dim)
+                            for dim, length in metadata.sizes.items()
+                            if int(length) == longest_size
+                        ]
+                        warnings.warn(
+                            f"partition_dim {partition_dim!r} has length "
+                            + f"{global_size}, but it should be a longest "
+                            + "dataset dimension. Longest dimension(s) "
+                            + f"{longest_dims!r} have length {longest_size}.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+
+                    # Pack the plan into a dictionary for broadcasting
+                    plan = {
+                        "partition_dim": partition_dim,
+                        "chunk_info": chunk_info,
+                        "open_chunk_overrides": open_chunk_overrides,
+                        "global_size": global_size,
+                    }
+            except BaseException as exc:  # noqa: BLE001
+                error = exc
+
+        # Every rank must learn about a rank-0 planning failure through the
+        # same collective sequence rank 0 used to detect it. Raising on rank
+        # 0 alone leaves ranks 1..N-1 blocked forever in the plan bcast
+        # below, since rank 0 never reaches it once it raises.
+        self._runtime.raise_if_error(error, "mpi.xarray.open_dataset planning")
 
         # 2. BROADCAST THE PLAN TO ALL RANKS
         plan = self._runtime.comm.bcast(plan, root=0)

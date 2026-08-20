@@ -1013,7 +1013,7 @@ def test_distributed_open_dataset() -> None:
     )
 
     open_validation_ok = call_raises(
-        ValueError,
+        (ValueError, mpi.MPIError),
         mpi.xarray.open_dataset,
         str(TEST_DATA_PATH),
         partition_dim="missing",
