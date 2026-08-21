@@ -108,9 +108,9 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
-# # from .update import _self_update
+# from .update import _self_update
 
-# # _self_update()
+# _self_update()
 
 try:
     from .accessors.xarray_patch import fix_xarray
