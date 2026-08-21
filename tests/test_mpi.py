@@ -2914,26 +2914,34 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
     )
     correct = True
     integrity_note = ""
-    if RANK == 0:
-        try:
-            with (
-                xr.open_dataset(serial_path) as expected,
-                xr.open_dataset(parallel_path) as actual,
-            ):
-                expected.load()
-                actual.load()
-                xr.testing.assert_identical(actual, expected)
-        except AssertionError as exc:
-            correct = False
-            integrity_note = str(exc)
+    try:
+        with (
+            xr.open_dataset(serial_path) as expected_full,
+            xr.open_dataset(parallel_path) as actual_full,
+        ):
+            start, stop = partition_bounds(expected_full.sizes["time"])
+            expected = expected_full.isel(time=slice(start, stop)).load()
+            actual = actual_full.isel(time=slice(start, stop)).load()
+            xr.testing.assert_identical(actual, expected)
+    except BaseException as exc:  # noqa: BLE001 - reported via the summary, not raised
+        correct = False
+        integrity_note = f"{type(exc).__name__}: {exc}"
 
-    correct, integrity_note = mpi.comm.bcast((correct, integrity_note), root=0)
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        # Gathered rather than reduced: which rank's slice failed, and why,
+        # is exactly what a real regression needs the summary to show.
+        notes = mpi.comm.gather(integrity_note, root=0)
+        if RANK == 0:
+            integrity_note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        integrity_note = mpi.comm.bcast(integrity_note, root=0)
+
     record_result(
         "NetCDF write (selected mock variables)",
         correct,
         serial_s,
         parallel_s,
-        note=integrity_note or "xr.testing.assert_identical",
+        note=integrity_note or "xr.testing.assert_identical (each rank validates its own slice)",
     )
 
     mpi.comm.barrier()
@@ -3054,32 +3062,31 @@ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
     correct = bool(mpi.reduce.all(local_meta_ok))
     integrity_note = ""
 
-    if RANK == 0:
-        try:
-            with (
-                xr.open_dataset(serial_path) as expected,
-                xr.open_dataset(parallel_path) as actual,
-            ):
-                expected.load()
-                actual.load()
-                xr.testing.assert_identical(actual, expected)
+    try:
+        with (
+            xr.open_dataset(serial_path) as expected_full,
+            xr.open_dataset(parallel_path) as actual_full,
+        ):
+            start, stop = partition_bounds(expected_full.sizes["time"])
+            expected = expected_full.isel(time=slice(start, stop)).load()
+            actual = actual_full.isel(time=slice(start, stop)).load()
+            xr.testing.assert_identical(actual, expected)
 
-                mpi_meta_leaked = "mpi_meta" in actual.attrs or any(
-                    "mpi_meta" in variable.attrs
-                    for variable in actual.variables.values()
-                )
-                if mpi_meta_leaked:
-                    raise AssertionError(
-                        "Internal mpi_meta attributes were written to NetCDF."
-                    )
-        except AssertionError as exc:
-            correct = False
-            integrity_note = str(exc)
+            mpi_meta_leaked = "mpi_meta" in actual.attrs or any(
+                "mpi_meta" in variable.attrs for variable in actual.variables.values()
+            )
+            if mpi_meta_leaked:
+                raise AssertionError("Internal mpi_meta attributes were written to NetCDF.")
+    except BaseException as exc:  # noqa: BLE001 - reported via the summary, not raised
+        correct = False
+        integrity_note = f"{type(exc).__name__}: {exc}"
 
-    correct, integrity_note = mpi.comm.bcast(
-        (correct, integrity_note),
-        root=0,
-    )
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        notes = mpi.comm.gather(integrity_note, root=0)
+        if RANK == 0:
+            integrity_note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        integrity_note = mpi.comm.bcast(integrity_note, root=0)
     record_result(
         "distributed NetCDF round-trip (selected mock variables)",
         correct,

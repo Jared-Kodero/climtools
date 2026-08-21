@@ -42,7 +42,7 @@ import xarray as xr
 from mpi4py import MPI
 
 from ..core.lib_mpi import mpi
-from ..core.xr_meta import MPI_META, get_mpi_meta
+from ..core.xr_meta import MPI_META, _format_bytes, get_mpi_meta
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:
@@ -662,6 +662,17 @@ def to_netcdf_parallel(
                 "unlimited_dim": unlimited,
                 "variables": variables,
             }
+            total_bytes = sum(
+                v["data"].nbytes for v in root_data.values() if hasattr(v["data"], "nbytes")
+            )
+            mpi.log(
+                f"xgeo.to_netcdf (rank-0 source): rank 0 holds "
+                + f"{_format_bytes(total_bytes)} before scatter, "
+                + f"~{_format_bytes(total_bytes / mpi.comm.size)}/rank after. "
+                + "An already-distributed input (mpi.xarray.open_dataset/"
+                + "redistribute) avoids this rank-0 peak entirely -- see the "
+                + "README's Parallel NetCDF output section.",
+            )
         except BaseException as exc:
             error = exc
 

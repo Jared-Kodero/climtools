@@ -515,6 +515,217 @@ class XarrayMPI(ArithmeticMixin):
             )
         return data
 
+    # mpi4py point-to-point tag for distribute(); arbitrary but fixed so a
+    # stray message from unrelated code can never be mistaken for a piece
+    # this call is expecting.
+    _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
+
+    def distribute(
+        self,
+        value: xr.Dataset | xr.DataArray | None,
+        dim: Hashable | Literal["auto"] = "auto",
+        *,
+        root: int = 0,
+        chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
+    ) -> xr.Dataset | xr.DataArray:
+        """Distribute an object that exists on only one rank.
+
+        ``redistribute`` assumes ``value`` is already the same object on
+        every rank and slices each rank's own copy locally, with no MPI
+        communication for the data itself. ``distribute`` is for the
+        different situation this project's parallel NetCDF writer's
+        "legacy scatter" path otherwise forces through
+        ``DataArray.values`` (an eager ``.compute()`` of the entire array
+        on one rank): the source genuinely exists on only one rank, not
+        because it was chosen not to replicate it, but because it cannot
+        be -- built from rank-local state, read from a resource only that
+        rank can reach, or any other reason it cannot simply be
+        reconstructed identically everywhere the way ``redistribute``
+        requires.
+
+        Each other rank receives, by direct point-to-point message, only
+        the slice it owns -- sliced with ``isel`` on ``root`` before
+        sending. If ``value`` is dask-backed, that slicing never triggers
+        computation: the message carries an uncomputed graph, not data, so
+        no rank other than the eventual owner of a slice ever materializes
+        it, and ``root`` never holds more than one slice's worth of pickled
+        graph in flight at a time. If ``value`` is already a plain
+        in-memory (non-dask) object, this still avoids the redundant
+        copies ``to_netcdf``'s scatter path makes, but cannot undo the fact
+        that the complete array already had to exist in ``root``'s memory
+        before this call -- only a dask-backed source avoids that.
+
+        Parameters
+        ----------
+        value : xarray.Dataset, xarray.DataArray, or None
+            The complete object, on ``root`` only. Every other rank must
+            pass None.
+        dim : hashable or {"auto"}, default "auto"
+            Dimension to distribute along. ``"auto"`` chooses ``root``'s
+            largest dimension. Ignored (and no partition metadata is
+            attached) if ``value`` has no dimensions at all.
+        root : int, default 0
+            Rank holding ``value``.
+        chunk_info : mapping, optional
+            Effective chunk size hints, as accepted by ``redistribute``.
+        log_partitions : bool, default False
+            Print a partition report on ``root`` once every rank has its
+            slice.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            This rank's own slice, tagged with ``mpi_meta`` exactly as
+            ``redistribute``'s output is, and just as suitable as input to
+            ``to_netcdf(..., parallel=True)`` or any ``mpi.xarray``
+            reduction. Not yet loaded: call ``.load()`` when ready to
+            materialize it, same as ``redistribute``'s output.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` is None on ``root``, is not None on a non-root
+            rank, already carries ``mpi_meta``, or names a dimension that
+            does not exist.
+        """
+        comm = self._runtime.comm
+        is_root = comm.rank == root
+
+        # Phase 1: validate and fully prepare on root -- including slicing
+        # every rank's piece -- without sending anything anywhere yet.
+        # Every rank then passes through raise_if_error together. Only
+        # after that succeeds on every rank does phase 2 below send or
+        # receive a single message, so a failure here can never leave a
+        # non-root rank blocked in recv() waiting for a send that root
+        # failed before reaching.
+        error: BaseException | None = None
+        pieces: list[Any] | None = None
+        replicated_value: xr.Dataset | xr.DataArray | None = None
+        try:
+            if is_root:
+                if value is None:
+                    raise ValueError(f"Rank {root} (root) must provide a value, not None.")
+                if get_mpi_meta(value) is not None:
+                    raise ValueError(
+                        "Cannot distribute an already distributed object. "
+                        + "Reduce or gather its distributed dimension first."
+                    )
+                stripped = strip_mpi_meta(value)
+
+                if not stripped.dims:
+                    # Nothing to partition: send the (necessarily small)
+                    # whole object to every rank as replicated data,
+                    # mirroring redistribute's handling of the same case.
+                    replicated_value = stripped
+                else:
+                    automatic = dim == "auto"
+                    resolved_dim = (
+                        choose_partition_dim(stripped.sizes, comm.size)
+                        if automatic
+                        else dim
+                    )
+                    if resolved_dim not in stripped.dims:
+                        raise ValueError(
+                            f"Distribution dimension {resolved_dim!r} does not exist."
+                        )
+
+                    length = int(stripped.sizes[resolved_dim])
+                    info = dict(chunk_info or {})
+                    chunk_size = int(
+                        info.get(
+                            str(resolved_dim),
+                            get_effective_chunk_size(length, None, comm.size),
+                        )
+                    )
+                    chunk_size = get_effective_chunk_size(length, chunk_size, comm.size)
+                    info[str(resolved_dim)] = chunk_size
+
+                    pieces = []
+                    for rank in range(comm.size):
+                        start, stop = get_chunk_bounds(length, chunk_size, rank, comm.size)
+                        piece = stripped.isel({resolved_dim: slice(start, stop)})
+                        # stripped came from strip_mpi_meta's .copy(deep=False):
+                        # every .isel() slice taken from a shallow-copied
+                        # object shares the exact same attrs dict as the
+                        # copy itself (and therefore with every other slice
+                        # taken from it) rather than getting its own, an
+                        # xarray behavior specific to slicing a .copy()'d
+                        # object rather than an original. Breaking that
+                        # sharing explicitly, rather than relying on it not
+                        # to happen, is what set_mpi_meta below needs: it
+                        # mutates these dicts in place, and every piece
+                        # silently ending up with the last rank's metadata
+                        # is exactly what happens without this.
+                        piece.attrs = dict(piece.attrs)
+                        if isinstance(piece, xr.Dataset):
+                            for variable in piece.variables.values():
+                                variable.attrs = dict(variable.attrs)
+                        piece_info = prune_chunk_info(info, piece)
+                        for other_dim, other_length in piece.sizes.items():
+                            piece_info.setdefault(
+                                str(other_dim),
+                                get_effective_chunk_size(int(other_length), None, comm.size),
+                            )
+                        set_mpi_meta(
+                            piece,
+                            dim=resolved_dim,
+                            global_size=length,
+                            start=start,
+                            stop=stop,
+                            chunk_info=piece_info,
+                        )
+                        pieces.append(piece)
+            elif value is not None:
+                raise ValueError(
+                    f"Only rank {root} (root) may provide a value; "
+                    + f"got one on rank {comm.rank}."
+                )
+        except BaseException as exc:
+            error = exc
+        self._runtime.raise_if_error(error, "mpi.xarray.distribute")
+
+        # Every rank must agree on which phase-2 branch to take, but only
+        # root's local variables reflect which one it prepared -- a plain
+        # `pieces is None` check on a non-root rank is always true and
+        # would pick the wrong branch there. One small, cheap broadcast
+        # settles it for everyone.
+        dimensionless = comm.bcast(replicated_value is not None if is_root else None, root=root)
+
+        # Phase 2: every rank reaches this point only because every rank,
+        # root included, passed phase 1 without error, so this is now
+        # ordinary data transfer of already-successfully-prepared pieces.
+        if dimensionless:
+            # Nothing to partition: same small object broadcast to every
+            # rank, no per-rank slicing or point-to-point send needed.
+            output = comm.bcast(replicated_value if is_root else None, root=root)
+            return cast("xr.Dataset | xr.DataArray", output)
+
+        if is_root:
+            assert pieces is not None
+            for rank, piece in enumerate(pieces):
+                if rank == root:
+                    output = piece
+                else:
+                    comm.send(piece, dest=rank, tag=self._DISTRIBUTE_TAG)
+        else:
+            output = comm.recv(source=root, tag=self._DISTRIBUTE_TAG)
+
+        if log_partitions:
+            meta = get_mpi_meta(output)
+            if meta is not None:
+                log_partition_report(
+                    self._runtime,
+                    output,
+                    meta["dim"],
+                    origin="mpi.xarray.distribute",
+                    global_size=meta["global_size"],
+                    start=meta["start"],
+                    stop=meta["stop"],
+                    automatic=(dim == "auto"),
+                )
+        return output
+
     def redistribute(
         self,
         value: xr.Dataset | xr.DataArray,

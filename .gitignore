@@ -2,6 +2,6 @@ __pycache__
 update.py
 cmaps.pyi
 .vscode/
-**/*.log
+*.log
 **/__pycache__
 

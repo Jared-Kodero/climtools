@@ -21,6 +21,7 @@ and MPI-collective parallel NetCDF-4 output.
   - [Native `.mean()`/`.sum()`/etc. on a distributed object are node-local](#native-meansumetc-on-a-distributed-object-are-node-local)
   - [Arithmetic on distributed objects](#arithmetic-on-distributed-objects)
   - [Parallel NetCDF-4 output](#parallel-netcdf-4-output)
+    - [Rank-0-source vs. already-distributed: which one at scale](#rank-0-source-vs-already-distributed-which-one-at-scale)
   - [Running under MPI](#running-under-mpi)
 - [Testing](#testing)
 - [License](#license)
@@ -295,8 +296,8 @@ NaNs local to the current rank. Every reduction accepts a `DataArray` or a
 `Dataset` interchangeably — a `Dataset` is reduced variable by variable,
 leaving non-distributed variables and static dimensions untouched.
 
-`mpi.xarray.open_dataset`/`redistribute`/`isel`/`sel` produce the
-distributed objects these reductions consume; see
+`mpi.xarray.open_dataset`/`redistribute`/`distribute`/`isel`/`sel` produce
+the distributed objects these reductions consume; see
 [`core/xr_mpi.py`](core/xr_mpi.py) for their full signatures.
 
 ### Native `.mean()`/`.sum()`/etc. on a distributed object are node-local
@@ -418,6 +419,104 @@ same order, or the call blocks forever waiting for ranks that never arrive.
 This is why the example above passes real data only on rank 0 and
 `empty_dataset()` elsewhere — every rank still calls the writer at the same
 point, even though only one of them supplies data.
+
+#### Rank-0-source vs. already-distributed: which one at scale
+
+`to_netcdf(..., parallel=True)` takes either kind of input, and picks the
+path by inspecting the object, not by an argument you set:
+
+| Input | Path | Rank 0's peak memory |
+| --- | --- | --- |
+| A plain `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere (the example above) | Legacy scatter | The **entire** output — every variable, in full, before it is scattered out |
+| An object carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`) | Distributed | Only that rank's own slice — no gather, no scatter |
+
+The rank-0-source path is convenient — build the data however is natural,
+worry about MPI only at the write call — but that convenience has a real
+cost: rank 0 must hold every variable's complete array simultaneously right
+before the scatter, an amount that scales with total output size, not with
+rank count. Adding ranks does not shrink it. At small `TIME_STEPS` or coarse
+resolution this is unremarkable; at large `TIME_STEPS` or fine resolution it
+is the first thing to check before assuming a slow or failing write is a bug
+elsewhere. `to_netcdf` logs this cost on rank 0 as it happens (search a run's
+log for `"rank-0 source"`), specifically so this is visible before it
+becomes an out-of-memory crash rather than after:
+
+```text
+xgeo.to_netcdf (rank-0 source): rank 0 holds 42.3GiB before scatter, ~5.3GiB/rank after.
+```
+
+If that number is uncomfortable, avoid ever holding the full array anywhere
+by building it in already-distributed form instead. This does **not** mean
+shipping pieces of a rank-0 array out to other ranks over MPI — it means
+every rank builds the *same lazy recipe* independently, and only ever
+materializes its own slice of it.
+
+**Already on disk.** `mpi.xarray.open_dataset(path, partition_dim=...)` opens
+the file on every rank and each rank reads only its own slice from disk —
+see [`mpi.xarray`: named-dimension distributed reductions](#mpixarray-named-dimension-distributed-reductions)
+and the worked example in [Parallel NetCDF output](#parallel-netcdf-4-output)
+above.
+
+**Computed, not read from a file.** If the 200 GiB comes from a computation
+rather than a direct file read, run that computation as a **dask-lazy graph,
+built identically on every rank** — building a dask graph is cheap metadata
+work regardless of the size it describes, since no data moves until
+something calls `.load()`/`.compute()` — and hand the *lazy* result to
+`mpi.xarray.redistribute`, not `to_netcdf`, directly:
+
+```python
+import xarray as xr
+from climtools import mpi
+
+# Every rank builds this identically. Nothing is computed yet: dask.array
+# operations (indexing, arithmetic, ufuncs, .map_blocks, xr.apply_ufunc with
+# dask="parallelized") all stay lazy until something forces evaluation.
+lazy = xr.open_mfdataset(paths, chunks={"time": 100}, parallel=True)
+transformed = some_expensive_transform(lazy)  # still lazy: no data read yet
+
+# redistribute() is itself pure metadata/slicing -- it never calls .load()
+# or .compute(). Only this rank's own bounds along "time" are kept.
+local = mpi.xarray.redistribute(transformed, dim="time")
+
+# .load() is the only point anything is computed, and it computes only
+# this rank's own slice -- not the full 200 GiB, on any rank, ever.
+local = local.load()
+
+local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
+```
+
+This works because `redistribute` assumes its input is already the *same*
+object on every rank (see [`core/xr_mpi.py`](core/xr_mpi.py)) and slices it
+locally with no MPI communication for the data itself — which is exactly a
+lazy scatter when the input is dask-backed, and needs no special support to
+be one.
+
+**Data that can only be produced by one rank.** `redistribute` needs every
+rank to be able to rebuild `value` identically — a resource only one rank
+has credentials for, or a computation depending on rank-local state, breaks
+that assumption. `mpi.xarray.distribute` is for exactly that case: `value`
+is real on one rank (`root`, default rank 0) and `None` everywhere else.
+`root` slices it — lazily, if it is dask-backed, so slicing never triggers
+computation — and sends each other rank only its own slice by direct
+point-to-point message; `root` never holds more than one slice's worth of
+pickled graph in flight, and every rank materializes only what it was sent:
+
+```python
+if mpi.comm.rank == 0:
+    full = build_dataset_only_possible_on_rank_0()  # dask-backed
+else:
+    full = None
+
+local = mpi.xarray.distribute(full, dim="time")  # still lazy
+local = local.load()  # only now, and only this rank's own slice
+local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
+```
+
+If `full` is already a plain in-memory (non-dask) object rather than
+dask-backed, `distribute` still avoids `to_netcdf`'s own scatter-path
+redundant copies, but cannot undo the fact that the complete array already
+had to exist in `root`'s memory before the call — only a dask-backed source
+avoids ever holding more than one rank's share anywhere.
 
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
 immediately after the collective `nc.close()` — inside
