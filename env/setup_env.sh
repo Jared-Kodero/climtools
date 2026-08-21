@@ -13,6 +13,7 @@
 #
 # Usage:
 #   env/setup_env.sh [env_name]
+#   env/setup_env.sh --help
 #
 # With no active conda environment or virtualenv, creates and activates a
 # conda environment named env_name (default "climtools") from
@@ -23,6 +24,17 @@
 # (re)built.
 
 set -eo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+# Versions built by the source-build fallback (step 2b below). Bump these
+# together; netCDF-C's parallel support is only tested against the HDF5
+# minor series it was released alongside.
+readonly HDF5_SOURCE_VERSION="1.14.5"
+readonly NETCDF_C_SOURCE_VERSION="4.9.3"
 
 log() { printf '\n--- %s ---\n' "$*" >&2; }
 die() {
@@ -39,6 +51,22 @@ env_name=""
 is_conda=0
 
 python_bin() { command -v python3 || command -v python; }
+
+# True if the active Python's netCDF4/mpi4py are both importable and
+# netCDF4 reports parallel4 support. Used both right after building the
+# stack and again after any later dependency re-solve that might have
+# silently replaced one of the two with a plain (serial) build.
+parallel_netcdf_confirmed() {
+    "$(python_bin)" -c '
+import sys
+try:
+    import mpi4py.MPI  # noqa: F401
+    import netCDF4
+except ImportError:
+    sys.exit(1)
+sys.exit(0 if netCDF4.__has_parallel4_support__ else 1)
+' 2>/dev/null
+}
 
 # ---------------------------------------------------------------------------
 # 1. Environment: use whatever is active, or create+activate a conda one
@@ -103,17 +131,8 @@ find_module_stack() {
     command -v module >/dev/null 2>&1 || return 1
 
     local -a mpi_candidates=() netcdf_candidates=()
-    local discovered candidate
-
-    discovered="$(module_names hpcx-mpi || true)"
-    while IFS= read -r candidate; do
-        [[ -n "${candidate}" ]] && mpi_candidates+=("${candidate}")
-    done <<< "${discovered}"
-
-    discovered="$(module_names netcdf-mpi || true)"
-    while IFS= read -r candidate; do
-        [[ -n "${candidate}" ]] && netcdf_candidates+=("${candidate}")
-    done <<< "${discovered}"
+    mapfile -t mpi_candidates < <(module_names hpcx-mpi || true)
+    mapfile -t netcdf_candidates < <(module_names netcdf-mpi || true)
 
     ((${#mpi_candidates[@]} > 0)) || return 1
     ((${#netcdf_candidates[@]} > 0)) || return 1
@@ -146,7 +165,9 @@ find_module_stack() {
 }
 
 build_source_stack() {
-    local prefix="$1" hdf5_version="1.14.5" netcdf_version="4.9.3"
+    local prefix="$1"
+    local hdf5_version="${HDF5_SOURCE_VERSION}"
+    local netcdf_version="${NETCDF_C_SOURCE_VERSION}"
 
     command -v mpicc >/dev/null 2>&1 \
         || die "No MPI compiler (mpicc) found. Load or install an MPI implementation first."
@@ -270,13 +291,11 @@ build_parallel_io_stack() {
             --no-deps --force-reinstall .
     )
 
-    "${py}" - << 'PYEOF'
-import mpi4py.MPI  # noqa: F401
-import netCDF4
-
-assert netCDF4.__has_parallel4_support__, "netCDF4 built without parallel4 support"
-print(f"netCDF4 {netCDF4.__version__}: parallel4 support confirmed")
-PYEOF
+    if parallel_netcdf_confirmed; then
+        "${py}" -c 'import netCDF4; print(f"netCDF4 {netCDF4.__version__}: parallel4 support confirmed")'
+    else
+        die "netCDF4 built without parallel4 support"
+    fi
 }
 
 build_parallel_io_stack
@@ -318,6 +337,9 @@ elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
         fi
         {
             printf '%s\n' "${marker_begin}"
+            # shellcheck disable=SC2016  # deliberately literal: written into
+            # the activate script to be expanded when *that* script is later
+            # sourced, not expanded here at setup time.
             printf 'export LD_LIBRARY_PATH=%q"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' \
                 "${LD_LIBRARY_PATH:-}"
             printf '%s\n' "${marker_end}"
@@ -338,12 +360,7 @@ if [[ "${is_conda}" == "1" && -n "${env_name}" ]]; then
     # netCDF4 as a transitive dependency of something else, even though
     # environment.yml itself never names them. Confirm the parallel build
     # survived, and rebuild it once if not.
-    if ! "$(python_bin)" -c '
-import mpi4py.MPI  # noqa: F401
-import netCDF4
-import sys
-sys.exit(0 if netCDF4.__has_parallel4_support__ else 1)
-'; then
+    if ! parallel_netcdf_confirmed; then
         log "environment.yml solve replaced the parallel I/O build; restoring it"
         build_parallel_io_stack
     fi

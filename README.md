@@ -1,78 +1,150 @@
 # climtools
 
-Utilities for climate data analysis and plotting.
+Utilities for climate data analysis and plotting: xarray-based geospatial
+operations, Cartopy map plotting, an MPI runtime for distributed reductions,
+and MPI-collective parallel NetCDF-4 output.
 
-climtools is a small collection of utilities for exploratory and reproducible
-climate-data analysis. It wraps common operations on xarray objects, integrates
-with CDO where available, provides Cartopy map plotting, and includes colormap,
-statistics, NetCDF-writing and theming helpers.
+- Repository: https://github.com/Jared-Kodero/climtools
+- Requires Python ≥ 3.12
 
-## Layout
+## Contents
 
-| Namespace         | Purpose                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `climtools.plot`  | Cartopy map plotting. Entry point `plot.geo`.                             |
-| `climtools.xgeo`  | Geospatial operations, NetCDF output: regridding, masking, transects, local solar time. |
-| `climtools.calc`  | Trends, correlations and difference-of-means testing.                     |
-| `climtools.cmaps` | Colormaps spanning local IPCC tables, matplotlib and cmocean.             |
-| `climtools.cdo`   | Thin xarray-aware wrapper over the CDO command-line tool.                 |
-| `climtools.mpi`   | MPI runtime: `mpi.comm` for the raw communicator, `mpi.reduce`/`mpi.xarray` for collective reductions and distributed-aware arithmetic, backing parallel NetCDF-4 output. |
+- [Package layout](#package-layout)
+- [Installation](#installation)
+  - [1. Plain install (plotting, `calc`, `cdo`, single-rank `mpi`)](#1-plain-install)
+  - [2. MPI-collective parallel NetCDF-4 output](#2-mpi-collective-parallel-netcdf-4-output)
+- [Quick start: plotting](#quick-start-plotting)
+- [The MPI runtime](#the-mpi-runtime)
+  - [`mpi.reduce` vs `mpi.xarray`: which one do I want?](#mpireduce-vs-mpixarray-which-one-do-i-want)
+  - [`mpi.reduce`: element-wise reductions](#mpireduce-element-wise-reductions)
+  - [`mpi.xarray`: named-dimension distributed reductions](#mpixarray-named-dimension-distributed-reductions)
+  - [Native `.mean()`/`.sum()`/etc. on a distributed object are node-local](#native-meansumetc-on-a-distributed-object-are-node-local)
+  - [Arithmetic on distributed objects](#arithmetic-on-distributed-objects)
+  - [Parallel NetCDF-4 output](#parallel-netcdf-4-output)
+  - [Running under MPI](#running-under-mpi)
+- [Testing](#testing)
+- [License](#license)
+
+## Package layout
+
+| Namespace | Purpose | Source |
+| --- | --- | --- |
+| `climtools.plot` | Cartopy map plotting. Entry point `plot.geo`. | [`viz/plotting.py`](viz/plotting.py) |
+| `climtools.xgeo` | Geospatial operations and NetCDF output: regridding, masking, transects, local solar time, `to_netcdf`. | [`core/xgeo.py`](core/xgeo.py), [`lib_netcdf/`](lib_netcdf/) |
+| `climtools.calc` | Trends, correlations, difference-of-means testing. | [`core/calc_stats.py`](core/calc_stats.py) |
+| `climtools.cmaps` | Colormaps: local IPCC tables, matplotlib, cmocean. | [`viz/cmaps.py`](viz/cmaps.py) |
+| `climtools.cdo` | Thin xarray-aware wrapper over the CDO command-line tool. | [`cdo/pycdo.py`](cdo/pycdo.py) |
+| `climtools.mpi` | MPI runtime: `mpi.comm`, `mpi.reduce`, `mpi.xarray`, `mpi.scatterv`, the `@mpi` decorator, `mpi.watchdog`. | [`core/lib_mpi.py`](core/lib_mpi.py), [`core/xr_mpi.py`](core/xr_mpi.py) |
+
+The `.xgeo` accessor is registered on `xarray.DataArray`/`xarray.Dataset` as
+soon as `climtools` is imported (`import climtools` is enough; you do not
+need `from climtools import xgeo` for the accessor form to work) — see
+[`accessors/xarray_accessors.py`](accessors/xarray_accessors.py).
 
 ## Installation
 
-This is a local developer package: clone the repository and import it from
-the parent of the cloned directory, or install it into an environment.
+### 1. Plain install
+
+This covers `climtools.plot`, `climtools.calc`, `climtools.cdo`,
+`climtools.cmaps`, and single-rank use of `climtools.mpi` (`mpi.reduce`
+degrades to a no-op over one rank; `to_netcdf(..., allow_serial=True)`
+writes without MPI collectives). It does **not** cover MPI-collective
+parallel NetCDF-4 output (`to_netcdf(..., parallel=True)` under more than
+one rank) — that needs step 2 below.
+
+```bash
+pip install climtools
+```
+
+or, from a clone, editable for development:
 
 ```bash
 git clone https://github.com/Jared-Kodero/climtools.git
+cd climtools
+pip install -e .
 ```
 
-```bash
-# pip, into an already-activated environment
-pip install ./climtools
+Regridding (`xgeo.remap`) imports `xesmf` only on first call, so the rest of
+the package works without it:
 
-# or conda: creates/uses the active environment, builds the parallel
-# MPI/NetCDF stack, applies the rest of climtools's dependencies, and
-# installs climtools itself, in one step
+```bash
+pip install "climtools[regrid]"
+```
+
+`climtools.cdo` and `xgeo.plot.animate` shell out to the `cdo`/`nco` and
+`ffmpeg` command-line tools respectively. These are not Python packages and
+must be on `PATH` separately — see
+[`env/environment.yml`](env/environment.yml), which installs them from
+conda-forge alongside everything else in this step.
+
+### 2. MPI-collective parallel NetCDF-4 output
+
+`to_netcdf(..., parallel=True)` needs `netCDF4` and `mpi4py` built against a
+**parallel-enabled** MPI/HDF5/NetCDF-C stack. The plain wheels from PyPI (and
+most conda-forge builds) are serial-only: importing them works fine, but
+`to_netcdf(..., parallel=True)` raises `NetCDFWriteError` the first time it
+runs under more than one rank. climtools checks for this and prints a
+one-time hint pointing back here as soon as `climtools.mpi` is used under a
+real multi-rank launch — see `_warn_if_parallel_netcdf_missing` in
+[`core/lib_mpi.py`](core/lib_mpi.py).
+
+Run the setup script from a clone of this repository:
+
+```bash
+git clone https://github.com/Jared-Kodero/climtools.git
+cd climtools
 env/setup_env.sh [env_name]
 ```
 
-`pyproject.toml` lists every third-party package climtools's own source
-imports; nothing else is required. Regridding (`climtools.xgeo.remap`)
-imports `xesmf` only on first call, so the rest of the package works without
-it; install it with the `regrid` extra (`pip install "./climtools[regrid]"`)
-or from `environment.yml`. `climtools.cdo` and
-`climtools.xgeo.plot.animate` shell out to the `cdo`/`nco` and `ffmpeg`
-command-line tools respectively; these are not Python packages and must be
-on `PATH` separately (`environment.yml` installs them from conda-forge).
+Step by step, this script:
 
-Parallel NetCDF-4 output
-(`climtools.xgeo.to_netcdf(..., parallel=True)`) needs `netCDF4` and
-`mpi4py` built against a parallel-enabled MPI/HDF5/NetCDF-C stack.
-`env/setup_env.sh` builds that stack automatically, without ever using a
-distro package manager (apt/yum builds are not available on HPC login or
-compute nodes, which is what this stack is for): it first tries `module
-load`-ing a matching MPI and `netcdf-mpi` module pair, and falls back to
-compiling HDF5 and netCDF-C from source against the active MPI compiler.
-Building `netCDF4`-python itself against certain netcdf-c 4.9.x builds (for
-example Ubuntu's packaged netcdf-c 4.9.0) hits three known upstream
-packaging issues — a redeclared bzip2/blosc filter shim, a
-`nc_rc_get`/`nc_rc_set` version guard that assumes those symbols exist
-starting at 4.9.0 when they were actually added later, and two
-`nc_complex` functions (`pfnc_inq_varndims`, `pfnc_inq_vardimid`) declared
-`inline` with no matching out-of-line definition anywhere in that vendored
-library, which can leave an unresolved symbol at link time depending on
-whether the compiler inlines every call site. `setup_env.sh` patches all
-three defensively (a no-op against `netCDF4`/`nc_complex` versions that do
-not have the corresponding issue) before building. Everything else in
-climtools works with the ordinary serial `netCDF4` and `mpi4py` wheels from
-PyPI or conda-forge.
+1. Uses whatever conda environment or virtualenv is already active. With
+   none active, it creates and activates a conda environment (default name
+   `climtools`, or `env_name` if you passed one) from
+   [`env/environment.boot.yml`](env/environment.boot.yml), installing
+   Miniconda first if `conda` itself is missing.
+2. Locates a parallel-enabled MPI/HDF5/NetCDF-C stack, in order:
+   - **HPC environment modules** — `module load`s a matching MPI +
+     `netcdf-mpi` module pair, if the `module` command exists (this is the
+     fast path on most clusters, since the site has usually already built
+     one).
+   - **Source build** — otherwise compiles HDF5 and NetCDF-C from source
+     against the active MPI compiler.
 
-## Usage
+   Neither path uses a distro package manager: `apt`/`yum` are unavailable on
+   HPC login and compute nodes, which is what this stack is for.
+3. Builds `mpi4py` and `netCDF4` from source against that stack (patching
+   three known netCDF4-python/netcdf-c packaging mismatches along the way,
+   documented in [`env/setup_env.sh`](env/setup_env.sh)), and confirms
+   `netCDF4.__has_parallel4_support__` is `True` before continuing.
+4. Applies the rest of climtools's dependencies from
+   [`env/environment.yml`](env/environment.yml) (conda environments only),
+   then re-confirms the parallel build survived the solve — a full re-solve
+   can occasionally pull in a replacement `mpi4py`/`netCDF4` as someone
+   else's transitive dependency, so this rebuilds once if that happened.
+5. Installs `climtools` itself, editable, into whichever environment is
+   active.
 
-Two access patterns are supported and are equivalent. The `.xgeo` accessor is
-registered on `xarray.DataArray` and `xarray.Dataset` when the package is
-imported.
+Run it again any time to re-check or repair the parallel stack — every step
+is idempotent.
+
+**Required on Lustre/GPFS**: HDF5 takes POSIX advisory locks by default, and
+many ranks opening the same file concurrently — or one rank reopening a file
+another rank just closed — can block on those locks indefinitely on a
+parallel filesystem, which presents as a hang with no traceback on any rank.
+`lib_netcdf/parallel.py` sets `HDF5_USE_FILE_LOCKING=FALSE` as a
+process-local default the moment it is imported, so this is handled
+automatically for anything going through `xgeo.to_netcdf`. If your own code
+opens NetCDF files directly (not through `xgeo.to_netcdf`), set it yourself,
+before those opens happen:
+
+```bash
+export HDF5_USE_FILE_LOCKING=FALSE
+```
+
+## Quick start: plotting
+
+Two access patterns are supported and are equivalent:
 
 ```python
 from climtools import xgeo as xg
@@ -81,12 +153,12 @@ from climtools import cmaps
 # Free-function form
 plot = xg.plot.geo(t2m, method="contourf", cmap=cmaps.temp_div(), gridlines=True)
 
-# Accessor form
+# Accessor form (climtools must have been imported at least once)
 plot = t2m.xgeo.plot.geo(method="contourf", cmap=cmaps.temp_div(), gridlines=True)
 ```
 
 `plot.geo` returns a `GeoPlot`. Overlays are added through its chainable
-`add` namespace, each returning the same `GeoPlot`:
+`add` namespace, each call returning the same `GeoPlot` so calls chain:
 
 ```python
 (
@@ -100,12 +172,12 @@ plot = t2m.xgeo.plot.geo(method="contourf", cmap=cmaps.temp_div(), gridlines=Tru
 ```
 
 `add` provides `default`, `contour`, `contourf`, `pcolormesh`, `imshow`,
-`scatter`, `quiver`, `significance` and `colorbar`. Every overlay is applied to
-each populated facet of a faceted map, with the overlay field sliced to match
-each facet, so an overlaid field must carry the same facet dimension (`col` or
-`row`) as the base field. Gridlines and coastlines, borders, states, ocean,
-land, lakes and rivers are map-layout options set as keyword arguments on
-`plot.geo`, not `add` methods.
+`scatter`, `quiver`, `significance`, and `colorbar`. Every overlay applies to
+each populated facet of a faceted map, sliced to match that facet, so an
+overlaid field must carry the same facet dimension (`col`/`row`) as the base
+field. Gridlines, coastlines, borders, states, ocean, land, lakes, and
+rivers are map-layout keyword arguments on `plot.geo` itself, not `add`
+methods.
 
 Chaining geospatial operations reads in execution order:
 
@@ -119,137 +191,187 @@ Chaining geospatial operations reads in execution order:
 )
 ```
 
-Faceting a three-dimensional array requires `col` or `row`:
+Faceting a three-dimensional array needs `col` or `row`:
 
 ```python
 xg.plot.geo(monthly, col="month", col_wrap=4, method="contourf")
 ```
 
-An animation over a dimension is encoded as MP4 (requires `ffmpeg`):
+Encode an animation over a dimension as MP4 (requires `ffmpeg` on `PATH`):
 
 ```python
 t2m.xgeo.plot.animate("time", method="contourf", vmin=-30, vmax=30, fps=6)
 ```
 
-## Examples
+All input coordinates are interpreted in `PlateCarree`. The display
+projection is chosen with `projection=`, or inferred from the data extent.
+See [`viz/plotting.py`](viz/plotting.py) for the full `GeoPlot` API and
+[`viz/cmaps.py`](viz/cmaps.py) for the colormap catalog.
 
-`examples/` contains two Python scripts, run directly (`python
-examples/<script>.py`) or under an MPI launcher; see
-[Running under MPI](#running-under-mpi) for why the launcher line should
-include `-m mpi4py`:
+## The MPI runtime
 
-| File        | Demonstrates                                                                 |
-| ----------- | ---------------------------------------------------------------------------- |
-| `test.py`   | The correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (including `open_dataset`/`redistribute`/`isel`/`sel`, `apply`/`align`/`evaluate`, and the native-reduction distribution guard), `mpi.scatterv` and the NetCDF writers. Self-contained: rank 0 builds a deterministic mock NetCDF file, so no external input is required. `--time-steps` and `--resolution` set the size of that file. |
-| `test1.py`  | Parallel NetCDF write benchmark across three source placements: rank-0-only (scattered), distributed from the start, and read back through a distributed open. Sizes are set with `--time-steps`, `--lat` and `--lon`. Skips the collective write cleanly when netCDF4 lacks parallel4 support. |
-| `test.sh`   | Slurm batch script (`sbatch examples/test.sh`) running `test.py` on eight ranks, with the environment settings the suite requires. |
+`climtools.mpi` is a single object (an `MPIRuntime`, defined in
+[`core/lib_mpi.py`](core/lib_mpi.py)) exposing:
 
-Every timed check in `test.py` (one that actually measured a serial baseline
-against the distributed implementation, as opposed to a pure correctness
-contract) is tagged in the summary with a plain-language verdict —
-`MPI (faster)`, `Xarray (faster)`, or `tie` (within 5% either way) — so the
-final table answers "was this actually worth distributing" at a glance
-without reading raw timings. Small, in-memory, single-node checks routinely
-come back `Xarray (faster)`: real speedups from `mpi.reduce`/`mpi.xarray`
-show up once the ranks are on separate cores with enough data per rank to
-outweigh collective-call overhead, which is also this repository's
-[Running the suite on a cluster](#running-the-suite-on-a-cluster) case.
+| Attribute | What it is | Source |
+| --- | --- | --- |
+| `mpi.comm` | The native `mpi4py.MPI.Intracomm` (`MPI.COMM_WORLD` by default) | [`core/lib_mpi.py`](core/lib_mpi.py) |
+| `mpi.reduce` | Element-wise collective reductions over whole objects | [`core/lib_mpi.py`](core/lib_mpi.py) (`ReduceAccessor`) |
+| `mpi.xarray` | Distributed reductions/indexing/arithmetic along a named dimension | [`core/xr_mpi.py`](core/xr_mpi.py) (`XarrayMPI`) |
+| `mpi.scatterv` | Scatter leading-axis slabs of a NumPy array | [`core/lib_mpi.py`](core/lib_mpi.py) |
+| `@mpi` | Decorator: run a function on rank 0 (default), every rank, or broadcast the result | [`core/lib_mpi.py`](core/lib_mpi.py) |
+| `mpi.watchdog` | Context manager: dump every rank's stack and abort after a period with no progress | [`core/lib_mpi.py`](core/lib_mpi.py) |
+| `mpi.MPIError` | climtools's own exception for synchronized MPI failures | [`core/lib_mpi.py`](core/lib_mpi.py) |
 
-### Data placement covered by the suite
+`mpi.comm` is the real `mpi4py.MPI.Intracomm`, so anything not covered by
+the accessors above — point-to-point `Send`/`Recv`, `Bcast`,
+`Scatterv`/`Gatherv`, non-blocking collectives — is reached directly as
+`mpi.comm.<method>` with full mpi4py signatures and IDE completion. See the
+[mpi4py documentation](https://mpi4py.readthedocs.io/en/stable/) for the
+complete API.
 
-Distributed reductions behave differently depending on where the data starts
-and how it is partitioned, so the suite covers each placement explicitly:
+### `mpi.reduce` vs `mpi.xarray`: which one do I want?
 
-- **Replicated**: every rank holds the whole object, `mpi.xarray.redistribute`
-  partitions it.
-- **Rank-0-only**: one rank reads or generates the field and the others hold
-  nothing. Both routes out of that state are checked, broadcasting followed by
-  partitioning, and `mpi.scatterv` of leading-axis slabs.
-- **Distributed open**: `mpi.xarray.open_dataset` partitions lazily on
-  effective chunk bounds, so the rank-local partial is materialized inside the
-  reduction.
-- **Empty partitions**: whenever the partitioned dimension is shorter than the
-  communicator, trailing ranks own no elements. These ranks build their
-  partials through a different code path, which makes this the configuration
-  most likely to expose an asymmetric collective sequence. Lengths below, at
-  and above the rank count are all exercised, in both result placements.
+Both combine data across ranks with one MPI collective. The difference is
+**where the split lives**:
 
-### Shared configuration must be rank-invariant
+| | `mpi.reduce` | `mpi.xarray` |
+| --- | --- | --- |
+| Each rank holds | A complete partial result (its own whole array/scalar/Dataset) | A slice of one shared dimension of a larger object |
+| Combines by | Adding/comparing whole partials together, element-wise | Reducing along the named, distributed dimension |
+| Typical source | Independent, embarrassingly-parallel work — one case per rank, then combine | `mpi.xarray.open_dataset`/`redistribute`, which partition a dimension across ranks |
+| Example | Each rank sums a different subset of storm events into the same `(lat, lon)` grid; `mpi.reduce.sum` adds the 8 grids together | Each rank holds a different slice of `time`; `mpi.xarray.mean(dim="time")` reduces across ranks to one answer |
 
-Any value that sizes a collective (slice bounds, buffer shapes, partition
-lengths) has to be derived identically on every rank. Deriving one inside a
-rank-0-only branch leaves the other ranks holding their module defaults, and
-the two failure modes that follow are both hard to read: reductions whose
-buffers still happen to match return silently wrong answers, and reductions
-whose buffers do not match deadlock, with rank 0 blocked in `Allreduce` while
-every other rank waits in the next all-gather. `test.py` therefore reads its
-shape constants back from the generated file on every rank and asserts they
-agree, and `mpi.reduce` compares buffer signatures before posting.
+```python
+# mpi.reduce: every rank already has a complete (lat, lon) composite over
+# its own share of events; combine the 8 complete grids into one.
+local_composite = build_local_composite()          # shape (lat, lon) on every rank
+composite = mpi.reduce.sum(local_composite)         # same (lat, lon) result on every rank
 
-Set `CLIMTOOLS_CHECK_COLLECTIVES=0` to skip the buffer comparison in
-latency-bound production runs. It is on by default, because a mismatched
-buffer is undefined behaviour and costs far more to diagnose than the check
-costs to post.
-
-### Collective symmetry
-
-`test_collective_sequence_symmetry` records the sequence of collectives each
-rank posts during every reduction and compares those sequences across ranks.
-Ranks that post different collectives can appear to succeed under one MPI
-implementation and deadlock under another, because whether a mismatched buffer
-collective completes depends on the algorithm the library selects. Comparing
-the sequences directly makes that class of defect fail deterministically in
-the suite rather than in a production run.
-
-The same guarantee is enforced at runtime. Every reduction buffer collective
-carries a signature (operation, placement, root, dtype, shape) inside the
-all-gather that already synchronizes rank-local errors, so a divergence raises
-`MPIError` naming the disagreeing ranks instead of blocking. The check costs no
-additional communication.
-
-`mpi.reduce.sum`/`.prod`/`.min`/`.max`/`.any`/`.all` on a `Dataset` batch this
-signature check across every variable into a single all-gather rather than
-opening one per variable (the buffer collectives that actually move data
-still run once per variable, since their shapes differ; only the redundant
-per-variable *verification* step is batched). For a Dataset with *V*
-variables this drops the collective count for the check itself from *V*
-separate all-gathers to one, halving the total collective count of the
-reduction (`2V` → `V + 1`) — a latency-bound win that matters for climate
-Datasets, which commonly hold dozens of variables.
-
-### Running the suite on a cluster
-
-Two environment settings matter and are set in `test.sh`:
-
-```bash
-# Required. HDF5 advisory locks block rather than fail on a parallel
-# filesystem, which can stall a subset of ranks inside open_dataset.
-export HDF5_USE_FILE_LOCKING=FALSE
-
-# Diagnostic only, off by default. Disables HCOLL/UCC collective offload.
-export CLIMTOOLS_NO_COLL_OFFLOAD=1
+# mpi.xarray: every rank holds a different slice of the "time" dimension of
+# the *same* field; reduce across that shared dimension.
+local_slice = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
+time_mean = mpi.xarray.mean(local_slice, dim="time")  # same result on every rank
 ```
 
-Collective offload is left at the site default. A correct program must not
-depend on which collective algorithm the MPI library selects, and the suite
-verifies that every rank posts an identical collective sequence, so offload is
-not a correctness risk; disabling it costs performance on multi-node
-reductions. Use `CLIMTOOLS_NO_COLL_OFFLOAD=1` only when bisecting a suspected
-hang. If disabling offload changes the outcome, that is a collective-symmetry
-bug to investigate, not a setting to keep.
+If you are not sure which applies: does every rank already have its own
+*complete* answer that just needs combining (`mpi.reduce`), or does every
+rank have a different *piece* of one shared dimension that needs reducing
+(`mpi.xarray`)?
 
-Launch with `python -m mpi4py`, never a bare `python`, so an exception on a
-subset of ranks aborts the job instead of leaving it blocked in
-`MPI_Finalize`. Reductions are guarded by `mpi.watchdog`, which dumps every
-rank's stack after a period without progress and then aborts; the guard covers
-the error-synchronization step as well as the work itself, so a rank that runs
-ahead of the others still reports where it is.
+### `mpi.reduce`: element-wise reductions
 
-## Parallel output
+Works on scalars, NumPy arrays, and xarray DataArrays/Datasets alike; dims,
+coords, and attrs are kept.
 
-MPI ranks can each hold a partial result and combine them into one field, and
-a complete Dataset can be written to one shared NetCDF-4 file with every rank
-contributing its slab through a single MPI-collective write.
+```python
+composite = mpi.reduce.sum(local)                        # every rank gets the result
+composite = mpi.reduce.sum(local, mode="root", root=0)    # only rank 0 gets it; None elsewhere
+```
+
+`mpi.reduce` also exposes `prod`, `min`, `max`, `any`, and `all`, all with
+the same `sum(value, *, mode="all", root=0)` signature. `mode="all"`
+(default) gives every rank the result; `mode="root"` gives it only to
+`root`.
+
+### `mpi.xarray`: named-dimension distributed reductions
+
+`mpi.xarray` reduces a `DataArray`/`Dataset` along a dimension that is
+itself split across ranks:
+
+```python
+local_mean = mpi.xarray.mean(local_events, dim="event")  # same result on every rank
+```
+
+`local_mean` equals plain xarray's `assembled.mean(dim="event")` on the
+fully assembled array — `mpi.xarray` gets there with one collective per
+reduction instead of requiring the full array in one place first. It
+exposes `sum`, `prod`, `min`, `max`, `mean`, `any`, and `all`, with
+`skipna`/`min_count` applied consistently across the whole distributed
+dimension (not per rank): `min_count` only drops a value once the count is
+summed across every rank holding a share of `dim`, and `skipna=False`
+propagates a NaN present on *any* rank to the combined result, not just
+NaNs local to the current rank. Every reduction accepts a `DataArray` or a
+`Dataset` interchangeably — a `Dataset` is reduced variable by variable,
+leaving non-distributed variables and static dimensions untouched.
+
+`mpi.xarray.open_dataset`/`redistribute`/`isel`/`sel` produce the
+distributed objects these reductions consume; see
+[`core/xr_mpi.py`](core/xr_mpi.py) for their full signatures.
+
+### Native `.mean()`/`.sum()`/etc. on a distributed object are node-local
+
+This is the single most common mistake with a distributed object, so it is
+worth stating plainly:
+
+> **Calling a distributed object's own `.mean()`/`.sum()`/`.max()`/etc.
+> directly — instead of `mpi.xarray.mean`/`mpi.xarray.sum`/... — does not
+> fail and does not raise. It silently returns *this rank's own partial
+> reduction* over its own local slice of the distributed dimension, not the
+> reduction over the whole (conceptual) array.**
+
+```python
+distributed = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
+
+distributed.mean()          # WRONG: this rank's mean over its own slice only
+mpi.xarray.mean(distributed, dim="time")  # RIGHT: combined across every rank
+```
+
+climtools does not patch or intercept native xarray reductions to guard
+against this — a distributed object is an ordinary `xarray.Dataset`/
+`DataArray` in every other respect, and leaving `.mean()` alone keeps it
+that way. The rule is simply: once an object came from
+`mpi.xarray.open_dataset`/`redistribute` (check `"mpi_meta" in obj.attrs` if
+you need to test this programmatically), reduce it with `mpi.xarray`, not
+its own methods, whenever the reduction touches the distributed dimension.
+Reducing a dimension that is *not* the distributed one (for example
+`distributed.mean(dim="lon")` when the distributed dimension is `"time"`) is
+a legitimate, embarrassingly-parallel per-rank operation and needs no
+`mpi.xarray` call at all.
+
+### Arithmetic on distributed objects
+
+`mpi.xarray.apply(left, op, right)` combines two operands element-wise with
+no MPI communication, after checking that every rank already holds matching,
+aligned local slices: either neither operand is distributed, both are
+distributed identically (same dimension, same global size, same per-rank
+bounds), or one is distributed and the other is replicated. Anything else
+raises `ValueError` rather than silently combining misaligned data.
+
+```python
+anomaly = mpi.xarray.apply(t2m_distributed, "-", climatology_distributed)
+```
+
+`op` accepts a string token (`"+"`, `"-"`, `"*"`, `"/"`, `"//"`, `"%"`,
+`"**"`, `"=="`, `"!="`, `"<"`, `"<="`, `">"`, `">="`, `"&"`, `"|"`, `"^"`) or
+a two-argument callable such as `operator.add`.
+
+`mpi.xarray.align(left, right, dim=None)` is the counterpart to
+`xarray.align`, but for rank ownership rather than coordinate labels: it
+returns `(left, right)` repartitioned so `apply` is guaranteed to accept
+them.
+
+```python
+climatology, t2m = mpi.xarray.align(climatology_full, t2m_distributed)
+anomaly = mpi.xarray.apply(t2m, "-", climatology)
+```
+
+`mpi.xarray.evaluate(expression, **variables)` parses `expression` with the
+standard-library `ast` module and evaluates it through `apply`, so ordinary
+operator precedence applies:
+
+```python
+result = mpi.xarray.evaluate("(a + b) * c - d / e", a=ds1, b=ds2, c=ds3, d=ds4, e=ds5)
+```
+
+See [`core/xr_mpi.py`](core/xr_mpi.py) for the full `apply`/`align`/
+`evaluate` API, including the exact no-data-movement cases `align` resolves
+locally.
+
+### Parallel NetCDF-4 output
+
+A complete Dataset can be written to one shared NetCDF-4 file with every
+rank contributing its slab through a single MPI-collective write:
 
 ```python
 import climtools
@@ -267,19 +389,12 @@ def build_local_composite():
 
 def main():
     local = build_local_composite()
-
-    # Element-wise collective reduction. Works on scalars, NumPy arrays, and
-    # xarray DataArrays/Datasets alike; dims, coords, and attrs are kept.
     composite = mpi.reduce.sum(local)  # same result on every rank
-    # composite = mpi.reduce.sum(local, mode="root", root=0)  # result on rank 0 only, None elsewhere
 
     # Rank 0 must hold the complete Dataset or DataArray; every other rank
-    # binds empty_dataset() so `.xgeo` still resolves on a real xr.Dataset
-    # (an accessor cannot bind to None). The writer creates the file schema
-    # from rank 0's object, then scatters it back out and has every rank
-    # write its own slab collectively, so serial NetCDF I/O never becomes
-    # the bottleneck even though rank 0 does hold the full array in memory
-    # right before the write.
+    # binds empty_dataset() so `.xgeo` still resolves on a real xr.Dataset.
+    # The writer builds the file schema from rank 0's object, scatters it
+    # back out, and has every rank write its own slab collectively.
     if mpi.comm.rank == 0:
         full = assemble_full_dataset(composite)
     else:
@@ -296,24 +411,45 @@ mpirun -n 8 python -m mpi4py script.py
 srun --ntasks=8 --mpi=pmix python -m mpi4py script.py
 ```
 
+Every one of `mpi.reduce`/`mpi.xarray`/`mpi.scatterv`/
+`to_netcdf(..., parallel=True)` and raw `mpi.comm.<method>` calls is
+MPI-collective: every rank in `mpi.comm` must reach the same call, in the
+same order, or the call blocks forever waiting for ranks that never arrive.
+This is why the example above passes real data only on rank 0 and
+`empty_dataset()` elsewhere — every rank still calls the writer at the same
+point, even though only one of them supplies data.
+
+Internally, `to_netcdf(..., parallel=True)` calls `nc.sync()` before the
+collective `nc.close()` and then posts an `mpi.comm.Barrier()` — inside
+[`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/
+`write_distributed`, right next to the `close()` it protects — so that by
+the time the call returns on any rank, the file is fully written and closed
+everywhere, and safe to reopen through a different communicator or a
+non-parallel handle (as, for example, the test suite's own read-back
+validation does immediately afterward).
+
+See [`core/xgeo.py`](core/xgeo.py) and [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)
+for the full `to_netcdf` signature (chunking, compression, unlimited
+dimensions, MPI-IO hints).
+
 ### Running under MPI
 
 Launch with `python -m mpi4py`, not a bare `python`. mpi4py calls
-`MPI_Init_thread` when `mpi4py.MPI` is imported and registers `MPI_Finalize`
-to run at interpreter exit, so an unhandled exception on a subset of ranks
-does not terminate the job: the failing ranks block in `MPI_Finalize` waiting
-for the others, and the others block in the collective the failing ranks never
-reached. `python -m mpi4py` installs a finalizer hook that calls `MPI_Abort`
-instead, converting that deadlock into a non-zero exit
-([mpi4py: Exceptions and deadlocks](https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks)).
-
+`MPI_Init_thread` when `mpi4py.MPI` is imported and registers
+`MPI_Finalize` to run at interpreter exit, so an unhandled exception on a
+subset of ranks does not terminate the job by default: the failing ranks
+block in `MPI_Finalize` waiting for the others, and the others block in the
+collective the failing ranks never reached. `python -m mpi4py` installs a
+finalizer hook that calls `MPI_Abort` instead, converting that deadlock into
+a clean non-zero exit — see
+[mpi4py: Exceptions and deadlocks](https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks).
 Because the launch command is outside climtools's control, importing
-`climtools.mpi` under an MPI launcher installs the equivalent `sys.excepthook`
-as a fallback. It is a no-op when `python -m mpi4py` already installed its own
-hook, and on single-rank runs with no launcher.
+`climtools.mpi` under an MPI launcher also installs the equivalent
+`sys.excepthook` as a fallback (a no-op when `python -m mpi4py` already
+installed its own, and on single-rank runs with no launcher).
 
-Neither hook helps when a rank is blocked rather than failing, since a blocked
-rank raises nothing. `mpi.watchdog(phase)` covers that case:
+Neither hook helps when a rank is blocked rather than failing, since a
+blocked rank raises nothing. `mpi.watchdog(phase)` covers that case:
 
 ```python
 with mpi.watchdog("compositing"):
@@ -322,189 +458,49 @@ with mpi.watchdog("compositing"):
 
 It arms a daemon thread on every rank. mpi4py releases the GIL for the
 duration of a blocking MPI call, so the thread keeps running while the main
-thread sits in `Allreduce` or in a blocking read, and prints that rank's own
+thread sits in `Allreduce` or a blocking read, and prints that rank's own
 traceback naming the line it is stuck on before calling `MPI_Abort`. Every
-rank dumps independently, so the log distinguishes the ranks that arrived from
-the ones that did not. The default is 600 s of no progress; pass `timeout=` to
-change it, or `timeout=0` to leave the block unguarded.
+rank dumps independently, so the log distinguishes ranks that arrived from
+ranks that did not. Default: 600 s of no progress; pass `timeout=` to
+change it, or `timeout=0` to leave the block unguarded. Every rank waits the
+same delay before calling `Abort` (not one scaled by its own rank number),
+so a rank that is genuinely stuck cannot tear the job down before a
+slower-but-fine rank has flushed its own dump.
 
-On Lustre or GPFS, `HDF5_USE_FILE_LOCKING=FALSE` must be set in the
-environment. HDF5 takes POSIX advisory locks by default, and many ranks
-opening the same NetCDF file concurrently can block there indefinitely, which
-presents as a hang with no traceback on any rank.
-
-The same script runs unchanged on a single rank without a launcher, by
-passing `allow_serial=True` to `to_netcdf`; `mpi.reduce` degrades to a no-op
-reduction over one rank. `mpi4py` is a hard dependency of `climtools.mpi` and
-of the NetCDF writer, so it must be installed (see
+The same script runs unchanged on a single rank without a launcher, passing
+`allow_serial=True` to `to_netcdf`; `mpi.reduce` degrades to a no-op
+reduction over one rank. `mpi4py` is a hard dependency of `climtools.mpi`
+and of the NetCDF writer, so it must be installed (see
 [Installation](#installation)) even for single-rank runs.
 
-`mpi.reduce` also exposes `prod`, `min`, `max`, `any`, and `all`, all
-following the same signature as `sum`. Every reduction accepts `mode="all"`
-(the default: every rank gets the result) or `mode="root"` with a `root=`
-rank (only that rank gets the result; `None` elsewhere). `mpi.comm` is the
-native `mpi4py.MPI.Intracomm`, so anything not covered above — point-to-point
-`Send`/`Recv`, `Bcast`, `Scatterv`/`Gatherv`, non-blocking collectives — is
-reached directly as `mpi.comm.<method>` with full mpi4py signatures and IDE
-completion.
+## Testing
 
-`mpi.xarray` reduces an xarray `DataArray`/`Dataset` along a named
-dimension that is itself split across ranks — the counterpart to
-`mpi.reduce` for when the split is expressed as a dimension rather than as
-independent whole-array partials:
+[`tests/`](tests/) holds the test suite, split by whether a test needs an MPI
+launcher:
 
-```python
-# Each rank holds a different slice of the "event" dimension.
-local_mean = mpi.xarray.mean(local_events, dim="event")  # same result on every rank
+| File | Demonstrates |
+| --- | --- |
+| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` — both Mann-Kendall and `polyfit` — `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
+| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, and the parallel NetCDF writer. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
+| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running both suites — `test_general.py` directly, then `test_mpi.py` on eight ranks — with the environment settings the MPI suite requires, including `HDF5_USE_FILE_LOCKING=FALSE`. |
+
+```bash
+python tests/test_general.py
+
+python -m mpi4py tests/test_mpi.py
+mpirun -n 8 python -m mpi4py tests/test_mpi.py --time-steps 7200
 ```
 
-`local_mean` is identical to calling plain `xarray`'s
-`assembled.mean(dim="event")` on the fully assembled array — `mpi.xarray`
-combines each rank's local xarray reduction with one collective rather than
-requiring the full array in one place first. `mpi.xarray` exposes `sum`, `prod`,
-`min`, `max`, `mean`, `any`, and `all`, with `skipna`/`min_count` applied
-consistently across the whole distributed dimension (not per rank): a value
-is only dropped by `min_count` once the count is summed across every rank
-that holds a share of `dim`, and `skipna=False` propagates a NaN present on
-any rank to the combined result, not just NaNs local to the current rank.
-Every reduction accepts a `DataArray` or a `Dataset` interchangeably — a
-`Dataset` is reduced variable by variable, keeping non-distributed variables
-untouched and static (non-distributed) dimensions intact.
+Every timed check in `test_mpi.py` is tagged in the summary with a
+plain-language verdict — `MPI (faster)`, `Xarray (faster)`, or `tie` (within
+5% either way) — so the final table answers "was this actually worth
+distributing" at a glance. Small, in-memory, single-node checks routinely
+come back `Xarray (faster)`: real speedups from `mpi.reduce`/`mpi.xarray`
+show up once ranks are on separate cores with enough data per rank to
+outweigh collective-call overhead — run with `-n <= your core count` for a
+meaningful comparison. `test_general.py` is not a scaling benchmark; every
+check there is correctness-focused and independent of core count.
 
-> **Calling `.mean()`/`.sum()`/etc. directly, instead of `mpi.xarray.mean`/
-> `mpi.xarray.sum`, is the most common mistake with a distributed object.**
-> `ds.mean()` on a Dataset that `mpi.xarray.open_dataset`/`redistribute`
-> produced does not fail and does not raise — it silently returns *this
-> rank's own partial reduction* over its own slice of the distributed
-> dimension, not the reduction over the whole dataset. Importing
-> `climtools.mpi` patches `xarray.Dataset`/`xarray.DataArray`'s own
-> `mean`/`sum`/`prod`/`std`/`var`/`min`/`max`/`median`/`any`/`all`/`cumsum`/
-> `cumprod` so that calling one of them directly on an object carrying
-> `mpi_meta`, over a `dim` that includes the distributed dimension, raises a
-> `UserWarning` naming the `mpi.xarray` call to use instead. The computation
-> itself is unchanged — this is a warning about an easy mistake, not a
-> behavior change — and a reduction over a dimension that is *not* the
-> distributed one (for example `distributed.mean(dim="lon")` when the
-> distributed dimension is `"lat"`) is a legitimate, embarrassingly-parallel
-> per-rank operation and stays silent.
+## License
 
-#### Arithmetic on distributed objects
-
-`mpi.xarray.apply(left, op, right)` combines two operands elementwise
-without any MPI communication. This is only safe when every rank already
-holds matching, aligned local slices, so `apply` checks that first: either
-neither operand is distributed, both are distributed identically (same
-dimension, same global size, same per-rank bounds), or one is distributed
-and the other is replicated (or does not carry that dimension). Anything
-else raises `ValueError` instead of silently combining misaligned data —
-plain xarray's own coordinate-based alignment would otherwise intersect or
-reshape mismatched partitions without warning.
-
-```python
-anomaly = mpi.xarray.apply(t2m_distributed, "-", climatology_distributed)
-```
-
-`op` accepts either a string token (`"+"`, `"-"`, `"*"`, `"/"`, `"//"`,
-`"%"`, `"**"`, `"=="`, `"!="`, `"<"`, `"<="`, `">"`, `">="`, `"&"`, `"|"`,
-`"^"`) or a two-argument callable such as `operator.add`. When either
-operand was distributed, the result carries the same distribution metadata
-forward, so it chains into further `apply` calls or straight into a
-collective reduction (`mpi.xarray.sum`, `.mean`, ...).
-
-`mpi.xarray.align(left, right, dim=None)` is the counterpart to
-`xarray.align`, but for rank ownership rather than coordinate labels: it
-returns `(left, right)` repartitioned so `apply` is guaranteed to accept
-them. Three cases resolve with no data movement between ranks — a
-replicated operand sliced onto an already-distributed partner's exact
-bounds, two replicated operands independently redistributed along the same
-`dim` (deterministic given length/rank/size, so both land on identical
-bounds without coordinating), and two already-identically-distributed
-operands returned unchanged. Two operands already distributed on genuinely
-different partitions is a data-movement problem `align` does not attempt;
-it raises with guidance instead of guessing.
-
-Matching *lengths* along `dim` is not the same as matching *labels* — two
-operands can have the same length while their `dim` coordinate is offset,
-reordered, or otherwise not simply "the same index sliced the same way",
-which pure position-based slicing cannot see. In both of the no-data-movement
-cases above, `align` now also runs `xarray.align(left, right, join="exact")`
-as a local, communication-free label check (every rank already holds the
-data being compared, so this costs no MPI traffic) before treating the
-operands as combinable, and raises `ValueError` if the labels disagree
-instead of silently handing `apply`/`evaluate` two slices that only look
-aligned by length:
-
-```python
-# Same length along "plev", different physical levels: caught immediately.
-mpi.xarray.align(model_a, model_b, dim="plev")
-# ValueError: left and right disagree on 'plev' coordinate labels ...
-```
-
-```python
-# a_full is a freshly-loaded replicated climatology; t2m is already
-# distributed along "time" from an earlier reduction.
-climatology, t2m = mpi.xarray.align(a_full, t2m)
-anomaly = mpi.xarray.apply(t2m, "-", climatology)
-```
-
-`mpi.xarray.evaluate(expression, **variables)` parses `expression` as a
-Python expression with the standard library `ast` module and evaluates it
-through `apply`, so ordinary operator precedence and parentheses apply
-(`*`/`/` before `+`/`-`, explicit grouping with `()`), unlike chaining
-`apply` calls by hand. Names in `expression` are bound the same way
-`DataFrame.query` binds column names — as keyword arguments:
-
-```python
-result = mpi.xarray.evaluate("(a + b) * c - d / e", a=ds1, b=ds2, c=ds3, d=ds4, e=ds5)
-```
-
-`ast` was chosen over pandas' query engine deliberately: pandas' engine
-resolves column names against a DataFrame's own namespace and dispatches
-through numexpr or its own evaluator, neither built to accept xarray
-objects as operands or to carry climtools's distribution metadata through
-the computation. `ast` needs no extra dependency, gets Python's exact
-precedence rules from the grammar for free, and routes every operator
-through `apply`, so the same compatibility checks and metadata propagation
-apply here as to a single `apply` call. Only a small, explicit whitelist of
-node types is evaluated — names, literals, and unary/binary/comparison
-operators; attribute access, subscripts, and function calls are rejected
-rather than executed.
-
-Every one of `mpi.reduce`/`mpi.xarray`/`mpi.scatterv`/`to_netcdf(...,
-parallel=True)` and the raw `mpi.comm.<method>` calls above is
-MPI-collective: every rank in `mpi.comm` must reach the same call, in the
-same order, or the call blocks forever waiting for ranks that never arrive.
-This is what makes the `to_netcdf(..., parallel=True)` calling convention
-above matter — passing real data only on rank 0 and `empty_dataset()`
-elsewhere keeps every rank calling the writer at the same point, even though
-only one of them supplies data. Work that inherently runs at different
-paces per rank (for example, independent cases assigned one-per-rank) should
-use ordinary serial `to_netcdf()` for anything each rank writes on its own,
-and only bring ranks back through a shared collective (`mpi.comm.barrier()`,
-`mpi.reduce`, `mpi.xarray`, or a collective write) at points where every
-rank is guaranteed to have arrived — see `examples/test1.py`'s rank-0-only
-source placement (above) for a script structured this way.
-
-Parallel output requires `netCDF4` and `mpi4py` built against a
-parallel-enabled MPI/HDF5/NetCDF-C stack; see
-[Installation](#installation) and `env/setup_env.sh`.
-
-mpi4py itself initializes MPI (`MPI_Init`/`MPI_Init_thread`) as a side
-effect of `import mpi4py.MPI`, not on first collective call, and registers
-`MPI_Finalize` to run automatically at process exit, so climtools code never
-calls either explicitly. mpi4py also sets the `ERRORS_RETURN` error handler
-on `COMM_WORLD` by default (rather than MPI's default
-`ERRORS_ARE_FATAL`), so a failing raw `mpi.comm.<method>` call raises a
-catchable `mpi4py.MPI.Exception` (a `RuntimeError` subclass) instead of
-aborting the process outright; `climtools.mpi.MPIError` is climtools's own
-exception type, raised by `mpi.reduce`/`mpi.xarray`/the `@mpi` decorator/the
-NetCDF writer for climtools-level validation and synchronized-failure
-reporting; see the [mpi4py Overview](https://mpi4py.readthedocs.io/en/stable/overview.html)
-for further detail on both.
-
-## Notes
-
-- The map entry point is `plot.geo`, reached either as the free function
-  `climtools.plot.geo(da, ...)` or as the accessor `da.xgeo.plot.geo(...)`.
-- All input coordinates are interpreted in `PlateCarree`. The display
-  projection is chosen with `projection=`, or inferred from the data extent.
+MIT — see [`LICENSE`](LICENSE).

@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "climtools"
+version = "0.1.0"
+description = "Utilities for climate data analysis and plotting, with an MPI runtime for distributed xarray reductions and parallel NetCDF-4 output."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "Jared M Kodero" }]
+keywords = [
+    "climate",
+    "xarray",
+    "netcdf",
+    "mpi",
+    "cartopy",
+    "atmospheric-science",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+# Every entry below is imported somewhere in climtools's own source (not
+# transitively pulled in by another dependency). These plain PyPI wheels are
+# enough for everything except MPI-collective parallel NetCDF-4 output
+# (climtools.xgeo.to_netcdf(..., parallel=True) under more than one rank),
+# which needs netCDF4 and mpi4py rebuilt against a parallel-enabled
+# MPI/HDF5/NetCDF-C stack. `pip install climtools` cannot build that stack
+# itself (pip has no post-install hook, and the build depends on the local
+# HPC module system or a from-source compile). After installing, clone this
+# repository and run its setup script instead:
+#
+#   git clone https://github.com/Jared-Kodero/climtools.git
+#   cd climtools && env/setup_env.sh
+#
+# climtools also prints a one-time hint pointing here the first time
+# climtools.mpi is used under a real multi-rank launch without a parallel
+# netCDF4 build (see _warn_if_parallel_netcdf_missing in core/lib_mpi.py).
+# See env/setup_env.sh and the README's Installation section for detail.
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "xarray",
+    "dask[array,distributed]",
+    "cftime",
+    "netCDF4",
+    "cf_xarray",
+    "mpi4py>=3.1",
+    "matplotlib",
+    "cartopy",
+    "seaborn",
+    "cmocean",
+    "pymannkendall",
+    "ipython",
+    "rich",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jared-Kodero/climtools"
+Repository = "https://github.com/Jared-Kodero/climtools"
+Issues = "https://github.com/Jared-Kodero/climtools/issues"
+Documentation = "https://github.com/Jared-Kodero/climtools#readme"
+
+[project.optional-dependencies]
+# xesmf is imported only inside climtools.xgeo.remap on first call; the rest
+# of the package works without it. Its ESMF dependency is far more reliable
+# from conda-forge than from pip; see env/environment.yml.
+regrid = ["xesmf"]
+dev = ["ruff", "typing_extensions", "build", "twine"]
+
+[tool.setuptools]
+# This repository's root *is* the "climtools" package: __init__.py sits
+# next to this file, not inside a src/ subdirectory. package-dir maps the
+# distribution's "climtools" package to ".", the directory containing this
+# file, rather than assuming a src-layout that does not exist here.
+packages = [
+    "climtools",
+    "climtools.accessors",
+    "climtools.cdo",
+    "climtools.core",
+    "climtools.lib_netcdf",
+    "climtools.viz",
+]
+package-dir = { climtools = "." }
+
+[tool.setuptools.package-data]
+"climtools.core" = ["data/**/*"]
+"climtools.viz" = ["data/**/*"]
+
+[tool.setuptools.exclude-package-data]
+# Keep the sdist/wheel free of dev tooling and the multi-hundred-MB test
+# scratch output that setup_env.sh and tests/test_mpi.py can generate.
+"*" = ["env/*", "tests/*.log", "tests/__pycache__/*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 92
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

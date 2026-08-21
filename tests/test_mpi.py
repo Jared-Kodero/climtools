@@ -10,9 +10,9 @@ containing precipitation, temperature, sea-land mask, and pressure-level fields.
 The only configurable input is the number of mock time steps, which defaults to
 3600::
 
-    python climtools_test.py
-    mpirun -n 8 python climtools_test.py
-    mpirun -n 8 python climtools_test.py --time-steps 7200
+    python -m mpi4py test_mpi.py
+    mpirun -n 8 python -m mpi4py test_mpi.py
+    mpirun -n 8 python -m mpi4py test_mpi.py --time-steps 7200
 
 Parallel NetCDF checks require netCDF4 with parallel HDF5/NetCDF-C support. When
 that capability is unavailable on a multi-rank run, those checks are skipped.
@@ -3736,8 +3736,8 @@ def print_test_summary() -> int:
             "\nRan on 1 rank: speedups will be ~1x or worse. "
             + "mpi.reduce/mpi.xarray/\n"
             + "the parallel NetCDF writer all still pay collective-call overhead "
-            + "even\nwith nothing to parallelize against. Run `mpirun -n N python "
-            + "climtools_test.py`\nwith N >= 2 real cores to see actual speedups."
+            + "even\nwith nothing to parallelize against. Run `mpirun -n N python -m "
+            + "mpi4py test_mpi.py`\nwith N >= 2 real cores to see actual speedups."
         )
     else:
         n_cpus = os.cpu_count() or 1

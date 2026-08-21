@@ -148,6 +148,41 @@ def mpi_alive(comm: _MPI.Comm) -> bool:
         return False
 
 
+def _warn_if_parallel_netcdf_missing(comm: _MPI.Comm) -> None:
+    """Print a one-time, root-only hint when parallel NetCDF-4 looks unset up.
+
+    A plain ``pip``/conda-forge ``netCDF4`` wheel is not built against a
+    parallel-enabled HDF5/NetCDF-C, so ``to_netcdf(..., parallel=True)``
+    raises a clear ``NetCDFWriteError`` the first time it is called under
+    more than one rank -- but only then, which means a user can get all the
+    way to a multi-node production run before discovering it. This checks the
+    one cheap, already-imported attribute that predicts that failure
+    (``netCDF4.__has_parallel4_support__``) as soon as the MPI runtime itself
+    is constructed, under an actual multi-rank launch, and points at
+    ``env/setup_env.sh``, which builds the required stack. It never raises:
+    a build without the parallel writer is completely usable for everything
+    else in climtools, including ``mpi.reduce``/``mpi.xarray``.
+    """
+    if comm.Get_size() <= 1 or comm.Get_rank() != 0:
+        return
+    try:
+        import netCDF4
+
+        if netCDF4.__has_parallel4_support__:
+            return
+    except Exception:
+        return
+    sys.stderr.write(
+        "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
+        + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
+        + f"this {comm.Get_size()}-rank run. mpi.reduce, mpi.xarray, and "
+        + "everything else are unaffected. To build the parallel stack, "
+        + "run `env/setup_env.sh` from the climtools repository (see the "
+        + "README's Installation section); nothing else needs it.\n"
+    )
+    sys.stderr.flush()
+
+
 def is_dataarray(value: Any) -> bool:
     """Check if value is an xarray DataArray."""
 
@@ -648,6 +683,7 @@ class MPIRuntime:
         self._xarray: XarrayMPI = XarrayMPI(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         install_abort_excepthook()
+        _warn_if_parallel_netcdf_missing(self.comm)
 
     @property
     def xarray(self) -> XarrayMPI:
@@ -921,9 +957,16 @@ class MPIRuntime:
             sys.stderr.flush()
             # Give every rank a chance to print its own stack before the
             # first one tears the job down, or the log records only whichever
-            # rank happened to fire first.
+            # rank happened to fire first. The delay must not depend on this
+            # rank's own number: sleeping `5.0 + 0.25 * rank` gave rank 0 the
+            # *shortest* delay of all, so whichever rank was genuinely stuck
+            # (frequently rank 0, since it usually does the actual
+            # rank-0-only work) tended to call Abort first, tearing the job
+            # down before higher-ranked ranks had flushed their dumps. Every
+            # rank instead waits the same worst-case delay, so no rank can
+            # abort before every rank has had at least that long to print.
             if abort:
-                time.sleep(5.0 + 0.25 * rank)
+                time.sleep(5.0 + 0.25 * (self.comm.size - 1))
                 sys.stderr.write(
                     f"[MPI RANK {rank}] WATCHDOG: aborting MPI_COMM_WORLD.\n"
                 )
