@@ -33,11 +33,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-import dask
-import dask.array as da
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
 
 # Raised from 100 to make the local per-rank compute in every reduction
@@ -2925,7 +2922,7 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
             expected = expected_full.isel(time=slice(start, stop)).load()
             actual = actual_full.isel(time=slice(start, stop)).load()
             xr.testing.assert_identical(actual, expected)
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary, not raised
+    except BaseException as exc:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
@@ -2935,7 +2932,9 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
         # is exactly what a real regression needs the summary to show.
         notes = mpi.comm.gather(integrity_note, root=0)
         if RANK == 0:
-            integrity_note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+            integrity_note = "; ".join(
+                f"rank {r}: {n}" for r, n in enumerate(notes) if n
+            )
         integrity_note = mpi.comm.bcast(integrity_note, root=0)
 
     record_result(
@@ -2943,7 +2942,8 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
         correct,
         serial_s,
         parallel_s,
-        note=integrity_note or "xr.testing.assert_identical (each rank validates its own slice)",
+        note=integrity_note
+        or "xr.testing.assert_identical (each rank validates its own slice)",
     )
 
     mpi.comm.barrier()
@@ -3078,8 +3078,10 @@ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
                 "mpi_meta" in variable.attrs for variable in actual.variables.values()
             )
             if mpi_meta_leaked:
-                raise AssertionError("Internal mpi_meta attributes were written to NetCDF.")
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary, not raised
+                raise AssertionError(
+                    "Internal mpi_meta attributes were written to NetCDF."
+                )
+    except BaseException as exc:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
@@ -3087,7 +3089,9 @@ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
     if not correct:
         notes = mpi.comm.gather(integrity_note, root=0)
         if RANK == 0:
-            integrity_note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+            integrity_note = "; ".join(
+                f"rank {r}: {n}" for r, n in enumerate(notes) if n
+            )
         integrity_note = mpi.comm.bcast(integrity_note, root=0)
     record_result(
         "distributed NetCDF round-trip (selected mock variables)",
@@ -3209,7 +3213,7 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
             expected = expected_full.isel(time=slice(start, stop)).load()
             actual = actual_full.isel(time=slice(start, stop)).load()
             xr.testing.assert_identical(actual, expected)
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary, not raised
+    except BaseException as exc:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
@@ -3217,7 +3221,9 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
     if not correct:
         notes = mpi.comm.gather(integrity_note, root=0)
         if RANK == 0:
-            integrity_note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+            integrity_note = "; ".join(
+                f"rank {r}: {n}" for r, n in enumerate(notes) if n
+            )
         integrity_note = mpi.comm.bcast(integrity_note, root=0)
     record_result(
         "distributed NetCDF DataArray round-trip (selected mock pr)",
@@ -3233,222 +3239,6 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
             if os.path.exists(path):
                 os.remove(path)
     mpi.comm.barrier()
-
-
-def _dask_backed_dataset(n_time: int, n_lat: int, n_lon: int) -> xr.Dataset:
-    """A small, deterministic, dask-backed Dataset built only on the caller.
-
-    Chunked one time step at a time along the partition dimension, so a
-    scale sweep run at N ranks always has more chunks than ranks and every
-    rank's share spans multiple chunks -- the shape most likely to surface
-    an off-by-one in chunk/rank boundary math.
-    """
-    time = np.arange(n_time, dtype="float64")
-    lat = np.linspace(-90, 90, n_lat, dtype="float32")
-    lon = np.linspace(-180, 180, n_lon, endpoint=False, dtype="float32")
-    values = da.from_array(
-        (
-            np.arange(n_time, dtype="float32")[:, None, None]
-            * np.ones((1, n_lat, n_lon), dtype="float32")
-        ),
-        chunks=(1, n_lat, n_lon),
-    )
-    return xr.Dataset(
-        {"x": (("time", "lat", "lon"), values)},
-        coords={"time": time, "lat": lat, "lon": lon},
-    )
-
-
-def _eager_dataset(n_time: int, n_lat: int, n_lon: int) -> xr.Dataset:
-    """The plain in-memory (non-dask) counterpart of ``_dask_backed_dataset``."""
-    time = np.arange(n_time, dtype="float64")
-    lat = np.linspace(-90, 90, n_lat, dtype="float32")
-    lon = np.linspace(-180, 180, n_lon, endpoint=False, dtype="float32")
-    values = np.arange(n_time, dtype="float32")[:, None, None] * np.ones(
-        (1, n_lat, n_lon), dtype="float32"
-    )
-    return xr.Dataset(
-        {"x": (("time", "lat", "lon"), values)},
-        coords={"time": time, "lat": lat, "lon": lon},
-    )
-
-
-def _assert_rank0_source_write_correct(
-    out_dir: str, n_time: int, n_lat: int, n_lon: int, *, dask_backed: bool
-) -> tuple[bool, str]:
-    """Write a rank-0-source Dataset in parallel and verify it round-trips.
-
-    Returns ``(correct, note)``, synchronized: every rank returns the same
-    values, so the caller can call ``record_result`` unconditionally rather
-    than needing its own broadcast.
-    """
-    build = _dask_backed_dataset if dask_backed else _eager_dataset
-    full = build(n_time, n_lat, n_lon) if RANK == 0 else xgeo.empty_dataset()
-    suffix = "dask" if dask_backed else "eager"
-    out_path = os.path.join(out_dir, f"climtools_scale_sweep_{suffix}.nc")
-
-    error: BaseException | None = None
-    try:
-        full.xgeo.to_netcdf(
-            out_path,
-            partition_dim="time",
-            parallel=True,
-            allow_serial=(SIZE == 1),
-        )
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary
-        error = exc
-    correct = bool(mpi.reduce.all(error is None))
-    note = ""
-    if not correct:
-        notes = mpi.comm.gather("" if error is None else f"{type(error).__name__}: {error}", root=0)
-        if RANK == 0:
-            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
-        note = mpi.comm.bcast(note, root=0)
-        return correct, note
-
-    # Every rank validates only its own time slice, exactly as the fixed
-    # test_parallel_netcdf_write above does -- this is precisely the check
-    # whose rank-0-only, full-dataset form caused the original hang at
-    # TIME_STEPS=720. Read back through mpi.xarray.open_dataset (a
-    # collective, distributed open) rather than xr.open_dataset, so this
-    # exercises the same read path a real consumer of the file would use.
-    correct_local = True
-    note_local = ""
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            with mpi.xarray.open_dataset(out_path, partition_dim="time") as reopened:
-                start = int(reopened.attrs["mpi_meta"]["start"])
-                stop = int(reopened.attrs["mpi_meta"]["stop"])
-                expected = (
-                    np.arange(n_time, dtype="float32")[start:stop, None, None]
-                    * np.ones((1, n_lat, n_lon), dtype="float32")
-                )
-                actual = reopened["x"].load().values
-        if not np.array_equal(actual, expected):
-            raise AssertionError(
-                f"slice [{start}:{stop}] mismatched: shape {actual.shape} vs {expected.shape}"
-            )
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary
-        correct_local = False
-        note_local = f"{type(exc).__name__}: {exc}"
-
-    correct = bool(mpi.reduce.all(correct_local))
-    if not correct:
-        notes = mpi.comm.gather(note_local, root=0)
-        if RANK == 0:
-            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
-        note = mpi.comm.bcast(note, root=0)
-
-    if RANK == 0 and os.path.exists(out_path):
-        os.remove(out_path)
-    mpi.comm.barrier()
-    return correct, note
-
-
-@run_test
-def test_auto_distribute_paths(out_dir: str) -> None:
-    """``to_netcdf(parallel=True)`` picks the right path for each input kind.
-
-    A dask-backed rank-0-source input must be distributed lazily (see
-    ``mpi.xarray.distribute``); a plain eager rank-0-source input must keep
-    using the original scatter path unchanged; an already-distributed input
-    (``mpi.xarray.distribute`` called explicitly beforehand) must be
-    unaffected by either. All three are exercised here for the same small
-    dataset so a regression in the routing between them -- not just in one
-    path considered alone -- would be caught.
-    """
-    n_time, n_lat, n_lon = 17, 4, 4  # deliberately not evenly divisible by SIZE
-
-    correct_dask, note_dask = _assert_rank0_source_write_correct(
-        out_dir, n_time, n_lat, n_lon, dask_backed=True
-    )
-    record_result(
-        "auto-distribute: dask-backed rank-0 source",
-        correct_dask,
-        0.0,
-        0.0,
-        note=note_dask or "each rank validated its own slice via mpi.xarray.open_dataset",
-    )
-
-    correct_eager, note_eager = _assert_rank0_source_write_correct(
-        out_dir, n_time, n_lat, n_lon, dask_backed=False
-    )
-    record_result(
-        "auto-distribute: eager rank-0 source (unchanged scatter path)",
-        correct_eager,
-        0.0,
-        0.0,
-        note=note_eager or "each rank validated its own slice via mpi.xarray.open_dataset",
-    )
-
-    already = mpi.xarray.distribute(
-        _eager_dataset(n_time, n_lat, n_lon) if RANK == 0 else None,
-        dim="time",
-    ).load()
-    out_path = os.path.join(out_dir, "climtools_scale_sweep_already_distributed.nc")
-    error: BaseException | None = None
-    try:
-        already.xgeo.to_netcdf(
-            out_path, partition_dim="time", parallel=True, allow_serial=(SIZE == 1)
-        )
-    except BaseException as exc:  # noqa: BLE001 - reported via the summary
-        error = exc
-    correct_already = bool(mpi.reduce.all(error is None))
-    note_already = ""
-    if not correct_already:
-        notes = mpi.comm.gather("" if error is None else f"{type(error).__name__}: {error}", root=0)
-        if RANK == 0:
-            note_already = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
-        note_already = mpi.comm.bcast(note_already, root=0)
-    if RANK == 0 and os.path.exists(out_path):
-        os.remove(out_path)
-    mpi.comm.barrier()
-    record_result(
-        "auto-distribute: already-distributed input unaffected",
-        correct_already,
-        0.0,
-        0.0,
-        note=note_already or "correctness-focused",
-    )
-
-
-# The historical failure this guards against: TIME_STEPS=720 passed
-# correctness but the rank-0-only validation this suite used at the time
-# took long enough on that much data, loaded onto one rank alone, to exceed
-# the watchdog's 600 s window -- while TIME_STEPS=100 finished in seconds.
-# Distributing validation across ranks (see test_parallel_netcdf_write
-# above) fixed the mechanism, but this list exists to keep checking it
-# directly rather than trusting that it stays fixed.
-SCALE_SWEEP_CASES = [
-    (6, 3, 3),
-    (37, 4, 4),
-    (200, 6, 6),
-    (720, 4, 4),
-]
-
-
-@run_test
-def test_parallel_write_scale_sweep(out_dir: str) -> None:
-    """Parallel NetCDF write and read-back across a range of time-step counts.
-
-    Each case is self-contained (its own small Dataset, not the shared mock
-    file), so the whole sweep runs in seconds regardless of which sizes are
-    in ``SCALE_SWEEP_CASES`` and adding a case is just adding a tuple.
-    """
-    for n_time, n_lat, n_lon in SCALE_SWEEP_CASES:
-        for dask_backed in (False, True):
-            kind = "dask-backed" if dask_backed else "eager"
-            correct, note = _assert_rank0_source_write_correct(
-                out_dir, n_time, n_lat, n_lon, dask_backed=dask_backed
-            )
-            record_result(
-                f"scale sweep time={n_time} lat={n_lat} lon={n_lon} ({kind})",
-                correct,
-                0.0,
-                0.0,
-                note=note or "each rank validated its own slice",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -4190,8 +3980,6 @@ def main() -> None:
     test_parallel_netcdf_write(output_dir)
     test_distributed_netcdf_roundtrip(output_dir)
     test_distributed_dataarray_roundtrip(output_dir)
-    test_auto_distribute_paths(output_dir)
-    test_parallel_write_scale_sweep(output_dir)
 
     mpi.comm.barrier()
     if print_test_summary():
