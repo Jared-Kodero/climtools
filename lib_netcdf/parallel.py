@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 # opposite setting) is left alone.
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
+import dask
 import netCDF4
 import numpy as np
 import xarray as xr
@@ -429,14 +430,20 @@ def to_netcdf_parallel(
 
     Objects carrying ``mpi_meta`` are treated as already distributed. Every
     rank contributes its existing local slab directly and no data gather or
-    scatter is performed. For ordinary objects, rank 0 owns the complete data
-    and the legacy scatter path is used.
+    scatter is performed. For an ordinary object, rank 0 owns the complete
+    data; if that data is dask-backed, it is distributed lazily first (see
+    ``mpi.xarray.distribute``), so no rank -- including rank 0 -- ever
+    materializes more than its own share. An eager (already in-memory,
+    non-dask) object instead uses the legacy scatter path unchanged: rank 0
+    materializes the array (it already had to, to be eager) and every
+    rank's slice is scattered to it directly, which is faster for data that
+    gains nothing from staying lazy.
 
     Parameters
     ----------
     data : xarray.Dataset or xarray.DataArray or None
         Rank-local distributed data, or the complete object on rank 0 for the
-        legacy path.
+        legacy or dask-backed-distribute path.
     path : str or os.PathLike
         Output path.
     partition_dim : str, optional
@@ -510,6 +517,46 @@ def to_netcdf_parallel(
     schema: dict[str, Any] | None = None
     output_path: str | None = None
     error = None
+
+    if not distributed:
+        # A dask-backed rank-0-source input can be distributed lazily
+        # instead of forced through np.asarray(...values) below, which
+        # would materialize the complete array on rank 0 regardless of
+        # size. An eager (already in-memory) input gains nothing from that
+        # laziness -- the array is already fully resident wherever it
+        # started -- and pays real overhead switching to point-to-point
+        # pickling instead of scatterv's zero-copy buffer transfer, so it
+        # is left on the original path entirely unchanged below. Every
+        # rank must agree on this decision before either branch runs, for
+        # the same collective-mismatch reason as the agreement check above:
+        # only rank 0 can inspect the real object, so its answer is
+        # broadcast rather than each rank guessing from an empty one.
+        is_dask_backed = False
+        try:
+            if mpi.comm.rank == 0 and local_ds is not None:
+                is_dask_backed = any(
+                    dask.is_dask_collection(variable.data)
+                    for variable in local_ds.variables.values()
+                )
+        except BaseException as exc:
+            error = exc
+        mpi.raise_if_error(error, "parallel NetCDF dask-backed detection")
+        is_dask_backed = mpi.comm.bcast(is_dask_backed, root=0)
+
+        if is_dask_backed:
+            mpi.log(
+                "xgeo.to_netcdf (rank-0 source, dask-backed): distributing "
+                + "lazily instead of materializing on rank 0 -- see "
+                + "mpi.xarray.distribute in the README's Parallel NetCDF "
+                + "output section.",
+            )
+            local_ds = mpi.xarray.distribute(
+                local_ds if mpi.comm.rank == 0 else None,
+                dim=partition_dim if partition_dim is not None else "auto",
+                root=0,
+            )
+            local_meta = get_mpi_meta(local_ds)
+            distributed = local_meta is not None
 
     if distributed:
         if local_ds is None or local_meta is None:
@@ -663,10 +710,12 @@ def to_netcdf_parallel(
                 "variables": variables,
             }
             total_bytes = sum(
-                v["data"].nbytes for v in root_data.values() if hasattr(v["data"], "nbytes")
+                v["data"].nbytes
+                for v in root_data.values()
+                if hasattr(v["data"], "nbytes")
             )
             mpi.log(
-                f"xgeo.to_netcdf (rank-0 source): rank 0 holds "
+                "xgeo.to_netcdf (rank-0 source): rank 0 holds "
                 + f"{_format_bytes(total_bytes)} before scatter, "
                 + f"~{_format_bytes(total_bytes / mpi.comm.size)}/rank after. "
                 + "An already-distributed input (mpi.xarray.open_dataset/"

@@ -422,34 +422,49 @@ point, even though only one of them supplies data.
 
 #### Rank-0-source vs. already-distributed: which one at scale
 
-`to_netcdf(..., parallel=True)` takes either kind of input, and picks the
-path by inspecting the object, not by an argument you set:
+`to_netcdf(..., parallel=True)` takes any of three kinds of input, and picks
+the path by inspecting the object, not by an argument you set:
 
 | Input | Path | Rank 0's peak memory |
 | --- | --- | --- |
-| A plain `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere (the example above) | Legacy scatter | The **entire** output — every variable, in full, before it is scattered out |
-| An object carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`) | Distributed | Only that rank's own slice — no gather, no scatter |
+| A plain, **eager** (non-dask) `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Legacy scatter | The **entire** output — every variable, in full, before it is scattered out |
+| A plain, **dask-backed** `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Auto-distributed | Only rank 0's own slice — `to_netcdf` calls `mpi.xarray.distribute` internally before writing |
+| An object already carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`/`distribute`) | Distributed | Only that rank's own slice — no gather, no scatter |
 
-The rank-0-source path is convenient — build the data however is natural,
-worry about MPI only at the write call — but that convenience has a real
-cost: rank 0 must hold every variable's complete array simultaneously right
-before the scatter, an amount that scales with total output size, not with
-rank count. Adding ranks does not shrink it. At small `TIME_STEPS` or coarse
-resolution this is unremarkable; at large `TIME_STEPS` or fine resolution it
-is the first thing to check before assuming a slow or failing write is a bug
-elsewhere. `to_netcdf` logs this cost on rank 0 as it happens (search a run's
-log for `"rank-0 source"`), specifically so this is visible before it
-becomes an out-of-memory crash rather than after:
+The middle row is automatic: nothing about how you call `to_netcdf` changes.
+Building the same rank-0-source Dataset dask-backed instead of eager — for
+example `xr.open_mfdataset(paths, chunks=...)` on rank 0 instead of loading
+eagerly — is enough to opt into it. `to_netcdf` logs which path it took
+(search a run's log for `"rank-0 source"`), so this is visible either way:
 
 ```text
+xgeo.to_netcdf (rank-0 source, dask-backed): distributing lazily instead of materializing on rank 0.
 xgeo.to_netcdf (rank-0 source): rank 0 holds 42.3GiB before scatter, ~5.3GiB/rank after.
 ```
 
-If that number is uncomfortable, avoid ever holding the full array anywhere
-by building it in already-distributed form instead. This does **not** mean
-shipping pieces of a rank-0 array out to other ranks over MPI — it means
-every rank builds the *same lazy recipe* independently, and only ever
-materializes its own slice of it.
+The eager row's cost is unavoidable at the design level, not a bug: the
+array is already fully resident in rank 0's memory by the time `to_netcdf`
+sees it (that is what "eager" means), so there is nothing left to make lazy.
+It only matters at large `TIME_STEPS` or fine resolution — at small sizes it
+is unremarkable — but when a write is slow or failing at scale, this row is
+the first thing worth ruling out. Making the *source* dask-backed (the
+middle row) is what actually avoids it.
+
+One caveat worth knowing rather than being surprised by: on the
+auto-distributed and already-distributed paths, rank 0 specifically may
+compute its own share of a dask-backed input twice — once while `to_netcdf`
+samples dtype and shape to create the file's structure, once more during
+the actual collective write. Every other rank computes its own share
+exactly once. This is a pre-existing characteristic of the underlying
+writer, not something scale-dependent or memory-related: no rank ever
+touches more than its own slice, computed twice or not.
+
+If the eager row's cost is uncomfortable and making the source dask-backed
+isn't an option, avoid ever holding the full array anywhere by building it
+in already-distributed form instead. This does **not** mean shipping pieces
+of a rank-0 array out to other ranks over MPI yourself — it means every rank
+builds the *same lazy recipe* independently, and only ever materializes its
+own slice of it.
 
 **Already on disk.** `mpi.xarray.open_dataset(path, partition_dim=...)` opens
 the file on every rank and each rank reads only its own slice from disk —
@@ -512,11 +527,23 @@ local = local.load()  # only now, and only this rank's own slice
 local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
 ```
 
+If the only thing `local` is for is this `to_netcdf` call, calling
+`distribute` explicitly like this is no longer necessary: `to_netcdf`
+detects a dask-backed rank-0-source input and does exactly this internally
+(see the table above). Calling it explicitly still matters when the result
+is needed for something *besides* the write — an `mpi.xarray`/`mpi.reduce`
+computation on the distributed data before writing it, for example — or
+when explicit control over the moment slicing happens is worth having.
+
 If `full` is already a plain in-memory (non-dask) object rather than
-dask-backed, `distribute` still avoids `to_netcdf`'s own scatter-path
-redundant copies, but cannot undo the fact that the complete array already
-had to exist in `root`'s memory before the call — only a dask-backed source
-avoids ever holding more than one rank's share anywhere.
+dask-backed, calling `distribute` on it directly still avoids `to_netcdf`'s
+own scatter-path redundant copies, but pays point-to-point pickling instead
+of `scatterv`'s zero-copy buffer transfer, and cannot undo the fact that the
+complete array already had to exist in `root`'s memory before the call —
+only a dask-backed source avoids ever holding more than one rank's share
+anywhere. For an eager source headed straight to `to_netcdf`, just calling
+`to_netcdf` directly (skipping `distribute` and `.load()` above) is both
+simpler and faster: it already takes the scatter path this describes.
 
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
 immediately after the collective `nc.close()` — inside
@@ -590,7 +617,7 @@ launcher:
 | File | Demonstrates |
 | --- | --- |
 | [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` — both Mann-Kendall and `polyfit` — `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
-| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, and the parallel NetCDF writer. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
+| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, and the parallel NetCDF writer — including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
 | [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running both suites — `test_general.py` directly, then `test_mpi.py` on eight ranks — with the environment settings the MPI suite requires, including `HDF5_USE_FILE_LOCKING=FALSE`. |
 
 ```bash
