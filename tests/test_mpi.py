@@ -24,6 +24,8 @@ import argparse
 import operator
 import os
 import shutil
+import time as time_module
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -33,6 +35,7 @@ from typing import Any
 
 import numpy as np
 import xarray as xr
+
 from climtools import mpi, xgeo
 
 # Raised from 100 to make the local per-rank compute in every reduction
@@ -52,7 +55,7 @@ from climtools import mpi, xgeo
 # roughly 170-180 GiB peak on rank 0 alone. That fits the 500 GiB/node SLURM
 # allocation with headroom; lower --time-steps (or raise --resolution, which
 # coarsens the grid) on a smaller node.
-TIME_STEPS = 1000
+TIME_STEPS = 24 * 30
 RESOLUTION_DEG = 0.25
 PLEV_STEP = -50
 
@@ -113,6 +116,37 @@ def timer(
     if function is None:
         return decorate
     return decorate(function)
+
+
+def _diagnose_write_failure(path: Path) -> str:
+    """Capture filesystem state relevant to a failed write to ``path``.
+
+    Called only after a write has already failed, so best-effort: a
+    diagnostic call failing too must not replace the original exception with
+    a confusing one of its own.
+    """
+    parts = []
+    parent = path.parent
+    try:
+        parts.append(f"parent_exists={parent.is_dir()}")
+        parts.append(f"parent_writable={os.access(parent, os.W_OK)}")
+    except OSError as exc:
+        parts.append(f"parent_stat_failed={exc}")
+    try:
+        usage = shutil.disk_usage(parent)
+        parts.append(
+            f"disk_free={usage.free / 2**30:.1f}GiB/{usage.total / 2**30:.1f}GiB"
+        )
+    except OSError as exc:
+        parts.append(f"disk_usage_failed={exc}")
+    try:
+        if path.exists():
+            parts.append(f"partial_file_size={path.stat().st_size}B")
+        else:
+            parts.append("partial_file=none")
+    except OSError as exc:
+        parts.append(f"path_stat_failed={exc}")
+    return ", ".join(parts)
 
 
 def build_mock_dataset(
@@ -200,8 +234,45 @@ def build_mock_dataset(
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
 
-    path.unlink(missing_ok=True)
-    ds.to_netcdf(path, format="NETCDF4")
+    # This path is a fixed scratch location, wiped and recreated by main()
+    # immediately before this call, so the specific inode being reused is
+    # not the concern. What has been observed instead: this create failed
+    # once, on a job that ran shortly after a prior job touching this same
+    # underlying storage was killed abruptly (SIGKILL, which skips the
+    # graceful close a normal exit performs). The leading hypothesis is a
+    # parallel filesystem's (Lustre, GPFS) own lock/object-cleanup recovery
+    # lagging behind that abrupt death, rather than anything about this
+    # dataset's contents -- but that is inference from one occurrence in a
+    # sandbox that cannot reproduce this cluster's storage layer, not a
+    # confirmed mechanism. The retry below is deliberately generous (minutes,
+    # not seconds: this job's walltime budget is hours) on the chance that
+    # is right, and gathers concrete diagnostics on every failed attempt so
+    # that if it recurs, the log carries actual forensic data -- disk space,
+    # directory state, any partial file left behind -- instead of only the
+    # bare "HDF error" a retry alone would still leave unexplained.
+    max_attempts = 6
+    delays = (5.0, 15.0, 30.0, 60.0, 120.0)
+    assert len(delays) == max_attempts - 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            path.unlink(missing_ok=True)
+            ds.to_netcdf(path, format="NETCDF4")
+            break
+        except OSError as exc:
+            diagnostics = _diagnose_write_failure(path)
+            if attempt == max_attempts:
+                raise OSError(
+                    f"{exc}\nDiagnostics after {max_attempts} attempts "
+                    + f"over {sum(delays):.0f}s: {diagnostics}"
+                ) from exc
+            delay = delays[attempt - 1]
+            warnings.warn(
+                f"build_mock_dataset: attempt {attempt}/{max_attempts} to "
+                + f"create {path} failed ({exc}); retrying in {delay:.0f}s. "
+                + f"Diagnostics: {diagnostics}",
+                stacklevel=2,
+            )
+            time_module.sleep(delay)
 
     mpi.log(f"Mock dataset saved to {path}", timestamp=True, prefix=True)
 
@@ -3793,9 +3864,8 @@ def main() -> None:
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         build_mock_dataset(TEST_DATA_PATH, TIME_STEPS)
-    # ADD A BARRIER HERE
-    # Wait for Rank 0 to finish writing the file before other ranks proceed.
-    # (Adjust the syntax below depending on the specific MPI wrapper you are using)
+    # Every other rank waits here for rank 0 to finish writing the mock
+    # dataset before touching TEST_DATA_PATH.
     mpi.comm.Barrier()
 
     mpi.log("[SETUP] validating test dataset visibility", timestamp=True, flush=True)

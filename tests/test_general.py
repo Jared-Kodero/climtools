@@ -35,6 +35,7 @@ matplotlib.use("Agg")  # headless: this suite never needs an on-screen figure
 import numpy as np
 import pandas as pd
 import xarray as xr
+
 from climtools import calc, cmaps, xgeo
 from climtools import plot as ctplot
 from climtools.core.tools import AttrDict, LockFile, n_cpus
@@ -78,7 +79,7 @@ def run_test(function: Callable[..., None]) -> Callable[..., None]:
         before = len(RESULTS)
         try:
             function(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - test isolation, not rethrow
+        except Exception as exc:
             record_result(
                 f"{function.__name__} (uncaught exception)",
                 False,
@@ -131,8 +132,16 @@ def make_grid(n_time: int = 24, n_lat: int = 37, n_lon: int = 72) -> xr.Dataset:
         },
         coords={
             "time": time,
-            "lat": ("lat", lat, {"units": "degrees_north", "standard_name": "latitude"}),
-            "lon": ("lon", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+            "lat": (
+                "lat",
+                lat,
+                {"units": "degrees_north", "standard_name": "latitude"},
+            ),
+            "lon": (
+                "lon",
+                lon,
+                {"units": "degrees_east", "standard_name": "longitude"},
+            ),
         },
         attrs={"title": "climtools general test mock dataset"},
     )
@@ -515,7 +524,9 @@ def test_serial_netcdf_append(tmp_dir: Path) -> None:
                 reopened["t2m"].isel(time=slice(3, 6)).values, second["t2m"].values
             )
         )
-    record_result("lib_netcdf.serial.append extends without corrupting prior data", correct)
+    record_result(
+        "lib_netcdf.serial.append extends without corrupting prior data", correct
+    )
 
 
 @run_test
@@ -565,7 +576,9 @@ def test_lock_file(tmp_dir: Path) -> None:
         released_cleanly = True
 
     correct = bool(entered and reentry_blocked and released_cleanly)
-    record_result("core.tools.LockFile excludes concurrent holders and releases", correct)
+    record_result(
+        "core.tools.LockFile excludes concurrent holders and releases", correct
+    )
 
 
 @run_test
