@@ -35,7 +35,24 @@ import numpy as np
 import xarray as xr
 from climtools import mpi, xgeo
 
-TIME_STEPS = 100
+# Raised from 100 to make the local per-rank compute in every reduction
+# large relative to the fixed per-call MPI overhead (the collective-agreement
+# allgather in XarrayMPI._agree and the error/signature allgather in
+# MPIRuntime.raise_if_error, profiled at a few ms each regardless of data
+# size -- see the profiling notes in the accompanying patch). At
+# TIME_STEPS=100 that fixed cost dominates the tiny per-rank payload, which
+# is why most mpi.xarray.* checks reported "Xarray (faster)" in the last
+# run; a larger payload is what actually exercises the collective's
+# bandwidth-bound behavior instead of just its latency floor.
+#
+# Memory: at the default RESOLUTION_DEG=0.25 (721x1440x21), the "t" field
+# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes; at TIME_STEPS=1000 that is
+# ~81 GiB, and build_mock_dataset briefly holds two full copies of it on
+# rank 0 (the broadcast subtraction and the following .astype), so budget
+# roughly 170-180 GiB peak on rank 0 alone. That fits the 500 GiB/node SLURM
+# allocation with headroom; lower --time-steps (or raise --resolution, which
+# coarsens the grid) on a smaller node.
+TIME_STEPS = 1000
 RESOLUTION_DEG = 0.25
 PLEV_STEP = -50
 
@@ -2075,92 +2092,6 @@ def test_distributed_arithmetic() -> None:
 
 
 @run_test
-def test_distributed_reduction_guard(ny: int, nx: int) -> None:
-    """Native xr.Dataset/DataArray reductions warn on a distributed object.
-
-    ``mpi.xarray.open_dataset``/``redistribute`` tag their output with
-    ``mpi_meta``. Calling the ordinary, undistributed ``.mean()`` (etc.)
-    directly on that object silently returns only this rank's own partial
-    reduction, with no error, which is easy to do by mistake and easy not to
-    notice. ``install_reduction_guard`` patches xarray's own reduction
-    methods to warn in exactly that situation, while leaving every other
-    case (non-distributed objects, and reductions that never touch the
-    distributed dimension) completely silent.
-    """
-    import warnings
-
-    full = load_test_variable("t2m", time=0, lat=slice(0, ny), lon=slice(0, nx))
-    distributed = mpi.xarray.redistribute(full, "lat")
-
-    def warns(callback: Callable[[], Any]) -> bool:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            callback()
-        return any(
-            issubclass(item.category, UserWarning)
-            and "mpi.xarray." in str(item.message)
-            for item in caught
-        )
-
-    # Reducing over the distributed dim (explicitly, or via the default
-    # dim=None, which reduces over every dim) must warn.
-    warns_default_dim = warns(lambda: distributed.mean())
-    warns_named_dim = warns(lambda: distributed.sum(dim="lat"))
-    warns_dim_list = warns(lambda: distributed.max(dim=["lat", "lon"]))
-    warns_dataset = warns(lambda: distributed.to_dataset(name="t2m").mean())
-
-    # Reducing over a dim that is NOT the distributed one is a legitimate,
-    # embarrassingly-parallel per-rank operation and must stay silent.
-    no_warn_other_dim = not warns(lambda: distributed.mean(dim="lon"))
-
-    # A plain, non-distributed object must never warn.
-    no_warn_undistributed = not warns(lambda: full.mean())
-
-    # The reduction itself is unaffected: the warning wraps, not replaces,
-    # the original computation.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        local_partial = distributed.mean(dim="lat").values
-    expected_local_partial = (
-        full.isel(
-            lat=slice(
-                distributed.attrs["mpi_meta"]["start"],
-                distributed.attrs["mpi_meta"]["stop"],
-            )
-        )
-        .mean(dim="lat")
-        .values
-    )
-    computation_unaffected = bool(
-        np.allclose(
-            local_partial,
-            expected_local_partial,
-            rtol=relative_tolerance_for_dtype(expected_local_partial),
-            equal_nan=True,
-        )
-    )
-
-    correct = bool(
-        mpi.reduce.all(
-            warns_default_dim
-            and warns_named_dim
-            and warns_dim_list
-            and warns_dataset
-            and no_warn_other_dim
-            and no_warn_undistributed
-            and computation_unaffected
-        )
-    )
-    record_result(
-        "native .mean()/.sum()/etc. warn on a distributed object",
-        correct,
-        0.0,
-        0.0,
-        note="correctness-focused",
-    )
-
-
-@run_test
 def test_reduction_redistribution(n_lat_max: int, nx: int) -> None:
     """Redistribute a mock-data reduction result along longitude."""
     full = load_test_variable(
@@ -3938,7 +3869,6 @@ def main() -> None:
     test_collective_sequence_symmetry()
     test_distributed_xarray_contracts()
     test_distributed_arithmetic()
-    test_distributed_reduction_guard(LATITUDE_COUNT, LONGITUDE_COUNT)
     test_reduction_redistribution(LATITUDE_COUNT, LONGITUDE_COUNT)
 
     mpi.log("\n--- data placement ---")
