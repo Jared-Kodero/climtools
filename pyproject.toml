@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Utilities for climate data analysis and plotting, with an MPI runtime for distributed xarray reductions and parallel NetCDF-4 output."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 authors = [{ name = "Jared M Kodero" }]
 keywords = [
     "climate",
@@ -22,13 +22,11 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Topic :: Scientific/Engineering :: Visualization",
     "Environment :: Console",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS",
 ]
 
 # Every entry below is imported somewhere in climtools's own source (not
@@ -78,7 +76,7 @@ Documentation = "https://github.com/Jared-Kodero/climtools#readme"
 # of the package works without it. Its ESMF dependency is far more reliable
 # from conda-forge than from pip; see env/environment.yml.
 regrid = ["xesmf"]
-dev = ["ruff", "typing_extensions", "build", "twine"]
+dev = ["typing_extensions", "build", "twine"]
 
 [tool.setuptools]
 # This repository's root *is* the "climtools" package: __init__.py sits
@@ -103,10 +101,3 @@ package-dir = { climtools = "." }
 # Keep the sdist/wheel free of dev tooling and the multi-hundred-MB test
 # scratch output that setup_env.sh and tests/test_mpi.py can generate.
 "*" = ["env/*", "tests/*.log", "tests/__pycache__/*"]
-
-[tool.ruff]
-target-version = "py312"
-line-length = 92
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -22,10 +22,11 @@ import sys
 import tempfile
 import traceback
 import warnings
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import matplotlib
 
@@ -34,8 +35,6 @@ matplotlib.use("Agg")  # headless: this suite never needs an on-screen figure
 import numpy as np
 import pandas as pd
 import xarray as xr
-
-import climtools
 from climtools import calc, cmaps, xgeo
 from climtools import plot as ctplot
 from climtools.core.tools import AttrDict, LockFile, n_cpus
@@ -62,7 +61,9 @@ class Result:
 RESULTS: list[Result] = []
 
 
-def record_result(name: str, passed: bool, note: str = "", *, skipped: bool = False) -> None:
+def record_result(
+    name: str, passed: bool, note: str = "", *, skipped: bool = False
+) -> None:
     RESULTS.append(Result(name, passed, note, skipped))
     status = "SKIP" if skipped else ("OK  " if passed else "FAIL")
     suffix = f"  ({note})" if note else ""
@@ -162,7 +163,9 @@ def test_cmaps_registry() -> None:
     record_result(
         "cmaps: every registered colormap name resolves",
         correct,
-        note=f"{len(names)} colormap(s)" if correct else "a registered name failed to resolve",
+        note=f"{len(names)} colormap(s)"
+        if correct
+        else "a registered name failed to resolve",
     )
 
 
@@ -505,8 +508,12 @@ def test_serial_netcdf_append(tmp_dir: Path) -> None:
         reopened.load()
         correct = bool(
             reopened.sizes["time"] == 6
-            and np.allclose(reopened["t2m"].isel(time=slice(0, 3)).values, first["t2m"].values)
-            and np.allclose(reopened["t2m"].isel(time=slice(3, 6)).values, second["t2m"].values)
+            and np.allclose(
+                reopened["t2m"].isel(time=slice(0, 3)).values, first["t2m"].values
+            )
+            and np.allclose(
+                reopened["t2m"].isel(time=slice(3, 6)).values, second["t2m"].values
+            )
         )
     record_result("lib_netcdf.serial.append extends without corrupting prior data", correct)
 
@@ -638,7 +645,9 @@ def print_summary() -> int:
     n_skipped = sum(1 for r in RESULTS if r.skipped)
     n_passed = n_total - n_failed - n_skipped
     print("-" * 88)
-    print(f"Results: {n_passed} passed, {n_failed} failed, {n_skipped} skipped, {n_total} total.")
+    print(
+        f"Results: {n_passed} passed, {n_failed} failed, {n_skipped} skipped, {n_total} total."
+    )
     if n_failed:
         print(f"{n_failed} check(s) FAILED.")
     else:

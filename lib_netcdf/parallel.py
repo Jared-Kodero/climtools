@@ -326,7 +326,6 @@ def write_distributed(
                 ncvar[index] = values
     finally:
         if nc is not None:
-            nc.sync()
             nc.close()
         free_writer_comm(comm)
         # Every rank reaches this barrier -- including the COMM_NULL/no-data
@@ -406,7 +405,6 @@ def write_partitioned(
                 ncvar[index] = local
     finally:
         if nc is not None:
-            nc.sync()
             nc.close()
         free_writer_comm(comm)
         # See the matching comment in write_distributed: guarantees every

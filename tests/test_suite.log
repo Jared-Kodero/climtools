@@ -1,0 +1,111 @@
+## SLURM PROLOG ###############################################################
+##    Job ID : 5127217
+##  Job Name : test.sh
+##  Nodelist : node2416
+##      CPUs : 8
+##  Mem/Node : 512000 MB
+## Directory : /oscar/home/jkodero/research/climtools/tests
+##   Job Started : Fri Aug 21 11:33:26 AM EDT 2026
+###############################################################################
+
+Currently Loaded Modules:
+  1) hpcx-mpi/2.25.1s-le4f    13) libunistring/1.2-pf4t
+  2) glibc/2.34-xtty          14) libidn2/2.3.7-xkvg
+  3) gcc-runtime/11.5.0-7cbl  15) openssl/3.5.1s-cpde
+  4) libaec/1.0.6-sjxu        16) nghttp2/1.65.0-67io
+  5) zlib/1.3.1-xo4x          17) curl/8.11.1-qbgr
+  6) libiconv/1.18-ifc5       18) lz4/1.10.0-vu6t
+  7) xz/5.6.3-pvai            19) snappy/1.2.1-llhc
+  8) libxml2/2.13.5-ikrc      20) c-blosc/1.21.6-vyv3
+  9) pkgconf/2.3.0-wdev       21) netcdf-c-mpi/4.9.3-lezy
+ 10) hdf5-mpi/1.14.6-wybi     22) netcdf-fortran-mpi/4.6.1-7t2u
+ 11) bzip2/1.0.8-raqr         23) netcdf-mpi/4.9.3-kuxq
+ 12) zstd/1.5.7-v3mt
+
+ 
+
+2026-08-21 11:33:35 - [MPI RANK 0] Creating mock dataset
+Traceback (most recent call last):
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/file_manager.py", line 219, in _acquire_with_cache_info
+    file = self._cache[self._key]
+           ~~~~~~~~~~~^^^^^^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/lru_cache.py", line 56, in __getitem__
+    value = self._cache[key]
+            ~~~~~~~~~~~^^^^^
+KeyError: [<class 'netCDF4._netCDF4.Dataset'>, ('/users/jkodero/scratch/io_mpi_test/mock_in.nc',), 'a', (('clobber', True), ('diskless', False), ('format', 'NETCDF4'), ('persist', False)), '5d3a4ce6-1e80-496d-b280-5880cd4f044e']
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/__main__.py", line 8, in <module>
+    main()
+    ~~~~^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 320, in main
+    run_command_line(args)
+    ~~~~~~~~~~~~~~~~^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/mpi4py/run.py", line 53, in run_command_line
+    run_path(sys.argv[0], run_name="__main__")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 294, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "test_mpi.py", line 3900, in <module>
+    main()
+    ~~~~^^
+  File "test_mpi.py", line 3795, in main
+    build_mock_dataset(TEST_DATA_PATH, TIME_STEPS)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "test_mpi.py", line 204, in build_mock_dataset
+    ds.to_netcdf(path, format="NETCDF4")
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/core/dataset.py", line 2206, in to_netcdf
+    return to_netcdf(  # type: ignore[return-value]  # mypy cannot resolve the overloads:(
+        self,
+    ...<10 lines>...
+        auto_complex=auto_complex,
+    )
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/writers.py", line 422, in to_netcdf
+    store = get_writable_netcdf_store(
+        target,
+    ...<5 lines>...
+        auto_complex=auto_complex,
+    )
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/writers.py", line 78, in get_writable_netcdf_store
+    return store_open(target, mode=mode, format=format, **kwargs)
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/netCDF4_.py", line 529, in open
+    return cls(manager, group=group, mode=mode, lock=lock, autoclose=autoclose)
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/netCDF4_.py", line 429, in __init__
+    self.format = self.ds.data_model
+                  ^^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/netCDF4_.py", line 538, in ds
+    return self._acquire()
+           ~~~~~~~~~~~~~^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/netCDF4_.py", line 532, in _acquire
+    with self._manager.acquire_context(needs_lock) as root:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/file_manager.py", line 207, in acquire_context
+    file, cached = self._acquire_with_cache_info(needs_lock)
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/users/jkodero/miniconda3/envs/mother/lib/python3.14/site-packages/xarray/backends/file_manager.py", line 225, in _acquire_with_cache_info
+    file = self._opener(*self._args, **kwargs)
+  File "src/netCDF4/_netCDF4.pyx", line 2521, in netCDF4._netCDF4.Dataset.__init__
+  File "src/netCDF4/_netCDF4.pyx", line 2158, in netCDF4._netCDF4._ensure_nc_success
+OSError: [Errno -101] NetCDF: HDF error: '/users/jkodero/scratch/io_mpi_test/mock_in.nc'
+[MPI RANK 0] unhandled OSError; aborting MPI_COMM_WORLD so the remaining ranks do not deadlock in the next collective.
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+srun: Job step aborted: Waiting up to 182 seconds for job step to finish.
+[2026-08-21T11:35:05.983] error: *** STEP 5127217.0 ON node2416 CANCELLED AT 2026-08-21T11:35:05 DUE to SIGNAL Killed ***
+srun: error: node2416: tasks 1-7: Killed
+srun: Terminating StepId=5127217.0
+srun: error: node2416: task 0: Exited with exit code 1

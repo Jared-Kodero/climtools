@@ -419,14 +419,24 @@ This is why the example above passes real data only on rank 0 and
 `empty_dataset()` elsewhere — every rank still calls the writer at the same
 point, even though only one of them supplies data.
 
-Internally, `to_netcdf(..., parallel=True)` calls `nc.sync()` before the
-collective `nc.close()` and then posts an `mpi.comm.Barrier()` — inside
+Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
+immediately after the collective `nc.close()` — inside
 [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/
 `write_distributed`, right next to the `close()` it protects — so that by
 the time the call returns on any rank, the file is fully written and closed
 everywhere, and safe to reopen through a different communicator or a
 non-parallel handle (as, for example, the test suite's own read-back
-validation does immediately afterward).
+validation does immediately afterward). An earlier version of this also
+called `nc.sync()` just before `close()`, on the theory that an explicit
+flush could only make the guarantee stronger; in practice, on HDF5 1.14
+(this project's actual deployment target — the sandbox this was first
+validated in only had HDF5 1.10 available), an explicit collective `sync()`
+immediately before the already-collective `close()` triggered a genuine
+`NetCDF: HDF error` on close instead. `close()` on a file opened through the
+MPI-IO/parallel HDF5 driver already performs its own collective,
+synchronizing flush; calling `sync()` first was both redundant and, on the
+stricter parallel-consistency checking newer HDF5 versions do, actively
+harmful. Removed.
 
 See [`core/xgeo.py`](core/xgeo.py) and [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)
 for the full `to_netcdf` signature (chunking, compression, unlimited

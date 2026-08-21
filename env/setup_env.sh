@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Set up an environment for climtools, including MPI-collective parallel
-# NetCDF-4 output (climtools.xgeo.to_netcdf(..., parallel=True)).
+# Set up an environment for XGEO, including MPI-collective parallel
+# NetCDF-4 output (XGEO.xgeo.to_netcdf(..., parallel=True)).
 #
 # The parallel stack (mpi4py + netCDF4 built against a parallel-enabled
 # MPI/HDF5/NetCDF-C) is located in one of two ways, in order, and never
@@ -16,11 +16,11 @@
 #   env/setup_env.sh --help
 #
 # With no active conda environment or virtualenv, creates and activates a
-# conda environment named env_name (default "climtools") from
-# environment.boot.yml, installing Miniconda first if conda itself is
-# missing, then applies environment.yml for the rest of climtools's
+# conda environment named env_name (default "XGEO") from
+# environment.boot.yaml, installing Miniconda first if conda itself is
+# missing, then applies environment.yaml for the rest of XGEO's
 # dependencies. Inside an already-active environment, uses it directly and
-# skips both steps; only the parallel stack and climtools itself are
+# skips both steps; only the parallel stack and XGEO itself are
 # (re)built.
 
 set -eo pipefail
@@ -77,7 +77,7 @@ if [[ -n "${CONDA_DEFAULT_ENV:-}" && "${CONDA_DEFAULT_ENV}" != "base" ]]; then
 elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
     log "using active virtualenv: $(basename "${VIRTUAL_ENV}")"
 else
-    env_name="${1:-climtools}"
+    env_name="${1:-XGEO}"
     log "no active environment; creating conda environment '${env_name}'"
 
     if ! command -v conda >/dev/null 2>&1; then
@@ -95,9 +95,9 @@ else
     source "${conda_sh}"
 
     if conda env list | grep -qE "^${env_name}[[:space:]]"; then
-        conda env update -n "${env_name}" -f "${repo_dir}/environment.boot.yml"
+        conda env update -n "${env_name}" -f "${repo_dir}/boot.yaml"
     else
-        conda env create -n "${env_name}" -f "${repo_dir}/environment.boot.yml"
+        conda env create -n "${env_name}" -f "${repo_dir}/boot.yaml"
     fi
     conda activate "${env_name}"
     is_conda=1
@@ -308,28 +308,28 @@ if [[ "${is_conda}" == "1" && -n "${CONDA_PREFIX:-}" ]]; then
     deactivate_dir="${CONDA_PREFIX}/etc/conda/deactivate.d"
     mkdir -p "${activate_dir}" "${deactivate_dir}"
 
-    cat > "${activate_dir}/climtools-parallel-io.sh" << HOOK
+    cat > "${activate_dir}/XGEO-parallel-io.sh" << HOOK
 #!/usr/bin/env bash
-export _CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:-}"
+export _XGEO_PIO_OLD_LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:-}"
 
 $([[ -n "${mpi_module_name}" ]] && printf 'module load %q\n' "${mpi_module_name}")
 $([[ -n "${netcdf_module_name}" ]] && printf 'module load %q\n' "${netcdf_module_name}")
 export LD_LIBRARY_PATH=$(printf '%q' "${LD_LIBRARY_PATH:-}")"\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
 HOOK
-    cat > "${deactivate_dir}/climtools-parallel-io.sh" << 'HOOK'
+    cat > "${deactivate_dir}/XGEO-parallel-io.sh" << 'HOOK'
 #!/usr/bin/env bash
-if [[ -n "${_CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH:-}" ]]; then
-    export LD_LIBRARY_PATH="${_CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH}"
+if [[ -n "${_XGEO_PIO_OLD_LD_LIBRARY_PATH:-}" ]]; then
+    export LD_LIBRARY_PATH="${_XGEO_PIO_OLD_LD_LIBRARY_PATH}"
 else
     unset LD_LIBRARY_PATH
 fi
-unset _CLIMTOOLS_PIO_OLD_LD_LIBRARY_PATH
+unset _XGEO_PIO_OLD_LD_LIBRARY_PATH
 HOOK
-    chmod +x "${activate_dir}/climtools-parallel-io.sh" "${deactivate_dir}/climtools-parallel-io.sh"
+    chmod +x "${activate_dir}/XGEO-parallel-io.sh" "${deactivate_dir}/XGEO-parallel-io.sh"
     log "installed conda activate/deactivate hooks in ${CONDA_PREFIX}"
 elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
-    marker_begin="# BEGIN climtools-parallel-io"
-    marker_end="# END climtools-parallel-io"
+    marker_begin="# BEGIN XGEO-parallel-io"
+    marker_end="# END XGEO-parallel-io"
     activate_script="${VIRTUAL_ENV}/bin/activate"
     if [[ -f "${activate_script}" ]]; then
         if grep -qF "${marker_begin}" "${activate_script}"; then
@@ -349,24 +349,24 @@ elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. The rest of climtools's dependencies (conda only; environment.yml is a
-#    conda spec), then climtools itself, editable, in either environment
+# 4. The rest of XGEO's dependencies (conda only; environment.yaml is a
+#    conda spec), then XGEO itself, editable, in either environment
 # ---------------------------------------------------------------------------
 if [[ "${is_conda}" == "1" && -n "${env_name}" ]]; then
-    log "applying environment.yml"
-    conda env update -n "${env_name}" -f "${repo_dir}/environment.yml"
+    log "applying environment.yaml"
+    conda env update -n "${env_name}" -f "${repo_dir}/environment.yaml"
 
     # A full re-solve can occasionally pull in a replacement mpi4py or
     # netCDF4 as a transitive dependency of something else, even though
-    # environment.yml itself never names them. Confirm the parallel build
+    # environment.yaml itself never names them. Confirm the parallel build
     # survived, and rebuild it once if not.
     if ! parallel_netcdf_confirmed; then
-        log "environment.yml solve replaced the parallel I/O build; restoring it"
+        log "environment.yaml solve replaced the parallel I/O build; restoring it"
         build_parallel_io_stack
     fi
 fi
 
-log "installing climtools (editable)"
+log "installing XGEO (editable)"
 "$(python_bin)" -m pip install --no-cache-dir --break-system-packages --no-deps -e "${repo_dir}"
 
 log "done"
