@@ -361,6 +361,16 @@ def _delayed_local(
     return dask_array.from_delayed(dask.delayed(fn)(*args), shape=shape, dtype=dtype)
 
 
+_SHORT_PARTITION_WARNED: set[tuple[str, int, int]] = set()
+"""Distinct (dim, length, mpi_size) triples already warned about this process.
+
+Populated by :func:`choose_partition_dim`. Not meant to be read or mutated
+directly; exists at module scope only so the warning survives across many
+independent calls within one process without needing to thread state through
+every caller.
+"""
+
+
 def choose_partition_dim(
     sizes: Mapping[Hashable, int],
     mpi_size: int,
@@ -394,6 +404,19 @@ def choose_partition_dim(
     ------
     ValueError
         If no dimension is available.
+
+    Notes
+    -----
+    A short-partition warning (see below) is emitted at most once per
+    distinct ``(dim, length, mpi_size)`` combination for the life of the
+    process. climtools sets its own warnings filter to ``"always"`` for
+    ``climtools.*`` modules (see ``climtools/__init__.py``) precisely so a
+    climtools warning is never silently dropped by Python's default
+    per-callsite dedup -- but that same policy means a warning raised from a
+    hot path would otherwise repeat, unchanged, on every single call, which
+    is pure noise rather than new information. Deduplicating on the
+    condition itself keeps the first, genuinely informative occurrence
+    visible while not repeating it for a condition already reported.
     """
     blocked = set(exclude)
     candidates = [
@@ -407,13 +430,18 @@ def choose_partition_dim(
     dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
 
     if length < mpi_size:
-        warnings.warn(
-            f"Automatic partition dimension {str(dim)!r} has length {length}, "
-            + f"which is shorter than the {mpi_size} available ranks, so "
-            + f"{mpi_size - length} rank(s) will hold no data.",
-            UserWarning,
-            stacklevel=3,
-        )
+        warn_key = (str(dim), length, mpi_size)
+        if warn_key not in _SHORT_PARTITION_WARNED:
+            _SHORT_PARTITION_WARNED.add(warn_key)
+            warnings.warn(
+                f"Automatic partition dimension {str(dim)!r} has length "
+                + f"{length}, which is shorter than the {mpi_size} available "
+                + f"ranks, so {mpi_size - length} rank(s) will hold no data. "
+                + "This message will not repeat for the same dimension, "
+                + "length, and rank count.",
+                UserWarning,
+                stacklevel=3,
+            )
     return dim
 
 
@@ -1806,26 +1834,73 @@ class XarrayMPI(ArithmeticMixin):
     ) -> xr.Dataset:
         return self._reduced_dataset(value, dims, variables)
 
+    @staticmethod
+    def _redistribution_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
+        """Dimensions eligible as a post-reduction partition dimension.
+
+        Restricted to dimensions still present on a variable that itself
+        required an MPI collective (``entry.distributed``). A Dataset
+        variable that never carried the active partition dimension is
+        identical, not partitioned, on every rank; selecting one of its own
+        dimensions as the new partition would slice that replicated variable
+        differently per rank instead of scattering a real global object, so
+        such dimensions are never legitimate ``"auto"`` or explicit targets.
+        """
+        return frozenset(
+            dim for entry in plan if entry.distributed for dim, _ in entry.shape
+        )
+
     def _finish(
         self,
         result: xr.Dataset | xr.DataArray,
         *,
         old_meta: Mapping[str, Any] | None,
         redistribute_on: Hashable | Literal["auto"] | None,
+        auto_candidates: frozenset[Hashable],
     ) -> xr.Dataset | xr.DataArray:
-        """Finalize a global reduction and choose its next distribution."""
+        """Finalize a global reduction and choose its next distribution.
+
+        Parameters
+        ----------
+        result : xarray.Dataset or xarray.DataArray
+            Global reduction result, currently replicated on every rank.
+        old_meta : mapping, optional
+            ``mpi_meta`` of the object that was reduced.
+        redistribute_on : hashable, "auto", or None
+            Placement requested by the caller.
+        auto_candidates : frozenset of hashable
+            Dimensions eligible as the new partition dimension -- those
+            still present on a variable that itself required an MPI
+            collective. See :meth:`_redistribution_candidates`. Also
+            enforced for an explicit ``redistribute_on`` so a caller cannot
+            accidentally fabricate a fake partition on an untouched,
+            replicated sibling variable either.
+        """
         result = strip_mpi_meta(result)
-        partition_removed = (
-            old_meta is not None and old_meta["dim"] not in result.dims
-        )
+        partition_removed = old_meta is not None and old_meta["dim"] not in result.dims
 
         if redistribute_on is None:
             return result
+
+        target = redistribute_on
         if redistribute_on == "auto":
             if not partition_removed:
                 return result
-            if not any(int(length) > 1 for length in result.sizes.values()):
+            sizes = {
+                dim: length
+                for dim, length in result.sizes.items()
+                if dim in auto_candidates
+            }
+            if not any(int(length) > 1 for length in sizes.values()):
                 return result
+            target = choose_partition_dim(sizes, self._runtime.comm.size)
+        elif redistribute_on not in auto_candidates:
+            raise ValueError(
+                f"redistribute_on={redistribute_on!r} is not a dimension of any "
+                + "variable that required an MPI collective in this reduction; "
+                + "an untouched, replicated variable's own dimension cannot be "
+                + "used as the new partition dimension."
+            )
 
         chunk_info = (
             prune_chunk_info(old_meta["chunk_info"], result)
@@ -1834,7 +1909,7 @@ class XarrayMPI(ArithmeticMixin):
         )
         return self.redistribute(
             result,
-            redistribute_on,
+            target,
             chunk_info=chunk_info,
         )
 
@@ -2272,6 +2347,7 @@ class XarrayMPI(ArithmeticMixin):
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
+                auto_candidates=self._redistribution_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2308,6 +2384,7 @@ class XarrayMPI(ArithmeticMixin):
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
+            auto_candidates=self._redistribution_candidates(plan),
         )
 
     def mean(
@@ -2403,6 +2480,7 @@ class XarrayMPI(ArithmeticMixin):
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
+                auto_candidates=self._redistribution_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2438,6 +2516,7 @@ class XarrayMPI(ArithmeticMixin):
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
+            auto_candidates=self._redistribution_candidates(plan),
         )
 
     def min(
@@ -2604,6 +2683,7 @@ class XarrayMPI(ArithmeticMixin):
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
+                auto_candidates=self._redistribution_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2640,6 +2720,7 @@ class XarrayMPI(ArithmeticMixin):
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
+            auto_candidates=self._redistribution_candidates(plan),
         )
 
     def any(
@@ -2784,6 +2865,7 @@ class XarrayMPI(ArithmeticMixin):
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
+                auto_candidates=self._redistribution_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2814,5 +2896,6 @@ class XarrayMPI(ArithmeticMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
+            auto_candidates=self._redistribution_candidates(plan),
             redistribute_on=redistribute_on,
         )

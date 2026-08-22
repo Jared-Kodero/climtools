@@ -26,7 +26,7 @@ import os
 import shutil
 import time as time_module
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import wraps
 from io import StringIO
@@ -1349,7 +1349,7 @@ def test_distributed_numeric_reduction(
     )
     distributed = mpi.xarray.redistribute(full, "plev")
     op = getattr(mpi.xarray, op_name)
-    kwargs = {"skipna": True, "keep_attrs": True}
+    kwargs = {"skipna": True, "keep_attrs": True, "redistribute_on": None}
     if op_name in {"sum", "prod"}:
         kwargs["min_count"] = 1
 
@@ -1368,7 +1368,6 @@ def test_distributed_numeric_reduction(
         return getattr(full, op_name)(dim="plev", **serial_kwargs).values
 
     expected, serial_s = serial_fn()
-    root_result = op(distributed, dim="plev", mode="root", root=0, **kwargs)
     tolerance = relative_tolerance_for_dtype(expected)
     all_mode_ok = (
         result is not None
@@ -1376,15 +1375,7 @@ def test_distributed_numeric_reduction(
         and bool(np.allclose(result.values, expected, rtol=tolerance, equal_nan=True))
         and result.attrs.get("units") == full.attrs.get("units")
     )
-    root_mode_ok = (
-        root_result is not None
-        and bool(
-            np.allclose(root_result.values, expected, rtol=tolerance, equal_nan=True)
-        )
-        if RANK == 0
-        else root_result is None
-    )
-    correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
+    correct = bool(mpi.reduce.all(all_mode_ok))
     record_result(
         f"mpi.xarray.{op_name} mock t over {full.sizes['plev']} pressure levels",
         correct,
@@ -1412,7 +1403,7 @@ def test_distributed_logical_reduction(
 
     @timer
     def reduce_latitudes() -> Any:
-        return op(distributed, dim="lat")
+        return op(distributed, dim="lat", redistribute_on=None)
 
     result, parallel_s = reduce_latitudes()
 
@@ -1422,14 +1413,8 @@ def test_distributed_logical_reduction(
         return getattr(full, op_name)(dim="lat").values
 
     expected, serial_s = serial_fn()
-    root_result = op(distributed, dim="lat", mode="root", root=0)
     all_mode_ok = result is not None and bool(np.array_equal(result.values, expected))
-    root_mode_ok = (
-        root_result is not None and bool(np.array_equal(root_result.values, expected))
-        if RANK == 0
-        else root_result is None
-    )
-    correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
+    correct = bool(mpi.reduce.all(all_mode_ok))
     record_result(
         f"mpi.xarray.{op_name} mock slmsk land mask ({full.sizes['lat']} latitudes)",
         correct,
@@ -1453,8 +1438,10 @@ def test_distributed_dataset_reduction(ny: int, nx: int) -> None:
 
     @timer
     def reduce_dataset() -> tuple[xr.Dataset, xr.Dataset]:
-        result = mpi.xarray.sum(distributed, dim="lat")
-        mean_result = mpi.xarray.mean(distributed, dim=("lat", "lon"))
+        result = mpi.xarray.sum(distributed, dim="lat", redistribute_on=None)
+        mean_result = mpi.xarray.mean(
+            distributed, dim=("lat", "lon"), redistribute_on=None
+        )
         return result, mean_result
 
     (result, mean_result), parallel_s = reduce_dataset()
@@ -1547,6 +1534,143 @@ def test_distributed_dataset_reduction(ny: int, nx: int) -> None:
 
 
 @run_test
+def test_redistribution_candidate_restriction() -> None:
+    """Auto/explicit post-reduction redistribution never targets a static var.
+
+    Regression coverage for the ``_finish``/``_redistribution_candidates``
+    fix: a Dataset combining a fully-reduced distributed variable, a
+    partially-reduced distributed variable, and an untouched static variable
+    must pick the new partition dimension only from a variable that itself
+    required an MPI collective. Picking the static variable's own dimension
+    would slice data that is identical (not partitioned) on every rank
+    differently per rank, silently fabricating a fake partition.
+    """
+    lat, lon, other = 8, 6, 3
+    t2m = xr.DataArray(
+        np.arange(lat * lon, dtype=np.float32).reshape(lat, lon),
+        dims=("lat", "lon"),
+        name="t2m",
+    )
+    pr = xr.DataArray(
+        np.arange(lat, dtype=np.float32) * 0.1,
+        dims=("lat",),
+        name="pr",
+    )
+    static = xr.DataArray(
+        np.arange(other, dtype=np.float32) + 100.0,
+        dims=("other",),
+        name="static",
+    )
+    full = xr.merge([t2m.to_dataset(), pr.to_dataset(), static.to_dataset()])
+    distributed = mpi.xarray.redistribute(full, "lat")
+
+    # -- auto: must land on "lon" (t2m's surviving dim), never "other" ------
+    auto_result = mpi.xarray.sum(distributed, dim="lat")
+    auto_meta = auto_result.attrs.get("mpi_meta")
+    auto_ok = (
+        isinstance(auto_meta, dict)
+        and auto_meta.get("dim") == "lon"
+        and all(
+            bool(np.array_equal(part, static.values))
+            for part in mpi.comm.allgather(auto_result["static"].values)
+        )
+    )
+
+    # -- explicit valid target ("lon") must agree with auto -----------------
+    explicit_lon = mpi.xarray.sum(distributed, dim="lat", redistribute_on="lon")
+    explicit_lon_meta = explicit_lon.attrs.get("mpi_meta")
+    explicit_ok = (
+        isinstance(explicit_lon_meta, dict) and explicit_lon_meta.get("dim") == "lon"
+    )
+
+    # -- explicit invalid target (static's own "other") must raise ----------
+    invalid_ok = call_raises(
+        ValueError,
+        mpi.xarray.sum,
+        distributed,
+        dim="lat",
+        redistribute_on="other",
+        contains="not a dimension of any variable that required an MPI collective",
+    )
+
+    # -- fully-collapsed reduction (no eligible dim at all) stays replicated
+    scalar_result = mpi.xarray.sum(distributed, dim=("lat", "lon"))
+    scalar_ok = "mpi_meta" not in scalar_result.attrs and bool(
+        np.array_equal(
+            scalar_result["static"].values,
+            static.values,
+        )
+    )
+
+    correct = bool(mpi.reduce.all(auto_ok and explicit_ok and invalid_ok and scalar_ok))
+    record_result(
+        "mpi.xarray auto/explicit redistribution never targets a static variable",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_short_partition_warning_deduplication() -> None:
+    """choose_partition_dim's short-partition warning fires once per condition.
+
+    climtools sets its warnings filter to "always" for climtools's own
+    modules (see climtools/__init__.py) precisely so a genuine warning is
+    never silently dropped after the first occurrence -- but a hot,
+    frequently-reached path like automatic redistribution can hit the exact
+    same (dim, length, mpi_size) condition many times in one process.
+    Deduplicating on that condition keeps the first, informative occurrence
+    visible without repeating it verbatim for a condition already reported,
+    while a genuinely different condition still warns on its own first hit.
+    """
+    from climtools.core import xr_mpi as xr_mpi_module
+
+    same_dim = f"__test_probe_same_{RANK}__"
+    other_dim = f"__test_probe_other_{RANK}__"
+    xr_mpi_module._SHORT_PARTITION_WARNED.discard((same_dim, 1, SIZE))
+    xr_mpi_module._SHORT_PARTITION_WARNED.discard((other_dim, 1, SIZE))
+
+    with warnings.catch_warnings(record=True) as repeated:
+        warnings.simplefilter("always")
+        for _ in range(5):
+            xr_mpi_module.choose_partition_dim({same_dim: 1}, SIZE)
+    repeated_user_warnings = [
+        w for w in repeated if issubclass(w.category, UserWarning)
+    ]
+    repeat_ok = SIZE <= 1 or len(repeated_user_warnings) == 1
+
+    with warnings.catch_warnings(record=True) as distinct:
+        warnings.simplefilter("always")
+        xr_mpi_module.choose_partition_dim({other_dim: 1}, SIZE)
+    distinct_user_warnings = [
+        w for w in distinct if issubclass(w.category, UserWarning)
+    ]
+    distinct_ok = SIZE <= 1 or len(distinct_user_warnings) == 1
+
+    # Dedup must never change the actual chosen dimension or break real use.
+    small = xr.DataArray(
+        np.arange(2, dtype=np.float64).reshape(1, 2),
+        dims=("lat", "lon"),
+        name="tiny",
+    )
+    distributed = mpi.xarray.redistribute(small, "lat")
+    still_works = (
+        mpi.xarray.sum(distributed, dim="lat", redistribute_on=None) is not None
+    )
+
+    correct = bool(mpi.reduce.all(repeat_ok and distinct_ok and still_works))
+    record_result(
+        "choose_partition_dim short-partition warning dedup (once per condition)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
 def test_distributed_xarray_contracts() -> None:
     """Exercise distributed xarray edge cases and validation with deterministic data."""
     full = xr.DataArray(
@@ -1607,11 +1731,27 @@ def test_distributed_xarray_contracts() -> None:
         and scalar_auto.attrs.get("mpi_meta") is None
     )
 
+    # dim="lon" excludes the active "lat" partition dimension, so this is a
+    # rank-local xarray reduction with no MPI collective: it must not raise,
+    # and must keep the "lat" mpi_meta intact rather than stripping it.
+    local_lon_sum = mpi.xarray.sum(distributed, dim="lon")
+    local_lon_sum_meta = local_lon_sum.attrs.get("mpi_meta")
+    local_reduction_ok = (
+        bool(
+            np.array_equal(
+                local_lon_sum.values,
+                distributed.sum(dim="lon").values,
+            )
+        )
+        and isinstance(local_lon_sum_meta, dict)
+        and local_lon_sum_meta.get("dim") == "lat"
+    )
+
     total_sum = mpi.xarray.sum(distributed, dim=None)
     ellipsis_sum = mpi.xarray.sum(distributed, dim=...)
     tuple_mean = mpi.xarray.mean(distributed, dim=("lat", "lon"))
-    minimum = mpi.xarray.min(distributed, dim="lat")
-    maximum = mpi.xarray.max(distributed, dim="lat")
+    minimum = mpi.xarray.min(distributed, dim="lat", redistribute_on=None)
+    maximum = mpi.xarray.max(distributed, dim="lat", redistribute_on=None)
 
     nan_full = xr.DataArray(
         np.asarray(
@@ -1632,19 +1772,33 @@ def test_distributed_xarray_contracts() -> None:
         dim="lat",
         skipna=True,
         min_count=4,
+        redistribute_on=None,
     )
     min_count_prod = mpi.xarray.prod(
         nan_distributed,
         dim="lat",
         skipna=True,
         min_count=4,
+        redistribute_on=None,
     )
-    nan_mean_skip = mpi.xarray.mean(nan_distributed, dim="lat", skipna=True)
-    nan_mean_keep = mpi.xarray.mean(nan_distributed, dim="lat", skipna=False)
-    nan_min_skip = mpi.xarray.min(nan_distributed, dim="lat", skipna=True)
-    nan_min_keep = mpi.xarray.min(nan_distributed, dim="lat", skipna=False)
-    nan_max_skip = mpi.xarray.max(nan_distributed, dim="lat", skipna=True)
-    nan_max_keep = mpi.xarray.max(nan_distributed, dim="lat", skipna=False)
+    nan_mean_skip = mpi.xarray.mean(
+        nan_distributed, dim="lat", skipna=True, redistribute_on=None
+    )
+    nan_mean_keep = mpi.xarray.mean(
+        nan_distributed, dim="lat", skipna=False, redistribute_on=None
+    )
+    nan_min_skip = mpi.xarray.min(
+        nan_distributed, dim="lat", skipna=True, redistribute_on=None
+    )
+    nan_min_keep = mpi.xarray.min(
+        nan_distributed, dim="lat", skipna=False, redistribute_on=None
+    )
+    nan_max_skip = mpi.xarray.max(
+        nan_distributed, dim="lat", skipna=True, redistribute_on=None
+    )
+    nan_max_keep = mpi.xarray.max(
+        nan_distributed, dim="lat", skipna=False, redistribute_on=None
+    )
 
     empty_length = max(1, SIZE - 1)
     integer_full = xr.DataArray(
@@ -1748,13 +1902,11 @@ def test_distributed_xarray_contracts() -> None:
         and bool(empty_partition_ok)
     )
 
-    root = SIZE - 1
-    root_sum = mpi.xarray.sum(distributed, dim="lat", mode="root", root=root)
-    root_ok = (
-        root_sum is not None
-        and bool(np.array_equal(root_sum.values, full.sum(dim="lat").values))
-        if RANK == root
-        else root_sum is None
+    # mpi.xarray reductions have no root placement: every rank must observe
+    # the identical all-reduced global result, unlike mpi.reduce's mode="root".
+    gathered_total_sum = mpi.comm.allgather(float(total_sum.item()))
+    all_reduce_agreement_ok = all(
+        value == gathered_total_sum[0] for value in gathered_total_sum
     )
 
     complex_full = xr.DataArray(
@@ -1778,30 +1930,6 @@ def test_distributed_xarray_contracts() -> None:
                 full,
                 "missing",
                 contains="does not exist",
-            ),
-            call_raises(
-                ValueError,
-                mpi.xarray.sum,
-                distributed,
-                dim="lon",
-                contains="Distributed dimension",
-            ),
-            call_raises(
-                ValueError,
-                mpi.xarray.sum,
-                distributed,
-                dim="lat",
-                mode="invalid",
-                contains="mode",
-            ),
-            call_raises(
-                ValueError,
-                mpi.xarray.sum,
-                distributed,
-                dim="lat",
-                mode="root",
-                root=SIZE,
-                contains="outside",
             ),
             call_raises(
                 NotImplementedError,
@@ -1871,10 +1999,16 @@ def test_distributed_xarray_contracts() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(indexing_ok and reduction_ok and root_ok and validation_ok)
+        mpi.reduce.all(
+            indexing_ok
+            and local_reduction_ok
+            and reduction_ok
+            and all_reduce_agreement_ok
+            and validation_ok
+        )
     )
     record_result(
-        "mpi.xarray contracts (edge reductions/indexing/validation/nonzero root)",
+        "mpi.xarray contracts (edge reductions/indexing/validation/all-reduce)",
         correct,
         0.0,
         0.0,
@@ -2099,7 +2233,10 @@ def test_distributed_arithmetic() -> None:
         )
     )
     chained_reduction = mpi.xarray.sum(
-        mpi.xarray.evaluate("(a + b) - a", a=a, b=b), dim="plev", skipna=True
+        mpi.xarray.evaluate("(a + b) - a", a=a, b=b),
+        dim="plev",
+        skipna=True,
+        redistribute_on=None,
     )
     expected_chained = b_full.sum(dim="plev", skipna=True)
     chained_ok = bool(
@@ -3566,10 +3703,17 @@ def test_create_dataset(out_dir: str) -> None:
         ):
             raise AssertionError(f"mpi_meta incorrect: {meta}")
 
-        expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
-            start, stop
-        ).astype("timedelta64[h]")
+        # create_dataset never CF-decodes: coords are forwarded to the plain
+        # xr.Dataset constructor and only sliced to this rank's bounds, so
+        # the raw "hours since ..." floats stay floats here. Decoding only
+        # happens on a real read-back through xr.open_dataset, exercised
+        # separately below after the NetCDF round-trip.
+        expected_time = np.arange(start, stop, dtype=np.float64)
         np.testing.assert_array_equal(ds["time"].values, expected_time)
+        if ds["time"].attrs.get("units") != "hours since 1970-01-01 00:00:00":
+            raise AssertionError(
+                f"time units attr not preserved: {ds['time'].attrs.get('units')!r}"
+            )
 
         loaded = ds.load()
         np.testing.assert_array_equal(loaded["pr"].values, fill_pr(start, stop))
@@ -3772,8 +3916,8 @@ def test_rank0_source_distribution(ny: int, nx: int) -> None:
     @timer
     def reduce_broadcast_source() -> tuple[Any, Any]:
         return (
-            mpi.xarray.sum(distributed, dim="lat"),
-            mpi.xarray.mean(distributed, dim="lat"),
+            mpi.xarray.sum(distributed, dim="lat", redistribute_on=None),
+            mpi.xarray.mean(distributed, dim="lat", redistribute_on=None),
         )
 
     (total, average), parallel_s = reduce_broadcast_source()
@@ -3845,10 +3989,10 @@ def test_distributed_open_reductions() -> None:
     @timer
     def reduce_opened_dataset() -> dict[str, Any]:
         return {
-            "sum": mpi.xarray.sum(distributed, dim="lat"),
-            "mean": mpi.xarray.mean(distributed, dim="lat"),
-            "min": mpi.xarray.min(distributed, dim="lat"),
-            "max": mpi.xarray.max(distributed, dim="lat"),
+            "sum": mpi.xarray.sum(distributed, dim="lat", redistribute_on=None),
+            "mean": mpi.xarray.mean(distributed, dim="lat", redistribute_on=None),
+            "min": mpi.xarray.min(distributed, dim="lat", redistribute_on=None),
+            "max": mpi.xarray.max(distributed, dim="lat", redistribute_on=None),
         }
 
     results, parallel_s = reduce_opened_dataset()
@@ -3871,13 +4015,7 @@ def test_distributed_open_reductions() -> None:
                 )
             )
 
-    # Root placement returns the result only on the destination rank.
-    root_result = mpi.xarray.sum(distributed, dim="lat", mode="root", root=SIZE - 1)
-    checks.append(
-        (root_result is not None) if RANK == SIZE - 1 else (root_result is None)
-    )
-
-    land = mpi.xarray.any(distributed["slmsk"] == 1, dim="lat")
+    land = mpi.xarray.any(distributed["slmsk"] == 1, dim="lat", redistribute_on=None)
     checks.append(
         land is not None
         and bool(np.array_equal(land.values, (serial["slmsk"] == 1).any(dim="lat")))
@@ -3933,16 +4071,6 @@ def test_empty_partition_reductions() -> None:
                     )
                 )
             )
-            root_result = getattr(mpi.xarray, op_name)(
-                distributed,
-                dim="plev",
-                mode="root",
-                root=SIZE - 1,
-            )
-            checks.append(
-                (root_result is not None) if RANK == SIZE - 1 else (root_result is None)
-            )
-
         flags = mpi.xarray.redistribute(profile > float(profile.mean()), "plev")
         for op_name in ("any", "all"):
             result = getattr(mpi.xarray, op_name)(flags, dim="plev")
@@ -4079,12 +4207,6 @@ def test_collective_sequence_symmetry() -> None:
                 (
                     "sum(min_count)",
                     lambda d=distributed: mpi.xarray.sum(d, dim="plev", min_count=1),
-                ),
-                (
-                    "min(root)",
-                    lambda d=distributed: mpi.xarray.min(
-                        d, dim="plev", mode="root", root=SIZE - 1
-                    ),
                 ),
                 ("any", lambda d=flags: mpi.xarray.any(d, dim="plev")),
                 ("all", lambda d=flags: mpi.xarray.all(d, dim="plev")),
@@ -4273,23 +4395,81 @@ def test_reduce_buffer_agreement() -> None:
 
 
 def print_test_summary() -> int:
-    """Print the final result table and return the number of failed checks."""
-    mpi.log("\n" + "=" * 88)
+    """Print the final result table and return the number of failed checks.
+
+    Serial timings throughout this suite are always plain xarray running on
+    rank 0 alone, under ``@mpi(broadcast=True)`` + ``@timer(synchronize=False)``
+    -- no MPI collective is on the serial side of the comparison. Parallel
+    timings are the same operation through ``mpi.xarray``/``mpi.reduce``
+    across every rank, synchronized with a barrier and reported as the
+    slowest rank. "Faster" reflects exactly that comparison, not a guess.
+    """
+    mpi.log("\n" + "=" * 100)
     mpi.log(f"SUMMARY -- {SIZE} rank(s)")
-    mpi.log("=" * 88)
-    for result in RESULTS:
-        speedup_str = (
-            "  n/a " if np.isnan(result.speedup) else f"{result.speedup:5.2f}x"
+    mpi.log("=" * 100)
+
+    headers = (
+        "#",
+        "Status",
+        "Check",
+        "Serial (xarray, rank0)",
+        "Parallel (mpi)",
+        "Speedup",
+        "Faster",
+    )
+    rows: list[tuple[str, str, str, str, str, str, str]] = []
+    for i, result in enumerate(RESULTS, start=1):
+        status = "SKIP" if result.skipped else ("OK" if result.correct else "FAIL")
+        if result.skipped or (result.serial_s <= 0.0 and result.parallel_s <= 0.0):
+            serial_str = parallel_str = speedup_str = "--"
+        else:
+            serial_str = f"{result.serial_s:.4f}s"
+            parallel_str = f"{result.parallel_s:.4f}s"
+            speedup_str = (
+                "n/a" if np.isnan(result.speedup) else f"{result.speedup:.2f}x"
+            )
+        faster = {"MPI (faster)": "MPI", "Xarray (faster)": "Xarray", "tie": "tie"}.get(
+            result.verdict, "--"
         )
-        status = "SKIP" if result.skipped else ("OK  " if result.correct else "FAIL")
-        verdict = f"  [{result.verdict}]" if result.verdict else ""
-        mpi.log(
-            f"[{status}] {result.name:<52} speedup={speedup_str}{verdict}  "
-            + f"serial={result.serial_s:7.4f}s  parallel={result.parallel_s:7.4f}s"
-            + (f"  ({result.note})" if result.note else "")
+        rows.append(
+            (str(i), status, result.name, serial_str, parallel_str, speedup_str, faster)
         )
-    mpi.log("-" * 88)
-    n_fail = sum(1 for result in RESULTS if not result.correct and not result.skipped)
+
+    name_width = min(max((len(r[2]) for r in rows), default=4), 58)
+    widths = [
+        max(len(headers[0]), len(rows[-1][0]) if rows else 1),
+        max(len(headers[1]), 4),
+        name_width,
+        max(len(headers[3]), 7),
+        max(len(headers[4]), 7),
+        max(len(headers[5]), 7),
+        max(len(headers[6]), 6),
+    ]
+
+    def fmt_row(cells: Sequence[str]) -> str:
+        parts = []
+        for i, (value, width) in enumerate(zip(cells, widths, strict=True)):
+            text = value if len(value) <= width else value[: width - 1] + "\u2026"
+            parts.append(text.ljust(width) if i == 2 else text.rjust(width))
+        return "  ".join(parts)
+
+    mpi.log(fmt_row(headers))
+    mpi.log("  ".join("-" * w for w in widths))
+    for row in rows:
+        mpi.log(fmt_row(row))
+    mpi.log("-" * 100)
+
+    failed = [r for r in RESULTS if not r.correct and not r.skipped]
+    if failed:
+        mpi.log("Failure detail:")
+        for result in failed:
+            mpi.log(
+                f"  - {result.name}: {result.note}"
+                if result.note
+                else f"  - {result.name}"
+            )
+
+    n_fail = len(failed)
     n_skip = sum(1 for result in RESULTS if result.skipped)
     n_pass = len(RESULTS) - n_fail - n_skip
     n_mpi_faster = sum(1 for result in RESULTS if result.verdict == "MPI (faster)")
@@ -4446,6 +4626,8 @@ def main() -> None:
             op_name,
         )
     test_distributed_dataset_reduction(LATITUDE_COUNT, LONGITUDE_COUNT)
+    test_redistribution_candidate_restriction()
+    test_short_partition_warning_deduplication()
     test_empty_partition_reductions()
     test_reduction_dtype_contracts()
     test_collective_sequence_symmetry()
