@@ -105,6 +105,17 @@ def get_chunks(
     the partitioned dimension to one chunk removes the possibility of a
     rank's slab straddling a chunk edge entirely, regardless of dataset
     size.
+
+    This forcing has to run over every variable that carries
+    ``partition_dim``, coordinates included: netCDF4/HDF5 also picks its
+    own default chunk shape -- independent of dask and of dataset size --
+    for any variable left out of the returned mapping (``create_file``
+    only passes ``chunksizes`` for names present here). For a 1D unlimited
+    coordinate such as a partitioned "time" axis that default is a fixed
+    512-element chunk regardless of the final length, so the same
+    straddle-and-garbage failure reappears through the coordinate even when
+    every data variable is covered. Iterating ``ds.variables`` rather than
+    ``ds.data_vars`` closes that gap.
     """
     if chunks is not None:
         return {
@@ -113,11 +124,19 @@ def get_chunks(
         }
 
     output: dict[str, tuple[int, ...]] = {}
-    for name, da in ds.data_vars.items():
+    for name, da in ds.variables.items():
         if da.ndim == 0 or any(length == 0 for length in da.shape):
             continue
         chunked = da if da.chunks is not None else da.chunk("auto")
-        shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
+        # An index (dimension) coordinate -- e.g. a partitioned "time" axis
+        # -- is always an IndexVariable, which xarray never dask-chunks:
+        # chunk("auto") is a no-op and leaves chunked.chunksizes empty.
+        # Its own shape is then the only available chunk size, and, being a
+        # 1D coordinate, is small enough to use directly.
+        if chunked.chunks is None:
+            shape = tuple(int(length) for length in da.shape)
+        else:
+            shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
         if (
             partition_dim is not None
             and partition_length is not None

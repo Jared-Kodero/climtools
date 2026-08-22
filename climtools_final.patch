@@ -1,0 +1,1362 @@
+diff --git a/README.md b/README.md
+index 4d28652..f40aa78 100755
+--- a/README.md
++++ b/README.md
+@@ -545,6 +545,59 @@ anywhere. For an eager source headed straight to `to_netcdf`, just calling
+ `to_netcdf` directly (skipping `distribute` and `.load()` above) is both
+ simpler and faster: it already takes the scatter path this describes.
+ 
++**Data with no existing source at all — you are generating it.**
++`redistribute` needs an identical recipe every rank can already build;
++`distribute` needs a source that exists on one rank. Neither fits synthetic
++or procedurally generated data — a mock dataset for testing, a per-rank RNG
++stream, one file per rank — where there is no array or file to slice in the
++first place. `mpi.xarray.create_dataarray`/`create_dataset` are for this:
++every rank computes `get_balanced_bounds(length, rank, size)` independently
++(a pure function of the global length, this rank's number, and the
++communicator size — no communication at all) and calls your own function
++with only its own `(start, stop)`, so nothing is ever built on one rank and
++sent to another:
++
++```python
++import numpy as np
++from climtools import mpi, xgeo
++
++def fill_pr(start: int, stop: int) -> np.ndarray:
++    # called once per rank, with THIS rank's own global bounds along "time" --
++    # rank 3 of 8 gets (270, 360), not (0, 90)
++    t = np.arange(start, stop, dtype=np.float32)
++    return some_formula(t)  # shape (stop - start, n_lat, n_lon)
++
++def fill_slmsk() -> np.ndarray:
++    # not partitioned (no "time" in its dims) -- identical on every rank,
++    # so this takes no arguments
++    return build_mask()  # shape (n_lat, n_lon)
++
++ds = mpi.xarray.create_dataset(
++    data_vars={
++        "pr": (("time", "lat", "lon"), fill_pr),
++        "slmsk": (("lat", "lon"), fill_slmsk),
++    },
++    sizes={"time": 8760, "lat": 721, "lon": 1440},
++    dim="time",
++)
++# ds is dask-backed and not yet computed. Writing it runs each rank's own
++# fill() calls as part of the write -- rank 0 never materializes more than
++# its own slice, at any point, for any variable.
++xgeo.to_netcdf(ds, "output.nc", partition_dim="time", parallel=True)
++```
++
++`fill` is wrapped in `dask.delayed`, so it runs only when this rank's slice
++is actually needed (loaded, reduced, or written), not eagerly at the
++`create_dataset` call. A coordinate matching `dim` can be passed the same
++way as to the ordinary `xr.Dataset` constructor — a full-length array — and
++is auto-sliced to this rank's own bounds. `create_dataset` also accepts a
++bare `xr.DataArray` as a `data_vars` value (one already built by
++`create_dataarray`, for instance), exactly as `xr.Dataset`'s own constructor
++accepts a bare DataArray alongside `(dims, array)` tuples. See
++`create_dataarray`'s and `create_dataset`'s docstrings in
++[`core/xr_mpi.py`](core/xr_mpi.py) for the single-DataArray form and the
++full set of options.
++
+ Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
+ immediately after the collective `nc.close()` — inside
+ [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/
+diff --git a/core/xr_mpi.py b/core/xr_mpi.py
+index e794433..77f885f 100644
+--- a/core/xr_mpi.py
++++ b/core/xr_mpi.py
+@@ -6,7 +6,7 @@ from __future__ import annotations
+ import hashlib
+ import math
+ import warnings
+-from collections.abc import Hashable, Iterable, Mapping
++from collections.abc import Hashable, Iterable, Mapping, Sequence
+ from functools import cache
+ from numbers import Integral
+ from types import EllipsisType
+@@ -265,6 +265,33 @@ def prune_chunk_info(
+     }
+ 
+ 
++def _localize_coord(
++    spec: Any,
++    global_size: int,
++    start: int,
++    stop: int,
++) -> Any:
++    """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
++
++    Accepts a coordinate in any of the three forms
++    :class:`xarray.DataArray`/:class:`~xarray.Dataset` themselves accept: a
++    bare array-like, ``(dims, array)``, or ``(dims, array, attrs)``. A
++    coordinate whose own length does not equal ``global_size`` is returned
++    unchanged (already rank-local, or a scalar/unrelated-length auxiliary
++    coordinate -- not this function's business to guess about).
++    """
++    if isinstance(spec, tuple):
++        coord_dims, coord_array, *rest = spec
++    else:
++        coord_dims, coord_array, rest = None, spec, []
++    coord_array = np.asarray(coord_array)
++    if coord_array.shape and coord_array.shape[0] == global_size:
++        coord_array = coord_array[start:stop]
++    if coord_dims is None:
++        return coord_array
++    return (coord_dims, coord_array, *rest)
++
++
+ def choose_partition_dim(
+     sizes: Mapping[Hashable, int],
+     mpi_size: int,
+@@ -726,6 +753,284 @@ class XarrayMPI(ArithmeticMixin):
+                 )
+         return output
+ 
++    def create_dataarray(
++        self,
++        shape: Sequence[int],
++        fill: Callable[[int, int], Any],
++        dims: Sequence[Hashable],
++        *,
++        dim: Hashable | int = 0,
++        dtype: Any = np.float64,
++        coords: Mapping[Hashable, Any] | None = None,
++        name: Hashable | None = None,
++        attrs: Mapping[str, Any] | None = None,
++        log_partitions: bool = False,
++    ) -> xr.DataArray:
++        """Build a DataArray whose local slice every rank computes itself.
++
++        No rank ever holds more than its own slice, and nothing crosses a
++        rank boundary: ``get_balanced_bounds`` -- the same helper
++        :meth:`redistribute` and :meth:`XarrayMPIRuntime.open_dataset` use
++        -- is a pure function of ``shape[dim]``, this rank's number and the
++        communicator size, so every rank derives identical, non-
++        overlapping, gap-free bounds with no communication at all. Each
++        rank then calls ``fill(start, stop)`` with only its own bounds and
++        wraps the result in ``dask.delayed``, so the call does not run
++        until this rank's slice is actually needed (loaded, reduced, or
++        written) rather than eagerly here.
++
++        Use this to *generate* new distributed data from a description
++        every rank can already evaluate (a formula, a per-rank RNG stream,
++        one file per rank, ...). It is not for data that inherently exists
++        on only one rank already -- there is no way to hand that to every
++        rank without moving bytes somewhere, which is exactly what
++        :meth:`distribute` is for.
++
++        Parameters
++        ----------
++        shape : sequence of int
++            Full, global shape of the array -- identical on every rank,
++            since it is metadata, not data.
++        fill : callable
++            ``fill(start, stop) -> array_like`` returning this rank's own
++            slice, shaped like ``shape`` except with ``stop - start`` along
++            ``dim``. Called once per rank, each with only its own bounds.
++        dims : sequence of hashable
++            Dimension names, one per entry in ``shape``.
++        dim : hashable or int, default 0
++            Dimension to distribute along, as a name from ``dims`` or an
++            integer axis.
++        dtype : optional
++            Dtype of the array ``fill`` returns. Default is ``float64``.
++        coords : mapping, optional
++            Forwarded to the :class:`xarray.DataArray` constructor. A
++            coordinate matching ``dim`` whose own length equals
++            ``shape[dim]`` is sliced to this rank's own bounds first, so a
++            full-length coordinate array can be passed the same way as to
++            the ordinary constructor.
++        name, attrs : optional
++            Forwarded to the :class:`xarray.DataArray` constructor.
++        log_partitions : bool, default False
++            Print a partition report on rank 0 once every rank has built
++            its slice.
++
++        Returns
++        -------
++        xarray.DataArray
++            This rank's own slice, tagged with ``mpi_meta`` exactly as
++            :meth:`distribute`'s output is. Not yet loaded.
++
++        Raises
++        ------
++        ValueError
++            If ``dim`` does not name (or index) an entry of ``dims``, or
++            ``len(shape) != len(dims)``.
++        """
++        import dask
++        import dask.array as dask_array
++
++        if len(shape) != len(dims):
++            raise ValueError(
++                f"shape has {len(shape)} entries but dims has {len(dims)}."
++            )
++        axis = dims.index(dim) if not isinstance(dim, Integral) else int(dim)
++        if not 0 <= axis < len(dims):
++            raise ValueError(f"dim {dim!r} is not in dims {tuple(dims)!r}.")
++        dim_name = dims[axis]
++
++        comm = self._runtime.comm
++        global_size = int(shape[axis])
++        start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
++        local_shape = tuple(
++            stop - start if index == axis else int(length)
++            for index, length in enumerate(shape)
++        )
++
++        local_data = dask_array.from_delayed(
++            dask.delayed(fill)(start, stop),
++            shape=local_shape,
++            dtype=dtype,
++        )
++
++        local_coords = dict(coords) if coords else {}
++        if dim_name in local_coords:
++            local_coords[dim_name] = _localize_coord(
++                local_coords[dim_name], global_size, start, stop
++            )
++
++        da = xr.DataArray(
++            local_data, dims=tuple(dims), coords=local_coords, name=name, attrs=attrs
++        )
++        set_mpi_meta(
++            da,
++            dim=dim_name,
++            global_size=global_size,
++            start=start,
++            stop=stop,
++            chunk_info={str(dim_name): stop - start},
++        )
++        if log_partitions:
++            log_partition_report(
++                self._runtime,
++                da,
++                dim_name,
++                origin="mpi.xarray.create_dataarray",
++                global_size=global_size,
++                start=start,
++                stop=stop,
++            )
++        return da
++
++    def create_dataset(
++        self,
++        data_vars: Mapping[
++            Hashable,
++            xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]],
++        ],
++        sizes: Mapping[Hashable, int],
++        *,
++        dim: Hashable,
++        dtype: Any = np.float64,
++        coords: Mapping[Hashable, Any] | None = None,
++        attrs: Mapping[str, Any] | None = None,
++        log_partitions: bool = False,
++    ) -> xr.Dataset:
++        """Build a Dataset whose local slice every rank computes itself.
++
++        The per-variable counterpart of :meth:`create_dataarray`: each
++        entry of ``data_vars`` whose ``dims`` include ``dim`` is built the
++        same way -- every rank derives its own bounds from ``sizes[dim]``
++        via ``get_balanced_bounds`` with no communication, then calls that
++        variable's own ``fill(start, stop)`` with only its own bounds. A
++        variable whose ``dims`` do not include ``dim`` is identical on
++        every rank by construction, so there is no ``(start, stop)`` to
++        give it: pass either a zero-argument callable ``fill() ->
++        array_like`` (closing over whatever sizes it needs from ``sizes``
++        itself) or an already-built array-like directly. A value can also
++        be an :class:`xarray.DataArray` outright -- one already built by
++        :meth:`create_dataarray`, for instance -- exactly as
++        :class:`xarray.Dataset`'s own constructor accepts a bare DataArray
++        alongside ``(dims, array)`` tuples.
++
++        Parameters
++        ----------
++        data_vars : mapping
++            ``{name: (dims, fill)}`` or ``{name: dataarray}``. For a
++            ``(dims, fill)`` variable carrying ``dim``, ``fill(start,
++            stop) -> array_like`` returns that variable's own slice. For
++            one not carrying ``dim``, ``fill`` is either a zero-argument
++            callable returning the complete array or the complete array
++            itself. A bare DataArray is used as given; if it carries
++            ``dim``, it must already be sized to this rank's own bounds.
++        sizes : mapping
++            Global length of every dimension named in any variable's
++            ``dims``, keyed by dimension name.
++        dim : hashable
++            Dimension to distribute along. Must be a key of ``sizes``.
++        dtype : optional
++            Dtype every ``(dims, fill)`` entry's ``fill`` returns. Pass a
++            ``{name: dtype}`` mapping instead for per-variable dtypes.
++            Ignored for bare-DataArray entries, which already carry their
++            own dtype.
++        coords, attrs : optional
++            Forwarded to the :class:`xarray.Dataset` constructor. A
++            coordinate matching ``dim`` whose own length equals
++            ``sizes[dim]`` is sliced to this rank's own bounds first.
++        log_partitions : bool, default False
++            Print a partition report on rank 0 once every rank has built
++            its slice.
++
++        Returns
++        -------
++        xarray.Dataset
++            This rank's own slice, tagged with ``mpi_meta`` exactly as
++            :meth:`distribute`'s output is. Not yet loaded.
++
++        Raises
++        ------
++        ValueError
++            If ``dim`` is not a key of ``sizes``, or a bare-DataArray entry
++            carrying ``dim`` is not already sized to this rank's own
++            bounds.
++        """
++        import dask
++        import dask.array as dask_array
++
++        if dim not in sizes:
++            raise ValueError(f"dim {dim!r} is not a key of sizes {tuple(sizes)!r}.")
++
++        comm = self._runtime.comm
++        global_size = int(sizes[dim])
++        start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
++
++        dtype_map = dtype if isinstance(dtype, Mapping) else None
++
++        built_vars: dict[Hashable, Any] = {}
++        for var_name, spec in data_vars.items():
++            if isinstance(spec, xr.DataArray):
++                if dim in spec.dims and int(spec.sizes[dim]) != stop - start:
++                    raise ValueError(
++                        f"data_vars[{var_name!r}] is a DataArray of length "
++                        + f"{spec.sizes[dim]} along {dim!r}, but this rank "
++                        + f"owns [{start}:{stop}) ({stop - start} elements). "
++                        + "Pass a DataArray already sized to this rank's own "
++                        + "bounds (e.g. from create_dataarray), not the full "
++                        + "global array."
++                    )
++                built_vars[var_name] = spec
++                continue
++
++            var_dims, var_fill = spec
++            var_dtype = dtype_map[var_name] if dtype_map is not None else dtype
++            if dim in var_dims:
++                local_shape = tuple(
++                    stop - start if name == dim else int(sizes[name])
++                    for name in var_dims
++                )
++                local_data = dask_array.from_delayed(
++                    dask.delayed(var_fill)(start, stop),
++                    shape=local_shape,
++                    dtype=var_dtype,
++                )
++            elif callable(var_fill):
++                # Not partitioned: identical on every rank, so there is no
++                # (start, stop) to give -- fill() takes no arguments and
++                # closes over whatever sizes it needs from `sizes` itself.
++                local_shape = tuple(int(sizes[name]) for name in var_dims)
++                local_data = dask_array.from_delayed(
++                    dask.delayed(var_fill)(), shape=local_shape, dtype=var_dtype
++                )
++            else:
++                local_data = var_fill
++            built_vars[var_name] = (tuple(var_dims), local_data)
++
++        local_coords = dict(coords) if coords else {}
++        if dim in local_coords:
++            local_coords[dim] = _localize_coord(
++                local_coords[dim], global_size, start, stop
++            )
++
++        ds = xr.Dataset(built_vars, coords=local_coords, attrs=attrs)
++        set_mpi_meta(
++            ds,
++            dim=dim,
++            global_size=global_size,
++            start=start,
++            stop=stop,
++            chunk_info={str(dim): stop - start},
++        )
++        if log_partitions:
++            log_partition_report(
++                self._runtime,
++                ds,
++                dim,
++                origin="mpi.xarray.create_dataset",
++                global_size=global_size,
++                start=start,
++                stop=stop,
++            )
++        return ds
++
+     def redistribute(
+         self,
+         value: xr.Dataset | xr.DataArray,
+diff --git a/examples/create_dataset_example.py b/examples/create_dataset_example.py
+new file mode 100644
+index 0000000..4bee9f5
+--- /dev/null
++++ b/examples/create_dataset_example.py
+@@ -0,0 +1,104 @@
++"""Complete example: mpi.xarray.create_dataset.
++
++Every rank builds only its own slice of each variable directly -- no
++distribute(), no scatter, no MPI transfer of the actual data at all. Run
++with, e.g.:
++
++    mpirun -n 8 python examples/create_dataset_example.py
++"""
++
++from __future__ import annotations
++
++import numpy as np
++from climtools import mpi, xgeo
++
++TIME_STEPS = 720
++N_LAT, N_LON = 8, 8
++
++
++# --- one fill function per variable -----------------------------------
++#
++# fill(start, stop) is called ONCE PER RANK, with that rank's own global
++# bounds along "time". start/stop are global indices: rank 3 of 8 gets
++# (270, 360), not (0, 90) -- so a formula that depends on absolute time
++# must use `start`/`stop` directly, not re-zero them.
++def fill_pr(start: int, stop: int) -> np.ndarray:
++    """Precipitation: (time, lat, lon), partitioned along "time"."""
++    t = np.arange(start, stop, dtype=np.float32)
++    lat = np.linspace(-90, 90, N_LAT, dtype=np.float32)
++    lon = np.linspace(-180, 180, N_LON, endpoint=False, dtype=np.float32)
++    lat_rad = np.deg2rad(lat)[None, :, None]
++    lon_rad = np.deg2rad(lon)[None, None, :]
++    phase = (t % 24.0)[:, None, None]
++    return (
++        1.0e-4
++        * (1.25 + np.cos(lat_rad) ** 2)
++        * (1.0 + 0.15 * np.sin(lon_rad))
++        * (1.0 + 0.01 * phase)
++    ).astype(np.float32)
++
++
++def fill_t2m(start: int, stop: int) -> np.ndarray:
++    """Surface temperature: (time, lat, lon), partitioned along "time"."""
++    t = np.arange(start, stop, dtype=np.float32)
++    lat = np.linspace(-90, 90, N_LAT, dtype=np.float32)
++    lon = np.linspace(-180, 180, N_LON, endpoint=False, dtype=np.float32)
++    lat_rad = np.deg2rad(lat)[None, :, None]
++    lon_rad = np.deg2rad(lon)[None, None, :]
++    phase = (t % 24.0)[:, None, None]
++    return (
++        288.0 - 42.0 * np.sin(lat_rad) ** 2 + 2.0 * np.cos(lon_rad) + 0.05 * phase
++    ).astype(np.float32)
++
++
++def fill_slmsk() -> np.ndarray:
++    """Sea/land mask: (lat, lon), NOT partitioned -- identical on every
++    rank, so this takes no arguments at all.
++    """
++    lat_idx = np.arange(N_LAT)[:, None]
++    lon_idx = np.arange(N_LON)[None, :]
++    return ((lat_idx + lon_idx) % 3).astype(np.int8)
++
++
++def main() -> None:
++    # This runs identically, in parallel, on every rank -- there is no
++    # "rank 0 builds it, others wait" step anywhere in this function.
++    ds = mpi.xarray.create_dataset(
++        data_vars={
++            "pr": (("time", "lat", "lon"), fill_pr),
++            "t2m": (("time", "lat", "lon"), fill_t2m),
++            "slmsk": (("lat", "lon"), fill_slmsk),
++        },
++        sizes={"time": TIME_STEPS, "lat": N_LAT, "lon": N_LON},
++        dim="time",
++        coords={
++            # A full-length coordinate is auto-sliced to this rank's own
++            # bounds -- pass it exactly as you would to xr.Dataset itself.
++            "time": (
++                "time",
++                np.arange(TIME_STEPS, dtype=np.float64),
++                {"units": "hours since 1970-01-01 00:00:00"},
++            ),
++            "lat": np.linspace(-90, 90, N_LAT, dtype=np.float32),
++            "lon": np.linspace(-180, 180, N_LON, endpoint=False, dtype=np.float32),
++        },
++        log_partitions=True,  # prints a per-rank partition table on rank 0
++    )
++
++    mpi.log(f"rank {mpi.comm.rank}: local ds sizes = {dict(ds.sizes)}")
++
++    # ds is not yet computed -- to_netcdf triggers each rank's fill()
++    # calls as it writes that rank's own slab, still with no scatter.
++    xgeo.to_netcdf(
++        ds,
++        "mock_climate.nc",
++        unlimited_dim="time",
++        partition_dim="time",
++        parallel=True,
++        allow_serial=(mpi.comm.size == 1),
++    )
++    mpi.log("done")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/lib_netcdf/parallel.py b/lib_netcdf/parallel.py
+index 01165e7..1068095 100755
+--- a/lib_netcdf/parallel.py
++++ b/lib_netcdf/parallel.py
+@@ -105,6 +105,17 @@ def get_chunks(
+     the partitioned dimension to one chunk removes the possibility of a
+     rank's slab straddling a chunk edge entirely, regardless of dataset
+     size.
++
++    This forcing has to run over every variable that carries
++    ``partition_dim``, coordinates included: netCDF4/HDF5 also picks its
++    own default chunk shape -- independent of dask and of dataset size --
++    for any variable left out of the returned mapping (``create_file``
++    only passes ``chunksizes`` for names present here). For a 1D unlimited
++    coordinate such as a partitioned "time" axis that default is a fixed
++    512-element chunk regardless of the final length, so the same
++    straddle-and-garbage failure reappears through the coordinate even when
++    every data variable is covered. Iterating ``ds.variables`` rather than
++    ``ds.data_vars`` closes that gap.
+     """
+     if chunks is not None:
+         return {
+@@ -113,11 +124,19 @@ def get_chunks(
+         }
+ 
+     output: dict[str, tuple[int, ...]] = {}
+-    for name, da in ds.data_vars.items():
++    for name, da in ds.variables.items():
+         if da.ndim == 0 or any(length == 0 for length in da.shape):
+             continue
+         chunked = da if da.chunks is not None else da.chunk("auto")
+-        shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
++        # An index (dimension) coordinate -- e.g. a partitioned "time" axis
++        # -- is always an IndexVariable, which xarray never dask-chunks:
++        # chunk("auto") is a no-op and leaves chunked.chunksizes empty.
++        # Its own shape is then the only available chunk size, and, being a
++        # 1D coordinate, is small enough to use directly.
++        if chunked.chunks is None:
++            shape = tuple(int(length) for length in da.shape)
++        else:
++            shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
+         if (
+             partition_dim is not None
+             and partition_length is not None
+@@ -223,6 +242,7 @@ def create_file(
+     partition_dim = schema["partition_dim"]
+     unlimited = set(schema["unlimited_dim"])
+     chunks = schema["chunks"]
++    prewritten = set(schema.get("prewritten", ()))
+ 
+     with netCDF4.Dataset(path, mode="w", format="NETCDF4") as nc:
+         if schema["nofill"]:
+@@ -254,7 +274,11 @@ def create_file(
+             ncvar = nc.createVariable(name, dtype, dims, **kwargs)
+             set_attrs(ncvar, attrs)
+ 
+-            partitioned = partition_dim is not None and partition_dim in dims
++            partitioned = (
++                partition_dim is not None
++                and partition_dim in dims
++                and name not in prewritten
++            )
+             if not partitioned:
+                 with quiet_netcdf4_writes():
+                     ncvar[...] = variable["data"]
+@@ -339,6 +363,7 @@ def write_distributed(
+     partition_dim = str(meta["dim"])
+     start = int(meta["start"])
+     stop = int(meta["stop"])
++    prewritten = set(schema.get("prewritten", ()))
+ 
+     comm = writer_comm(stop > start)
+     nc: netCDF4.Dataset | None = None
+@@ -348,7 +373,7 @@ def write_distributed(
+         nc = open_in_parallel(path, schema, comm)
+         for name, spec in schema["variables"].items():
+             dims = tuple(spec["dims"])
+-            if partition_dim not in dims:
++            if partition_dim not in dims or name in prewritten:
+                 continue
+             if spec["dtype"] == "str":
+                 raise NetCDFWriteError(
+@@ -380,7 +405,7 @@ def write_distributed(
+ def write_partitioned(
+     path: str,
+     schema: Mapping[str, Any],
+-    root_data: Mapping[str, Mapping[str, Any]] | None,
++    source_ds: xr.Dataset | None,
+ ) -> None:
+     """Scatter root-owned partitioned buffers and collectively write them.
+ 
+@@ -389,10 +414,21 @@ def write_partitioned(
+     only on the writer sub-communicator. The two sequences are internally
+     ordered on their own communicators, so they cannot deadlock against one
+     another.
++
++    Rank 0's array for each partitioned variable is pulled from
++    ``source_ds`` here, immediately before that variable's ``scatterv``,
++    rather than upfront for every variable at once: ``root_data`` only
++    carries schema metadata (dims/dtype/shape) for these entries (see the
++    schema-construction step in ``to_netcdf_parallel``), not the array
++    itself. Once a variable's local slab has been sent, the reference to
++    its full array falls out of scope before the next variable is touched,
++    so at most one partitioned variable's array -- not all of them -- adds
++    to rank 0's resident set at any point in this loop.
+     """
+     partition_dim = schema["partition_dim"]
+     if partition_dim is None:
+         return
++    prewritten = set(schema.get("prewritten", ()))
+ 
+     length = int(schema["sizes"][partition_dim])
+     counts = np.full(mpi.comm.size, length // mpi.comm.size, dtype=np.int64)
+@@ -408,7 +444,7 @@ def write_partitioned(
+ 
+         for name, spec in schema["variables"].items():
+             dims = tuple(spec["dims"])
+-            if partition_dim not in dims:
++            if partition_dim not in dims or name in prewritten:
+                 continue
+             if spec["dtype"] == "str":
+                 raise NetCDFWriteError(
+@@ -424,14 +460,17 @@ def write_partitioned(
+ 
+             send = None
+             if mpi.comm.rank == 0:
+-                if root_data is None:
+-                    raise AssertionError("Rank 0 data buffers are missing.")
++                if source_ds is None:
++                    raise AssertionError("Rank 0 source Dataset is missing.")
++                variable = source_ds[name]
++                variable = encode_time(variable) if is_time_like(variable) else variable
+                 send = np.ascontiguousarray(
+-                    np.moveaxis(root_data[name]["data"], axis, 0),
++                    np.moveaxis(np.asarray(variable.values), axis, 0),
+                     dtype=dtype,
+                 )
+ 
+             local = mpi.scatterv(send, counts, local_shape, dtype)
++            send = None
+             if nc is None:
+                 continue
+ 
+@@ -612,6 +651,66 @@ def to_netcdf_parallel(
+         mpi.raise_if_error(error, "parallel NetCDF partition dimension")
+         partition_dim = distributed_dim
+ 
++        # Coordinates that carry partition_dim (a distributed "time" axis is
++        # the common case) are genuinely different per rank, unlike lat/lon/
++        # plev, so rank 0 cannot just read them off its own local_ds. Gather
++        # every rank's piece, verify the pieces tile the global interval with
++        # no gap or overlap, and concatenate in start order. This also means
++        # such a coordinate is CF-encoded exactly once (one units/calendar
++        # pair for the whole axis) instead of once per rank, and it can then
++        # be written serially in create_file alongside lat/lon/plev rather
++        # than through the collective phase -- sidestepping netCDF4's
++        # default chunk size for that variable entirely, not just working
++        # around it with an explicit override.
++        start = int(local_meta["start"])
++        stop = int(local_meta["stop"])
++        global_size = int(local_meta["global_size"])
++        prewritten_coords: dict[str, xr.DataArray] = {}
++        try:
++            coord_names = [
++                name
++                for name, coord in local_ds.coords.items()
++                if partition_dim in coord.dims
++            ]
++        except BaseException as exc:
++            coord_names = []
++            error = exc
++        mpi.raise_if_error(
++            error,
++            "parallel NetCDF coordinate discovery",
++            signature=tuple(coord_names),
++        )
++
++        for coord_name in coord_names:
++            local_values = np.asarray(local_ds[coord_name].values)
++            pieces = mpi.comm.gather((start, stop, local_values), root=0)
++            if mpi.comm.rank == 0:
++                try:
++                    ordered = sorted(pieces, key=lambda item: item[0])
++                    cursor = 0
++                    for piece_start, piece_stop, _ in ordered:
++                        if piece_start != cursor:
++                            raise NetCDFWriteError(
++                                f"Partitioned coordinate {coord_name!r} has a "
++                                + f"gap or overlap: expected start {cursor}, "
++                                + f"got {piece_start}."
++                            )
++                        cursor = piece_stop
++                    if cursor != global_size:
++                        raise NetCDFWriteError(
++                            f"Partitioned coordinate {coord_name!r} covers "
++                            + f"{cursor} of {global_size} global elements."
++                        )
++                    assembled = np.concatenate([values for _, _, values in ordered])
++                    prewritten_coords[coord_name] = local_ds[coord_name].copy(
++                        data=assembled
++                    )
++                except BaseException as exc:
++                    error = exc
++            mpi.raise_if_error(
++                error, f"parallel NetCDF coordinate gather ({coord_name})"
++            )
++
+         # No data gather/scatter. Rank 0 only constructs the schema from its
+         # local metadata and mpi_meta's global partition length.
+         if mpi.comm.rank == 0:
+@@ -640,6 +739,8 @@ def to_netcdf_parallel(
+                 root_data = {}
+                 variables: dict[str, dict[str, Any]] = {}
+                 for name, source in ds.variables.items():
++                    if name in prewritten_coords:
++                        source = prewritten_coords[name]
+                     variable = encode_time(source) if is_time_like(source) else source
+                     values, dtype = _normalise_variable(source)
+                     attrs = {
+@@ -676,6 +777,7 @@ def to_netcdf_parallel(
+                     "hints": hints,
+                     "nofill": bool(nofill),
+                     "partition_dim": partition_dim,
++                    "prewritten": tuple(sorted(prewritten_coords)),
+                     "shuffle": bool(shuffle),
+                     "sizes": sizes,
+                     "unlimited_dim": unlimited,
+@@ -713,9 +815,66 @@ def to_netcdf_parallel(
+             chunk_map = get_chunks(
+                 ds, chunks, partition_dim, ds.sizes.get(partition_dim)
+             )
++            # Rank 0 already holds the complete global array for every
++            # coordinate here (there is nothing to gather, unlike the
++            # distributed path), so a coordinate carrying partition_dim can
++            # be written directly below rather than through the scatter
++            # loop -- avoiding netCDF4's own default chunking for it.
++            prewritten_names = frozenset(
++                name for name in ds.coords if partition_dim in ds[name].dims
++            )
+             root_data = {}
+             variables = {}
+             for name, source in ds.variables.items():
++                dims = tuple(source.dims)
++                partitioned = partition_dim in dims and name not in prewritten_names
++
++                if partitioned and not is_time_like(source):
++                    # The actual array is deferred to write_partitioned,
++                    # which extracts, encodes and scatters one variable at a
++                    # time. Materializing every variable's full array here,
++                    # before any writing starts, would hold all of them
++                    # resident on rank 0 simultaneously -- on top of `ds`
++                    # itself -- for no benefit, since create_file never reads
++                    # `data` for a partitioned entry (it only pre-extends the
++                    # unlimited dimension). Only cheap shape/dtype metadata
++                    # is needed here, mirroring _normalise_variable's dtype
++                    # rules without touching `.values`. A time-like
++                    # partitioned variable is deliberately excluded from
++                    # this and falls through to the eager branch below: its
++                    # post-encoding dtype (from encode_time's cftime/
++                    # timedelta branches) is not always knowable without
++                    # actually running the encode, and getting it wrong here
++                    # would create the netCDF variable with a dtype that
++                    # write_partitioned's later scatter wouldn't match.
++                    if source.dtype.kind in ("U", "S", "O"):
++                        dtype: str | np.dtype[Any] = "str"
++                    elif source.dtype.kind == "b":
++                        dtype = np.dtype(np.int8)
++                    elif source.dtype.byteorder not in ("=", "|"):
++                        dtype = source.dtype.newbyteorder("=")
++                    else:
++                        dtype = source.dtype
++                    attrs = {
++                        key: value
++                        for key, value in source.attrs.items()
++                        if key != MPI_META
++                    }
++                    root_data[name] = {
++                        "attrs": attrs,
++                        "data": None,
++                        "dims": dims,
++                        "dtype": dtype,
++                        "coord": name in ds.coords,
++                    }
++                    variables[name] = {
++                        "coord": name in ds.coords,
++                        "dims": dims,
++                        "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
++                        "shape": tuple(int(length) for length in source.shape),
++                    }
++                    continue
++
+                 variable = encode_time(source) if is_time_like(source) else source
+                 values, dtype = _normalise_variable(source)
+                 attrs = {
+@@ -747,16 +906,13 @@ def to_netcdf_parallel(
+                 "hints": hints,
+                 "nofill": bool(nofill),
+                 "partition_dim": partition_dim,
++                "prewritten": tuple(sorted(prewritten_names)),
+                 "shuffle": bool(shuffle),
+                 "sizes": dict(ds.sizes),
+                 "unlimited_dim": unlimited,
+                 "variables": variables,
+             }
+-            total_bytes = sum(
+-                v["data"].nbytes
+-                for v in root_data.values()
+-                if hasattr(v["data"], "nbytes")
+-            )
++            total_bytes = sum(variable.nbytes for variable in ds.variables.values())
+             mpi.log(
+                 "xgeo.to_netcdf (rank-0 source): rank 0 holds "
+                 + f"{_format_bytes(total_bytes)} before scatter, "
+@@ -790,7 +946,7 @@ def to_netcdf_parallel(
+                 raise AssertionError("Distributed rank-local data are missing.")
+             write_distributed(output_path, schema, local_ds, local_meta)
+         else:
+-            write_partitioned(output_path, schema, root_data)
++            write_partitioned(output_path, schema, local_ds)
+     except BaseException:
+         # Aborting without a diagnostic leaves the job log with nothing but
+         # "MPI_ABORT was invoked", so the failure is reported first.
+diff --git a/tests/test_mpi.py b/tests/test_mpi.py
+index 5e31ead..16dfb56 100644
+--- a/tests/test_mpi.py
++++ b/tests/test_mpi.py
+@@ -33,9 +33,11 @@ from io import StringIO
+ from pathlib import Path
+ from typing import Any
+ 
++import dask.array as dask_array
+ import numpy as np
+ import xarray as xr
+ from climtools import mpi, xgeo
++from climtools.core.xr_mpi import get_balanced_bounds
+ 
+ # Raised from 100 to make the local per-rank compute in every reduction
+ # large relative to the fixed per-call MPI overhead (the collective-agreement
+@@ -48,16 +50,22 @@ from climtools import mpi, xgeo
+ # bandwidth-bound behavior instead of just its latency floor.
+ #
+ # Memory: at the default RESOLUTION_DEG=0.25 (721x1440x21), the "t" field
+-# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes; at TIME_STEPS=1000 that is
+-# ~81 GiB, and build_mock_dataset briefly holds two full copies of it on
+-# rank 0 (the broadcast subtraction and the following .astype), so budget
+-# roughly 170-180 GiB peak on rank 0 alone. That fits the 500 GiB/node SLURM
+-# allocation with headroom; lower --time-steps (or raise --resolution, which
+-# coarsens the grid) on a smaller node.
++# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes -- 712 GiB at
++# TIME_STEPS=8760, far beyond any single rank's RAM. build_mock_dataset
++# therefore builds "pr", "t2m" and "t" as dask arrays chunked along "time"
++# (see MOCK_TIME_CHUNK_BYTES below) instead of eager NumPy arrays, so
++# ds.to_netcdf streams the write one time-chunk at a time and rank 0's peak
++# stays bounded by a single chunk regardless of TIME_STEPS.
+ TIME_STEPS = 24 * 30
+ RESOLUTION_DEG = 0.25
+ PLEV_STEP = -50
+ 
++# Target peak size, in bytes, of a single time-chunk of the 4D "t" field
++# (the largest array build_mock_dataset constructs). The chunk length along
++# "time" is derived from this budget and the grid size (see
++# build_mock_dataset), so peak memory stays bounded at any TIME_STEPS.
++MOCK_TIME_CHUNK_BYTES = 2 * 1024**3
++
+ 
+ LATITUDE_COUNT: int = 0
+ LONGITUDE_COUNT: int = 0
+@@ -172,7 +180,17 @@ def build_mock_dataset(
+ 
+     plev = np.arange(1000.0, -1.0, PLEV_STEP, dtype=np.float32)
+ 
+-    time_phase = (time % 24.0)[:, None, None]
++    # The "t" field is (n_time_steps, len(plev), n_lat, n_lon) float32: at
++    # the default 0.25 degree grid that is 712 GiB for n_time_steps=8760, so
++    # it and the smaller "pr"/"t2m" fields (n_time_steps, n_lat, n_lon) are
++    # built as dask arrays chunked along "time" rather than eager NumPy
++    # arrays. xr.Dataset.to_netcdf then streams the write one chunk at a
++    # time instead of materializing the full array on rank 0.
++    bytes_per_time_step = max(1, len(plev) * n_lat * n_lon * 4)
++    time_chunk = max(1, min(n_time_steps, MOCK_TIME_CHUNK_BYTES // bytes_per_time_step))
++
++    time_blocked = dask_array.from_array(time, chunks=time_chunk)
++    time_phase = (time_blocked % 24.0)[:, None, None]
+     lat_rad = np.deg2rad(lat)[None, :, None]
+     lon_rad = np.deg2rad(lon)[None, None, :]
+ 
+@@ -499,7 +517,7 @@ def run_test(function: Callable[..., None]) -> Callable[..., None]:
+ 
+ def partition_bounds(size: int, rank: int = RANK) -> tuple[int, int]:
+     """Return this rank's contiguous bounds within a global dimension."""
+-    return size * rank // SIZE, size * (rank + 1) // SIZE
++    return get_balanced_bounds(size, rank, SIZE)
+ 
+ 
+ def load_test_variable(
+@@ -2954,6 +2972,143 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
+     mpi.comm.barrier()
+ 
+ 
++@run_test
++def test_parallel_netcdf_write_numpy_coords(out_dir: str) -> None:
++    """Rank-0-owned NumPy write with "time" past netCDF4's default chunk.
++
++    test_parallel_netcdf_write already sends a NumPy (non-dask) Dataset
++    through this same eager scatter path, but its "time" axis is short
++    (TIME_STEPS, sliced down further by plev/lat/lon selection) and never
++    happened to cross netCDF4's own default chunk size for a 1D unlimited
++    coordinate, which a standalone check found to be a fixed 512 elements
++    regardless of the coordinate's final length. That was the exact
++    condition -- a straddled default chunk on the "time" variable, not on
++    any data variable -- behind the OverflowError and the WATCHDOG deadlock
++    that followed it. n_time below is picked past that boundary so this
++    test would have reproduced the original failure had the prewritten-
++    coordinate fix in to_netcdf_parallel's rank-0-owned branch not been
++    applied, without depending on TIME_STEPS or any generated mock file.
++    """
++    import netCDF4
++
++    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
++        record_result(
++            "NetCDF write (NumPy source, time > netCDF4 default chunk)",
++            True,
++            0.0,
++            0.0,
++            note="netCDF4 lacks parallel4 support",
++            skipped=True,
++        )
++        return
++
++    mpi.log(
++        "\n--- NetCDF write: plain NumPy source, time > netCDF4 default chunk (512) ---",
++    )
++
++    n_time = 600
++    n_lat, n_lon = 8, 8
++
++    full: xr.Dataset | None = None
++    error: BaseException | None = None
++    if RANK == 0:
++        try:
++            time = np.arange(n_time, dtype=np.float64)
++            lat = np.linspace(-90, 90, n_lat, dtype=np.float32)
++            lon = np.linspace(-180, 180, n_lon, endpoint=False, dtype=np.float32)
++            # A deterministic (not random) formula lets every rank recompute
++            # its own expected slab locally after read-back, with nothing
++            # sent from rank 0 beyond the file itself.
++            pr = (
++                time[:, None, None]
++                + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
++                + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
++            ).astype(np.float32)
++            full = xr.Dataset(
++                data_vars={"pr": (("time", "lat", "lon"), pr)},
++                coords={
++                    "time": (
++                        "time",
++                        time,
++                        {"units": "hours since 1970-01-01 00:00:00"},
++                    ),
++                    "lat": ("lat", lat),
++                    "lon": ("lon", lon),
++                },
++            )
++        except BaseException as exc:
++            error = exc
++    mpi.raise_if_error(error, "build plain NumPy mock source")
++
++    parallel_path = os.path.join(out_dir, "climtools_test_numpy_coords_parallel.nc")
++
++    @timer
++    def write_numpy_dataset() -> None:
++        ds = full if RANK == 0 else xgeo.empty_dataset()
++        xgeo.to_netcdf(
++            ds,
++            parallel_path,
++            unlimited_dim="time",
++            partition_dim="time",
++            parallel=True,
++            allow_serial=(SIZE == 1),
++        )
++
++    _, parallel_s = write_numpy_dataset()
++
++    mpi.log(
++        "validating time coordinate and data slabs after read-back",
++        timestamp=True,
++        flush=True,
++    )
++    correct = True
++    note = ""
++    try:
++        # decode_cf defaults to True: a straddled/garbage-filled "time"
++        # chunk raises OverflowError right here, on open, before any value
++        # is even compared -- exactly the original failure mode. Comparing
++        # against the *decoded* np.datetime64 expectation (rather than
++        # opening with decode_times=False) keeps this test on that same
++        # code path instead of sidestepping it.
++        with xr.open_dataset(parallel_path) as actual:
++            expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
++                n_time
++            ).astype("timedelta64[h]")
++            np.testing.assert_array_equal(actual["time"].values, expected_time)
++            start, stop = partition_bounds(n_time)
++            local_time = np.arange(start, stop, dtype=np.float64)
++            expected_pr = (
++                local_time[:, None, None]
++                + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
++                + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
++            ).astype(np.float32)
++            actual_pr = actual["pr"].isel(time=slice(start, stop)).load().values
++            np.testing.assert_array_equal(actual_pr, expected_pr)
++    except BaseException as exc:
++        correct = False
++        note = f"{type(exc).__name__}: {exc}"
++
++    correct = bool(mpi.reduce.all(correct))
++    if not correct:
++        notes = mpi.comm.gather(note, root=0)
++        if RANK == 0:
++            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
++        note = mpi.comm.bcast(note, root=0)
++
++    record_result(
++        "NetCDF write (NumPy source, time > netCDF4 default chunk)",
++        correct,
++        0.0,
++        parallel_s,
++        note=note or "time coordinate exact match; each rank's slab exact match",
++    )
++
++    mpi.comm.barrier()
++    if RANK == 0 and os.path.exists(parallel_path):
++        os.remove(parallel_path)
++    mpi.comm.barrier()
++
++
+ @run_test
+ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
+     """Compare distributed and serial writes of selected mock variables."""
+@@ -3241,6 +3396,304 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
+     mpi.comm.barrier()
+ 
+ 
++@run_test
++def test_create_dataarray() -> None:
++    """mpi.xarray.create_dataarray builds each rank's slice natively.
++
++    n_time is deliberately not a multiple of SIZE: partition_bounds() used
++    to compute a different remainder split than the real writer whenever a
++    dimension did not divide evenly, and every previously-tested TIME_STEPS
++    (24/168/720/8760) happened to be a multiple of 8, which is exactly why
++    that went unnoticed. This size is chosen to actually exercise the
++    uneven case now that partition_bounds() delegates to the same
++    get_balanced_bounds create_dataarray itself uses.
++    """
++    mpi.log("\n--- mpi.xarray.create_dataarray ---")
++
++    n_time, n_lat, n_lon = 723, 5, 6
++    call_count = [0]
++
++    def fill(start: int, stop: int) -> np.ndarray:
++        call_count[0] += 1
++        t = np.arange(start, stop, dtype=np.float64)
++        return (
++            t[:, None, None]
++            + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
++            + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
++        ).astype(np.float32)
++
++    da = mpi.xarray.create_dataarray(
++        shape=(n_time, n_lat, n_lon),
++        fill=fill,
++        dims=("time", "lat", "lon"),
++        dim="time",
++        coords={
++            "time": np.arange(n_time, dtype=np.float64),
++            "lat": np.linspace(-90, 90, n_lat, dtype=np.float32),
++        },
++        name="pr",
++    )
++
++    correct = True
++    note = ""
++    try:
++        if call_count[0] != 0:
++            raise AssertionError(
++                f"fill() ran {call_count[0]} time(s) before .load() -- not lazy."
++            )
++
++        start, stop = partition_bounds(n_time)
++        expected_shape = (stop - start, n_lat, n_lon)
++        if da.shape != expected_shape:
++            raise AssertionError(f"shape {da.shape} != expected {expected_shape}")
++
++        meta = da.attrs.get("mpi_meta")
++        if not (
++            isinstance(meta, dict)
++            and meta.get("dim") == "time"
++            and int(meta.get("start", -1)) == start
++            and int(meta.get("stop", -1)) == stop
++            and int(meta.get("global_size", -1)) == n_time
++        ):
++            raise AssertionError(f"mpi_meta incorrect or missing: {meta}")
++
++        np.testing.assert_array_equal(
++            da["time"].values, np.arange(start, stop, dtype=np.float64)
++        )
++        np.testing.assert_array_equal(
++            da["lat"].values, np.linspace(-90, 90, n_lat, dtype=np.float32)
++        )
++
++        loaded = da.load()
++        if call_count[0] != 1:
++            raise AssertionError(f"fill() ran {call_count[0]} time(s), expected 1.")
++        expected = fill(start, stop)
++        np.testing.assert_array_equal(loaded.values, expected)
++    except (AssertionError, KeyError, ValueError) as exc:
++        correct = False
++        note = f"{type(exc).__name__}: {exc}"
++
++    correct = bool(mpi.reduce.all(correct))
++    if not correct:
++        notes = mpi.comm.gather(note, root=0)
++        if RANK == 0:
++            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
++        note = mpi.comm.bcast(note, root=0)
++
++    record_result(
++        "mpi.xarray.create_dataarray: bounds, mpi_meta, coords, laziness, values",
++        correct,
++        0.0,
++        0.0,
++        note=note or "all correct on every rank",
++    )
++
++
++@run_test
++def test_create_dataset(out_dir: str) -> None:
++    """mpi.xarray.create_dataset: mixed data_vars forms, errors, round-trip.
++
++    Exercises all three accepted data_vars forms in one Dataset: a
++    partitioned (dims, fill) variable, a non-partitioned (dims, fill) one
++    (fill takes no arguments), and a bare DataArray built by
++    create_dataarray -- plus the per-variable dtype mapping and both
++    documented error paths.
++    """
++    mpi.log("\n--- mpi.xarray.create_dataset ---")
++
++    n_time, n_lat, n_lon = 723, 5, 6
++
++    def fill_pr(start: int, stop: int) -> np.ndarray:
++        t = np.arange(start, stop, dtype=np.float64)
++        return (
++            t[:, None, None]
++            + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
++            + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
++        ).astype(np.float32)
++
++    def fill_slmsk() -> np.ndarray:
++        lat_idx = np.arange(n_lat)[:, None]
++        lon_idx = np.arange(n_lon)[None, :]
++        return ((lat_idx + lon_idx) % 3).astype(np.int8)
++
++    def fill_t2m(start: int, stop: int) -> np.ndarray:
++        return fill_pr(start, stop) + 273.15
++
++    t2m_da = mpi.xarray.create_dataarray(
++        shape=(n_time, n_lat, n_lon),
++        fill=fill_t2m,
++        dims=("time", "lat", "lon"),
++        dim="time",
++        dtype=np.float32,
++    )
++
++    correct = True
++    note = ""
++    ds: xr.Dataset | None = None
++    try:
++        ds = mpi.xarray.create_dataset(
++            data_vars={
++                "pr": (("time", "lat", "lon"), fill_pr),
++                "slmsk": (("lat", "lon"), fill_slmsk),
++                "t2m": t2m_da,
++            },
++            sizes={"time": n_time, "lat": n_lat, "lon": n_lon},
++            dim="time",
++            dtype={"pr": np.float32},
++            coords={
++                "time": (
++                    "time",
++                    np.arange(n_time, dtype=np.float64),
++                    {"units": "hours since 1970-01-01 00:00:00"},
++                ),
++            },
++        )
++
++        start, stop = partition_bounds(n_time)
++        if ds.sizes["time"] != stop - start:
++            raise AssertionError(
++                f"local time size {ds.sizes['time']} != {stop - start}"
++            )
++        if ds["slmsk"].shape != (n_lat, n_lon):
++            raise AssertionError(f"slmsk shape {ds['slmsk'].shape} != {(n_lat, n_lon)}")
++
++        meta = ds.attrs.get("mpi_meta")
++        if not (
++            isinstance(meta, dict)
++            and int(meta.get("start", -1)) == start
++            and int(meta.get("stop", -1)) == stop
++        ):
++            raise AssertionError(f"mpi_meta incorrect: {meta}")
++
++        expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
++            start, stop
++        ).astype("timedelta64[h]")
++        np.testing.assert_array_equal(ds["time"].values, expected_time)
++
++        loaded = ds.load()
++        np.testing.assert_array_equal(loaded["pr"].values, fill_pr(start, stop))
++        np.testing.assert_array_equal(loaded["t2m"].values, fill_t2m(start, stop))
++        np.testing.assert_array_equal(loaded["slmsk"].values, fill_slmsk())
++        if loaded["pr"].dtype != np.float32:
++            raise AssertionError(
++                f"pr dtype {loaded['pr'].dtype} != float32 (dtype map)"
++            )
++
++        # Error path 1: dim not a key of sizes.
++        try:
++            mpi.xarray.create_dataset(
++                data_vars={"pr": (("time",), fill_pr)},
++                sizes={"lat": n_lat},
++                dim="time",
++            )
++            raise AssertionError("expected ValueError for dim not in sizes")
++        except ValueError:
++            pass
++
++        # Error path 2: a bare DataArray not sized to this rank's bounds.
++        wrong_size_da = xr.DataArray(
++            np.zeros((stop - start + 1, n_lat, n_lon), dtype=np.float32),
++            dims=("time", "lat", "lon"),
++        )
++        try:
++            mpi.xarray.create_dataset(
++                data_vars={
++                    "pr": (("time", "lat", "lon"), fill_pr),
++                    "bad": wrong_size_da,
++                },
++                sizes={"time": n_time, "lat": n_lat, "lon": n_lon},
++                dim="time",
++            )
++            raise AssertionError("expected ValueError for mis-sized DataArray")
++        except ValueError:
++            pass
++    except (AssertionError, KeyError) as exc:
++        correct = False
++        note = f"{type(exc).__name__}: {exc}"
++
++    correct = bool(mpi.reduce.all(correct))
++    if not correct:
++        notes = mpi.comm.gather(note, root=0)
++        if RANK == 0:
++            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
++        note = mpi.comm.bcast(note, root=0)
++
++    record_result(
++        "mpi.xarray.create_dataset: mixed forms, dtype map, errors, mpi_meta",
++        correct,
++        0.0,
++        0.0,
++        note=note or "all correct on every rank",
++    )
++
++    if not correct or ds is None:
++        return
++
++    import netCDF4
++
++    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
++        record_result(
++            "NetCDF write of a create_dataset() result",
++            True,
++            0.0,
++            0.0,
++            note="netCDF4 lacks parallel4 support",
++            skipped=True,
++        )
++        return
++
++    path = os.path.join(out_dir, "climtools_test_create_dataset.nc")
++
++    @timer
++    def write_created_dataset() -> None:
++        xgeo.to_netcdf(
++            ds,
++            path,
++            unlimited_dim="time",
++            partition_dim="time",
++            parallel=True,
++            allow_serial=(SIZE == 1),
++        )
++
++    _, write_s = write_created_dataset()
++
++    correct = True
++    note = ""
++    try:
++        with xr.open_dataset(path) as actual:
++            expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
++                n_time
++            ).astype("timedelta64[h]")
++            np.testing.assert_array_equal(actual["time"].values, expected_time)
++            start, stop = partition_bounds(n_time)
++            actual_pr = actual["pr"].isel(time=slice(start, stop)).load().values
++            np.testing.assert_array_equal(actual_pr, fill_pr(start, stop))
++            np.testing.assert_array_equal(actual["slmsk"].values, fill_slmsk())
++    except BaseException as exc:  # noqa: BLE001
++        correct = False
++        note = f"{type(exc).__name__}: {exc}"
++
++    correct = bool(mpi.reduce.all(correct))
++    if not correct:
++        notes = mpi.comm.gather(note, root=0)
++        if RANK == 0:
++            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
++        note = mpi.comm.bcast(note, root=0)
++
++    record_result(
++        "NetCDF write of a create_dataset() result",
++        correct,
++        0.0,
++        write_s,
++        note=note or "time and data match, no OverflowError, no scatter needed",
++    )
++
++    mpi.comm.barrier()
++    if RANK == 0 and os.path.exists(path):
++        os.remove(path)
++    mpi.comm.barrier()
++
++
+ # ---------------------------------------------------------------------------
+ # Driver
+ # ---------------------------------------------------------------------------
+@@ -3978,8 +4431,11 @@ def main() -> None:
+     test_xgeo_interface_contracts(output_dir)
+     test_parallel_netcdf_writer_options(output_dir)
+     test_parallel_netcdf_write(output_dir)
++    test_parallel_netcdf_write_numpy_coords(output_dir)
+     test_distributed_netcdf_roundtrip(output_dir)
+     test_distributed_dataarray_roundtrip(output_dir)
++    test_create_dataarray()
++    test_create_dataset(output_dir)
+ 
+     mpi.comm.barrier()
+     if print_test_summary():

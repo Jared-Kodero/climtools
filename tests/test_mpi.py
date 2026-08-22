@@ -33,8 +33,10 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+import dask.array as dask_array
 import numpy as np
 import xarray as xr
+
 from climtools import mpi, xgeo
 
 # Raised from 100 to make the local per-rank compute in every reduction
@@ -48,15 +50,21 @@ from climtools import mpi, xgeo
 # bandwidth-bound behavior instead of just its latency floor.
 #
 # Memory: at the default RESOLUTION_DEG=0.25 (721x1440x21), the "t" field
-# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes; at TIME_STEPS=1000 that is
-# ~81 GiB, and build_mock_dataset briefly holds two full copies of it on
-# rank 0 (the broadcast subtraction and the following .astype), so budget
-# roughly 170-180 GiB peak on rank 0 alone. That fits the 500 GiB/node SLURM
-# allocation with headroom; lower --time-steps (or raise --resolution, which
-# coarsens the grid) on a smaller node.
+# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes -- 712 GiB at
+# TIME_STEPS=8760, far beyond any single rank's RAM. build_mock_dataset
+# therefore builds "pr", "t2m" and "t" as dask arrays chunked along "time"
+# (see MOCK_TIME_CHUNK_BYTES below) instead of eager NumPy arrays, so
+# ds.to_netcdf streams the write one time-chunk at a time and rank 0's peak
+# stays bounded by a single chunk regardless of TIME_STEPS.
 TIME_STEPS = 24 * 30
 RESOLUTION_DEG = 0.25
 PLEV_STEP = -50
+
+# Target peak size, in bytes, of a single time-chunk of the 4D "t" field
+# (the largest array build_mock_dataset constructs). The chunk length along
+# "time" is derived from this budget and the grid size (see
+# build_mock_dataset), so peak memory stays bounded at any TIME_STEPS.
+MOCK_TIME_CHUNK_BYTES = 2 * 1024**3
 
 
 LATITUDE_COUNT: int = 0
@@ -172,7 +180,17 @@ def build_mock_dataset(
 
     plev = np.arange(1000.0, -1.0, PLEV_STEP, dtype=np.float32)
 
-    time_phase = (time % 24.0)[:, None, None]
+    # The "t" field is (n_time_steps, len(plev), n_lat, n_lon) float32: at
+    # the default 0.25 degree grid that is 712 GiB for n_time_steps=8760, so
+    # it and the smaller "pr"/"t2m" fields (n_time_steps, n_lat, n_lon) are
+    # built as dask arrays chunked along "time" rather than eager NumPy
+    # arrays. xr.Dataset.to_netcdf then streams the write one chunk at a
+    # time instead of materializing the full array on rank 0.
+    bytes_per_time_step = max(1, len(plev) * n_lat * n_lon * 4)
+    time_chunk = max(1, min(n_time_steps, MOCK_TIME_CHUNK_BYTES // bytes_per_time_step))
+
+    time_blocked = dask_array.from_array(time, chunks=time_chunk)
+    time_phase = (time_blocked % 24.0)[:, None, None]
     lat_rad = np.deg2rad(lat)[None, :, None]
     lon_rad = np.deg2rad(lon)[None, None, :]
 
