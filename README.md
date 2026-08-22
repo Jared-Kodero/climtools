@@ -545,6 +545,70 @@ anywhere. For an eager source headed straight to `to_netcdf`, just calling
 `to_netcdf` directly (skipping `distribute` and `.load()` above) is both
 simpler and faster: it already takes the scatter path this describes.
 
+**Data with no existing source at all — you are generating it.**
+`redistribute` needs an identical recipe every rank can already build;
+`distribute` needs a source that exists on one rank. Neither fits synthetic
+or procedurally generated data — a mock dataset for testing, a per-rank RNG
+stream, one file per rank — where there is no array or file to slice in the
+first place. `mpi.xarray.create_dataarray`/`create_dataset` are for this:
+every rank computes `get_balanced_bounds(length, rank, size)` independently
+(a pure function of the global length, this rank's number, and the
+communicator size — no communication at all) and calls your own function
+with only its own `(start, stop)`, so nothing is ever built on one rank and
+sent to another:
+
+```python
+import numpy as np
+from climtools import mpi, xgeo
+
+def fill_pr(start: int, stop: int) -> np.ndarray:
+    # called once per rank, with THIS rank's own global bounds along "time" --
+    # rank 3 of 8 gets (270, 360), not (0, 90)
+    t = np.arange(start, stop, dtype=np.float32)
+    return some_formula(t)  # shape (stop - start, n_lat, n_lon)
+
+def fill_slmsk() -> np.ndarray:
+    # not partitioned (no "time" in its dims) -- identical on every rank,
+    # so this takes no arguments
+    return build_mask()  # shape (n_lat, n_lon)
+
+ds = mpi.xarray.create_dataset(
+    data_vars={
+        "pr": (("time", "lat", "lon"), fill_pr),
+        "slmsk": (("lat", "lon"), fill_slmsk),
+    },
+    # sizes= is unnecessary here: every dimension named above ("time",
+    # "lat", "lon") has a full-length coordinate below, and reading a
+    # coordinate's length never forces any computation, since coordinates
+    # are always plain, eager arrays -- never a lazy fill function. Give
+    # sizes={"lon": 1440} instead of a "lon" coordinate below to cover a
+    # dimension with no coordinate of its own.
+    coords={
+        "time": np.arange(8760, dtype=np.float64),
+        "lat": np.linspace(-90, 90, 721, dtype=np.float32),
+        "lon": np.linspace(-180, 180, 1440, endpoint=False, dtype=np.float32),
+    },
+    dim="time",
+)
+# ds is dask-backed and not yet computed. Writing it runs each rank's own
+# fill() calls as part of the write -- rank 0 never materializes more than
+# its own slice, at any point, for any variable.
+xgeo.to_netcdf(ds, "output.nc", partition_dim="time", parallel=True)
+```
+
+`fill` is wrapped in `dask.delayed`, so it runs only when this rank's slice
+is actually needed (loaded, reduced, or written), not eagerly at the
+`create_dataset` call. A coordinate matching `dim` can be passed the same
+way as to the ordinary `xr.Dataset` constructor — a full-length array — and
+is auto-sliced to this rank's own bounds. `create_dataset` also accepts a
+bare `xr.DataArray` as a `data_vars` value (one already built by
+`create_dataarray`, for instance), exactly as `xr.Dataset`'s own constructor
+accepts a bare DataArray alongside `(dims, array)` tuples. See
+`create_dataarray`'s and `create_dataset`'s docstrings in
+
+[`core/xr_mpi.py`](core/xr_mpi.py) for the single-DataArray form and the
+full set of options.
+
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
 immediately after the collective `nc.close()` — inside
 [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/

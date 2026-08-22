@@ -36,8 +36,8 @@ from typing import Any
 import dask.array as dask_array
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
+from climtools.core.xr_mpi import get_balanced_bounds
 
 # Raised from 100 to make the local per-rank compute in every reduction
 # large relative to the fixed per-call MPI overhead (the collective-agreement
@@ -517,7 +517,7 @@ def run_test(function: Callable[..., None]) -> Callable[..., None]:
 
 def partition_bounds(size: int, rank: int = RANK) -> tuple[int, int]:
     """Return this rank's contiguous bounds within a global dimension."""
-    return size * rank // SIZE, size * (rank + 1) // SIZE
+    return get_balanced_bounds(size, rank, SIZE)
 
 
 def load_test_variable(
@@ -2973,6 +2973,143 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
 
 
 @run_test
+def test_parallel_netcdf_write_numpy_coords(out_dir: str) -> None:
+    """Rank-0-owned NumPy write with "time" past netCDF4's default chunk.
+
+    test_parallel_netcdf_write already sends a NumPy (non-dask) Dataset
+    through this same eager scatter path, but its "time" axis is short
+    (TIME_STEPS, sliced down further by plev/lat/lon selection) and never
+    happened to cross netCDF4's own default chunk size for a 1D unlimited
+    coordinate, which a standalone check found to be a fixed 512 elements
+    regardless of the coordinate's final length. That was the exact
+    condition -- a straddled default chunk on the "time" variable, not on
+    any data variable -- behind the OverflowError and the WATCHDOG deadlock
+    that followed it. n_time below is picked past that boundary so this
+    test would have reproduced the original failure had the prewritten-
+    coordinate fix in to_netcdf_parallel's rank-0-owned branch not been
+    applied, without depending on TIME_STEPS or any generated mock file.
+    """
+    import netCDF4
+
+    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
+        record_result(
+            "NetCDF write (NumPy source, time > netCDF4 default chunk)",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
+        )
+        return
+
+    mpi.log(
+        "\n--- NetCDF write: plain NumPy source, time > netCDF4 default chunk (512) ---",
+    )
+
+    n_time = 600
+    n_lat, n_lon = 8, 8
+
+    full: xr.Dataset | None = None
+    error: BaseException | None = None
+    if RANK == 0:
+        try:
+            time = np.arange(n_time, dtype=np.float64)
+            lat = np.linspace(-90, 90, n_lat, dtype=np.float32)
+            lon = np.linspace(-180, 180, n_lon, endpoint=False, dtype=np.float32)
+            # A deterministic (not random) formula lets every rank recompute
+            # its own expected slab locally after read-back, with nothing
+            # sent from rank 0 beyond the file itself.
+            pr = (
+                time[:, None, None]
+                + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
+                + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
+            ).astype(np.float32)
+            full = xr.Dataset(
+                data_vars={"pr": (("time", "lat", "lon"), pr)},
+                coords={
+                    "time": (
+                        "time",
+                        time,
+                        {"units": "hours since 1970-01-01 00:00:00"},
+                    ),
+                    "lat": ("lat", lat),
+                    "lon": ("lon", lon),
+                },
+            )
+        except BaseException as exc:
+            error = exc
+    mpi.raise_if_error(error, "build plain NumPy mock source")
+
+    parallel_path = os.path.join(out_dir, "climtools_test_numpy_coords_parallel.nc")
+
+    @timer
+    def write_numpy_dataset() -> None:
+        ds = full if RANK == 0 else xgeo.empty_dataset()
+        xgeo.to_netcdf(
+            ds,
+            parallel_path,
+            unlimited_dim="time",
+            partition_dim="time",
+            parallel=True,
+            allow_serial=(SIZE == 1),
+        )
+
+    _, parallel_s = write_numpy_dataset()
+
+    mpi.log(
+        "validating time coordinate and data slabs after read-back",
+        timestamp=True,
+        flush=True,
+    )
+    correct = True
+    note = ""
+    try:
+        # decode_cf defaults to True: a straddled/garbage-filled "time"
+        # chunk raises OverflowError right here, on open, before any value
+        # is even compared -- exactly the original failure mode. Comparing
+        # against the *decoded* np.datetime64 expectation (rather than
+        # opening with decode_times=False) keeps this test on that same
+        # code path instead of sidestepping it.
+        with xr.open_dataset(parallel_path) as actual:
+            expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
+                n_time
+            ).astype("timedelta64[h]")
+            np.testing.assert_array_equal(actual["time"].values, expected_time)
+            start, stop = partition_bounds(n_time)
+            local_time = np.arange(start, stop, dtype=np.float64)
+            expected_pr = (
+                local_time[:, None, None]
+                + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
+                + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
+            ).astype(np.float32)
+            actual_pr = actual["pr"].isel(time=slice(start, stop)).load().values
+            np.testing.assert_array_equal(actual_pr, expected_pr)
+    except BaseException as exc:
+        correct = False
+        note = f"{type(exc).__name__}: {exc}"
+
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        notes = mpi.comm.gather(note, root=0)
+        if RANK == 0:
+            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        note = mpi.comm.bcast(note, root=0)
+
+    record_result(
+        "NetCDF write (NumPy source, time > netCDF4 default chunk)",
+        correct,
+        0.0,
+        parallel_s,
+        note=note or "time coordinate exact match; each rank's slab exact match",
+    )
+
+    mpi.comm.barrier()
+    if RANK == 0 and os.path.exists(parallel_path):
+        os.remove(parallel_path)
+    mpi.comm.barrier()
+
+
+@run_test
 def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
     """Compare distributed and serial writes of selected mock variables."""
     import netCDF4
@@ -3256,6 +3393,342 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
         for path in (serial_path, parallel_path):
             if os.path.exists(path):
                 os.remove(path)
+    mpi.comm.barrier()
+
+
+@run_test
+def test_create_dataarray() -> None:
+    """mpi.xarray.create_dataarray builds each rank's slice natively.
+
+    n_time is deliberately not a multiple of SIZE: partition_bounds() used
+    to compute a different remainder split than the real writer whenever a
+    dimension did not divide evenly, and every previously-tested TIME_STEPS
+    (24/168/720/8760) happened to be a multiple of 8, which is exactly why
+    that went unnoticed. This size is chosen to actually exercise the
+    uneven case now that partition_bounds() delegates to the same
+    get_balanced_bounds create_dataarray itself uses.
+    """
+    mpi.log("\n--- mpi.xarray.create_dataarray ---")
+
+    n_time, n_lat, n_lon = 723, 5, 6
+    call_count = [0]
+
+    def fill(start: int, stop: int) -> np.ndarray:
+        call_count[0] += 1
+        t = np.arange(start, stop, dtype=np.float64)
+        return (
+            t[:, None, None]
+            + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
+            + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
+        ).astype(np.float32)
+
+    da = mpi.xarray.create_dataarray(
+        shape=(n_time, n_lat, n_lon),
+        fill=fill,
+        dims=("time", "lat", "lon"),
+        dim="time",
+        coords={
+            "time": np.arange(n_time, dtype=np.float64),
+            "lat": np.linspace(-90, 90, n_lat, dtype=np.float32),
+        },
+        name="pr",
+    )
+
+    correct = True
+    note = ""
+    try:
+        if call_count[0] != 0:
+            raise AssertionError(
+                f"fill() ran {call_count[0]} time(s) before .load() -- not lazy."
+            )
+
+        start, stop = partition_bounds(n_time)
+        expected_shape = (stop - start, n_lat, n_lon)
+        if da.shape != expected_shape:
+            raise AssertionError(f"shape {da.shape} != expected {expected_shape}")
+
+        meta = da.attrs.get("mpi_meta")
+        if not (
+            isinstance(meta, dict)
+            and meta.get("dim") == "time"
+            and int(meta.get("start", -1)) == start
+            and int(meta.get("stop", -1)) == stop
+            and int(meta.get("global_size", -1)) == n_time
+        ):
+            raise AssertionError(f"mpi_meta incorrect or missing: {meta}")
+
+        np.testing.assert_array_equal(
+            da["time"].values, np.arange(start, stop, dtype=np.float64)
+        )
+        np.testing.assert_array_equal(
+            da["lat"].values, np.linspace(-90, 90, n_lat, dtype=np.float32)
+        )
+
+        loaded = da.load()
+        if call_count[0] != 1:
+            raise AssertionError(f"fill() ran {call_count[0]} time(s), expected 1.")
+        expected = fill(start, stop)
+        np.testing.assert_array_equal(loaded.values, expected)
+    except (AssertionError, KeyError, ValueError) as exc:
+        correct = False
+        note = f"{type(exc).__name__}: {exc}"
+
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        notes = mpi.comm.gather(note, root=0)
+        if RANK == 0:
+            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        note = mpi.comm.bcast(note, root=0)
+
+    record_result(
+        "mpi.xarray.create_dataarray: bounds, mpi_meta, coords, laziness, values",
+        correct,
+        0.0,
+        0.0,
+        note=note or "all correct on every rank",
+    )
+
+
+@run_test
+def test_create_dataset(out_dir: str) -> None:
+    """mpi.xarray.create_dataset: mixed data_vars forms, errors, round-trip.
+
+    Exercises all three accepted data_vars forms in one Dataset: a
+    partitioned (dims, fill) variable, a non-partitioned (dims, fill) one
+    (fill takes no arguments), and a bare DataArray built by
+    create_dataarray -- plus the per-variable dtype mapping and both
+    documented error paths.
+    """
+    mpi.log("\n--- mpi.xarray.create_dataset ---")
+
+    n_time, n_lat, n_lon = 723, 5, 6
+
+    def fill_pr(start: int, stop: int) -> np.ndarray:
+        t = np.arange(start, stop, dtype=np.float64)
+        return (
+            t[:, None, None]
+            + np.arange(n_lat, dtype=np.float64)[None, :, None] * 0.01
+            + np.arange(n_lon, dtype=np.float64)[None, None, :] * 0.0001
+        ).astype(np.float32)
+
+    def fill_slmsk() -> np.ndarray:
+        lat_idx = np.arange(n_lat)[:, None]
+        lon_idx = np.arange(n_lon)[None, :]
+        return ((lat_idx + lon_idx) % 3).astype(np.int8)
+
+    def fill_t2m(start: int, stop: int) -> np.ndarray:
+        return fill_pr(start, stop) + 273.15
+
+    t2m_da = mpi.xarray.create_dataarray(
+        shape=(n_time, n_lat, n_lon),
+        fill=fill_t2m,
+        dims=("time", "lat", "lon"),
+        dim="time",
+        dtype=np.float32,
+    )
+
+    correct = True
+    note = ""
+    ds: xr.Dataset | None = None
+    try:
+        ds = mpi.xarray.create_dataset(
+            data_vars={
+                "pr": (("time", "lat", "lon"), fill_pr),
+                "slmsk": (("lat", "lon"), fill_slmsk),
+                "t2m": t2m_da,
+            },
+            sizes={"time": n_time, "lat": n_lat, "lon": n_lon},
+            dim="time",
+            dtype={"pr": np.float32},
+            coords={
+                "time": (
+                    "time",
+                    np.arange(n_time, dtype=np.float64),
+                    {"units": "hours since 1970-01-01 00:00:00"},
+                ),
+            },
+        )
+
+        start, stop = partition_bounds(n_time)
+        if ds.sizes["time"] != stop - start:
+            raise AssertionError(
+                f"local time size {ds.sizes['time']} != {stop - start}"
+            )
+        if ds["slmsk"].shape != (n_lat, n_lon):
+            raise AssertionError(f"slmsk shape {ds['slmsk'].shape} != {(n_lat, n_lon)}")
+
+        meta = ds.attrs.get("mpi_meta")
+        if not (
+            isinstance(meta, dict)
+            and int(meta.get("start", -1)) == start
+            and int(meta.get("stop", -1)) == stop
+        ):
+            raise AssertionError(f"mpi_meta incorrect: {meta}")
+
+        expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
+            start, stop
+        ).astype("timedelta64[h]")
+        np.testing.assert_array_equal(ds["time"].values, expected_time)
+
+        loaded = ds.load()
+        np.testing.assert_array_equal(loaded["pr"].values, fill_pr(start, stop))
+        np.testing.assert_array_equal(loaded["t2m"].values, fill_t2m(start, stop))
+        np.testing.assert_array_equal(loaded["slmsk"].values, fill_slmsk())
+        if loaded["pr"].dtype != np.float32:
+            raise AssertionError(
+                f"pr dtype {loaded['pr'].dtype} != float32 (dtype map)"
+            )
+
+        # Error path 1: dim not a key of sizes.
+        try:
+            mpi.xarray.create_dataset(
+                data_vars={"pr": (("time",), fill_pr)},
+                sizes={"lat": n_lat},
+                dim="time",
+            )
+            raise AssertionError("expected ValueError for dim not in sizes")
+        except ValueError:
+            pass
+
+        # Error path 2: a bare DataArray not sized to this rank's bounds.
+        wrong_size_da = xr.DataArray(
+            np.zeros((stop - start + 1, n_lat, n_lon), dtype=np.float32),
+            dims=("time", "lat", "lon"),
+        )
+        try:
+            mpi.xarray.create_dataset(
+                data_vars={
+                    "pr": (("time", "lat", "lon"), fill_pr),
+                    "bad": wrong_size_da,
+                },
+                sizes={"time": n_time, "lat": n_lat, "lon": n_lon},
+                dim="time",
+            )
+            raise AssertionError("expected ValueError for mis-sized DataArray")
+        except ValueError:
+            pass
+
+        # sizes= is optional when every relevant dimension has a
+        # full-length coordinate: this must resolve identically to the
+        # explicit-sizes call above, with no sizes= at all.
+        auto_ds = mpi.xarray.create_dataset(
+            data_vars={
+                "pr": (("time", "lat", "lon"), fill_pr),
+                "slmsk": (("lat", "lon"), fill_slmsk),
+            },
+            dim="time",
+            coords={
+                "time": np.arange(n_time, dtype=np.float64),
+                "lat": np.linspace(-90, 90, n_lat, dtype=np.float32),
+                "lon": np.linspace(-180, 180, n_lon, endpoint=False, dtype=np.float32),
+            },
+        )
+        if auto_ds.sizes["time"] != stop - start:
+            raise AssertionError(
+                f"auto-inferred local time size {auto_ds.sizes['time']} "
+                + f"!= {stop - start}"
+            )
+        auto_loaded = auto_ds.load()
+        np.testing.assert_array_equal(auto_loaded["pr"].values, fill_pr(start, stop))
+        np.testing.assert_array_equal(auto_loaded["slmsk"].values, fill_slmsk())
+
+        # A dimension with neither an explicit size nor a coordinate must
+        # raise a clear error, not silently build something wrong.
+        try:
+            mpi.xarray.create_dataset(
+                data_vars={"pr": (("time", "lat", "lon"), fill_pr)},
+                dim="time",
+                coords={"time": np.arange(n_time, dtype=np.float64)},  # no lat/lon
+            )
+            raise AssertionError(
+                "expected ValueError: 'lat'/'lon' have no size or coordinate"
+            )
+        except ValueError:
+            pass
+    except (AssertionError, KeyError) as exc:
+        correct = False
+        note = f"{type(exc).__name__}: {exc}"
+
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        notes = mpi.comm.gather(note, root=0)
+        if RANK == 0:
+            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        note = mpi.comm.bcast(note, root=0)
+
+    record_result(
+        "mpi.xarray.create_dataset: mixed forms, dtype map, errors, mpi_meta",
+        correct,
+        0.0,
+        0.0,
+        note=note or "all correct on every rank",
+    )
+
+    if not correct or ds is None:
+        return
+
+    import netCDF4
+
+    if SIZE > 1 and not getattr(netCDF4, "__has_parallel4_support__", False):
+        record_result(
+            "NetCDF write of a create_dataset() result",
+            True,
+            0.0,
+            0.0,
+            note="netCDF4 lacks parallel4 support",
+            skipped=True,
+        )
+        return
+
+    path = os.path.join(out_dir, "climtools_test_create_dataset.nc")
+
+    @timer
+    def write_created_dataset() -> None:
+        xgeo.to_netcdf(
+            ds,
+            path,
+            unlimited_dim="time",
+            partition_dim="time",
+            parallel=True,
+            allow_serial=(SIZE == 1),
+        )
+
+    _, write_s = write_created_dataset()
+
+    correct = True
+    note = ""
+    try:
+        with xr.open_dataset(path) as actual:
+            expected_time = np.datetime64("1970-01-01T00:00:00") + np.arange(
+                n_time
+            ).astype("timedelta64[h]")
+            np.testing.assert_array_equal(actual["time"].values, expected_time)
+            start, stop = partition_bounds(n_time)
+            actual_pr = actual["pr"].isel(time=slice(start, stop)).load().values
+            np.testing.assert_array_equal(actual_pr, fill_pr(start, stop))
+            np.testing.assert_array_equal(actual["slmsk"].values, fill_slmsk())
+    except BaseException as exc:  # noqa: BLE001
+        correct = False
+        note = f"{type(exc).__name__}: {exc}"
+
+    correct = bool(mpi.reduce.all(correct))
+    if not correct:
+        notes = mpi.comm.gather(note, root=0)
+        if RANK == 0:
+            note = "; ".join(f"rank {r}: {n}" for r, n in enumerate(notes) if n)
+        note = mpi.comm.bcast(note, root=0)
+
+    record_result(
+        "NetCDF write of a create_dataset() result",
+        correct,
+        0.0,
+        write_s,
+        note=note or "time and data match, no OverflowError, no scatter needed",
+    )
+
+    mpi.comm.barrier()
+    if RANK == 0 and os.path.exists(path):
+        os.remove(path)
     mpi.comm.barrier()
 
 
@@ -3996,8 +4469,11 @@ def main() -> None:
     test_xgeo_interface_contracts(output_dir)
     test_parallel_netcdf_writer_options(output_dir)
     test_parallel_netcdf_write(output_dir)
+    test_parallel_netcdf_write_numpy_coords(output_dir)
     test_distributed_netcdf_roundtrip(output_dir)
     test_distributed_dataarray_roundtrip(output_dir)
+    test_create_dataarray()
+    test_create_dataset(output_dir)
 
     mpi.comm.barrier()
     if print_test_summary():

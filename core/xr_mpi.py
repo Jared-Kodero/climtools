@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import math
 import warnings
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from functools import cache
 from numbers import Integral
 from types import EllipsisType
@@ -263,6 +263,102 @@ def prune_chunk_info(
         for dim in value.dims
         if str(dim) in chunk_info
     }
+
+
+def _coord_length(spec: Any) -> int | None:
+    """Return a coordinate spec's own length, or None if it has none.
+
+    Accepts the same forms as :func:`_localize_coord`: a bare array-like or
+    a ``(dims, array[, attrs])`` tuple. A 0-D (scalar) coordinate has no
+    length to offer.
+    """
+    array = spec[1] if isinstance(spec, tuple) else spec
+    array = np.asarray(array)
+    return int(array.shape[0]) if array.ndim > 0 else None
+
+
+def _resolve_sizes(
+    required_dims: Iterable[Hashable],
+    sizes: Mapping[Hashable, int] | None,
+    coords: Mapping[Hashable, Any] | None,
+) -> dict[Hashable, int]:
+    """Fill in any dimension length missing from ``sizes`` using ``coords``.
+
+    A dimension's length can come from either an explicit entry in
+    ``sizes`` (checked first, so it always wins) or the length of a
+    matching full-length coordinate in ``coords`` -- reading that length
+    never forces any computation, since coordinates passed to
+    :meth:`XarrayMPI.create_dataarray`/``create_dataset`` are always plain,
+    eager arrays, never lazy ``fill`` functions. Any dimension with
+    neither is reported together, in one error, rather than one at a time.
+    """
+    resolved = dict(sizes) if sizes else {}
+    coords = coords or {}
+    missing = []
+    for dim_name in required_dims:
+        if dim_name in resolved:
+            continue
+        length = _coord_length(coords[dim_name]) if dim_name in coords else None
+        if length is None:
+            missing.append(dim_name)
+        else:
+            resolved[dim_name] = length
+    if missing:
+        raise ValueError(
+            f"Cannot determine the length of {sorted(str(d) for d in missing)}: "
+            + "not given explicitly and no matching full-length coordinate "
+            + "was passed. Pass its length explicitly, or include a "
+            + "full-length coordinate array for it."
+        )
+    return resolved
+
+
+def _localize_coord(
+    spec: Any,
+    global_size: int,
+    start: int,
+    stop: int,
+) -> Any:
+    """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
+
+    Accepts a coordinate in any of the three forms
+    :class:`xarray.DataArray`/:class:`~xarray.Dataset` themselves accept: a
+    bare array-like, ``(dims, array)``, or ``(dims, array, attrs)``. A
+    coordinate whose own length does not equal ``global_size`` is returned
+    unchanged (already rank-local, or a scalar/unrelated-length auxiliary
+    coordinate -- not this function's business to guess about).
+    """
+    if isinstance(spec, tuple):
+        coord_dims, coord_array, *rest = spec
+    else:
+        coord_dims, coord_array, rest = None, spec, []
+    coord_array = np.asarray(coord_array)
+    if coord_array.shape and coord_array.shape[0] == global_size:
+        coord_array = coord_array[start:stop]
+    if coord_dims is None:
+        return coord_array
+    return (coord_dims, coord_array, *rest)
+
+
+def _delayed_local(
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    shape: tuple[int, ...],
+    dtype: Any,
+) -> Any:
+    """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
+
+    Shared by :meth:`XarrayMPI.create_dataarray` and
+    :meth:`XarrayMPI.create_dataset`: every call site passes a *different*
+    ``fn``/``args`` (this rank's own ``fill`` and its own bounds, or none
+    for a non-partitioned variable), computed independently with no
+    communication -- this helper only avoids repeating the
+    ``dask.delayed``/``from_delayed`` wiring three times.
+    """
+    import dask
+    import dask.array as dask_array
+
+    return dask_array.from_delayed(dask.delayed(fn)(*args), shape=shape, dtype=dtype)
 
 
 def choose_partition_dim(
@@ -605,7 +701,9 @@ class XarrayMPI(ArithmeticMixin):
         try:
             if is_root:
                 if value is None:
-                    raise ValueError(f"Rank {root} (root) must provide a value, not None.")
+                    raise ValueError(
+                        f"Rank {root} (root) must provide a value, not None."
+                    )
                 if get_mpi_meta(value) is not None:
                     raise ValueError(
                         "Cannot distribute an already distributed object. "
@@ -643,7 +741,9 @@ class XarrayMPI(ArithmeticMixin):
 
                     pieces = []
                     for rank in range(comm.size):
-                        start, stop = get_chunk_bounds(length, chunk_size, rank, comm.size)
+                        start, stop = get_chunk_bounds(
+                            length, chunk_size, rank, comm.size
+                        )
                         piece = stripped.isel({resolved_dim: slice(start, stop)})
                         # stripped came from strip_mpi_meta's .copy(deep=False):
                         # every .isel() slice taken from a shallow-copied
@@ -665,7 +765,9 @@ class XarrayMPI(ArithmeticMixin):
                         for other_dim, other_length in piece.sizes.items():
                             piece_info.setdefault(
                                 str(other_dim),
-                                get_effective_chunk_size(int(other_length), None, comm.size),
+                                get_effective_chunk_size(
+                                    int(other_length), None, comm.size
+                                ),
                             )
                         set_mpi_meta(
                             piece,
@@ -690,7 +792,9 @@ class XarrayMPI(ArithmeticMixin):
         # `pieces is None` check on a non-root rank is always true and
         # would pick the wrong branch there. One small, cheap broadcast
         # settles it for everyone.
-        dimensionless = comm.bcast(replicated_value is not None if is_root else None, root=root)
+        dimensionless = comm.bcast(
+            replicated_value is not None if is_root else None, root=root
+        )
 
         # Phase 2: every rank reaches this point only because every rank,
         # root included, passed phase 1 without error, so this is now
@@ -725,6 +829,280 @@ class XarrayMPI(ArithmeticMixin):
                     automatic=(dim == "auto"),
                 )
         return output
+
+    def create_dataarray(
+        self,
+        fill: Callable[[int, int], Any],
+        dims: Sequence[Hashable],
+        *,
+        shape: Sequence[int] | Mapping[Hashable, int] | None = None,
+        dim: Hashable | int = 0,
+        dtype: Any = np.float64,
+        coords: Mapping[Hashable, Any] | None = None,
+        name: Hashable | None = None,
+        attrs: Mapping[str, Any] | None = None,
+        log_partitions: bool = False,
+    ) -> xr.DataArray:
+        """Build a DataArray whose local slice every rank computes itself.
+
+        No rank ever holds more than its own slice, and nothing crosses a
+        rank boundary: ``get_balanced_bounds`` -- the same helper
+        :meth:`redistribute` and :meth:`XarrayMPIRuntime.open_dataset` use
+        -- is a pure function of the global length along ``dim``, this
+        rank's number and the communicator size, so every rank derives
+        identical, non-overlapping, gap-free bounds with no communication
+        at all. Each rank then calls ``fill(start, stop)`` with only its
+        own bounds and wraps the result in ``dask.delayed``, so the call
+        does not run until this rank's slice is actually needed (loaded,
+        reduced, or written) rather than eagerly here.
+
+        ``fill`` is an ordinary Python function, not an array -- and it
+        must be called with this method identically on **every rank**,
+        with the same function, not called on rank 0 alone. There is no
+        communication step here to ship anything from one rank to another
+        (unlike :meth:`distribute`): each rank runs this same call on its
+        own, and if only rank 0 calls it, only rank 0 gets a result. Any
+        ordinary closure works -- a formula, a per-rank RNG stream keyed on
+        ``comm.rank``, one file per rank -- as long as it is picklable
+        (plain data in the closure is fine; an open file handle or lock is
+        not) and, for correctness, gives the same answer for a given
+        ``(start, stop)`` regardless of when it happens to be called.
+
+        Use this to *generate* new distributed data from a description
+        every rank can already evaluate (a formula, a per-rank RNG stream,
+        one file per rank, ...). It is not for data that inherently exists
+        on only one rank already -- there is no way to hand that to every
+        rank without moving bytes somewhere, which is exactly what
+        :meth:`distribute` is for.
+
+        Parameters
+        ----------
+        fill : callable
+            A plain function (not an array), called identically on every
+            rank: ``fill(start, stop) -> array_like`` returning this
+            rank's own slice, shaped by ``dims`` except with ``stop -
+            start`` along ``dim``. Called once per rank, each with only
+            its own bounds -- see the note above on calling this from
+            every rank.
+        dims : sequence of hashable
+            Dimension names, one per axis.
+        shape : sequence of int, mapping, or None, optional
+            Every dimension's global length, identical on every rank since
+            it is metadata, not data. A sequence gives one length per
+            entry of ``dims``, in order. A mapping (or None) gives (or
+            leaves out) lengths by dimension name; any name missing from
+            it -- or every name, if this is None -- is filled in from a
+            matching full-length coordinate in ``coords`` instead. A name
+            with neither raises :exc:`ValueError` (see below).
+        dim : hashable or int, default 0
+            Dimension to distribute along, as a name from ``dims`` or an
+            integer axis.
+        dtype : optional
+            Dtype of the array ``fill`` returns. Default is ``float64``.
+        coords : mapping, optional
+            Forwarded to the :class:`xarray.DataArray` constructor. A
+            coordinate matching ``dim`` whose own length equals its
+            resolved global length is sliced to this rank's own bounds
+            first, so a full-length coordinate array can be passed the
+            same way as to the ordinary constructor -- and, per ``shape``
+            above, doing so for every dimension makes ``shape`` itself
+            unnecessary.
+        name, attrs : optional
+            Forwarded to the :class:`xarray.DataArray` constructor.
+        log_partitions : bool, default False
+            Print a partition report on rank 0 once every rank has built
+            its slice.
+
+        Returns
+        -------
+        xarray.DataArray
+            This rank's own slice, tagged with ``mpi_meta`` exactly as
+            :meth:`distribute`'s output is. Not yet loaded.
+
+        Raises
+        ------
+        ValueError
+            If ``dim`` does not name (or index) an entry of ``dims``, if
+            ``shape`` is a sequence whose length does not match ``dims``,
+            or if any dimension's length cannot be determined from
+            ``shape`` or ``coords``.
+        """
+        axis = dims.index(dim) if not isinstance(dim, Integral) else int(dim)
+        if not 0 <= axis < len(dims):
+            raise ValueError(f"dim {dim!r} is not in dims {tuple(dims)!r}.")
+        dim_name = dims[axis]
+
+        if shape is None or isinstance(shape, Mapping):
+            explicit_sizes = dict(shape) if shape else None
+        else:
+            if len(shape) != len(dims):
+                raise ValueError(
+                    f"shape has {len(shape)} entries but dims has {len(dims)}."
+                )
+            explicit_sizes = dict(zip(dims, shape, strict=True))
+        resolved_sizes = _resolve_sizes(dims, explicit_sizes, coords)
+
+        comm = self._runtime.comm
+        global_size = int(resolved_sizes[dim_name])
+        start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
+        local_shape = tuple(
+            stop - start if name == dim_name else int(resolved_sizes[name])
+            for name in dims
+        )
+
+        local_data = _delayed_local(fill, (start, stop), local_shape, dtype)
+
+        local_coords = dict(coords) if coords else {}
+        if dim_name in local_coords:
+            local_coords[dim_name] = _localize_coord(
+                local_coords[dim_name], global_size, start, stop
+            )
+
+        da = xr.DataArray(
+            local_data, dims=tuple(dims), coords=local_coords, name=name, attrs=attrs
+        )
+        set_mpi_meta(
+            da,
+            dim=dim_name,
+            global_size=global_size,
+            start=start,
+            stop=stop,
+            chunk_info={str(dim_name): stop - start},
+        )
+        if log_partitions:
+            log_partition_report(
+                self._runtime,
+                da,
+                dim_name,
+                origin="mpi.xarray.create_dataarray",
+                global_size=global_size,
+                start=start,
+                stop=stop,
+            )
+        return da
+
+    def create_dataset(
+        self,
+        data_vars: Mapping[
+            Hashable,
+            xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]],
+        ],
+        sizes: Mapping[Hashable, int] | None = None,
+        *,
+        dim: Hashable,
+        dtype: Any = np.float64,
+        coords: Mapping[Hashable, Any] | None = None,
+        attrs: Mapping[str, Any] | None = None,
+        log_partitions: bool = True,
+    ) -> xr.Dataset:
+        """Build a distributed xarray Dataset where each rank computes its local slice.
+
+        Parameters
+        ----------
+        data_vars : mapping
+            Variables to include, formatted as ``{name: (dims, fill)}`` or
+            ``{name: dataarray}``. For variables with ``dim``, ``fill(start, stop)``
+            returns the local slice. For variables without ``dim``, ``fill`` is a
+            zero-argument callable or array-like. Must be called identically on
+            every rank with no communication.
+        sizes : mapping, optional
+            Global lengths of dimensions. If omitted, dimensions are resolved
+            from matching full-length coordinates in ``coords``.
+        dim : hashable
+            Dimension to distribute along.
+        dtype : optional, default np.float64
+            Data type for ``fill`` outputs. Can be a scalar or a per-variable mapping.
+        coords, attrs : mapping, optional
+            Forwarded to the ``xr.Dataset`` constructor. Coordinates matching ``dim``
+            are automatically sliced to the rank's bounds.
+        log_partitions : bool, default False
+            If True, prints a partition report on rank 0.
+
+        Returns
+        -------
+        xr.Dataset
+            This rank's local dataset slice tagged with ``mpi_meta`` (unloaded).
+
+        Raises
+        ------
+        ValueError
+            If any dimension cannot be resolved from ``sizes`` or ``coords``, or if
+            a bare DataArray carrying ``dim`` has an incorrect local size.
+        """
+        required_dims: set[Hashable] = {dim}
+        for spec in data_vars.values():
+            if not isinstance(spec, xr.DataArray):
+                var_dims, _ = spec
+                required_dims.update(var_dims)
+        resolved_sizes = _resolve_sizes(required_dims, sizes, coords)
+
+        comm = self._runtime.comm
+        global_size = int(resolved_sizes[dim])
+        start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
+
+        dtype_map = dtype if isinstance(dtype, Mapping) else None
+
+        built_vars: dict[Hashable, Any] = {}
+        for var_name, spec in data_vars.items():
+            if isinstance(spec, xr.DataArray):
+                if dim in spec.dims and int(spec.sizes[dim]) != stop - start:
+                    raise ValueError(
+                        f"data_vars[{var_name!r}] is a DataArray of length "
+                        + f"{spec.sizes[dim]} along {dim!r}, but this rank "
+                        + f"owns [{start}:{stop}) ({stop - start} elements). "
+                        + "Pass a DataArray already sized to this rank's own "
+                        + "bounds (e.g. from create_dataarray), not the full "
+                        + "global array."
+                    )
+                built_vars[var_name] = spec
+                continue
+
+            var_dims, var_fill = spec
+            var_dtype = dtype_map[var_name] if dtype_map is not None else dtype
+            if dim in var_dims:
+                local_shape = tuple(
+                    stop - start if name == dim else int(resolved_sizes[name])
+                    for name in var_dims
+                )
+                local_data = _delayed_local(
+                    var_fill, (start, stop), local_shape, var_dtype
+                )
+            elif callable(var_fill):
+                # Not partitioned: identical on every rank, so there is no
+                # (start, stop) to give -- fill() takes no arguments and
+                # closes over whatever sizes it needs itself.
+                local_shape = tuple(int(resolved_sizes[name]) for name in var_dims)
+                local_data = _delayed_local(var_fill, (), local_shape, var_dtype)
+            else:
+                local_data = var_fill
+            built_vars[var_name] = (tuple(var_dims), local_data)
+
+        local_coords = dict(coords) if coords else {}
+        if dim in local_coords:
+            local_coords[dim] = _localize_coord(
+                local_coords[dim], global_size, start, stop
+            )
+
+        ds = xr.Dataset(built_vars, coords=local_coords, attrs=attrs)
+        set_mpi_meta(
+            ds,
+            dim=dim,
+            global_size=global_size,
+            start=start,
+            stop=stop,
+            chunk_info={str(dim): stop - start},
+        )
+        if log_partitions:
+            log_partition_report(
+                self._runtime,
+                ds,
+                dim,
+                origin="mpi.xarray.create_dataset",
+                global_size=global_size,
+                start=start,
+                stop=stop,
+            )
+        return ds
 
     def redistribute(
         self,

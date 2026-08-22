@@ -242,6 +242,7 @@ def create_file(
     partition_dim = schema["partition_dim"]
     unlimited = set(schema["unlimited_dim"])
     chunks = schema["chunks"]
+    prewritten = set(schema.get("prewritten", ()))
 
     with netCDF4.Dataset(path, mode="w", format="NETCDF4") as nc:
         if schema["nofill"]:
@@ -273,7 +274,11 @@ def create_file(
             ncvar = nc.createVariable(name, dtype, dims, **kwargs)
             set_attrs(ncvar, attrs)
 
-            partitioned = partition_dim is not None and partition_dim in dims
+            partitioned = (
+                partition_dim is not None
+                and partition_dim in dims
+                and name not in prewritten
+            )
             if not partitioned:
                 with quiet_netcdf4_writes():
                     ncvar[...] = variable["data"]
@@ -358,6 +363,7 @@ def write_distributed(
     partition_dim = str(meta["dim"])
     start = int(meta["start"])
     stop = int(meta["stop"])
+    prewritten = set(schema.get("prewritten", ()))
 
     comm = writer_comm(stop > start)
     nc: netCDF4.Dataset | None = None
@@ -367,7 +373,7 @@ def write_distributed(
         nc = open_in_parallel(path, schema, comm)
         for name, spec in schema["variables"].items():
             dims = tuple(spec["dims"])
-            if partition_dim not in dims:
+            if partition_dim not in dims or name in prewritten:
                 continue
             if spec["dtype"] == "str":
                 raise NetCDFWriteError(
@@ -399,7 +405,7 @@ def write_distributed(
 def write_partitioned(
     path: str,
     schema: Mapping[str, Any],
-    root_data: Mapping[str, Mapping[str, Any]] | None,
+    source_ds: xr.Dataset | None,
 ) -> None:
     """Scatter root-owned partitioned buffers and collectively write them.
 
@@ -408,10 +414,21 @@ def write_partitioned(
     only on the writer sub-communicator. The two sequences are internally
     ordered on their own communicators, so they cannot deadlock against one
     another.
+
+    Rank 0's array for each partitioned variable is pulled from
+    ``source_ds`` here, immediately before that variable's ``scatterv``,
+    rather than upfront for every variable at once: ``root_data`` only
+    carries schema metadata (dims/dtype/shape) for these entries (see the
+    schema-construction step in ``to_netcdf_parallel``), not the array
+    itself. Once a variable's local slab has been sent, the reference to
+    its full array falls out of scope before the next variable is touched,
+    so at most one partitioned variable's array -- not all of them -- adds
+    to rank 0's resident set at any point in this loop.
     """
     partition_dim = schema["partition_dim"]
     if partition_dim is None:
         return
+    prewritten = set(schema.get("prewritten", ()))
 
     length = int(schema["sizes"][partition_dim])
     counts = np.full(mpi.comm.size, length // mpi.comm.size, dtype=np.int64)
@@ -427,7 +444,7 @@ def write_partitioned(
 
         for name, spec in schema["variables"].items():
             dims = tuple(spec["dims"])
-            if partition_dim not in dims:
+            if partition_dim not in dims or name in prewritten:
                 continue
             if spec["dtype"] == "str":
                 raise NetCDFWriteError(
@@ -443,14 +460,34 @@ def write_partitioned(
 
             send = None
             if mpi.comm.rank == 0:
-                if root_data is None:
-                    raise AssertionError("Rank 0 data buffers are missing.")
+                if source_ds is None:
+                    raise AssertionError("Rank 0 source Dataset is missing.")
+                variable = source_ds[name]
+                variable = encode_time(variable) if is_time_like(variable) else variable
                 send = np.ascontiguousarray(
-                    np.moveaxis(root_data[name]["data"], axis, 0),
+                    np.moveaxis(np.asarray(variable.values), axis, 0),
                     dtype=dtype,
                 )
 
             local = mpi.scatterv(send, counts, local_shape, dtype)
+            # `send = None` (not `del send` + `gc.collect()`) is deliberate
+            # and sufficient: CPython reclaims a non-cyclic object the
+            # moment its refcount hits zero, and mpi.scatterv's own Scatterv
+            # call is synchronous and keeps no reference to `send` after it
+            # returns, so dropping this one binding is enough. An explicit
+            # gc.collect() here would only add a full generational GC pass
+            # with no correctness or memory benefit, since there is no
+            # reference cycle to break. What this does NOT release is
+            # source_ds's own underlying array for `name`: `.values` is
+            # typically a view into source_ds's own storage, not a copy, so
+            # source_ds -- which the caller keeps alive for this whole
+            # function's duration -- still holds it regardless. What this
+            # loop actually avoids is the *old* design's redundant extra
+            # copy of every variable sitting in root_data simultaneously
+            # (see to_netcdf_parallel's schema-construction step); it does
+            # not, and cannot, undo the baseline cost of an eager source
+            # already being fully resident before this function is called.
+            send = None
             if nc is None:
                 continue
 
@@ -631,6 +668,66 @@ def to_netcdf_parallel(
         mpi.raise_if_error(error, "parallel NetCDF partition dimension")
         partition_dim = distributed_dim
 
+        # Coordinates that carry partition_dim (a distributed "time" axis is
+        # the common case) are genuinely different per rank, unlike lat/lon/
+        # plev, so rank 0 cannot just read them off its own local_ds. Gather
+        # every rank's piece, verify the pieces tile the global interval with
+        # no gap or overlap, and concatenate in start order. This also means
+        # such a coordinate is CF-encoded exactly once (one units/calendar
+        # pair for the whole axis) instead of once per rank, and it can then
+        # be written serially in create_file alongside lat/lon/plev rather
+        # than through the collective phase -- sidestepping netCDF4's
+        # default chunk size for that variable entirely, not just working
+        # around it with an explicit override.
+        start = int(local_meta["start"])
+        stop = int(local_meta["stop"])
+        global_size = int(local_meta["global_size"])
+        prewritten_coords: dict[str, xr.DataArray] = {}
+        try:
+            coord_names = [
+                name
+                for name, coord in local_ds.coords.items()
+                if partition_dim in coord.dims
+            ]
+        except BaseException as exc:
+            coord_names = []
+            error = exc
+        mpi.raise_if_error(
+            error,
+            "parallel NetCDF coordinate discovery",
+            signature=tuple(coord_names),
+        )
+
+        for coord_name in coord_names:
+            local_values = np.asarray(local_ds[coord_name].values)
+            pieces = mpi.comm.gather((start, stop, local_values), root=0)
+            if mpi.comm.rank == 0:
+                try:
+                    ordered = sorted(pieces, key=lambda item: item[0])
+                    cursor = 0
+                    for piece_start, piece_stop, _ in ordered:
+                        if piece_start != cursor:
+                            raise NetCDFWriteError(
+                                f"Partitioned coordinate {coord_name!r} has a "
+                                + f"gap or overlap: expected start {cursor}, "
+                                + f"got {piece_start}."
+                            )
+                        cursor = piece_stop
+                    if cursor != global_size:
+                        raise NetCDFWriteError(
+                            f"Partitioned coordinate {coord_name!r} covers "
+                            + f"{cursor} of {global_size} global elements."
+                        )
+                    assembled = np.concatenate([values for _, _, values in ordered])
+                    prewritten_coords[coord_name] = local_ds[coord_name].copy(
+                        data=assembled
+                    )
+                except BaseException as exc:
+                    error = exc
+            mpi.raise_if_error(
+                error, f"parallel NetCDF coordinate gather ({coord_name})"
+            )
+
         # No data gather/scatter. Rank 0 only constructs the schema from its
         # local metadata and mpi_meta's global partition length.
         if mpi.comm.rank == 0:
@@ -659,6 +756,8 @@ def to_netcdf_parallel(
                 root_data = {}
                 variables: dict[str, dict[str, Any]] = {}
                 for name, source in ds.variables.items():
+                    if name in prewritten_coords:
+                        source = prewritten_coords[name]
                     variable = encode_time(source) if is_time_like(source) else source
                     values, dtype = _normalise_variable(source)
                     attrs = {
@@ -695,6 +794,7 @@ def to_netcdf_parallel(
                     "hints": hints,
                     "nofill": bool(nofill),
                     "partition_dim": partition_dim,
+                    "prewritten": tuple(sorted(prewritten_coords)),
                     "shuffle": bool(shuffle),
                     "sizes": sizes,
                     "unlimited_dim": unlimited,
@@ -732,9 +832,66 @@ def to_netcdf_parallel(
             chunk_map = get_chunks(
                 ds, chunks, partition_dim, ds.sizes.get(partition_dim)
             )
+            # Rank 0 already holds the complete global array for every
+            # coordinate here (there is nothing to gather, unlike the
+            # distributed path), so a coordinate carrying partition_dim can
+            # be written directly below rather than through the scatter
+            # loop -- avoiding netCDF4's own default chunking for it.
+            prewritten_names = frozenset(
+                name for name in ds.coords if partition_dim in ds[name].dims
+            )
             root_data = {}
             variables = {}
             for name, source in ds.variables.items():
+                dims = tuple(source.dims)
+                partitioned = partition_dim in dims and name not in prewritten_names
+
+                if partitioned and not is_time_like(source):
+                    # The actual array is deferred to write_partitioned,
+                    # which extracts, encodes and scatters one variable at a
+                    # time. Materializing every variable's full array here,
+                    # before any writing starts, would hold all of them
+                    # resident on rank 0 simultaneously -- on top of `ds`
+                    # itself -- for no benefit, since create_file never reads
+                    # `data` for a partitioned entry (it only pre-extends the
+                    # unlimited dimension). Only cheap shape/dtype metadata
+                    # is needed here, mirroring _normalise_variable's dtype
+                    # rules without touching `.values`. A time-like
+                    # partitioned variable is deliberately excluded from
+                    # this and falls through to the eager branch below: its
+                    # post-encoding dtype (from encode_time's cftime/
+                    # timedelta branches) is not always knowable without
+                    # actually running the encode, and getting it wrong here
+                    # would create the netCDF variable with a dtype that
+                    # write_partitioned's later scatter wouldn't match.
+                    if source.dtype.kind in ("U", "S", "O"):
+                        dtype: str | np.dtype[Any] = "str"
+                    elif source.dtype.kind == "b":
+                        dtype = np.dtype(np.int8)
+                    elif source.dtype.byteorder not in ("=", "|"):
+                        dtype = source.dtype.newbyteorder("=")
+                    else:
+                        dtype = source.dtype
+                    attrs = {
+                        key: value
+                        for key, value in source.attrs.items()
+                        if key != MPI_META
+                    }
+                    root_data[name] = {
+                        "attrs": attrs,
+                        "data": None,
+                        "dims": dims,
+                        "dtype": dtype,
+                        "coord": name in ds.coords,
+                    }
+                    variables[name] = {
+                        "coord": name in ds.coords,
+                        "dims": dims,
+                        "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
+                        "shape": tuple(int(length) for length in source.shape),
+                    }
+                    continue
+
                 variable = encode_time(source) if is_time_like(source) else source
                 values, dtype = _normalise_variable(source)
                 attrs = {
@@ -766,16 +923,13 @@ def to_netcdf_parallel(
                 "hints": hints,
                 "nofill": bool(nofill),
                 "partition_dim": partition_dim,
+                "prewritten": tuple(sorted(prewritten_names)),
                 "shuffle": bool(shuffle),
                 "sizes": dict(ds.sizes),
                 "unlimited_dim": unlimited,
                 "variables": variables,
             }
-            total_bytes = sum(
-                v["data"].nbytes
-                for v in root_data.values()
-                if hasattr(v["data"], "nbytes")
-            )
+            total_bytes = sum(variable.nbytes for variable in ds.variables.values())
             mpi.log(
                 "xgeo.to_netcdf (rank-0 source): rank 0 holds "
                 + f"{_format_bytes(total_bytes)} before scatter, "
@@ -809,7 +963,7 @@ def to_netcdf_parallel(
                 raise AssertionError("Distributed rank-local data are missing.")
             write_distributed(output_path, schema, local_ds, local_meta)
         else:
-            write_partitioned(output_path, schema, root_data)
+            write_partitioned(output_path, schema, local_ds)
     except BaseException:
         # Aborting without a diagnostic leaves the job log with nothing but
         # "MPI_ABORT was invoked", so the failure is reported first.
