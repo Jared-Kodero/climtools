@@ -17,7 +17,7 @@ echo "$import_times" > import_times.info
 # its non-parallel operations, the serial NetCDF writer, and core.tools.
 # Plain `python`, one rank, no launcher -- run first since it is the faster
 # and more informative half to fail on.
-#python test_general.py
+python test_general.py
 
 # `python -m mpi4py`, not a bare `python`: an unhandled exception on a subset
 # of ranks otherwise leaves the job blocked in MPI_Finalize until the
@@ -30,3 +30,7 @@ srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi.
 srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi.py --time-steps 720 > test.720.log 2>&1
 
 srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi.py --time-steps 8760 > test.8760.log 2>&1
+
+srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi.py --time-steps 43800 > test.43800.log 2>&1
+
+srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi.py --time-steps 87600 > test.87600.log 2>&1
