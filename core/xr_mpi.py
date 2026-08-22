@@ -1012,6 +1012,7 @@ class XarrayMPI(ArithmeticMixin):
             Dimension to distribute along.
         dtype : optional, default np.float64
             Data type for ``fill`` outputs. Can be a scalar or a per-variable mapping.
+            A mapping may be partial; unspecified fill variables use ``np.float64``.
         coords, attrs : mapping, optional
             Forwarded to the ``xr.Dataset`` constructor. Coordinates matching ``dim``
             are automatically sliced to the rank's bounds.
@@ -1058,7 +1059,11 @@ class XarrayMPI(ArithmeticMixin):
                 continue
 
             var_dims, var_fill = spec
-            var_dtype = dtype_map[var_name] if dtype_map is not None else dtype
+            var_dtype = (
+                dtype_map.get(var_name, np.float64)
+                if dtype_map is not None
+                else dtype
+            )
             if dim in var_dims:
                 local_shape = tuple(
                     stop - start if name == dim else int(resolved_sizes[name])

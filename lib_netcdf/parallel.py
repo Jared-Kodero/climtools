@@ -699,18 +699,28 @@ def to_netcdf_parallel(
         )
 
         for coord_name in coord_names:
-            local_values = np.asarray(local_ds[coord_name].values)
+            coordinate = local_ds[coord_name]
+            axis = coordinate.get_axis_num(partition_dim)
+            local_values = np.asarray(coordinate.values)
             pieces = mpi.comm.gather((start, stop, local_values), root=0)
             if mpi.comm.rank == 0:
                 try:
                     ordered = sorted(pieces, key=lambda item: item[0])
                     cursor = 0
-                    for piece_start, piece_stop, _ in ordered:
+                    for piece_start, piece_stop, values in ordered:
                         if piece_start != cursor:
                             raise NetCDFWriteError(
                                 f"Partitioned coordinate {coord_name!r} has a "
                                 + f"gap or overlap: expected start {cursor}, "
                                 + f"got {piece_start}."
+                            )
+                        expected = piece_stop - piece_start
+                        if values.shape[axis] != expected:
+                            raise NetCDFWriteError(
+                                f"Partitioned coordinate {coord_name!r} rank piece "
+                                + f"[{piece_start}:{piece_stop}) has length "
+                                + f"{values.shape[axis]} along {partition_dim!r}; "
+                                + f"expected {expected}."
                             )
                         cursor = piece_stop
                     if cursor != global_size:
@@ -718,10 +728,18 @@ def to_netcdf_parallel(
                             f"Partitioned coordinate {coord_name!r} covers "
                             + f"{cursor} of {global_size} global elements."
                         )
-                    assembled = np.concatenate([values for _, _, values in ordered])
-                    prewritten_coords[coord_name] = local_ds[coord_name].copy(
-                        data=assembled
+                    assembled = np.concatenate(
+                        [values for _, _, values in ordered],
+                        axis=axis,
                     )
+                    rebuilt = xr.DataArray(
+                        assembled,
+                        dims=coordinate.dims,
+                        name=coordinate.name,
+                        attrs=dict(coordinate.attrs),
+                    )
+                    rebuilt.encoding = dict(coordinate.encoding)
+                    prewritten_coords[coord_name] = rebuilt
                 except BaseException as exc:
                     error = exc
             mpi.raise_if_error(

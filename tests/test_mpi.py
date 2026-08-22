@@ -49,21 +49,22 @@ from climtools.core.xr_mpi import get_balanced_bounds
 # run; a larger payload is what actually exercises the collective's
 # bandwidth-bound behavior instead of just its latency floor.
 #
-# Memory: at the default RESOLUTION_DEG=0.25 (721x1440x21), the "t" field
-# alone is TIME_STEPS * 21 * 721 * 1440 * 4 bytes -- 712 GiB at
-# TIME_STEPS=8760, far beyond any single rank's RAM. build_mock_dataset
-# therefore builds "pr", "t2m" and "t" as dask arrays chunked along "time"
-# (see MOCK_TIME_CHUNK_BYTES below) instead of eager NumPy arrays, so
-# ds.to_netcdf streams the write one time-chunk at a time and rank 0's peak
-# stays bounded by a single chunk regardless of TIME_STEPS.
+# Memory/I/O: at the default RESOLUTION_DEG=0.25 (721x1440x21), storing the
+# pressure-level "t" field at every requested time would write 712 GiB for
+# TIME_STEPS=8760 before the suite even starts. The pressure-level tests only
+# inspect the reference profile at time=0, while the NetCDF round-trip tests
+# require identity rather than temporal variability of "t". The fixture
+# therefore stores "t" as one static (plev, lat, lon) profile and keeps the
+# full requested time dimension on "pr" and "t2m", the fields used to exercise
+# time-partitioned I/O. Those time-varying fields remain dask-backed so
+# ds.to_netcdf streams their chunks instead of materializing them on rank 0.
 TIME_STEPS = 24 * 30
 RESOLUTION_DEG = 0.25
 PLEV_STEP = -50
 
-# Target peak size, in bytes, of a single time-chunk of the 4D "t" field
-# (the largest array build_mock_dataset constructs). The chunk length along
-# "time" is derived from this budget and the grid size (see
-# build_mock_dataset), so peak memory stays bounded at any TIME_STEPS.
+# Conservative byte budget used to derive the time-chunk length for the
+# dask-backed surface fields. The calculation retains the former 4-D "t"
+# footprint as a working-set proxy, keeping chunks small at any TIME_STEPS.
 MOCK_TIME_CHUNK_BYTES = 2 * 1024**3
 
 
@@ -180,12 +181,9 @@ def build_mock_dataset(
 
     plev = np.arange(1000.0, -1.0, PLEV_STEP, dtype=np.float32)
 
-    # The "t" field is (n_time_steps, len(plev), n_lat, n_lon) float32: at
-    # the default 0.25 degree grid that is 712 GiB for n_time_steps=8760, so
-    # it and the smaller "pr"/"t2m" fields (n_time_steps, n_lat, n_lon) are
-    # built as dask arrays chunked along "time" rather than eager NumPy
-    # arrays. xr.Dataset.to_netcdf then streams the write one chunk at a
-    # time instead of materializing the full array on rank 0.
+    # Keep the same conservative chunk length that the former 4-D "t" field
+    # required. This bounds the working set while the two time-varying surface
+    # fields are streamed to NetCDF.
     bytes_per_time_step = max(1, len(plev) * n_lat * n_lon * 4)
     time_chunk = max(1, min(n_time_steps, MOCK_TIME_CHUNK_BYTES // bytes_per_time_step))
 
@@ -201,14 +199,17 @@ def build_mock_dataset(
         * (1.0 + 0.01 * time_phase)
     ).astype(np.float32)
 
-    surface_temperature = (
-        288.0 - 42.0 * np.sin(lat_rad) ** 2 + 2.0 * np.cos(lon_rad) + 0.05 * time_phase
+    surface_temperature_base = (
+        288.0 - 42.0 * np.sin(lat_rad) ** 2 + 2.0 * np.cos(lon_rad)
     ).astype(np.float32)
+    surface_temperature = (surface_temperature_base + 0.05 * time_phase).astype(
+        np.float32
+    )
 
     pressure_cooling = (7.0 * np.log(1000.0 / plev.astype(np.float64))).astype(
         np.float32
-    )[None, :, None, None]
-    air_temperature = surface_temperature[:, None, :, :] - pressure_cooling
+    )[:, None, None]
+    air_temperature = surface_temperature_base[0][None, :, :] - pressure_cooling
 
     # FIXED: Extracting lengths directly from the arrays to prevent race conditions
     lat_index = np.arange(len(lat))[:, None]
@@ -228,7 +229,7 @@ def build_mock_dataset(
                 {"units": "K", "long_name": "2 m air temperature"},
             ),
             "t": (
-                ("time", "plev", "lat", "lon"),
+                ("plev", "lat", "lon"),
                 air_temperature.astype(np.float32),
                 {"units": "K", "long_name": "air temperature"},
             ),
