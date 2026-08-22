@@ -1488,21 +1488,6 @@ class XarrayMPI(ArithmeticMixin):
 
     # -- collective planning -------------------------------------------------
 
-    def _validate_collective(
-        self,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> None:
-        if mode not in ("all", "root"):
-            raise ValueError("mode must be either 'all' or 'root'.")
-        if mode == "root":
-            if isinstance(root, bool) or not isinstance(root, Integral) or root < 0:
-                raise ValueError("root must be a non-negative integer rank.")
-            if root >= self._runtime.comm.size:
-                raise ValueError(
-                    f"root {root} is outside [0, {self._runtime.comm.size})."
-                )
-
     @staticmethod
     def _normalize_dim(
         value: xr.Dataset | xr.DataArray,
@@ -1570,19 +1555,42 @@ class XarrayMPI(ArithmeticMixin):
             name = "minimum" if operation == "min" else "maximum"
             raise TypeError(f"MPI {name} is not defined for complex xarray data.")
 
-    def _validate_distribution(
-        self,
-        value: xr.Dataset | xr.DataArray,
+    @staticmethod
+    def _local_reduction_meta(
+        meta: Mapping[str, Any] | None,
         dims: tuple[Hashable, ...],
-    ) -> dict[str, Any] | None:
-        meta = get_mpi_meta(value)
-        if meta is not None and meta["dim"] not in dims:
+        *,
+        redistribute_on: Hashable | Literal["auto"] | None,
+    ) -> Mapping[str, Any] | None:
+        """Return metadata when a reduction can stay entirely rank-local."""
+        if meta is None or meta["dim"] in dims:
+            return None
+        if redistribute_on not in (None, "auto"):
             raise ValueError(
-                "Distributed dimension "
-                + f"{meta['dim']!r} must be included in the MPI reduction. "
-                + "Use the ordinary xarray reduction for other dimensions."
+                "redistribute_on can name a new dimension only after the active "
+                + "partition dimension has been reduced away."
             )
         return meta
+
+    @staticmethod
+    def _finish_local_reduction(
+        result: xr.Dataset | xr.DataArray,
+        *,
+        old_meta: Mapping[str, Any],
+    ) -> xr.Dataset | xr.DataArray:
+        """Restore unchanged partition ownership after a rank-local reduction."""
+        partition_dim = old_meta["dim"]
+        if partition_dim not in result.dims:
+            return strip_mpi_meta(result)
+        set_mpi_meta(
+            result,
+            dim=partition_dim,
+            global_size=int(old_meta["global_size"]),
+            start=int(old_meta["start"]),
+            stop=int(old_meta["stop"]),
+            chunk_info=prune_chunk_info(old_meta["chunk_info"], result),
+        )
+        return result
 
     def _agree(self, signature: tuple[Any, ...]) -> None:
         """Verify that every rank entered the same reduction plan.
@@ -1615,8 +1623,6 @@ class XarrayMPI(ArithmeticMixin):
         meta: Mapping[str, Any] | None,
         *,
         operation: str,
-        mode: Literal["all", "root"],
-        root: int,
     ) -> tuple[PlanEntry, ...]:
         """Return the rank-independent per-variable reduction plan.
 
@@ -1654,8 +1660,6 @@ class XarrayMPI(ArithmeticMixin):
         self._agree(
             (
                 operation,
-                mode,
-                root,
                 tuple(str(dim) for dim in dims),
                 tuple(
                     (
@@ -1702,43 +1706,11 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.DataArray | None,
         op: _MPI.Op,
         *,
-        mode: Literal["all", "root"],
-        root: int,
         expect_dtype: np.dtype[Any] | None = None,
         error: BaseException | None = None,
         phase: str = "MPI xarray reduction buffer preparation",
-    ) -> xr.DataArray | None:
-        """Reduce one rank-local buffer across the communicator.
-
-        Parameters
-        ----------
-        value : xarray.DataArray or None
-            Rank-local partial. None is permitted only when ``error`` is set,
-            which happens when the rank-local computation preceding this
-            collective already failed.
-        op : mpi4py.MPI.Op
-            Reduction operation.
-        mode : {"all", "root"}
-            Result placement.
-        root : int
-            Destination rank when ``mode`` is "root".
-        expect_dtype : numpy.dtype, optional
-            Dtype every rank must post. It is derived from the reduced
-            variable's declared dtype, which is identical on every rank, so
-            casting to it removes any dependence of the buffer datatype on
-            rank-local data such as an empty partition.
-        error : BaseException, optional
-            Error already pending on this rank. It is synchronized by the
-            all-gather below, so a rank-local failure raises on every rank
-            instead of removing this rank from the collective sequence.
-        phase : str, optional
-            Label used in synchronized error messages.
-
-        Returns
-        -------
-        xarray.DataArray or None
-            Reduced result, or None off-root when ``mode`` is "root".
-        """
+    ) -> xr.DataArray:
+        """All-reduce one rank-local buffer across the communicator."""
         send: np.ndarray[Any, Any] | None = None
         if error is None:
             try:
@@ -1760,70 +1732,37 @@ class XarrayMPI(ArithmeticMixin):
                 error = exc
                 send = None
 
-        # The signature travels inside the all-gather that synchronizes
-        # errors, so verifying that every rank posts the same operation,
-        # placement, datatype and shape costs no extra communication. A
-        # divergent sequence then raises on every rank instead of leaving
-        # some ranks blocked in a buffer collective the others never post.
         signature = (
             None
             if send is None
             else (
                 _op_name(op),
-                mode,
-                int(root),
                 send.dtype.str,
                 tuple(int(length) for length in send.shape),
             )
         )
-
-        # Materializing a lazy rank-local result can fail on only one rank.
-        # Synchronize that failure before any rank posts Allreduce/Reduce, or
-        # the remaining ranks can block forever in the buffer collective.
         self._runtime.raise_if_error(error, phase, signature)
-        if send is None:
+        if send is None or value is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
-        recv = self._exchange(send, op, mode=mode, root=root)
-        if recv is None:
-            return None
+        recv = self._exchange(send, op)
         return value.copy(data=recv)
 
     def _exchange(
         self,
         send: np.ndarray[Any, Any],
         op: _MPI.Op,
-        *,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> np.ndarray[Any, Any] | None:
-        """Post the buffer collective for an already validated send buffer.
-
-        Allocates the receive buffer with the send buffer's own dtype and a
-        C-contiguous layout. numpy.empty_like would inherit the source memory
-        order, which can differ from the contiguous copy actually sent.
-        """
-        if mode == "all":
-            recv = np.empty(send.shape, dtype=send.dtype)
-            self._runtime.comm.Allreduce(send, recv, op=op)
-            return recv
-
-        recv = (
-            np.empty(send.shape, dtype=send.dtype)
-            if self._runtime.comm.rank == root
-            else None
-        )
-        self._runtime.comm.Reduce(send, recv, op=op, root=root)
+    ) -> np.ndarray[Any, Any]:
+        """All-reduce an already validated contiguous send buffer."""
+        recv = np.empty(send.shape, dtype=send.dtype)
+        self._runtime.comm.Allreduce(send, recv, op=op)
         return recv
 
     def _count(
         self,
         value: xr.DataArray,
         dims: tuple[Hashable, ...],
-        *,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.DataArray | None:
+    ) -> xr.DataArray:
         count: xr.DataArray | None = None
         error: BaseException | None = None
         try:
@@ -1833,24 +1772,10 @@ class XarrayMPI(ArithmeticMixin):
         return self._comm_reduce(
             count,
             _MPI.SUM,
-            mode=mode,
-            root=root,
             expect_dtype=_partial_dtype(value.dtype.str, "count", None),
             error=error,
             phase="MPI xarray count reduction",
         )
-
-    def _local_result(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        *,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Return a local result according to collective result placement."""
-        if mode == "root" and self._runtime.comm.rank != root:
-            return None
-        return value
 
     @staticmethod
     def _reduced_dataset(
@@ -1878,30 +1803,29 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.Dataset,
         dims: tuple[Hashable, ...],
         variables: Mapping[Hashable, xr.DataArray],
-        *,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.Dataset | None:
-        if mode == "root" and self._runtime.comm.rank != root:
-            return None
+    ) -> xr.Dataset:
         return self._reduced_dataset(value, dims, variables)
 
     def _finish(
         self,
-        result: xr.Dataset | xr.DataArray | None,
+        result: xr.Dataset | xr.DataArray,
         *,
         old_meta: Mapping[str, Any] | None,
         redistribute_on: Hashable | Literal["auto"] | None,
-        mode: Literal["all", "root"],
-    ) -> xr.Dataset | xr.DataArray | None:
-        if redistribute_on is not None and mode != "all":
-            raise ValueError("redistribute_on requires mode='all'.")
-        if result is None:
-            return None
-
+    ) -> xr.Dataset | xr.DataArray:
+        """Finalize a global reduction and choose its next distribution."""
         result = strip_mpi_meta(result)
+        partition_removed = (
+            old_meta is not None and old_meta["dim"] not in result.dims
+        )
+
         if redistribute_on is None:
             return result
+        if redistribute_on == "auto":
+            if not partition_removed:
+                return result
+            if not any(int(length) > 1 for length in result.sizes.values()):
+                return result
 
         chunk_info = (
             prune_chunk_info(old_meta["chunk_info"], result)
@@ -1925,15 +1849,11 @@ class XarrayMPI(ArithmeticMixin):
         *,
         skipna: bool | None,
         min_count: int | None,
-        mode: Literal["all", "root"],
-        root: int,
         error: BaseException | None = None,
-    ) -> xr.DataArray | None:
+    ) -> xr.DataArray:
         result = self._comm_reduce(
             partial,
             op,
-            mode=mode,
-            root=root,
             expect_dtype=_partial_dtype(
                 value.dtype.str,
                 "prod" if _op_name(op) == "PROD" else "sum",
@@ -1944,9 +1864,7 @@ class XarrayMPI(ArithmeticMixin):
         )
         global_count = None
         if min_count is not None and self._skipna_enabled(value.dtype, skipna):
-            global_count = self._count(value, dims, mode=mode, root=root)
-        if result is None:
-            return None
+            global_count = self._count(value, dims)
         if global_count is not None:
             # where() introduces NaN, which requires a floating result. Restore
             # the partial's own dtype so a float32 field stays float32.
@@ -1965,23 +1883,16 @@ class XarrayMPI(ArithmeticMixin):
         dims: tuple[Hashable, ...],
         *,
         skipna: bool | None = None,
-        mode: Literal["all", "root"],
-        root: int,
         error: BaseException | None = None,
-    ) -> xr.DataArray | None:
+    ) -> xr.DataArray:
         global_sum = self._comm_reduce(
             partial_sum,
             _MPI.SUM,
-            mode=mode,
-            root=root,
             expect_dtype=_partial_dtype(value.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray mean reduction",
         )
-        global_count = self._count(value, dims, mode=mode, root=root)
-        if global_sum is None or global_count is None:
-            return None
-
+        global_count = self._count(value, dims)
         # Divide in the dtype numpy.mean would produce for this input. Dividing
         # the float32 sum by the int64 count directly would promote the whole
         # array to float64 and then cast it back, costing two full-width
@@ -2059,10 +1970,8 @@ class XarrayMPI(ArithmeticMixin):
         *,
         minimum: bool,
         skipna: bool | None,
-        mode: Literal["all", "root"],
-        root: int,
         error: BaseException | None = None,
-    ) -> xr.DataArray | None:
+    ) -> xr.DataArray:
         # The number of collectives is decided from the reduced variable's
         # declared dtype, which the plan has already agreed on, never from
         # the rank-local partial. A rank owning an empty partition builds its
@@ -2087,8 +1996,6 @@ class XarrayMPI(ArithmeticMixin):
             return self._comm_reduce(
                 partial,
                 _MPI.LAND if minimum else _MPI.LOR,
-                mode=mode,
-                root=root,
                 expect_dtype=expect_dtype,
                 error=error,
                 phase=f"MPI xarray {operation} reduction",
@@ -2099,8 +2006,6 @@ class XarrayMPI(ArithmeticMixin):
             return self._comm_reduce(
                 partial,
                 op,
-                mode=mode,
-                root=root,
                 expect_dtype=expect_dtype,
                 error=error,
                 phase=f"MPI xarray {operation} reduction",
@@ -2158,8 +2063,6 @@ class XarrayMPI(ArithmeticMixin):
             if send is None
             else (
                 _op_name(op),
-                mode,
-                int(root),
                 send.dtype.str,
                 tuple(int(length) for length in send.shape),
             )
@@ -2172,9 +2075,7 @@ class XarrayMPI(ArithmeticMixin):
         if send is None or template is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
-        recv = self._exchange(send, op, mode=mode, root=root)
-        if recv is None:
-            return None
+        recv = self._exchange(send, op)
 
         shape = tuple(int(length) for length in template.shape)
         combined = np.asarray(recv[0]).reshape(shape)
@@ -2192,11 +2093,49 @@ class XarrayMPI(ArithmeticMixin):
         skipna: bool | None = None,
         min_count: int | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed summation."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Sum over one or more dimensions of a distributed xarray object.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Object to reduce. Objects carrying ``mpi_meta`` are interpreted as
+            rank-local slabs of one global xarray object.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to sum. ``None`` or ``...``
+            reduces over all dimensions, matching xarray semantics.
+        skipna : bool or None, optional
+            If True, skip missing values. If None, use xarray's dtype-dependent
+            default.
+        min_count : int or None, optional
+            Minimum number of valid values required for the result. When the
+            active partition dimension is reduced, the count is combined across
+            ranks before this threshold is applied.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one, an explicit dimension selects that dimension,
+            and None leaves the global result replicated on every rank. If the
+            active partition dimension survives, ``"auto"`` and None preserve
+            it and an explicit replacement dimension is invalid.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Reduced object, distributed when a useful partition dimension
+            survives or is selected after the reduction.
+
+        Notes
+        -----
+        If ``dim`` excludes the active partition dimension, this is exactly a
+        native xarray reduction on each rank and performs no MPI collective.
+        If ``dim`` includes it, every rank first sums over all requested local
+        dimensions in one xarray operation and the resulting partials are
+        combined with ``MPI.SUM``.
+        """
         return self._sum_prod(
             value,
             dim,
@@ -2206,8 +2145,6 @@ class XarrayMPI(ArithmeticMixin):
             min_count=min_count,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def prod(
@@ -2218,11 +2155,48 @@ class XarrayMPI(ArithmeticMixin):
         skipna: bool | None = None,
         min_count: int | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed multiplication."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Multiply values over one or more dimensions of a distributed object.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Object to reduce. Objects carrying ``mpi_meta`` are interpreted as
+            rank-local slabs of one global xarray object.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to take the product. ``None``
+            or ``...`` reduces over all dimensions, matching xarray semantics.
+        skipna : bool or None, optional
+            If True, skip missing values. If None, use xarray's dtype-dependent
+            default.
+        min_count : int or None, optional
+            Minimum number of valid values required for the result. When the
+            active partition dimension is reduced, the count is combined across
+            ranks before this threshold is applied.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one, an explicit dimension selects that dimension,
+            and None leaves the global result replicated on every rank. If the
+            active partition dimension survives, ``"auto"`` and None preserve
+            it and an explicit replacement dimension is invalid.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Reduced object, distributed when a useful partition dimension
+            survives or is selected after the reduction.
+
+        Notes
+        -----
+        If ``dim`` excludes the active partition dimension, this is a native
+        rank-local xarray product with no MPI collective. If ``dim`` includes
+        it, all requested dimensions are collapsed locally first and the rank
+        partials are combined with ``MPI.PROD``.
+        """
         return self._sum_prod(
             value,
             dim,
@@ -2232,8 +2206,6 @@ class XarrayMPI(ArithmeticMixin):
             min_count=min_count,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def _sum_prod(
@@ -2247,20 +2219,30 @@ class XarrayMPI(ArithmeticMixin):
         min_count: int | None,
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.Dataset | xr.DataArray | None:
+    ) -> xr.Dataset | xr.DataArray:
         operation = "prod" if product else "sum"
-        self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
-        old_meta = self._validate_distribution(value, dims)
+        old_meta = get_mpi_meta(value)
+        local_meta = self._local_reduction_meta(
+            old_meta,
+            dims,
+            redistribute_on=redistribute_on,
+        )
+        if local_meta is not None:
+            method = value.prod if product else value.sum
+            local_result = method(
+                dim=local_dim,
+                skipna=skipna,
+                min_count=min_count,
+                keep_attrs=keep_attrs,
+            )
+            return self._finish_local_reduction(local_result, old_meta=local_meta)
+
         plan = self._plan(
             value,
             dims,
             old_meta,
             operation=operation,
-            mode=mode,
-            root=root,
         )
 
         if isinstance(value, xr.DataArray):
@@ -2276,7 +2258,7 @@ class XarrayMPI(ArithmeticMixin):
             if not dims:
                 if local_error is not None:
                     raise local_error
-                return self._local_result(local, mode=mode, root=root)
+                return local
             result = self._combine_sum_or_prod(
                 value,
                 local,
@@ -2284,15 +2266,12 @@ class XarrayMPI(ArithmeticMixin):
                 op,
                 skipna=skipna,
                 min_count=min_count,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
             return self._finish(
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
-                mode=mode,
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2322,17 +2301,13 @@ class XarrayMPI(ArithmeticMixin):
                 op,
                 skipna=skipna,
                 min_count=min_count,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
-            if result is not None:
-                variables[entry.name] = result
+            variables[entry.name] = result
         return self._finish(
-            self._dataset_result(value, dims, variables, mode=mode, root=root),
+            self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
-            mode=mode,
         )
 
     def mean(
@@ -2342,21 +2317,63 @@ class XarrayMPI(ArithmeticMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed arithmetic mean."""
-        self._validate_collective(mode, root)
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Compute the arithmetic mean over one or more dimensions.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Distributed xarray object to reduce.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to average. ``None`` or ``...``
+            reduces over all dimensions, so a distributed object receives a
+            true global mean rather than a rank-local mean.
+        skipna : bool or None, optional
+            If True, skip missing values. If None, use xarray's dtype-dependent
+            default.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one, an explicit dimension selects that dimension,
+            and None leaves the global result replicated. If the active
+            partition dimension survives, ``"auto"`` and None preserve it.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Mean with xarray-compatible coordinates, attributes, and dtype.
+
+        Notes
+        -----
+        A reduction that excludes the active partition dimension is performed
+        entirely by native xarray on each rank. When the partition dimension is
+        included, each rank computes the sum over all requested local dimensions
+        and the corresponding valid-value count; both are summed across ranks
+        before division. Rank means are never averaged directly.
+        """
         local_dim, dims = self._normalize_dim(value, dim)
-        old_meta = self._validate_distribution(value, dims)
+        old_meta = get_mpi_meta(value)
+        local_meta = self._local_reduction_meta(
+            old_meta,
+            dims,
+            redistribute_on=redistribute_on,
+        )
+        if local_meta is not None:
+            local_result = value.mean(
+                dim=local_dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            )
+            return self._finish_local_reduction(local_result, old_meta=local_meta)
+
         plan = self._plan(
             value,
             dims,
             old_meta,
             operation="mean",
-            mode=mode,
-            root=root,
         )
 
         if isinstance(value, xr.DataArray):
@@ -2366,7 +2383,7 @@ class XarrayMPI(ArithmeticMixin):
                     skipna=skipna,
                     keep_attrs=keep_attrs,
                 )
-                return self._local_result(local_mean, mode=mode, root=root)
+                return local_mean
             local_sum, local_error = self._guarded(
                 lambda: value.sum(
                     dim=local_dim,
@@ -2380,15 +2397,12 @@ class XarrayMPI(ArithmeticMixin):
                 local_sum,
                 dims,
                 skipna=skipna,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
             return self._finish(
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
-                mode=mode,
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2417,17 +2431,13 @@ class XarrayMPI(ArithmeticMixin):
                 local_sum,
                 entry.dims,
                 skipna=skipna,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
-            if result is not None:
-                variables[entry.name] = result
+            variables[entry.name] = result
         return self._finish(
-            self._dataset_result(value, dims, variables, mode=mode, root=root),
+            self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
-            mode=mode,
         )
 
     def min(
@@ -2437,11 +2447,41 @@ class XarrayMPI(ArithmeticMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed minimum."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Compute the minimum over one or more dimensions.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Distributed xarray object to reduce.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to compute the minimum. ``None``
+            or ``...`` reduces over all dimensions.
+        skipna : bool or None, optional
+            If True, skip missing values. If None, use xarray's dtype-dependent
+            default.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one; None leaves the global result replicated. If
+            the active partition survives, its existing partition is retained.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Global minimum over the requested dimensions.
+
+        Notes
+        -----
+        Non-partition dimensions are reduced entirely locally. When the active
+        partition dimension participates, each rank first computes its minimum
+        over all requested local dimensions and the partial extrema are combined
+        globally. Floating-point reductions retain the existing all-NaN and
+        empty-partition validity handling; boolean minimum is logical AND.
+        """
         return self._extreme(
             value,
             dim,
@@ -2449,8 +2489,6 @@ class XarrayMPI(ArithmeticMixin):
             skipna=skipna,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def max(
@@ -2460,11 +2498,42 @@ class XarrayMPI(ArithmeticMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed maximum."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Compute the maximum over one or more dimensions.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Distributed xarray object to reduce.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to compute the maximum. ``None``
+            or ``...`` reduces over all dimensions and therefore gives the true
+            global maximum of a distributed DataArray.
+        skipna : bool or None, optional
+            If True, skip missing values. If None, use xarray's dtype-dependent
+            default.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one; None leaves the global result replicated. If
+            the active partition survives, its existing partition is retained.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Global maximum over the requested dimensions.
+
+        Notes
+        -----
+        Non-partition dimensions are reduced entirely locally. When the active
+        partition dimension participates, each rank first computes its maximum
+        over all requested local dimensions and the partial extrema are combined
+        globally. Floating-point reductions retain the existing all-NaN and
+        empty-partition validity handling; boolean maximum is logical OR.
+        """
         return self._extreme(
             value,
             dim,
@@ -2472,8 +2541,6 @@ class XarrayMPI(ArithmeticMixin):
             skipna=skipna,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def _extreme(
@@ -2485,31 +2552,36 @@ class XarrayMPI(ArithmeticMixin):
         skipna: bool | None,
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.Dataset | xr.DataArray | None:
+    ) -> xr.Dataset | xr.DataArray:
         operation = "min" if minimum else "max"
-        self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
-        old_meta = self._validate_distribution(value, dims)
+        old_meta = get_mpi_meta(value)
+        local_meta = self._local_reduction_meta(
+            old_meta,
+            dims,
+            redistribute_on=redistribute_on,
+        )
+        if local_meta is not None:
+            method = value.min if minimum else value.max
+            local_result = method(
+                dim=local_dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            )
+            return self._finish_local_reduction(local_result, old_meta=local_meta)
+
         plan = self._plan(
             value,
             dims,
             old_meta,
             operation=operation,
-            mode=mode,
-            root=root,
         )
         empty_partition = self._partition_is_empty(value, old_meta)
 
         if isinstance(value, xr.DataArray):
             if not dims:
                 method = value.min if minimum else value.max
-                return self._local_result(
-                    method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs),
-                    mode=mode,
-                    root=root,
-                )
+                return method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
             local, local_error = self._guarded(
                 lambda: self._local_extreme(
                     value,
@@ -2526,15 +2598,12 @@ class XarrayMPI(ArithmeticMixin):
                 dims,
                 minimum=minimum,
                 skipna=skipna,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
             return self._finish(
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
-                mode=mode,
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2564,17 +2633,13 @@ class XarrayMPI(ArithmeticMixin):
                 entry.dims,
                 minimum=minimum,
                 skipna=skipna,
-                mode=mode,
-                root=root,
                 error=local_error,
             )
-            if result is not None:
-                variables[entry.name] = result
+            variables[entry.name] = result
         return self._finish(
-            self._dataset_result(value, dims, variables, mode=mode, root=root),
+            self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
-            mode=mode,
         )
 
     def any(
@@ -2583,11 +2648,37 @@ class XarrayMPI(ArithmeticMixin):
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
         *,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed logical OR."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Return whether any value is true over one or more dimensions.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Distributed xarray object to reduce.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to apply logical OR. ``None`` or
+            ``...`` reduces over all dimensions.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one; None leaves the global result replicated. If
+            the active partition survives, its existing partition is retained.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Logical OR over the requested dimensions.
+
+        Notes
+        -----
+        When the active partition dimension is absent from ``dim``, native
+        xarray handles the reduction locally with no MPI communication. When it
+        is present, each rank reduces all requested local dimensions first and
+        the boolean partials are combined with ``MPI.LOR``.
+        """
         return self._logical(
             value,
             dim,
@@ -2595,8 +2686,6 @@ class XarrayMPI(ArithmeticMixin):
             all_values=False,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def all(
@@ -2605,11 +2694,37 @@ class XarrayMPI(ArithmeticMixin):
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
         *,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = None,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reduce an xarray object by distributed logical AND."""
+        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+    ) -> xr.Dataset | xr.DataArray:
+        """Return whether all values are true over one or more dimensions.
+
+        Parameters
+        ----------
+        value : xarray.DataArray or xarray.Dataset
+            Distributed xarray object to reduce.
+        dim : str, iterable of hashable, ..., or None, optional
+            Dimension or dimensions over which to apply logical AND. ``None`` or
+            ``...`` reduces over all dimensions.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes, with the same meaning as xarray.
+        redistribute_on : hashable, "auto", or None, default "auto"
+            Placement after the active partition dimension is reduced away.
+            ``"auto"`` repartitions on the longest surviving dimension whose
+            length exceeds one; None leaves the global result replicated. If
+            the active partition survives, its existing partition is retained.
+
+        Returns
+        -------
+        xarray.DataArray or xarray.Dataset
+            Logical AND over the requested dimensions.
+
+        Notes
+        -----
+        When the active partition dimension is absent from ``dim``, native
+        xarray handles the reduction locally with no MPI communication. When it
+        is present, each rank reduces all requested local dimensions first and
+        the boolean partials are combined with ``MPI.LAND``.
+        """
         return self._logical(
             value,
             dim,
@@ -2617,8 +2732,6 @@ class XarrayMPI(ArithmeticMixin):
             all_values=True,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
-            mode=mode,
-            root=root,
         )
 
     def _logical(
@@ -2630,20 +2743,25 @@ class XarrayMPI(ArithmeticMixin):
         all_values: bool,
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
-        mode: Literal["all", "root"],
-        root: int,
-    ) -> xr.Dataset | xr.DataArray | None:
+    ) -> xr.Dataset | xr.DataArray:
         operation = "all" if all_values else "any"
-        self._validate_collective(mode, root)
         local_dim, dims = self._normalize_dim(value, dim)
-        old_meta = self._validate_distribution(value, dims)
+        old_meta = get_mpi_meta(value)
+        local_meta = self._local_reduction_meta(
+            old_meta,
+            dims,
+            redistribute_on=redistribute_on,
+        )
+        if local_meta is not None:
+            method = value.all if all_values else value.any
+            local_result = method(dim=local_dim, keep_attrs=keep_attrs)
+            return self._finish_local_reduction(local_result, old_meta=local_meta)
+
         plan = self._plan(
             value,
             dims,
             old_meta,
             operation=operation,
-            mode=mode,
-            root=root,
         )
 
         if isinstance(value, xr.DataArray):
@@ -2654,12 +2772,10 @@ class XarrayMPI(ArithmeticMixin):
             if not dims:
                 if local_error is not None:
                     raise local_error
-                return self._local_result(local, mode=mode, root=root)
+                return local
             result = self._comm_reduce(
                 local,
                 op,
-                mode=mode,
-                root=root,
                 expect_dtype=_partial_dtype(value.dtype.str, operation, None),
                 error=local_error,
                 phase=f"MPI xarray {operation} reduction",
@@ -2668,7 +2784,6 @@ class XarrayMPI(ArithmeticMixin):
                 result,
                 old_meta=old_meta,
                 redistribute_on=redistribute_on,
-                mode=mode,
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -2691,17 +2806,13 @@ class XarrayMPI(ArithmeticMixin):
             result = self._comm_reduce(
                 local,
                 op,
-                mode=mode,
-                root=root,
                 expect_dtype=_partial_dtype(variable.dtype.str, operation, None),
                 error=local_error,
                 phase=f"MPI xarray {operation} reduction",
             )
-            if result is not None:
-                variables[entry.name] = result
+            variables[entry.name] = result
         return self._finish(
-            self._dataset_result(value, dims, variables, mode=mode, root=root),
+            self._dataset_result(value, dims, variables),
             old_meta=old_meta,
             redistribute_on=redistribute_on,
-            mode=mode,
         )

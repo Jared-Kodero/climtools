@@ -233,15 +233,16 @@ complete API.
 
 ### `mpi.reduce` vs `mpi.xarray`: which one do I want?
 
-Both combine data across ranks with one MPI collective. The difference is
-**where the split lives**:
+Both provide rank-aware reductions, but `mpi.xarray` communicates only when
+the requested reduction crosses its distributed dimension. The key difference
+is **where the split lives**:
 
 | | `mpi.reduce` | `mpi.xarray` |
 | --- | --- | --- |
 | Each rank holds | A complete partial result (its own whole array/scalar/Dataset) | A slice of one shared dimension of a larger object |
 | Combines by | Adding/comparing whole partials together, element-wise | Reducing along the named, distributed dimension |
 | Typical source | Independent, embarrassingly-parallel work — one case per rank, then combine | `mpi.xarray.open_dataset`/`redistribute`, which partition a dimension across ranks |
-| Example | Each rank sums a different subset of storm events into the same `(lat, lon)` grid; `mpi.reduce.sum` adds the 8 grids together | Each rank holds a different slice of `time`; `mpi.xarray.mean(dim="time")` reduces across ranks to one answer |
+| Example | Each rank sums a different subset of storm events into the same `(lat, lon)` grid; `mpi.reduce.sum` adds the 8 grids together | Each rank holds a different slice of `time`; `mpi.xarray.mean(dim="time")` reduces across ranks, then repartitions the result on the longest surviving dimension |
 
 ```python
 # mpi.reduce: every rank already has a complete (lat, lon) composite over
@@ -252,7 +253,9 @@ composite = mpi.reduce.sum(local_composite)         # same (lat, lon) result on 
 # mpi.xarray: every rank holds a different slice of the "time" dimension of
 # the *same* field; reduce across that shared dimension.
 local_slice = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
-time_mean = mpi.xarray.mean(local_slice, dim="time")  # same result on every rank
+time_mean = mpi.xarray.mean(local_slice, dim="time")
+# "time" is gone, so climtools repartitions time_mean on the longest
+# surviving dimension whose length is greater than one.
 ```
 
 If you are not sure which applies: does every rank already have its own
@@ -277,28 +280,69 @@ the same `sum(value, *, mode="all", root=0)` signature. `mode="all"`
 
 ### `mpi.xarray`: named-dimension distributed reductions
 
-`mpi.xarray` reduces a `DataArray`/`Dataset` along a dimension that is
-itself split across ranks:
+`mpi.xarray` accepts the same named reduction dimensions as xarray and decides
+from the object's `mpi_meta` whether communication is actually required. If the
+requested dimensions do **not** include the partition dimension, the complete
+reduction domain already exists on each rank: climtools calls native xarray
+locally, performs no MPI collective, and preserves the existing partition
+metadata. For an object partitioned on `time`, for example:
 
 ```python
-local_mean = mpi.xarray.mean(local_events, dim="event")  # same result on every rank
+local = mpi.xarray.redistribute(t2m, "time")
+local_zonal_mean = mpi.xarray.mean(local, dim="lon")
+# no MPI traffic; every rank still owns the same global time[start:stop] slab
 ```
 
-`local_mean` equals plain xarray's `assembled.mean(dim="event")` on the
-fully assembled array — `mpi.xarray` gets there with one collective per
-reduction instead of requiring the full array in one place first. It
-exposes `sum`, `prod`, `min`, `max`, `mean`, `any`, and `all`, with
-`skipna`/`min_count` applied consistently across the whole distributed
-dimension (not per rank): `min_count` only drops a value once the count is
-summed across every rank holding a share of `dim`, and `skipna=False`
-propagates a NaN present on *any* rank to the combined result, not just
-NaNs local to the current rank. Every reduction accepts a `DataArray` or a
-`Dataset` interchangeably — a `Dataset` is reduced variable by variable,
-leaving non-distributed variables and static dimensions untouched.
+If the requested dimensions **do** include the partition dimension, xarray
+first collapses all requested dimensions over that rank's local slab in one
+operation, and MPI combines only those already-reduced partials. Thus
+`dim=("time", "lat")` does not communicate the latitude dimension: each rank
+reduces its local `(time, lat)` domain first, then MPI combines the remaining
+partial array. `sum`/`prod` use `MPI.SUM`/`MPI.PROD`; `min`/`max` use global
+extrema with the existing NaN and empty-partition validity handling; `any` and
+`all` use `MPI.LOR` and `MPI.LAND`; and `mean` combines global sums and counts
+rather than averaging rank means. `min_count` likewise uses a count summed
+across ranks whenever the partition dimension participates.
 
-`mpi.xarray.open_dataset`/`redistribute`/`distribute`/`isel`/`sel` produce
-the distributed objects these reductions consume; see
-[`core/xr_mpi.py`](core/xr_mpi.py) for their full signatures.
+Once a reduction consumes the partition dimension, the old ownership metadata
+is no longer valid. The rank-local partials are combined with `Allreduce`, so
+the complete global reduction exists briefly on every rank. By default every
+`mpi.xarray` reduction has `redistribute_on="auto"`: climtools immediately
+repartitions that global result along its longest surviving dimension whose
+length is greater than one. This keeps large post-reduction fields distributed
+for subsequent work instead of leaving a complete copy on every rank. A scalar,
+or a result whose surviving dimensions are all length one, remains replicated.
+Pass `redistribute_on=<dim>` to choose the new partition explicitly, or
+`redistribute_on=None` to disable post-reduction redistribution and deliberately
+leave the complete global result replicated on every rank. When the original
+partition dimension survives the reduction, `"auto"` and None both preserve
+that existing partition; naming a different partition dimension is invalid
+because no redistribution is needed or implied by a local reduction.
+
+Result-placement options such as `mode="root"` and `root=` belong exclusively
+to `mpi.reduce`; they do not exist on the `mpi.xarray` reduction API.
+
+```python
+local = mpi.xarray.redistribute(t2m, "time")
+
+time_mean = mpi.xarray.mean(local, dim="time")
+# redistribute_on="auto" is the default. "time" is gone, so if lon is the
+# longest surviving dimension (>1), time_mean now carries mpi_meta for lon.
+
+replicated_mean = mpi.xarray.mean(local, dim="time", redistribute_on=None)
+# The same global (lat, lon) mean is deliberately left complete on every rank.
+
+global_max = mpi.xarray.max(local)
+# dim=None means all dimensions: each rank computes its local scalar maximum,
+# MPI.MAX combines those scalars, and no dimension remains to redistribute.
+```
+
+Every reduction accepts a `DataArray` or a `Dataset` interchangeably. Dataset
+planning remains variable-specific: a variable that does not carry the active
+partition dimension is reduced locally even when another variable in the same
+Dataset requires an MPI combine. `mpi.xarray.open_dataset`/`redistribute`/
+`distribute`/`isel`/`sel` produce the distributed objects these reductions
+consume; see [`core/xr_mpi.py`](core/xr_mpi.py) for their full signatures.
 
 ### Native `.mean()`/`.sum()`/etc. on a distributed object are node-local
 
@@ -306,10 +350,9 @@ This is the single most common mistake with a distributed object, so it is
 worth stating plainly:
 
 > **Calling a distributed object's own `.mean()`/`.sum()`/`.max()`/etc.
-> directly — instead of `mpi.xarray.mean`/`mpi.xarray.sum`/... — does not
-> fail and does not raise. It silently returns *this rank's own partial
-> reduction* over its own local slice of the distributed dimension, not the
-> reduction over the whole (conceptual) array.**
+> directly does not know that `mpi_meta` represents a larger conceptual
+> array. If the reduction touches the partition dimension, native xarray
+> returns only this rank's partial reduction, not the global result.**
 
 ```python
 distributed = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
@@ -318,17 +361,14 @@ distributed.mean()          # WRONG: this rank's mean over its own slice only
 mpi.xarray.mean(distributed, dim="time")  # RIGHT: combined across every rank
 ```
 
-climtools does not patch or intercept native xarray reductions to guard
-against this — a distributed object is an ordinary `xarray.Dataset`/
-`DataArray` in every other respect, and leaving `.mean()` alone keeps it
-that way. The rule is simply: once an object came from
-`mpi.xarray.open_dataset`/`redistribute` (check `"mpi_meta" in obj.attrs` if
-you need to test this programmatically), reduce it with `mpi.xarray`, not
-its own methods, whenever the reduction touches the distributed dimension.
-Reducing a dimension that is *not* the distributed one (for example
-`distributed.mean(dim="lon")` when the distributed dimension is `"time"`) is
-a legitimate, embarrassingly-parallel per-rank operation and needs no
-`mpi.xarray` call at all.
+climtools does not patch native xarray methods. Use `mpi.xarray` for reductions
+on distributed objects when you want the distribution semantics carried
+forward correctly. If the requested dimensions exclude the partition
+dimension, `mpi.xarray` now takes the same embarrassingly-parallel native
+xarray path internally, but also preserves the object's validated `mpi_meta`
+and avoids even the reduction-plan agreement collective. If the partition
+dimension is included — explicitly, in a dimension tuple, or implicitly by
+`dim=None`/`...` — `mpi.xarray` performs the required global MPI combine.
 
 ### Arithmetic on distributed objects
 
@@ -682,13 +722,15 @@ launcher:
 | --- | --- |
 | [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` — both Mann-Kendall and `polyfit` — `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
 | [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, and the parallel NetCDF writer — including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
-| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running both suites — `test_general.py` directly, then `test_mpi.py` on eight ranks — with the environment settings the MPI suite requires, including `HDF5_USE_FILE_LOCKING=FALSE`. |
+| [`test_mpi_xarray_reductions.py`](tests/test_mpi_xarray_reductions.py) | Focused regression checks for reduction placement: communication-free non-partition reductions, mixed dimension tuples, automatic longest-dimension redistribution after the partition dimension is consumed, scalar/length-one results, explicit redistribution, attrs, extrema/logical reductions, and the absence of `mode`/`root` from `mpi.xarray` reductions. |
+| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running both original suites — `test_general.py` directly, then `test_mpi.py` on eight ranks — with the environment settings the MPI suite requires, including `HDF5_USE_FILE_LOCKING=FALSE`. |
 
 ```bash
 python tests/test_general.py
 
 python -m mpi4py tests/test_mpi.py
 mpirun -n 8 python -m mpi4py tests/test_mpi.py --time-steps 7200
+mpirun -n 8 python -m mpi4py tests/test_mpi_xarray_reductions.py
 ```
 
 Every timed check in `test_mpi.py` is tagged in the summary with a
