@@ -58,6 +58,8 @@ class NetCDFWriteError(mpi.MPIError):
 def get_chunks(
     ds: xr.Dataset,
     chunks: Mapping[str, Iterable[int]] | None,
+    partition_dim: str | None = None,
+    partition_length: int | None = None,
 ) -> dict[str, tuple[int, ...]]:
     """Return explicit or existing xarray chunk shapes.
 
@@ -67,11 +69,42 @@ def get_chunks(
         Dataset whose variable chunks are inspected.
     chunks : mapping, optional
         Explicit variable chunk shapes.
+    partition_dim : str, optional
+        Dimension that MPI ranks write disjoint ``start:stop`` slabs of.
+        When given, the returned chunk length along this dimension always
+        spans its full ``partition_length`` instead of whatever dask's
+        automatic byte-size heuristic would have picked.
+    partition_length : int, optional
+        Global size of ``partition_dim``. Required to have any effect
+        together with ``partition_dim``.
 
     Returns
     -------
     dict
         Mapping from variable name to NetCDF chunk shape.
+
+    Notes
+    -----
+    ``da.chunk("auto")`` sizes chunks from byte counts alone, with no
+    knowledge of how the parallel writer partitions ``partition_dim``
+    across ranks. Below dask's ~128 MiB target that yields a single chunk
+    spanning the whole dimension, which happens to match every rank's
+    writes sharing one chunk collectively -- safe, if not what "auto" was
+    asked for. Above that target dask splits the dimension into chunks
+    whose boundary generally falls inside one rank's ``start:stop`` slab
+    rather than between two. Each rank's collective write then straddles
+    two HDF5 chunks, and the byte range within a straddled chunk that no
+    rank's write actually recorded stays as whatever ``nofill`` (on by
+    default here) left it, rather than any variable's real numeric value.
+    Reading it back later decodes that garbage the same way as any other
+    value, so a CF time axis surfaces it as an ``OverflowError`` from
+    cftime's int64 range check rather than as an out-of-place number. This
+    only appears once the dataset crosses dask's chunking threshold, which
+    is exactly why it will not reproduce at small ``TIME_STEPS`` and can
+    look like a scale-only slowdown rather than a correctness bug. Forcing
+    the partitioned dimension to one chunk removes the possibility of a
+    rank's slab straddling a chunk edge entirely, regardless of dataset
+    size.
     """
     if chunks is not None:
         return {
@@ -84,7 +117,15 @@ def get_chunks(
         if da.ndim == 0 or any(length == 0 for length in da.shape):
             continue
         chunked = da if da.chunks is not None else da.chunk("auto")
-        output[name] = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
+        shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
+        if (
+            partition_dim is not None
+            and partition_length is not None
+            and partition_dim in da.dims
+        ):
+            axis = da.dims.index(partition_dim)
+            shape = shape[:axis] + (int(partition_length),) + shape[axis + 1 :]
+        output[name] = shape
     return output
 
 
@@ -595,7 +636,7 @@ def to_netcdf_parallel(
                         f"Unknown unlimited dimensions: {sorted(missing)}."
                     )
 
-                chunk_map = get_chunks(ds, chunks)
+                chunk_map = get_chunks(ds, chunks, partition_dim, sizes[partition_dim])
                 root_data = {}
                 variables: dict[str, dict[str, Any]] = {}
                 for name, source in ds.variables.items():
@@ -669,7 +710,9 @@ def to_netcdf_parallel(
             if missing:
                 raise ValueError(f"Unknown unlimited dimensions: {sorted(missing)}.")
 
-            chunk_map = get_chunks(ds, chunks)
+            chunk_map = get_chunks(
+                ds, chunks, partition_dim, ds.sizes.get(partition_dim)
+            )
             root_data = {}
             variables = {}
             for name, source in ds.variables.items():
