@@ -13,11 +13,12 @@ if TYPE_CHECKING:
 
 MPI_META = "mpi_meta"
 # The subset of a partition's metadata that decides whether two partitions
-# describe the same rank-local ownership. chunk_info is deliberately
-# excluded: it records how the split was computed for the benefit of a
-# later redistribute(..., chunk_info=...), not the ownership itself, so two
-# partitions with different chunk_info but identical dim/global_size/start/
-# stop still own the exact same data and are still equal.
+# describe the same rank-local ownership. chunk_info and save_chunks are
+# deliberately excluded: they record how the split/write was computed for
+# the benefit of a later redistribute(..., chunk_info=...) or a NetCDF
+# write, not the ownership itself, so two partitions with different (or
+# absent) chunk_info/save_chunks but identical dim/global_size/start/stop
+# still own the exact same data and are still equal.
 _PARTITION_KEYS: tuple[str, ...] = ("dim", "global_size", "start", "stop")
 
 
@@ -109,6 +110,24 @@ def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     return _validate_mpi_meta(value, reference)
 
 
+def _assign_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
+    """Attach an already-built ``meta`` dict to ``value`` and its variables.
+
+    Shared by :func:`set_mpi_meta` (building ``meta`` from scratch) and
+    :func:`set_save_chunks` (adding one key to an existing ``meta``): both
+    need the identical propagation rule -- set on the object itself, and
+    on every variable that carries ``meta["dim"]``, clearing any stale
+    metadata on variables that do not.
+    """
+    dim = meta["dim"]
+    value.attrs[MPI_META] = dict(meta)
+    if isinstance(value, xr.Dataset):
+        for variable in value.variables.values():
+            variable.attrs.pop(MPI_META, None)
+            if dim in variable.dims:
+                variable.attrs[MPI_META] = dict(meta)
+
+
 def set_mpi_meta(
     value: xr.Dataset | xr.DataArray,
     *,
@@ -144,13 +163,53 @@ def set_mpi_meta(
             if name in value.dims and int(size) > 0
         },
     }
-    value.attrs[MPI_META] = meta
+    _assign_meta(value, meta)
 
-    if isinstance(value, xr.Dataset):
-        for variable in value.variables.values():
-            variable.attrs.pop(MPI_META, None)
-            if dim in variable.dims:
-                variable.attrs[MPI_META] = meta.copy()
+
+def set_save_chunks(
+    value: xr.Dataset | xr.DataArray,
+    save_chunks: Mapping[str, tuple[int, ...]],
+) -> None:
+    """Attach save_chunks to ``value``'s existing MPI distribution metadata.
+
+    ``save_chunks`` -- the on-disk NetCDF chunk shape computed by
+    :func:`~climtools.core.xr_chunks.compute_save_chunks` -- is stored
+    under the ``"save_chunks"`` key alongside the ``dim``/``global_size``/
+    ``start``/``stop``/``chunk_info`` keys :func:`set_mpi_meta` already
+    sets. It is excluded from ``_PARTITION_KEYS`` deliberately, for the
+    same reason ``chunk_info`` is: it records how a write should be
+    shaped, not which slice this rank owns, so two partitions with
+    different (or absent) ``save_chunks`` but identical
+    dim/global_size/start/stop still describe the same ownership and are
+    still equal under :func:`_partitions_match`.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Rank-local xarray object that already carries valid MPI
+        distribution metadata (see :func:`get_mpi_meta`).
+    save_chunks : mapping
+        Mapping from variable name to save_chunk shape.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` carries no valid MPI distribution metadata to attach
+        ``save_chunks`` to.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None:
+        raise ValueError(
+            "value carries no MPI distribution metadata; call set_mpi_meta "
+            + "(e.g. via mpi.xarray.redistribute/open_dataset) before "
+            + "attaching save_chunks."
+        )
+    updated = dict(meta)
+    updated["save_chunks"] = {
+        str(name): tuple(int(length) for length in shape)
+        for name, shape in save_chunks.items()
+    }
+    _assign_meta(value, updated)
 
 
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
@@ -210,38 +269,7 @@ def log_partition_report(
     automatic: bool = False,
     detail: bool = True,
 ) -> None:
-    """Print a compact description of the rank-local partition layout.
-
-    Every rank contributes its own bounds through a single gather and rank 0
-    prints the result. Logging from every rank instead produces interleaved,
-    unordered lines that are unreadable at scale.
-
-    The report is deliberately narrow. The full local shape is identical on
-    every rank apart from the partitioned dimension, so printing it once in
-    the header conveys the same information as repeating it on every row and
-    keeps the table inside a standard terminal width.
-
-    Parameters
-    ----------
-    runtime : MPIRuntime
-        Runtime owning the communicator.
-    data : xarray.Dataset or xarray.DataArray
-        Rank-local object after partitioning.
-    dim : hashable
-        Partitioned dimension.
-    origin : str
-        Name of the operation that produced the partition.
-    global_size : int
-        Global length of ``dim``.
-    start, stop : int
-        Global half-open interval owned by this rank.
-    automatic : bool, optional
-        Whether ``dim`` was selected automatically.
-    detail : bool, optional
-        Print the per-rank table in addition to the summary line. When False
-        only the two summary lines are printed, which is what long runs that
-        open many files usually want.
-    """
+    """Print a structured, compact description of the rank-local partition layout."""
     comm = runtime.comm
     first, last = _edge_labels(data, dim)
     local = (
@@ -258,42 +286,66 @@ def log_partition_report(
 
     counts = [row[2] - row[1] for row in rows]
     total = sum(row[5] for row in rows)
+    peak_bytes = max(row[5] for row in rows)
     idle = sum(1 for count in counts if count == 0)
-    other = " x ".join(
-        f"{name!s}:{int(length)}" for name, length in data.sizes.items() if name != dim
+
+    other = " ".join(
+        f"{name!s}={int(length)}" for name, length in data.sizes.items() if name != dim
+    )
+    chunk_text = "  ".join(
+        f"{name!s}={max(int(size) for size in chunks)}"
+        for name, chunks in (data.chunks or {}).items()
     )
 
+    # Build structured summary values
+    dim_str = f"{str(dim)!r}{' (auto)' if automatic else ''}"
+    split_str = f"{min(counts)}-{max(counts)}/rank"
+    if idle:
+        split_str += f" (IDLE={idle})"
+
+    usage_str = f"{_format_bytes(total)} total (Peak/Rank: {_format_bytes(peak_bytes)})"
+
+    border = "=" * 80
+    separator = "-" * 80
+
     lines = [
-        f"{origin}  dim={str(dim)!r}{' (auto)' if automatic else ''}"
-        + f"  size={global_size}  ranks={comm.size}"
-        + f"  split={min(counts)}-{max(counts)}/rank"
-        + (f"  IDLE={idle}" if idle else ""),
-        f"  held: {other or 'scalar'}"
-        + f"   {_format_bytes(total)} total"
-        + f", {_format_bytes(max(row[5] for row in rows))} peak/rank",
+        border,
+        f" MPI PARTITION REPORT: {origin}",
+        border,
+        f" 🔹 Dimension   : {dim_str}",
+        f" 🔹 Global Size : {global_size} (Ranks: {comm.size})",
+        f" 🔹 Split       : {split_str}",
+        f" 🔹 Shape       : {other or 'scalar'}",
+        f" 🔹 Chunks/Rank : {chunk_text or 'unchunked'}",
+        f" 🔹 Memory      : {usage_str}",
     ]
 
     if detail:
-        # Calculate max widths
+        lines.append(separator)
+        # Calculate max widths using the original table logic
         slice_width = max(len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows))
         first_width = max(len("first"), *(len(str(row[3])) for row in rows))
         last_width = max(len("last"), *(len(str(row[4])) for row in rows))
+        count_width = max(len("n"), *(len(str(row[2] - row[1])) for row in rows))
 
-        # Apply padding to headers
         lines.append(
-            f"  {'rank':>4}  {'slice':>{slice_width}}  {'n':>6}  "
+            f"   {'rank':>4}  {'slice':>{slice_width}}  {'n':>{count_width}}  "
             + f"({'first':>{first_width}}, {'last':>{last_width}})"
         )
+        lines.append(separator)
 
-        # Apply padding to row values
         for row in rows:
             slice_str = f"{row[1]}:{row[2]}"
+            count_val = row[2] - row[1]
             first_str = str(row[3])
             last_str = str(row[4])
 
             lines.append(
-                f"  {row[0]:>4}  {slice_str:>{slice_width}}  {row[2] - row[1]:>6}  "
+                f"   {row[0]:>4}  {slice_str:>{slice_width}}  {count_val:>{count_width}}  "
                 + f"({first_str:>{first_width}}, {last_str:>{last_width}})"
             )
 
-    runtime.log("\n".join(lines), flush=True)
+    lines.append(border)
+    runtime.log("")
+    runtime.log("\n".join(lines), flush=True, prefix=False)
+    runtime.log("", prefix=False)

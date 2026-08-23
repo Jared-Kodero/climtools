@@ -2054,8 +2054,8 @@ def test_distributed_arithmetic() -> None:
         return full.isel(plev=slice(meta["start"], meta["stop"])).values
 
     # -- apply: matching distributions run locally and tag the result -----
-    added = mpi.xarray.apply(a, "+", b)
-    subtracted = mpi.xarray.apply(a, operator.sub, b)
+    added = mpi.xarray.apply(operator.add, a, b)
+    subtracted = mpi.xarray.apply(operator.sub, a, b)
     apply_ok = (
         bool(np.array_equal(added.values, local_slice(a_full) + local_slice(b_full)))
         and bool(
@@ -2067,9 +2067,9 @@ def test_distributed_arithmetic() -> None:
 
     # -- apply: distributed against a scalar, and against a replicated ----
     # -- array that does not carry the distributed dimension --------------
-    scaled = mpi.xarray.apply(a, "*", 2.0)
+    scaled = mpi.xarray.apply(operator.mul, a, 2.0)
     weights = xr.DataArray(np.arange(6, dtype=np.float32) + 1.0, dims=("lat",))
-    weighted = mpi.xarray.apply(a, "*", weights)
+    weighted = mpi.xarray.apply(operator.mul, a, weights)
     broadcast_ok = bool(
         np.array_equal(scaled.values, local_slice(a_full) * 2.0)
     ) and bool(np.array_equal(weighted.values, local_slice(a_full) * weights.values))
@@ -2079,9 +2079,46 @@ def test_distributed_arithmetic() -> None:
     mismatch_ok = call_raises(
         ValueError,
         mpi.xarray.apply,
+        operator.add,
         a,
-        "+",
         b_by_lat,
+        contains="different partitions",
+    )
+
+    # -- apply: pandas.apply-style interface accepts any callable, N-ary --
+    # -- positional/keyword operands, and a non-elementwise callable -------
+    def _weighted_add(x: Any, y: Any, *, factor: float) -> Any:
+        return x + y * factor
+
+    kwargs_applied = mpi.xarray.apply(_weighted_add, a, b, factor=2.0)
+    kwargs_apply_ok = bool(
+        np.array_equal(
+            kwargs_applied.values,
+            local_slice(a_full) + local_slice(b_full) * 2.0,
+        )
+    ) and kwargs_applied.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+
+    ternary_applied = mpi.xarray.apply(xr.where, a > b, a, b)
+    ternary_apply_ok = bool(
+        np.array_equal(
+            ternary_applied.values,
+            np.where(
+                local_slice(a_full) > local_slice(b_full),
+                local_slice(a_full),
+                local_slice(b_full),
+            ),
+        )
+    ) and ternary_applied.attrs.get("mpi_meta") == a.attrs.get("mpi_meta")
+
+    # A distributed keyword argument mismatched against a distributed
+    # positional argument must still be caught.
+    kwargs_mismatch_ok = call_raises(
+        ValueError,
+        mpi.xarray.apply,
+        _weighted_add,
+        a,
+        y=b_by_lat,
+        factor=2.0,
         contains="different partitions",
     )
 
@@ -2322,7 +2359,14 @@ def test_distributed_arithmetic() -> None:
 
     correct = bool(
         mpi.reduce.all(
-            apply_ok and broadcast_ok and mismatch_ok and align_ok and evaluate_ok
+            apply_ok
+            and broadcast_ok
+            and mismatch_ok
+            and kwargs_apply_ok
+            and ternary_apply_ok
+            and kwargs_mismatch_ok
+            and align_ok
+            and evaluate_ok
         )
     )
     record_result(
@@ -3869,7 +3913,7 @@ def test_create_dataset(out_dir: str) -> None:
             actual_pr = actual["pr"].isel(time=slice(start, stop)).load().values
             np.testing.assert_array_equal(actual_pr, fill_pr(start, stop))
             np.testing.assert_array_equal(actual["slmsk"].values, fill_slmsk())
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         correct = False
         note = f"{type(exc).__name__}: {exc}"
 

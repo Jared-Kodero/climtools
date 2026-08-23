@@ -247,8 +247,8 @@ is **where the split lives**:
 ```python
 # mpi.reduce: every rank already has a complete (lat, lon) composite over
 # its own share of events; combine the 8 complete grids into one.
-local_composite = build_local_composite()          # shape (lat, lon) on every rank
-composite = mpi.reduce.sum(local_composite)         # same (lat, lon) result on every rank
+local_composite = build_local_composite()  # shape (lat, lon) on every rank
+composite = mpi.reduce.sum(local_composite)  # same (lat, lon) result on every rank
 
 # mpi.xarray: every rank holds a different slice of the "time" dimension of
 # the *same* field; reduce across that shared dimension.
@@ -269,8 +269,10 @@ Works on scalars, NumPy arrays, and xarray DataArrays/Datasets alike; dims,
 coords, and attrs are kept.
 
 ```python
-composite = mpi.reduce.sum(local)                        # every rank gets the result
-composite = mpi.reduce.sum(local, mode="root", root=0)    # only rank 0 gets it; None elsewhere
+composite = mpi.reduce.sum(local)  # every rank gets the result
+composite = mpi.reduce.sum(
+    local, mode="root", root=0
+)  # only rank 0 gets it; None elsewhere
 ```
 
 `mpi.reduce` also exposes `prod`, `min`, `max`, `any`, and `all`, all with
@@ -357,7 +359,7 @@ worth stating plainly:
 ```python
 distributed = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
 
-distributed.mean()          # WRONG: this rank's mean over its own slice only
+distributed.mean()  # WRONG: this rank's mean over its own slice only
 mpi.xarray.mean(distributed, dim="time")  # RIGHT: combined across every rank
 ```
 
@@ -372,20 +374,21 @@ dimension is included — explicitly, in a dimension tuple, or implicitly by
 
 ### Arithmetic on distributed objects
 
-`mpi.xarray.apply(left, op, right)` combines two operands element-wise with
-no MPI communication, after checking that every rank already holds matching,
-aligned local slices: either neither operand is distributed, both are
-distributed identically (same dimension, same global size, same per-rank
-bounds), or one is distributed and the other is replicated. Anything else
-raises `ValueError` rather than silently combining misaligned data.
+`mpi.xarray.apply(func, *args, **kwargs)` calls `func(*args, **kwargs)`
+rank-locally with no MPI communication, after checking that every
+distributed xarray argument shares one partition and every replicated
+argument that carries the distributed dimension matches its length: either
+no argument is distributed, every distributed argument is distributed
+identically (same dimension, same global size, same per-rank bounds), or an
+argument is distributed and the rest are replicated. Anything else raises
+`ValueError` rather than silently combining misaligned data. This is a
+`pandas.DataFrame.apply`-style interface: `func` can be any callable, not
+only a binary operator.
 
 ```python
-anomaly = mpi.xarray.apply(t2m_distributed, "-", climatology_distributed)
+anomaly = mpi.xarray.apply(operator.sub, t2m_distributed, climatology_distributed)
 ```
 
-`op` accepts a string token (`"+"`, `"-"`, `"*"`, `"/"`, `"//"`, `"%"`,
-`"**"`, `"=="`, `"!="`, `"<"`, `"<="`, `">"`, `">="`, `"&"`, `"|"`, `"^"`) or
-a two-argument callable such as `operator.add`.
 
 `mpi.xarray.align(left, right, dim=None)` is the counterpart to
 `xarray.align`, but for rank ownership rather than coordinate labels: it
@@ -394,7 +397,7 @@ them.
 
 ```python
 climatology, t2m = mpi.xarray.align(climatology_full, t2m_distributed)
-anomaly = mpi.xarray.apply(t2m, "-", climatology)
+anomaly = mpi.xarray.apply(operator.sub, t2m, climatology)
 ```
 
 `mpi.xarray.evaluate(expression, **variables)` parses `expression` with the
@@ -601,16 +604,19 @@ sent to another:
 import numpy as np
 from climtools import mpi, xgeo
 
+
 def fill_pr(start: int, stop: int) -> np.ndarray:
     # called once per rank, with THIS rank's own global bounds along "time" --
     # rank 3 of 8 gets (270, 360), not (0, 90)
     t = np.arange(start, stop, dtype=np.float32)
     return some_formula(t)  # shape (stop - start, n_lat, n_lon)
 
+
 def fill_slmsk() -> np.ndarray:
     # not partitioned (no "time" in its dims) -- identical on every rank,
     # so this takes no arguments
     return build_mask()  # shape (n_lat, n_lon)
+
 
 ds = mpi.xarray.create_dataset(
     data_vars={
@@ -671,6 +677,76 @@ harmful. Removed.
 See [`core/xgeo.py`](core/xgeo.py) and [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)
 for the full `to_netcdf` signature (chunking, compression, unlimited
 dimensions, MPI-IO hints).
+
+#### On-disk chunking: distribution_chunks vs save_chunks
+
+Two different chunk concepts are involved in a parallel write, computed
+independently in [`core/xr_chunks.py`](core/xr_chunks.py):
+
+- **distribution_chunks** — how much of the partition dimension each MPI
+  rank holds *in memory*. This is what `mpi.xarray.open_dataset`/
+  `redistribute`/`distribute` decide, and it is recorded in
+  `mpi_meta["chunk_info"]`. This is a single scalar chunk length per
+  dimension throughout — not an irregular, multiple-block-per-dimension
+  structure like a raw Dask chunk tuple (`(1000, 1000, 240)`); see the
+  design doc linked below for that unimplemented extension.
+- **save_chunks** — the actual on-disk NetCDF-4/HDF5 chunk shape written
+  for each variable. A save chunk's length comes from dask's own
+  `"auto"` byte-size heuristic against the variable's true *global*
+  shape and dtype (via a lazy `dask.array.zeros` mock — no data is ever
+  materialized to decide this), capped to HDF5's 4 GiB per-chunk limit.
+
+Along the partition dimension specifically, that dask-proposed,
+HDF5-capped length is not used as-is: `mpi.xarray.redistribute`'s
+`get_chunk_bounds` normally splits the partition dimension into whole
+`chunk_info[dim]`-sized chunks dealt round-robin across ranks, so a save
+chunk that evenly divides `chunk_info[dim]` is guaranteed to sit inside
+one rank's slab. But `get_chunk_bounds` falls back to a plain balanced
+split (`get_balanced_bounds`, no chunk structure at all) whenever there
+are fewer whole `chunk_info[dim]`-sized chunks than ranks — a case that
+can occur for perfectly ordinary inputs (e.g. splitting a 1000-length
+time axis across 64 ranks). In that fallback regime a divisor of
+`chunk_info[dim]` is not actually guaranteed to divide the real,
+irregular rank boundaries, so `compute_save_chunks` checks
+`chunk_alignment_holds` first and forces the partition-dimension
+save_chunk to a single element whenever the fallback applies, rather
+than risking a straddle. `chunk_alignment_holds` uses the exact same
+condition `get_chunk_bounds` branches on, so the two can never diverge.
+
+For an already-distributed object (the third row of the table above),
+`to_netcdf(..., parallel=True)` computes save_chunks this way
+automatically, whenever the caller does not pass an explicit `chunks=`
+mapping, and records the result under `mpi_meta["save_chunks"]` before
+writing. This runs as one extra MPI-collective planning step
+(`mpi.xarray.attach_save_chunks`, itself a small `bcast`) ahead of the
+write; nothing about it needs a separate call from user code.
+
+For the eager and dask-backed rank-0-source rows, the on-disk chunk
+shape is instead derived directly from the real, complete dataset rank 0
+already holds (`get_partition_chunk_size`/`get_chunks`), since there is
+no local-slice-vs-global-shape gap to close in that case.
+
+Two caveats worth knowing before relying on the no-straddle guarantee in
+production:
+
+- The partition-dimension save_chunk still depends on `mpi_size`
+  whenever the run's `distribution_chunk` ends up smaller than dask's
+  data-driven proposal (in the aligned regime above) — a save chunk
+  physically cannot be larger than what one rank's write can supply
+  without straddling a neighbor, so at high enough rank counts some
+  rank-count sensitivity is unavoidable given the current architecture.
+- If `distribution_chunk` happens to be prime and dask's capped proposal
+  is smaller than it, the only value that divides it evenly is 1 — still
+  correct, but a partition-dimension save_chunk of length 1 defeats
+  HDF5 chunking's purpose and should be benchmarked on real dimension
+  sizes, not assumed acceptable, before relying on this path at scale.
+
+See [`core/xr_chunks.py`](core/xr_chunks.py)'s module docstring for the
+full derivation, and
+[`docs/phase2-rank-distribution-design.md`](docs/phase2-rank-distribution-design.md)
+for the (not yet implemented) design that would remove the residual
+`mpi_size` dependency by generalizing rank-boundary computation to
+irregular, Dask-native chunk tuples.
 
 ### Running under MPI
 

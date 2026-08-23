@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import warnings
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from functools import cache
@@ -17,13 +16,45 @@ import xarray as xr
 from mpi4py import MPI as _MPI
 from mpi4py.util import dtlib as _dtlib
 
+from .xr_chunks import (
+    compute_save_chunks,
+    get_balanced_bounds,
+    get_chunk_bounds,
+    get_chunk_info,
+    get_chunk_overrides,
+    get_effective_chunk_size,
+    get_native_chunk_sizes,
+    get_usable_native_chunk,
+    prune_chunk_info,
+)
 from .xr_meta import (
     get_mpi_meta,
     log_partition_report,
     set_mpi_meta,
+    set_save_chunks,
     strip_mpi_meta,
 )
 from .xr_ops import ArithmeticMixin
+
+# get_balanced_bounds, get_chunk_bounds, get_chunk_info, get_chunk_overrides,
+# get_effective_chunk_size, get_native_chunk_sizes, get_usable_native_chunk,
+# and prune_chunk_info are imported (not defined) above: this
+# distribution_chunks math now lives in xr_chunks.py (see core/xr_chunks.py
+# for the distribution_chunks vs save_chunks split). __all__ re-exports
+# them, so external callers and tests importing these names from
+# climtools.core.xr_mpi keep working unchanged.
+__all__ = [
+    "XarrayMPI",
+    "choose_partition_dim",
+    "get_balanced_bounds",
+    "get_chunk_bounds",
+    "get_chunk_info",
+    "get_chunk_overrides",
+    "get_effective_chunk_size",
+    "get_native_chunk_sizes",
+    "get_usable_native_chunk",
+    "prune_chunk_info",
+]
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -153,116 +184,6 @@ class PlanEntry(NamedTuple):
     distributed: bool
     dtype: np.dtype[Any]
     shape: tuple[tuple[str, int], ...]
-
-
-def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
-    """Return a representative native on-disk chunk size for a dimension."""
-    candidates = [
-        variable for variable in data.data_vars.values() if dim in variable.dims
-    ]
-    if not candidates:
-        return None
-
-    variable = max(candidates, key=lambda item: item.nbytes)
-    chunksizes = variable.encoding.get("chunksizes")
-    if chunksizes is not None:
-        size = int(chunksizes[variable.get_axis_num(dim)])
-        return size if size > 0 else None
-
-    preferred = variable.encoding.get("preferred_chunks")
-    if isinstance(preferred, Mapping) and dim in preferred:
-        size = int(preferred[dim])
-        return size if size > 0 else None
-
-    return None
-
-
-def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
-    """Return whether a native chunk provides a useful on-disk partition."""
-    if length <= 1 or native_chunk is None or native_chunk <= 1:
-        return False
-    return math.ceil(length / native_chunk) > 1
-
-
-def get_effective_chunk_size(
-    length: int,
-    native_chunk: int | None,
-    mpi_size: int,
-) -> int:
-    """Return the chunk size climtools should retain for one dimension."""
-    if length <= 0:
-        return 1
-
-    if get_usable_native_chunk(length, native_chunk):
-        return cast("int", native_chunk)
-
-    return max(1, math.ceil(length / mpi_size))
-
-
-def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
-    """Calculate effective chunk sizes for all Dataset dimensions."""
-    return {
-        str(dim): get_effective_chunk_size(
-            int(length),
-            get_native_chunk_sizes(data, dim),
-            mpi_size,
-        )
-        for dim, length in data.sizes.items()
-    }
-
-
-def get_chunk_overrides(
-    data: xr.Dataset,
-    chunk_info: Mapping[str, int],
-) -> dict[str, int]:
-    """Return only chunk overrides that cannot use useful native chunks."""
-    return {
-        str(dim): int(chunk_info[str(dim)])
-        for dim, length in data.sizes.items()
-        if not get_usable_native_chunk(
-            int(length),
-            get_native_chunk_sizes(data, dim),
-        )
-    }
-
-
-def get_balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
-    quotient, remainder = divmod(length, size)
-    start = rank * quotient + min(rank, remainder)
-    return start, start + quotient + int(rank < remainder)
-
-
-def get_chunk_bounds(
-    length: int,
-    chunk_size: int,
-    rank: int,
-    size: int,
-) -> tuple[int, int]:
-    """Partition a dimension on effective chunk boundaries."""
-    if length <= 0:
-        return 0, 0
-
-    chunk_count = math.ceil(length / chunk_size)
-    if chunk_count < min(length, size):
-        return get_balanced_bounds(length, rank, size)
-
-    quotient, remainder = divmod(chunk_count, size)
-    first_chunk = rank * quotient + min(rank, remainder)
-    local_chunks = quotient + int(rank < remainder)
-    start = min(first_chunk * chunk_size, length)
-    stop = min((first_chunk + local_chunks) * chunk_size, length)
-    return start, stop
-
-
-def prune_chunk_info(
-    chunk_info: Mapping[str, int],
-    value: xr.Dataset | xr.DataArray,
-) -> dict[str, int]:
-    return {
-        str(dim): int(chunk_info[str(dim)])
-        for dim in value.dims
-        if str(dim) in chunk_info
-    }
 
 
 def _coord_length(spec: Any) -> int | None:
@@ -1098,9 +1019,7 @@ class XarrayMPI(ArithmeticMixin):
 
             var_dims, var_fill = spec
             var_dtype = (
-                dtype_map.get(var_name, np.float64)
-                if dtype_map is not None
-                else dtype
+                dtype_map.get(var_name, np.float64) if dtype_map is not None else dtype
             )
             if dim in var_dims:
                 local_shape = tuple(
@@ -1248,6 +1167,80 @@ class XarrayMPI(ArithmeticMixin):
                 automatic=automatic,
             )
         return output
+
+    def attach_save_chunks(
+        self,
+        value: xr.Dataset | xr.DataArray,
+    ) -> xr.Dataset | xr.DataArray:
+        """Compute and attach save_chunks to an already-distributed object.
+
+        Only meaningful for data that is actually distributed: ``value``
+        must already carry MPI distribution metadata (from
+        :meth:`redistribute`/:meth:`open_dataset`/:meth:`distribute`).
+        No rank holds ``value``'s full global array to chunk directly, so
+        this uses :func:`~climtools.core.xr_chunks.compute_save_chunks`
+        instead, which reconstructs each variable's true global shape
+        from ``value``'s own dtype/non-partition-dimension shape (already
+        identical on every rank) plus ``mpi_meta["global_size"]``, and
+        chunks a lazy, zero-cost mock array of that shape -- never real
+        data -- with dask's own ``"auto"`` heuristic. The
+        partition-dimension chunk is then aligned so no rank's write can
+        straddle a save chunk -- snapped to a divisor of
+        ``mpi_meta["chunk_info"]`` when :meth:`redistribute`'s rank
+        boundaries actually derive from it, or forced to a single element
+        in the rarer case where they do not (too few distribution_chunks
+        for the rank count; see
+        :func:`~climtools.core.xr_chunks.chunk_alignment_holds`) -- see
+        :func:`~climtools.core.xr_chunks.compute_save_chunks`'s docstring
+        for the full derivation.
+
+        The computation itself is a deterministic function of information
+        already identical on every rank, so it needs no MPI communication
+        to be *correct* -- but it is intentionally computed once, on rank
+        0, and broadcast, both to avoid redundant duplicate work on every
+        rank for what is normally a write-time, not hot-loop, operation,
+        and to keep this method's shape matching the rest of climtools's
+        plan-on-rank-0/bcast/apply-everywhere convention (see
+        :meth:`open_dataset`). A planning failure on rank 0 (for example,
+        ``chunk_info`` missing the partition dimension) is raised
+        identically on every rank rather than deadlocking the other ranks
+        waiting on the broadcast.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Rank-local slice of a distributed object.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            ``value``, with ``mpi_meta["save_chunks"]`` attached. Returned
+            unchanged (not an error) if ``value`` carries no distribution
+            metadata, since save_chunks is meaningful only for
+            distributed data.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` is distributed but its ``chunk_info`` does not
+            include the partition dimension.
+        """
+        meta = get_mpi_meta(value)
+        if meta is None:
+            return value
+
+        save_chunks: dict[str, tuple[int, ...]] | None = None
+        error: BaseException | None = None
+        if self._runtime.comm.rank == 0:
+            try:
+                save_chunks = compute_save_chunks(value, meta, self._runtime.comm.size)
+            except BaseException as exc:
+                error = exc
+        self._runtime.raise_if_error(error, "mpi.xarray.attach_save_chunks planning")
+
+        save_chunks = self._runtime.comm.bcast(save_chunks, root=0)
+        set_save_chunks(value, cast("dict[str, tuple[int, ...]]", save_chunks))
+        return value
 
     def isel(
         self,

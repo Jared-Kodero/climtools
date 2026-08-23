@@ -44,8 +44,8 @@ import xarray as xr
 from mpi4py import MPI
 
 from ..core.lib_mpi import mpi
+from ..core.xr_chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from ..core.xr_meta import MPI_META, _format_bytes, get_mpi_meta
-from ..core.xr_mpi import get_chunk_bounds
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:
@@ -64,157 +64,6 @@ class NetCDFWriteError(mpi.MPIError):
 # Half that hard limit is used as the working target below, leaving headroom
 # for HDF5/filter (zlib, shuffle) bookkeeping overhead per chunk rather than
 # skimming the exact boundary.
-_MAX_CHUNK_BYTES = 2**31
-
-
-def get_partition_chunk_size(
-    ds: xr.Dataset,
-    partition_dim: str | None,
-) -> int | None:
-    """Return the per-rank-aligned HDF5 chunk length for ``partition_dim``.
-
-    A single HDF5 chunk cannot exceed 4 GiB (2**32 bytes) -- an
-    architectural limit of HDF5's chunk indexing, not a climtools choice
-    (see ``_MAX_CHUNK_BYTES``). Exceeding it raises ``RuntimeError: NetCDF:
-    Bad chunk sizes.`` from the netCDF-C library. Using the dimension's
-    *global* length as the chunk length avoids a rank's write straddling a
-    chunk boundary (see :func:`get_chunks`) but has no ceiling of its own:
-    once ``global_length * (other dims) * itemsize`` crosses 4 GiB -- which
-    happens well within the range of a real climate dataset's time axis --
-    that whole-dimension chunk itself becomes invalid.
-
-    The preferred chunk length keeps one HDF5 chunk aligned with one rank's
-    write (``ceil(global_length / mpi_size)``): still no straddling, since
-    both ``write_partitioned`` and ``to_netcdf_parallel``'s
-    already-distributed path derive their actual write boundaries from this
-    exact value, while shrinking every individual chunk's byte size by
-    roughly the rank count. That alone is not always enough -- a large
-    enough array (a full-resolution grid over many timesteps written by a
-    modest rank count) can still exceed the byte limit per rank. When it
-    would, the chunk length is shrunk further below one-chunk-per-rank; a
-    rank's write then spans several whole chunks instead of exactly one.
-    :func:`~climtools.core.xr_mpi.get_chunk_bounds`, which both write paths
-    use to turn this chunk length into actual rank boundaries, already
-    supports that (its ``local_chunks`` can be greater than one), so no
-    straddling is introduced by shrinking further.
-    """
-    if partition_dim is None or partition_dim not in ds.sizes:
-        return ds.sizes.get(partition_dim)
-
-    length = int(ds.sizes[partition_dim])
-    preferred = max(1, math.ceil(length / mpi.comm.size))
-
-    other_bytes = max(
-        (
-            variable.dtype.itemsize
-            * math.prod(
-                int(size)
-                for dim, size in zip(variable.dims, variable.shape, strict=True)
-                if dim != partition_dim
-            )
-            for variable in ds.data_vars.values()
-            if partition_dim in variable.dims
-        ),
-        default=1,
-    )
-    if other_bytes <= 0 or preferred * other_bytes <= _MAX_CHUNK_BYTES:
-        return preferred
-    return max(1, _MAX_CHUNK_BYTES // other_bytes)
-
-
-def get_chunks(
-    ds: xr.Dataset,
-    chunks: Mapping[str, Iterable[int]] | None,
-    partition_dim: str | None = None,
-    partition_length: int | None = None,
-) -> dict[str, tuple[int, ...]]:
-    """Return explicit or existing xarray chunk shapes.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset whose variable chunks are inspected.
-    chunks : mapping, optional
-        Explicit variable chunk shapes.
-    partition_dim : str, optional
-        Dimension that MPI ranks write disjoint ``start:stop`` slabs of.
-        When given, the returned chunk length along this dimension always
-        spans its full ``partition_length`` instead of whatever dask's
-        automatic byte-size heuristic would have picked.
-    partition_length : int, optional
-        Global size of ``partition_dim``. Required to have any effect
-        together with ``partition_dim``.
-
-    Returns
-    -------
-    dict
-        Mapping from variable name to NetCDF chunk shape.
-
-    Notes
-    -----
-    ``da.chunk("auto")`` sizes chunks from byte counts alone, with no
-    knowledge of how the parallel writer partitions ``partition_dim``
-    across ranks. Below dask's ~128 MiB target that yields a single chunk
-    spanning the whole dimension, which happens to match every rank's
-    writes sharing one chunk collectively -- safe, if not what "auto" was
-    asked for. Above that target dask splits the dimension into chunks
-    whose boundary generally falls inside one rank's ``start:stop`` slab
-    rather than between two. Each rank's collective write then straddles
-    two HDF5 chunks, and the byte range within a straddled chunk that no
-    rank's write actually recorded stays as whatever ``nofill`` (on by
-    default here) left it, rather than any variable's real numeric value.
-    Reading it back later decodes that garbage the same way as any other
-    value, so a CF time axis surfaces it as an ``OverflowError`` from
-    cftime's int64 range check rather than as an out-of-place number. This
-    only appears once the dataset crosses dask's chunking threshold, which
-    is exactly why it will not reproduce at small ``TIME_STEPS`` and can
-    look like a scale-only slowdown rather than a correctness bug. Forcing
-    the partitioned dimension to one chunk removes the possibility of a
-    rank's slab straddling a chunk edge entirely, regardless of dataset
-    size.
-
-    This forcing has to run over every variable that carries
-    ``partition_dim``, coordinates included: netCDF4/HDF5 also picks its
-    own default chunk shape -- independent of dask and of dataset size --
-    for any variable left out of the returned mapping (``create_file``
-    only passes ``chunksizes`` for names present here). For a 1D unlimited
-    coordinate such as a partitioned "time" axis that default is a fixed
-    512-element chunk regardless of the final length, so the same
-    straddle-and-garbage failure reappears through the coordinate even when
-    every data variable is covered. Iterating ``ds.variables`` rather than
-    ``ds.data_vars`` closes that gap.
-    """
-    if chunks is not None:
-        return {
-            name: tuple(int(length) for length in shape)
-            for name, shape in chunks.items()
-        }
-
-    output: dict[str, tuple[int, ...]] = {}
-    for name, da in ds.variables.items():
-        if da.ndim == 0 or any(length == 0 for length in da.shape):
-            continue
-        chunked = da if da.chunks is not None else da.chunk("auto")
-        # An index (dimension) coordinate -- e.g. a partitioned "time" axis
-        # -- is always an IndexVariable, which xarray never dask-chunks:
-        # chunk("auto") is a no-op and leaves chunked.chunksizes empty.
-        # Its own shape is then the only available chunk size, and, being a
-        # 1D coordinate, is small enough to use directly.
-        if chunked.chunks is None:
-            shape = tuple(int(length) for length in da.shape)
-        else:
-            shape = tuple(max(chunked.chunksizes[dim]) for dim in da.dims)
-        if (
-            partition_dim is not None
-            and partition_length is not None
-            and partition_dim in da.dims
-        ):
-            axis = da.dims.index(partition_dim)
-            shape = shape[:axis] + (int(partition_length),) + shape[axis + 1 :]
-        output[name] = shape
-    return output
-
-
 def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
     """Set serializable NetCDF attributes, excluding internal MPI metadata."""
     for key, value in attrs.items():
@@ -721,12 +570,6 @@ def to_netcdf_parallel(
         is_dask_backed = mpi.comm.bcast(is_dask_backed, root=0)
 
         if is_dask_backed:
-            mpi.log(
-                "xgeo.to_netcdf (rank-0 source, dask-backed): distributing "
-                + "lazily instead of materializing on rank 0 -- see "
-                + "mpi.xarray.distribute in the README's Parallel NetCDF "
-                + "output section.",
-            )
             local_ds = mpi.xarray.distribute(
                 local_ds if mpi.comm.rank == 0 else None,
                 dim=partition_dim if partition_dim is not None else "auto",
@@ -747,6 +590,25 @@ def to_netcdf_parallel(
             )
         mpi.raise_if_error(error, "parallel NetCDF partition dimension")
         partition_dim = distributed_dim
+
+        # Plan save_chunks collectively before any rank-0-only work below,
+        # so the schema-construction branch can align the partition-
+        # dimension chunk to distribution_chunks and cap it to the HDF5
+        # 4 GiB chunk limit -- rank 0's own local slice (used below to read
+        # dtype/dims) does not know the array's true global shape, so a
+        # dask.chunk("auto") call against it alone would size every other
+        # dimension's chunk from 1/mpi_size of the real data volume.
+        # attach_save_chunks fixes that using mpi_meta alone (see its
+        # docstring), and is skipped when the caller already gave explicit
+        # chunks to honor below, since every rank sees the same `chunks`
+        # argument and can decide this identically without communication.
+        if chunks is None:
+            mpi.xarray.attach_save_chunks(local_ds)
+            local_meta = get_mpi_meta(local_ds)
+            if local_meta is None:
+                raise AssertionError(
+                    "attach_save_chunks unexpectedly cleared mpi_meta."
+                )
 
         # Coordinates that carry partition_dim (a distributed "time" axis is
         # the common case) are genuinely different per rank, unlike lat/lon/
@@ -850,11 +712,10 @@ def to_netcdf_parallel(
                         f"Unknown unlimited dimensions: {sorted(missing)}."
                     )
 
-                chunk_map = get_chunks(
-                    ds,
-                    chunks,
-                    partition_dim,
-                    local_meta["chunk_info"].get(partition_dim, sizes[partition_dim]),
+                chunk_map = (
+                    get_chunks(ds, chunks, partition_dim, sizes[partition_dim])
+                    if chunks is not None
+                    else local_meta["save_chunks"]
                 )
                 root_data = {}
                 variables: dict[str, dict[str, Any]] = {}
@@ -932,7 +793,9 @@ def to_netcdf_parallel(
             if missing:
                 raise ValueError(f"Unknown unlimited dimensions: {sorted(missing)}.")
 
-            partition_chunk_size = get_partition_chunk_size(ds, partition_dim)
+            partition_chunk_size = get_partition_chunk_size(
+                ds, partition_dim, mpi.comm.size
+            )
             chunk_map = get_chunks(ds, chunks, partition_dim, partition_chunk_size)
             # Rank 0 already holds the complete global array for every
             # coordinate here (there is nothing to gather, unlike the
