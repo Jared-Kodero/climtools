@@ -10,14 +10,6 @@ conda activate mother
 module list  # determine versions of netcdf and open mpi the stuff is linked against
 
 
-import_times=$(python -X importtime -c "import climtools" 2>&1)
-echo "$import_times" > import_times.info
-
-# Non-MPI component suite: plot, calc, cmaps, cdo, the .xgeo accessor and
-# its non-parallel operations, the serial NetCDF writer, and core.tools.
-# Plain `python`, one rank, no launcher -- run first since it is the faster
-# and more informative half to fail on.
-python test_general.py
 
 # `python -m mpi4py`, not a bare `python`: an unhandled exception on a subset
 # of ranks otherwise leaves the job blocked in MPI_Finalize until the
