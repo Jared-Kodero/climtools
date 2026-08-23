@@ -466,10 +466,11 @@ def compute_save_chunks(
     compatibility with HDF5 limits and MPI rank boundaries:
 
     - **Capped**: Limited by the HDF5 4 GiB chunk-size restriction.
-    - **Snapped**: If chunk alignment holds, snapped down to the largest divisor
-      of the distribution chunk size to prevent chunk straddling across ranks.
-    - **Forced to 1**: If alignment does not hold, forced to 1 to guarantee
-      safety across irregular rank boundaries.
+    - **Snapped**: If distribution-chunk alignment holds, snapped down to the
+      largest divisor of the distribution chunk size.
+    - **Boundary-aligned**: If distribution-chunk alignment does not hold,
+      snapped down to the largest divisor common to all balanced MPI rank
+      boundaries.
 
     Parameters
     ----------
@@ -500,8 +501,18 @@ def compute_save_chunks(
             + f"dimension {dim!r}; cannot bound save_chunks against "
             + "distribution_chunks without it."
         )
+
     distribution_chunk = int(chunk_info[dim])
     aligned = chunk_alignment_holds(global_size, distribution_chunk, mpi_size)
+
+    boundary_gcd = global_size
+    if not aligned and mpi_size > 1:
+        boundaries = [
+            get_balanced_bounds(global_size, rank, mpi_size)[1]
+            for rank in range(mpi_size - 1)
+        ]
+        if boundaries:
+            boundary_gcd = math.gcd(*boundaries)
 
     if isinstance(value, xr.Dataset):
         variables = list(value.variables.items())
@@ -514,27 +525,35 @@ def compute_save_chunks(
     for name, variable in variables:
         if variable.ndim == 0 or any(int(length) == 0 for length in variable.shape):
             continue
+
         shape = tuple(
             global_size if var_dim == dim else int(length)
             for var_dim, length in zip(variable.dims, variable.shape, strict=True)
         )
         mock = dask_array.zeros(shape, dtype=variable.dtype, chunks="auto")
         other_bytes = _other_dims_bytes(
-            variable.dtype.itemsize, variable.dims, shape, dim
+            variable.dtype.itemsize,
+            variable.dims,
+            shape,
+            dim,
         )
 
         save_chunk: list[int] = []
         for var_dim, length, blocks in zip(
-            variable.dims, shape, mock.chunks, strict=True
+            variable.dims,
+            shape,
+            mock.chunks,
+            strict=True,
         ):
             proposed = int(max(blocks)) if blocks else int(length)
             if var_dim != dim:
                 save_chunk.append(proposed)
                 continue
-            if not aligned:
-                save_chunk.append(1)
-                continue
+
             capped = _cap_partition_chunk_to_hdf5_limit(proposed, other_bytes)
-            save_chunk.append(_largest_divisor_at_most(distribution_chunk, capped))
+            divisor_source = distribution_chunk if aligned else boundary_gcd
+            save_chunk.append(_largest_divisor_at_most(divisor_source, capped))
+
         output[str(name)] = tuple(save_chunk)
+
     return output
