@@ -223,7 +223,7 @@ def _divide_by_ranks(value: Any, size: int) -> Any:
 
 def mpi_comm_reduce(
     runtime: MPIRuntime,
-    value: T,
+    value: Any,
     op: _MPI.Op,
     *,
     mode: Literal["all", "root"] = "all",
