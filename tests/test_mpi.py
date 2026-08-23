@@ -1649,6 +1649,21 @@ def test_short_partition_warning_deduplication() -> None:
     ]
     distinct_ok = SIZE <= 1 or len(distinct_user_warnings) == 1
 
+    # rank= gates the warning to rank 0, matching how every real call site
+    # in this module passes its own comm.rank: only the process that is
+    # actually rank 0 should see the warning here, even though every rank
+    # reaches this exact code path and computes the identical decision.
+    real_rank_dim = f"__test_probe_real_rank_{RANK}__"
+    xr_mpi_module._SHORT_PARTITION_WARNED.discard((real_rank_dim, 1, SIZE))
+    with warnings.catch_warnings(record=True) as real_rank_case:
+        warnings.simplefilter("always")
+        xr_mpi_module.choose_partition_dim({real_rank_dim: 1}, SIZE, rank=RANK)
+    real_rank_warnings = [
+        w for w in real_rank_case if issubclass(w.category, UserWarning)
+    ]
+    expected_count = 1 if RANK == 0 else 0
+    rank_gate_ok = SIZE <= 1 or len(real_rank_warnings) == expected_count
+
     # Dedup must never change the actual chosen dimension or break real use.
     small = xr.DataArray(
         np.arange(2, dtype=np.float64).reshape(1, 2),
@@ -1660,7 +1675,9 @@ def test_short_partition_warning_deduplication() -> None:
         mpi.xarray.sum(distributed, dim="lat", redistribute_on=None) is not None
     )
 
-    correct = bool(mpi.reduce.all(repeat_ok and distinct_ok and still_works))
+    correct = bool(
+        mpi.reduce.all(repeat_ok and distinct_ok and rank_gate_ok and still_works)
+    )
     record_result(
         "choose_partition_dim short-partition warning dedup (once per condition)",
         correct,

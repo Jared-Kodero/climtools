@@ -376,6 +376,7 @@ def choose_partition_dim(
     mpi_size: int,
     *,
     exclude: Iterable[Hashable] = (),
+    rank: int | None = None,
 ) -> Hashable:
     """Select a partition dimension automatically.
 
@@ -394,6 +395,13 @@ def choose_partition_dim(
     exclude : iterable of hashable, optional
         Dimensions that must not be chosen, for example a dimension the caller
         intends to reduce over.
+    rank : int, optional
+        Calling rank, used only to gate the short-partition warning below to
+        rank 0. The dimension this function returns never depends on it: the
+        choice is identical on every rank regardless. None (the default)
+        always warns, which is correct both for a caller that has already
+        gated its own call to one rank and for a direct, standalone call
+        (as in a test) where there is no meaningful "rank" to gate on.
 
     Returns
     -------
@@ -409,14 +417,15 @@ def choose_partition_dim(
     -----
     A short-partition warning (see below) is emitted at most once per
     distinct ``(dim, length, mpi_size)`` combination for the life of the
-    process. climtools sets its own warnings filter to ``"always"`` for
-    ``climtools.*`` modules (see ``climtools/__init__.py``) precisely so a
-    climtools warning is never silently dropped by Python's default
-    per-callsite dedup -- but that same policy means a warning raised from a
-    hot path would otherwise repeat, unchanged, on every single call, which
-    is pure noise rather than new information. Deduplicating on the
-    condition itself keeps the first, genuinely informative occurrence
-    visible while not repeating it for a condition already reported.
+    process, and, when ``rank`` is given, only from rank 0. climtools sets
+    its own warnings filter to ``"always"`` for ``climtools.*`` modules (see
+    ``climtools/__init__.py``) precisely so a climtools warning is never
+    silently dropped by Python's default per-callsite dedup -- but that same
+    policy means a warning raised identically on every rank of a hot,
+    rank-invariant path would otherwise print once per rank in addition to
+    repeating on every call, which is pure noise rather than new
+    information. Every rank computes the exact same decision here without
+    any communication, so only rank 0 needs to report it.
     """
     blocked = set(exclude)
     candidates = [
@@ -429,7 +438,7 @@ def choose_partition_dim(
     order = {dim: position for position, (dim, _) in enumerate(usable)}
     dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
 
-    if length < mpi_size:
+    if length < mpi_size and (rank is None or rank == 0):
         warn_key = (str(dim), length, mpi_size)
         if warn_key not in _SHORT_PARTITION_WARNED:
             _SHORT_PARTITION_WARNED.add(warn_key)
@@ -542,6 +551,7 @@ class XarrayMPI(ArithmeticMixin):
                         partition_dim = choose_partition_dim(
                             metadata.sizes,
                             self._runtime.comm.size,
+                            rank=self._runtime.comm.rank,
                         )
                     if partition_dim not in metadata.dims:
                         raise ValueError(
@@ -747,7 +757,7 @@ class XarrayMPI(ArithmeticMixin):
                 else:
                     automatic = dim == "auto"
                     resolved_dim = (
-                        choose_partition_dim(stripped.sizes, comm.size)
+                        choose_partition_dim(stripped.sizes, comm.size, rank=comm.rank)
                         if automatic
                         else dim
                     )
@@ -1178,7 +1188,9 @@ class XarrayMPI(ArithmeticMixin):
         if automatic:
             if not value.dims:
                 return strip_mpi_meta(value)
-            dim = choose_partition_dim(value.sizes, self._runtime.comm.size)
+            dim = choose_partition_dim(
+                value.sizes, self._runtime.comm.size, rank=self._runtime.comm.rank
+            )
 
         if dim not in value.dims:
             raise ValueError(f"Redistribution dimension {dim!r} does not exist.")
@@ -1893,7 +1905,9 @@ class XarrayMPI(ArithmeticMixin):
             }
             if not any(int(length) > 1 for length in sizes.values()):
                 return result
-            target = choose_partition_dim(sizes, self._runtime.comm.size)
+            target = choose_partition_dim(
+                sizes, self._runtime.comm.size, rank=self._runtime.comm.rank
+            )
         elif redistribute_on not in auto_candidates:
             raise ValueError(
                 f"redistribute_on={redistribute_on!r} is not a dimension of any "
