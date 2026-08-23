@@ -302,7 +302,13 @@ def log_partition_report(
 
     # Build structured summary values
     dim_str = f"{str(dim)!r}{' (auto)' if automatic else ''}"
-    split_str = f"{min(counts)}-{max(counts)}/rank"
+
+    # Use a single value if min and max counts are identical, otherwise show range
+    if min(counts) == max(counts):
+        split_str = f"{min(counts)}/rank"
+    else:
+        split_str = f"{min(counts)}-{max(counts)}/rank"
+
     if idle:
         split_str += f" (IDLE={idle})"
 
