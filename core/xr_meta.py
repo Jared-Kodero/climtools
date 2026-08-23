@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+import warnings
+from collections.abc import Hashable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
 
 if TYPE_CHECKING:
-    from .xr_mpi import MPIRuntime
+    from collections.abc import Callable
+
+    from .lib_mpi import MPIRuntime
 
 MPI_META = "mpi_meta"
 # The subset of a partition's metadata that decides whether two partitions
@@ -349,3 +352,211 @@ def log_partition_report(
     runtime.log("")
     runtime.log("\n".join(lines), flush=True, prefix=False)
     runtime.log("", prefix=False)
+
+
+def indexer_is_scalar(indexer: Any) -> bool:
+    """Return whether an isel/sel indexer selects a single position.
+
+    Parameters
+    ----------
+    indexer : Any
+        Value passed as an index. A :class:`slice`, ``list``, ``tuple``,
+        :class:`numpy.ndarray`, or :class:`xarray.DataArray` selects zero or
+        more positions; anything else (an int, a label, ...) selects one.
+
+    Returns
+    -------
+    bool
+        True when ``indexer`` selects exactly one position and therefore
+        drops its dimension, rather than keeping it with length one.
+    """
+    return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
+
+
+def _coord_length(spec: Any) -> int | None:
+    """Return a coordinate spec's own length, or None if it has none.
+
+    Accepts the same forms as :func:`_localize_coord`: a bare array-like or
+    a ``(dims, array[, attrs])`` tuple. A 0-D (scalar) coordinate has no
+    length to offer.
+    """
+    array = spec[1] if isinstance(spec, tuple) else spec
+    array = np.asarray(array)
+    return int(array.shape[0]) if array.ndim > 0 else None
+
+
+def _resolve_sizes(
+    required_dims: Iterable[Hashable],
+    sizes: Mapping[Hashable, int] | None,
+    coords: Mapping[Hashable, Any] | None,
+) -> dict[Hashable, int]:
+    """Fill in any dimension length missing from ``sizes`` using ``coords``.
+
+    A dimension's length can come from either an explicit entry in
+    ``sizes`` (checked first, so it always wins) or the length of a
+    matching full-length coordinate in ``coords`` -- reading that length
+    never forces any computation, since coordinates passed to
+    :meth:`XarrayMPI.create_dataarray`/``create_dataset`` are always plain,
+    eager arrays, never lazy ``fill`` functions. Any dimension with
+    neither is reported together, in one error, rather than one at a time.
+    """
+    resolved = dict(sizes) if sizes else {}
+    coords = coords or {}
+    missing = []
+    for dim_name in required_dims:
+        if dim_name in resolved:
+            continue
+        length = _coord_length(coords[dim_name]) if dim_name in coords else None
+        if length is None:
+            missing.append(dim_name)
+        else:
+            resolved[dim_name] = length
+    if missing:
+        raise ValueError(
+            f"Cannot determine the length of {sorted(str(d) for d in missing)}: "
+            + "not given explicitly and no matching full-length coordinate "
+            + "was passed. Pass its length explicitly, or include a "
+            + "full-length coordinate array for it."
+        )
+    return resolved
+
+
+def _localize_coord(
+    spec: Any,
+    global_size: int,
+    start: int,
+    stop: int,
+) -> Any:
+    """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
+
+    Accepts a coordinate in any of the three forms
+    :class:`xarray.DataArray`/:class:`~xarray.Dataset` themselves accept: a
+    bare array-like, ``(dims, array)``, or ``(dims, array, attrs)``. A
+    coordinate whose own length does not equal ``global_size`` is returned
+    unchanged (already rank-local, or a scalar/unrelated-length auxiliary
+    coordinate -- not this function's business to guess about).
+    """
+    if isinstance(spec, tuple):
+        coord_dims, coord_array, *rest = spec
+    else:
+        coord_dims, coord_array, rest = None, spec, []
+    coord_array = np.asarray(coord_array)
+    if coord_array.shape and coord_array.shape[0] == global_size:
+        coord_array = coord_array[start:stop]
+    if coord_dims is None:
+        return coord_array
+    return (coord_dims, coord_array, *rest)
+
+
+def _delayed_local(
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    shape: tuple[int, ...],
+    dtype: Any,
+) -> Any:
+    """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
+
+    Shared by :meth:`XarrayMPI.create_dataarray` and
+    :meth:`XarrayMPI.create_dataset`: every call site passes a *different*
+    ``fn``/``args`` (this rank's own ``fill`` and its own bounds, or none
+    for a non-partitioned variable), computed independently with no
+    communication -- this helper only avoids repeating the
+    ``dask.delayed``/``from_delayed`` wiring three times.
+    """
+    import dask
+    import dask.array as dask_array
+
+    return dask_array.from_delayed(dask.delayed(fn)(*args), shape=shape, dtype=dtype)
+
+
+_SHORT_PARTITION_WARNED: set[tuple[str, int, int]] = set()
+"""Distinct (dim, length, mpi_size) triples already warned about this process.
+
+Populated by :func:`choose_partition_dim`. Not meant to be read or mutated
+directly; exists at module scope only so the warning survives across many
+independent calls within one process without needing to thread state through
+every caller.
+"""
+
+
+def choose_partition_dim(
+    sizes: Mapping[Hashable, int],
+    mpi_size: int,
+    *,
+    exclude: Iterable[Hashable] = (),
+    rank: int | None = None,
+) -> Hashable:
+    """Select a partition dimension automatically.
+
+    The dimension that keeps the most ranks busy is the longest one, so the
+    primary key is length. Ties are broken by dataset declaration order, which
+    is identical on every rank, so the choice is rank-invariant without any
+    communication. Dimensions of length one are never chosen unless nothing
+    else exists, because partitioning them leaves every rank but one empty.
+
+    Parameters
+    ----------
+    sizes : mapping
+        Dimension name to global length.
+    mpi_size : int
+        Number of ranks the data will be spread over.
+    exclude : iterable of hashable, optional
+        Dimensions that must not be chosen, for example a dimension the caller
+        intends to reduce over.
+    rank : int, optional
+        Calling rank, used only to gate the short-partition warning below to
+        rank 0. The dimension this function returns never depends on it: the
+        choice is identical on every rank regardless. None (the default)
+        always warns, which is correct both for a caller that has already
+        gated its own call to one rank and for a direct, standalone call
+        (as in a test) where there is no meaningful "rank" to gate on.
+
+    Returns
+    -------
+    hashable
+        Chosen dimension.
+
+    Raises
+    ------
+    ValueError
+        If no dimension is available.
+
+    Notes
+    -----
+    A short-partition warning (see below) is emitted at most once per
+    distinct ``(dim, length, mpi_size)`` combination for the life of the
+    process, and, when ``rank`` is given, only from rank 0. climtools sets
+    its own warnings filter to ``"always"`` for ``climtools.*`` modules (see
+    ``climtools/__init__.py``) precisely so a climtools warning is never
+    silently dropped by Python's default per-callsite dedup -- but that same
+    policy means a warning raised identically on every rank of a hot,
+    rank-invariant path would otherwise print once per rank in addition to
+    repeating on every call, which is pure noise rather than new
+    information. Every rank computes the exact same decision here without
+    any communication, so only rank 0 needs to report it.
+    """
+    blocked = set(exclude)
+    candidates = [
+        (dim, int(length)) for dim, length in sizes.items() if dim not in blocked
+    ]
+    if not candidates:
+        raise ValueError("No dimension is available for automatic partitioning.")
+
+    usable = [item for item in candidates if item[1] > 1] or candidates
+    order = {dim: position for position, (dim, _) in enumerate(usable)}
+    dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
+
+    if length < mpi_size and (rank is None or rank == 0):
+        warn_key = (str(dim), length, mpi_size)
+        if warn_key not in _SHORT_PARTITION_WARNED:
+            _SHORT_PARTITION_WARNED.add(warn_key)
+            warnings.warn(
+                f"Automatic partition dimension {str(dim)!r} has length "
+                + f"{length}, which is shorter than the {mpi_size} available "
+                + f"ranks, so {mpi_size - length} rank(s) will hold no data. "
+                + "This message will not repeat for the same dimension, "
+                + "length, and rank count.",
+                UserWarning,
+                stacklevel=3,
+            )
+    return dim

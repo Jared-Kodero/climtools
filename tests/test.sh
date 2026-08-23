@@ -9,7 +9,10 @@ conda activate mother
 
 module list  # determine versions of netcdf and open mpi the stuff is linked against
 
+# Correctness suite: no MPI launcher needed.
+python test_general.py > test_general.log 2>&1
 
+srun --ntasks=8 --cpu-bind=cores --kill-on-bad-exit=1 python -m mpi4py test_mpi_xarray_reductions.py > test_mpi_xarray_reductions.log 2>&1
 
 # `python -m mpi4py`, not a bare `python`: an unhandled exception on a subset
 # of ranks otherwise leaves the job blocked in MPI_Finalize until the

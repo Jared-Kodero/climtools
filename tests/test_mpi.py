@@ -37,6 +37,7 @@ import dask.array as dask_array
 import numpy as np
 import xarray as xr
 from climtools import mpi, xgeo
+from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
 
 # Raised from 100 to make the local per-rank compute in every reduction
@@ -804,6 +805,241 @@ def test_mpi_reduction_contracts() -> None:
     )
     record_result(
         "mpi runtime/reduce contracts (validation/noncontiguous/nonzero root)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+# ---------------------------------------------------------------------------
+# core.xr_meta -- communicator-free helpers XarrayMPI is built on
+# ---------------------------------------------------------------------------
+
+
+@run_test
+def test_xr_meta_reexports() -> None:
+    """xr_mpi's relocated names are xr_meta's objects, not reimplementations.
+
+    Regression coverage for the xr_mpi.py -> xr_meta.py move of
+    ``choose_partition_dim`` and ``indexer_is_scalar``: both must remain
+    reachable as ``climtools.core.xr_mpi.<name>`` (existing callers and
+    tests import them from there) and must be *identical* objects to
+    ``climtools.core.xr_meta.<name>``, not a second, independently
+    maintained copy that could silently drift from the original.
+    """
+    from climtools.core import xr_mpi as xr_mpi_module
+
+    correct = bool(
+        mpi.reduce.all(
+            xr_mpi_module.choose_partition_dim is xr_meta.choose_partition_dim
+            and xr_mpi_module.indexer_is_scalar is xr_meta.indexer_is_scalar
+            and "choose_partition_dim" in xr_mpi_module.__all__
+            and "indexer_is_scalar" in xr_mpi_module.__all__
+        )
+    )
+    record_result(
+        "xr_mpi re-exports choose_partition_dim/indexer_is_scalar from xr_meta",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_indexer_is_scalar() -> None:
+    """A slice/list/tuple/ndarray/DataArray indexer is not scalar; else it is."""
+    non_scalar = (
+        slice(0, 1),
+        [0, 1],
+        (0, 1),
+        np.array([0, 1]),
+        xr.DataArray([0, 1]),
+    )
+    scalar = (0, -1, 3.5, "label", np.int64(2))
+    correct = all(not xr_meta.indexer_is_scalar(value) for value in non_scalar) and all(
+        xr_meta.indexer_is_scalar(value) for value in scalar
+    )
+    correct = bool(mpi.reduce.all(correct))
+    record_result(
+        "indexer_is_scalar (slice/list/tuple/ndarray/DataArray vs. label)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_choose_partition_dim_selection() -> None:
+    """choose_partition_dim's selection rules, independent of the warning.
+
+    Complements :func:`test_short_partition_warning_deduplication`, which
+    already covers the short-partition warning in depth: this test covers
+    which dimension is picked in the first place -- longest wins,
+    declaration-order tie-breaking, ``exclude``, the length-one fallback,
+    and the ``ValueError`` raised with no candidate dimensions at all.
+    """
+    longest = xr_meta.choose_partition_dim(
+        {"lat": 4, "lon": 10, "time": 6}, mpi_size=SIZE
+    )
+    tie_break = xr_meta.choose_partition_dim({"a": 5, "b": 5, "c": 5}, mpi_size=SIZE)
+    excluded = xr_meta.choose_partition_dim(
+        {"time": 100, "lat": 10}, mpi_size=SIZE, exclude=("time",)
+    )
+    avoids_length_one = xr_meta.choose_partition_dim(
+        {"member": 1, "lat": 3}, mpi_size=SIZE
+    )
+    forced_length_one = xr_meta.choose_partition_dim({"member": 1}, mpi_size=SIZE)
+    raises_with_none = call_raises(
+        ValueError,
+        xr_meta.choose_partition_dim,
+        {},
+        mpi_size=SIZE,
+    )
+
+    correct = bool(
+        mpi.reduce.all(
+            longest == "lon"
+            and tie_break == "a"
+            and excluded == "lat"
+            and avoids_length_one == "lat"
+            and forced_length_one == "member"
+            and raises_with_none
+        )
+    )
+    record_result(
+        "choose_partition_dim selection (longest/tie-break/exclude/"
+        "length-one fallback/no candidates)",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_mpi_meta_round_trip() -> None:
+    """set_mpi_meta/get_mpi_meta/strip_mpi_meta agree on a rank-local partition.
+
+    Uses each rank's own real MPI-derived bounds (via
+    :func:`partition_bounds`) rather than a fixed constant, so the check is
+    meaningful at any rank count, then verifies the length-mismatch
+    rejection and the Dataset variable-level fallback documented on
+    :func:`~climtools.core.xr_meta.get_mpi_meta`.
+    """
+    global_size = max(SIZE, 8)
+    start, stop = partition_bounds(global_size)
+    da = xr.DataArray(np.arange(stop - start, dtype=np.float64), dims=("x",), name="f")
+    no_meta_yet = xr_meta.get_mpi_meta(da) is None
+
+    xr_meta.set_mpi_meta(
+        da, dim="x", global_size=global_size, start=start, stop=stop, chunk_info={}
+    )
+    meta = xr_meta.get_mpi_meta(da)
+    round_trip_ok = (
+        meta is not None
+        and meta["dim"] == "x"
+        and meta["global_size"] == global_size
+        and meta["start"] == start
+        and meta["stop"] == stop
+    )
+
+    stripped = xr_meta.strip_mpi_meta(da)
+    strip_ok = xr_meta.get_mpi_meta(stripped) is None
+    strip_no_mutation_ok = xr_meta.get_mpi_meta(da) is not None
+
+    # A partition whose declared start/stop no longer matches the data's
+    # own length is invalid, not silently truncated to fit.
+    mismatched = da.isel(x=slice(0, 1)).copy()
+    mismatched.attrs[xr_meta.MPI_META] = dict(da.attrs[xr_meta.MPI_META])
+    length_mismatch_rejected = (stop - start) <= 1 or xr_meta.get_mpi_meta(
+        mismatched
+    ) is None
+
+    # Dataset variable-level fallback: Dataset.attrs is empty (as it is
+    # right after to_dataset()) but every data variable agrees, so the
+    # Dataset-level result should still be valid and describe the same
+    # partition.
+    ds = da.to_dataset()
+    dataset_fallback_ok = ds.attrs.get(xr_meta.MPI_META) is None
+    ds_meta = xr_meta.get_mpi_meta(ds)
+    dataset_fallback_ok = (
+        dataset_fallback_ok
+        and ds_meta is not None
+        and ds_meta["dim"] == "x"
+        and ds_meta["start"] == start
+        and ds_meta["stop"] == stop
+    )
+
+    correct = bool(
+        mpi.reduce.all(
+            no_meta_yet
+            and round_trip_ok
+            and strip_ok
+            and strip_no_mutation_ok
+            and length_mismatch_rejected
+            and dataset_fallback_ok
+        )
+    )
+    record_result(
+        "mpi_meta get/set/strip round trip, length-mismatch rejection, "
+        "Dataset variable-level fallback",
+        correct,
+        0.0,
+        0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_dataset_reduction_coordinate_filtering() -> None:
+    """A Dataset reduction keeps only coordinates outside the reduced dims.
+
+    Regression coverage for ``XarrayMPI._dataset_result`` (the merged
+    former ``_reduced_dataset``/``_dataset_result`` pair): a coordinate
+    that shares a reduced dimension must be dropped from the result, one
+    that does not must survive unchanged, and both data variables and
+    ``attrs`` must come through intact.
+    """
+    lat, lon = LATITUDE_COUNT, LONGITUDE_COUNT
+    field = xr.DataArray(
+        np.arange(lat * lon, dtype=np.float64).reshape(lat, lon),
+        dims=("lat", "lon"),
+        coords={
+            "lat": np.arange(lat, dtype=np.float64),
+            "lon": np.arange(lon, dtype=np.float64),
+        },
+        name="field",
+    )
+    full = field.to_dataset()
+    full.attrs["title"] = "coordinate filtering regression"
+    distributed = mpi.xarray.redistribute(full, "lat")
+
+    reduced = mpi.xarray.sum(distributed, dim="lat", redistribute_on=None)
+
+    lat_coord_dropped = "lat" not in reduced.coords
+    lon_coord_kept = "lon" in reduced.coords and bool(
+        np.array_equal(reduced["lon"].values, full["lon"].values)
+    )
+    attrs_kept = reduced.attrs.get("title") == "coordinate filtering regression"
+    values_ok = bool(
+        np.allclose(
+            reduced["field"].values,
+            full["field"].sum("lat").values,
+            rtol=relative_tolerance_for_dtype(full["field"].values),
+        )
+    )
+
+    correct = bool(
+        mpi.reduce.all(
+            lat_coord_dropped and lon_coord_kept and attrs_kept and values_ok
+        )
+    )
+    record_result(
+        "mpi.xarray Dataset reduction drops reduced-dim coords, "
+        "keeps the rest plus attrs",
         correct,
         0.0,
         0.0,
@@ -1625,17 +1861,15 @@ def test_short_partition_warning_deduplication() -> None:
     visible without repeating it verbatim for a condition already reported,
     while a genuinely different condition still warns on its own first hit.
     """
-    from climtools.core import xr_mpi as xr_mpi_module
-
     same_dim = f"__test_probe_same_{RANK}__"
     other_dim = f"__test_probe_other_{RANK}__"
-    xr_mpi_module._SHORT_PARTITION_WARNED.discard((same_dim, 1, SIZE))
-    xr_mpi_module._SHORT_PARTITION_WARNED.discard((other_dim, 1, SIZE))
+    xr_meta._SHORT_PARTITION_WARNED.discard((same_dim, 1, SIZE))
+    xr_meta._SHORT_PARTITION_WARNED.discard((other_dim, 1, SIZE))
 
     with warnings.catch_warnings(record=True) as repeated:
         warnings.simplefilter("always")
         for _ in range(5):
-            xr_mpi_module.choose_partition_dim({same_dim: 1}, SIZE)
+            xr_meta.choose_partition_dim({same_dim: 1}, SIZE)
     repeated_user_warnings = [
         w for w in repeated if issubclass(w.category, UserWarning)
     ]
@@ -1643,7 +1877,7 @@ def test_short_partition_warning_deduplication() -> None:
 
     with warnings.catch_warnings(record=True) as distinct:
         warnings.simplefilter("always")
-        xr_mpi_module.choose_partition_dim({other_dim: 1}, SIZE)
+        xr_meta.choose_partition_dim({other_dim: 1}, SIZE)
     distinct_user_warnings = [
         w for w in distinct if issubclass(w.category, UserWarning)
     ]
@@ -1654,10 +1888,10 @@ def test_short_partition_warning_deduplication() -> None:
     # actually rank 0 should see the warning here, even though every rank
     # reaches this exact code path and computes the identical decision.
     real_rank_dim = f"__test_probe_real_rank_{RANK}__"
-    xr_mpi_module._SHORT_PARTITION_WARNED.discard((real_rank_dim, 1, SIZE))
+    xr_meta._SHORT_PARTITION_WARNED.discard((real_rank_dim, 1, SIZE))
     with warnings.catch_warnings(record=True) as real_rank_case:
         warnings.simplefilter("always")
-        xr_mpi_module.choose_partition_dim({real_rank_dim: 1}, SIZE, rank=RANK)
+        xr_meta.choose_partition_dim({real_rank_dim: 1}, SIZE, rank=RANK)
     real_rank_warnings = [
         w for w in real_rank_case if issubclass(w.category, UserWarning)
     ]
@@ -4661,6 +4895,13 @@ def main() -> None:
     test_mpi_runtime_helpers()
     test_mpi_logging_and_error_propagation()
     test_mpi_reduction_contracts()
+
+    mpi.log("\n--- core.xr_meta helpers ---")
+    test_xr_meta_reexports()
+    test_indexer_is_scalar()
+    test_choose_partition_dim_selection()
+    test_mpi_meta_round_trip()
+    test_dataset_reduction_coordinate_filtering()
 
     mpi.log("\n--- mpi.reduce ---")
     test_reduce_scalar_sum(n_points)

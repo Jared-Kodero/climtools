@@ -28,7 +28,12 @@ from .xr_chunks import (
     prune_chunk_info,
 )
 from .xr_meta import (
+    _delayed_local,
+    _localize_coord,
+    _resolve_sizes,
+    choose_partition_dim,
     get_mpi_meta,
+    indexer_is_scalar,
     log_partition_report,
     set_mpi_meta,
     set_save_chunks,
@@ -40,9 +45,15 @@ from .xr_ops import ArithmeticMixin
 # get_effective_chunk_size, get_native_chunk_sizes, get_usable_native_chunk,
 # and prune_chunk_info are imported (not defined) above: this
 # distribution_chunks math now lives in xr_chunks.py (see core/xr_chunks.py
-# for the distribution_chunks vs save_chunks split). __all__ re-exports
-# them, so external callers and tests importing these names from
-# climtools.core.xr_mpi keep working unchanged.
+# for the distribution_chunks vs save_chunks split). choose_partition_dim,
+# indexer_is_scalar, and the create_dataarray/create_dataset coordinate and
+# dask-delayed helpers (_resolve_sizes, _localize_coord, _delayed_local) are
+# likewise imported (not defined) above: they carry no MPI-communication
+# logic of their own, so they live in xr_meta.py alongside the rest of this
+# module's shared xarray/MPI metadata helpers, which keeps xr_mpi.py focused
+# on the collective-communication code that actually needs a communicator.
+# __all__ re-exports the public names, so external callers and tests
+# importing them from climtools.core.xr_mpi keep working unchanged.
 __all__ = [
     "XarrayMPI",
     "choose_partition_dim",
@@ -53,6 +64,7 @@ __all__ = [
     "get_effective_chunk_size",
     "get_native_chunk_sizes",
     "get_usable_native_chunk",
+    "indexer_is_scalar",
     "prune_chunk_info",
 ]
 
@@ -184,199 +196,6 @@ class PlanEntry(NamedTuple):
     distributed: bool
     dtype: np.dtype[Any]
     shape: tuple[tuple[str, int], ...]
-
-
-def _coord_length(spec: Any) -> int | None:
-    """Return a coordinate spec's own length, or None if it has none.
-
-    Accepts the same forms as :func:`_localize_coord`: a bare array-like or
-    a ``(dims, array[, attrs])`` tuple. A 0-D (scalar) coordinate has no
-    length to offer.
-    """
-    array = spec[1] if isinstance(spec, tuple) else spec
-    array = np.asarray(array)
-    return int(array.shape[0]) if array.ndim > 0 else None
-
-
-def _resolve_sizes(
-    required_dims: Iterable[Hashable],
-    sizes: Mapping[Hashable, int] | None,
-    coords: Mapping[Hashable, Any] | None,
-) -> dict[Hashable, int]:
-    """Fill in any dimension length missing from ``sizes`` using ``coords``.
-
-    A dimension's length can come from either an explicit entry in
-    ``sizes`` (checked first, so it always wins) or the length of a
-    matching full-length coordinate in ``coords`` -- reading that length
-    never forces any computation, since coordinates passed to
-    :meth:`XarrayMPI.create_dataarray`/``create_dataset`` are always plain,
-    eager arrays, never lazy ``fill`` functions. Any dimension with
-    neither is reported together, in one error, rather than one at a time.
-    """
-    resolved = dict(sizes) if sizes else {}
-    coords = coords or {}
-    missing = []
-    for dim_name in required_dims:
-        if dim_name in resolved:
-            continue
-        length = _coord_length(coords[dim_name]) if dim_name in coords else None
-        if length is None:
-            missing.append(dim_name)
-        else:
-            resolved[dim_name] = length
-    if missing:
-        raise ValueError(
-            f"Cannot determine the length of {sorted(str(d) for d in missing)}: "
-            + "not given explicitly and no matching full-length coordinate "
-            + "was passed. Pass its length explicitly, or include a "
-            + "full-length coordinate array for it."
-        )
-    return resolved
-
-
-def _localize_coord(
-    spec: Any,
-    global_size: int,
-    start: int,
-    stop: int,
-) -> Any:
-    """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
-
-    Accepts a coordinate in any of the three forms
-    :class:`xarray.DataArray`/:class:`~xarray.Dataset` themselves accept: a
-    bare array-like, ``(dims, array)``, or ``(dims, array, attrs)``. A
-    coordinate whose own length does not equal ``global_size`` is returned
-    unchanged (already rank-local, or a scalar/unrelated-length auxiliary
-    coordinate -- not this function's business to guess about).
-    """
-    if isinstance(spec, tuple):
-        coord_dims, coord_array, *rest = spec
-    else:
-        coord_dims, coord_array, rest = None, spec, []
-    coord_array = np.asarray(coord_array)
-    if coord_array.shape and coord_array.shape[0] == global_size:
-        coord_array = coord_array[start:stop]
-    if coord_dims is None:
-        return coord_array
-    return (coord_dims, coord_array, *rest)
-
-
-def _delayed_local(
-    fn: Callable[..., Any],
-    args: tuple[Any, ...],
-    shape: tuple[int, ...],
-    dtype: Any,
-) -> Any:
-    """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
-
-    Shared by :meth:`XarrayMPI.create_dataarray` and
-    :meth:`XarrayMPI.create_dataset`: every call site passes a *different*
-    ``fn``/``args`` (this rank's own ``fill`` and its own bounds, or none
-    for a non-partitioned variable), computed independently with no
-    communication -- this helper only avoids repeating the
-    ``dask.delayed``/``from_delayed`` wiring three times.
-    """
-    import dask
-    import dask.array as dask_array
-
-    return dask_array.from_delayed(dask.delayed(fn)(*args), shape=shape, dtype=dtype)
-
-
-_SHORT_PARTITION_WARNED: set[tuple[str, int, int]] = set()
-"""Distinct (dim, length, mpi_size) triples already warned about this process.
-
-Populated by :func:`choose_partition_dim`. Not meant to be read or mutated
-directly; exists at module scope only so the warning survives across many
-independent calls within one process without needing to thread state through
-every caller.
-"""
-
-
-def choose_partition_dim(
-    sizes: Mapping[Hashable, int],
-    mpi_size: int,
-    *,
-    exclude: Iterable[Hashable] = (),
-    rank: int | None = None,
-) -> Hashable:
-    """Select a partition dimension automatically.
-
-    The dimension that keeps the most ranks busy is the longest one, so the
-    primary key is length. Ties are broken by dataset declaration order, which
-    is identical on every rank, so the choice is rank-invariant without any
-    communication. Dimensions of length one are never chosen unless nothing
-    else exists, because partitioning them leaves every rank but one empty.
-
-    Parameters
-    ----------
-    sizes : mapping
-        Dimension name to global length.
-    mpi_size : int
-        Number of ranks the data will be spread over.
-    exclude : iterable of hashable, optional
-        Dimensions that must not be chosen, for example a dimension the caller
-        intends to reduce over.
-    rank : int, optional
-        Calling rank, used only to gate the short-partition warning below to
-        rank 0. The dimension this function returns never depends on it: the
-        choice is identical on every rank regardless. None (the default)
-        always warns, which is correct both for a caller that has already
-        gated its own call to one rank and for a direct, standalone call
-        (as in a test) where there is no meaningful "rank" to gate on.
-
-    Returns
-    -------
-    hashable
-        Chosen dimension.
-
-    Raises
-    ------
-    ValueError
-        If no dimension is available.
-
-    Notes
-    -----
-    A short-partition warning (see below) is emitted at most once per
-    distinct ``(dim, length, mpi_size)`` combination for the life of the
-    process, and, when ``rank`` is given, only from rank 0. climtools sets
-    its own warnings filter to ``"always"`` for ``climtools.*`` modules (see
-    ``climtools/__init__.py``) precisely so a climtools warning is never
-    silently dropped by Python's default per-callsite dedup -- but that same
-    policy means a warning raised identically on every rank of a hot,
-    rank-invariant path would otherwise print once per rank in addition to
-    repeating on every call, which is pure noise rather than new
-    information. Every rank computes the exact same decision here without
-    any communication, so only rank 0 needs to report it.
-    """
-    blocked = set(exclude)
-    candidates = [
-        (dim, int(length)) for dim, length in sizes.items() if dim not in blocked
-    ]
-    if not candidates:
-        raise ValueError("No dimension is available for automatic partitioning.")
-
-    usable = [item for item in candidates if item[1] > 1] or candidates
-    order = {dim: position for position, (dim, _) in enumerate(usable)}
-    dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
-
-    if length < mpi_size and (rank is None or rank == 0):
-        warn_key = (str(dim), length, mpi_size)
-        if warn_key not in _SHORT_PARTITION_WARNED:
-            _SHORT_PARTITION_WARNED.add(warn_key)
-            warnings.warn(
-                f"Automatic partition dimension {str(dim)!r} has length "
-                + f"{length}, which is shorter than the {mpi_size} available "
-                + f"ranks, so {mpi_size - length} rank(s) will hold no data. "
-                + "This message will not repeat for the same dimension, "
-                + "length, and rank count.",
-                UserWarning,
-                stacklevel=3,
-            )
-    return dim
-
-
-def indexer_is_scalar(indexer: Any) -> bool:
-    return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
 
 class XarrayMPI(ArithmeticMixin):
@@ -1312,6 +1131,32 @@ class XarrayMPI(ArithmeticMixin):
         index: int,
         other_indexers: Mapping[Any, Any],
     ) -> xr.Dataset | xr.DataArray:
+        """Select one global integer index on the distributed dimension.
+
+        Broadcasts the selection from the single rank that owns ``index``
+        so every rank returns the identical, replicated result.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Distributed object carrying MPI partition metadata.
+        dim : hashable
+            Distributed dimension being indexed.
+        index : int
+            Global (not rank-local) integer index, negative indices allowed.
+        other_indexers : mapping
+            Additional, non-distributed ``isel`` indexers applied locally.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The selected slice, identical and undistributed on every rank.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is out of bounds for the global dimension size.
+        """
         meta = get_mpi_meta(value)
         if meta is None:
             return value.isel({dim: index, **other_indexers})
@@ -1427,6 +1272,35 @@ class XarrayMPI(ArithmeticMixin):
         tolerance: Any,
         drop: bool,
     ) -> xr.Dataset | xr.DataArray:
+        """Select one global label on the distributed dimension.
+
+        Resolves ``label`` to a global integer position (exactly, or via
+        ``method``/``tolerance`` nearest-style matching) then delegates to
+        :meth:`isel_scalar`, so every rank returns the identical, replicated
+        result.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Distributed object carrying MPI partition metadata.
+        dim : hashable
+            Distributed dimension being indexed.
+        label : Any
+            Coordinate label to select on the distributed dimension.
+        other_indexers : mapping
+            Additional, non-distributed ``sel`` indexers applied locally.
+        method : str or None
+            xarray nearest-label matching method, as in :meth:`xarray.Dataset.sel`.
+        tolerance : Any
+            Maximum distance for inexact matches, as in :meth:`xarray.Dataset.sel`.
+        drop : bool
+            Whether to drop the selected coordinate, as in :meth:`xarray.Dataset.sel`.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The selected slice, identical and undistributed on every rank.
+        """
         if method is not None:
             meta = get_mpi_meta(value)
             if meta is None:
@@ -1526,6 +1400,7 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.Dataset | xr.DataArray,
         dim: str | Iterable[Hashable] | EllipsisType | None,
     ) -> tuple[Any, tuple[Hashable, ...]]:
+        """Return ``dim`` unchanged alongside the tuple of dims it selects."""
         if not isinstance(value, (xr.DataArray, xr.Dataset)):
             raise TypeError(
                 "MPI xarray operations require an xarray DataArray or Dataset."
@@ -1538,13 +1413,6 @@ class XarrayMPI(ArithmeticMixin):
         return dims, dims
 
     @staticmethod
-    def _variable_dims(
-        value: xr.DataArray,
-        dims: tuple[Hashable, ...],
-    ) -> tuple[Hashable, ...]:
-        return tuple(dim for dim in dims if dim in value.dims)
-
-    @staticmethod
     def _variable_is_distributed(
         value: xr.DataArray,
         meta: Mapping[str, Any] | None,
@@ -1554,13 +1422,10 @@ class XarrayMPI(ArithmeticMixin):
 
     @staticmethod
     def _skipna_enabled(dtype: np.dtype[Any], skipna: bool | None) -> bool:
+        """Return the effective skipna flag, defaulting to dtype-based NaN support."""
         if skipna is not None:
             return skipna
         return dtype.kind in "fc"
-
-    @staticmethod
-    def _mean_dtype(dtype: np.dtype[Any]) -> np.dtype[Any]:
-        return np.asarray(np.mean(np.zeros(1, dtype=dtype))).dtype
 
     @staticmethod
     def _check_reducible(dtype: np.dtype[Any], operation: str) -> None:
@@ -1672,7 +1537,7 @@ class XarrayMPI(ArithmeticMixin):
 
         entries = []
         for name, variable in items:
-            variable_dims = self._variable_dims(variable, dims)
+            variable_dims = tuple(dim for dim in dims if dim in variable.dims)
             if variable_dims:
                 self._check_reducible(variable.dtype, operation)
             entries.append(
@@ -1796,6 +1661,7 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.DataArray,
         dims: tuple[Hashable, ...],
     ) -> xr.DataArray:
+        """Return the global element count across ``dims``, reduced by sum."""
         count: xr.DataArray | None = None
         error: BaseException | None = None
         try:
@@ -1811,7 +1677,7 @@ class XarrayMPI(ArithmeticMixin):
         )
 
     @staticmethod
-    def _reduced_dataset(
+    def _dataset_result(
         value: xr.Dataset,
         dims: tuple[Hashable, ...],
         variables: Mapping[Hashable, xr.DataArray],
@@ -1830,14 +1696,6 @@ class XarrayMPI(ArithmeticMixin):
             if not reduced & set(coord.dims)
         }
         return xr.Dataset(dict(variables), coords=coords, attrs=dict(value.attrs))
-
-    def _dataset_result(
-        self,
-        value: xr.Dataset,
-        dims: tuple[Hashable, ...],
-        variables: Mapping[Hashable, xr.DataArray],
-    ) -> xr.Dataset:
-        return self._reduced_dataset(value, dims, variables)
 
     @staticmethod
     def _redistribution_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
@@ -1933,6 +1791,12 @@ class XarrayMPI(ArithmeticMixin):
         min_count: int | None,
         error: BaseException | None = None,
     ) -> xr.DataArray:
+        """Reduce a rank-local sum/prod partial into the global result.
+
+        Applies xarray's ``min_count`` semantics after the collective, using
+        a global element count, since ``min_count`` compares against the
+        global rather than the rank-local element count.
+        """
         result = self._comm_reduce(
             partial,
             op,
@@ -1967,6 +1831,11 @@ class XarrayMPI(ArithmeticMixin):
         skipna: bool | None = None,
         error: BaseException | None = None,
     ) -> xr.DataArray:
+        """Reduce a rank-local sum partial into the global mean.
+
+        Divides the globally reduced sum by the global element count in the
+        dtype :func:`numpy.mean` would produce for this input.
+        """
         global_sum = self._comm_reduce(
             partial_sum,
             _MPI.SUM,
@@ -1979,7 +1848,7 @@ class XarrayMPI(ArithmeticMixin):
         # the float32 sum by the int64 count directly would promote the whole
         # array to float64 and then cast it back, costing two full-width
         # temporaries for a result that is float32 either way.
-        target = self._mean_dtype(value.dtype)
+        target = np.asarray(np.mean(np.zeros(1, dtype=value.dtype))).dtype
         divisor = (
             global_count.astype(target, keep_attrs=False)
             if target.kind in "fc"
@@ -2054,6 +1923,7 @@ class XarrayMPI(ArithmeticMixin):
         skipna: bool | None,
         error: BaseException | None = None,
     ) -> xr.DataArray:
+        """Reduce a rank-local min/max partial into the global extreme."""
         # The number of collectives is decided from the reduced variable's
         # declared dtype, which the plan has already agreed on, never from
         # the rank-local partial. A rank owning an empty partition builds its
@@ -2302,6 +2172,7 @@ class XarrayMPI(ArithmeticMixin):
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
+        """Shared implementation behind the public ``sum``/``prod`` methods."""
         operation = "prod" if product else "sum"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
@@ -2639,6 +2510,7 @@ class XarrayMPI(ArithmeticMixin):
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
+        """Shared implementation behind the public ``min``/``max`` methods."""
         operation = "min" if minimum else "max"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
@@ -2832,6 +2704,7 @@ class XarrayMPI(ArithmeticMixin):
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
+        """Shared implementation behind the public ``any``/``all`` methods."""
         operation = "all" if all_values else "any"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)

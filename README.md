@@ -35,11 +35,21 @@ and MPI-collective parallel NetCDF-4 output.
 | `climtools.calc` | Trends, correlations, difference-of-means testing. | [`core/calc_stats.py`](core/calc_stats.py) |
 | `climtools.cmaps` | Colormaps: local IPCC tables, matplotlib, cmocean. | [`viz/cmaps.py`](viz/cmaps.py) |
 | `climtools.cdo` | Thin xarray-aware wrapper over the CDO command-line tool. | [`cdo/pycdo.py`](cdo/pycdo.py) |
-| `climtools.mpi` | MPI runtime: `mpi.comm`, `mpi.reduce`, `mpi.xarray`, `mpi.scatterv`, the `@mpi` decorator, `mpi.watchdog`. | [`core/lib_mpi.py`](core/lib_mpi.py), [`core/xr_mpi.py`](core/xr_mpi.py) |
+| `climtools.mpi` | MPI runtime: `mpi.comm`, `mpi.reduce`, `mpi.xarray`, `mpi.scatterv`, the `@mpi` decorator, `mpi.watchdog`. | [`core/lib_mpi.py`](core/lib_mpi.py), [`core/xr_mpi.py`](core/xr_mpi.py), [`core/xr_meta.py`](core/xr_meta.py) |
+
+`core/xr_mpi.py` holds the `XarrayMPI` accessor and the collective-communication
+code that actually needs an MPI communicator (reduction planning, buffer
+collectives, redistribution). `core/xr_meta.py` holds the shared,
+communicator-free xarray/MPI-metadata helpers used by both `xr_mpi.py` and
+`xr_chunks.py`: partition metadata (`get_mpi_meta`/`set_mpi_meta`/
+`strip_mpi_meta`), the partition-report logger, automatic partition-dimension
+selection (`choose_partition_dim`), and the coordinate/dask-delayed helpers
+behind `create_dataarray`/`create_dataset`. Splitting them this way keeps
+`xr_mpi.py` focused on code that genuinely touches `mpi.comm`.
 
 The `.xgeo` accessor is registered on `xarray.DataArray`/`xarray.Dataset` as
 soon as `climtools` is imported (`import climtools` is enough; you do not
-need `from climtools import xgeo` for the accessor form to work) — see
+need `from climtools import xgeo` for the accessor form to work) -- see
 [`accessors/xarray_accessors.py`](accessors/xarray_accessors.py).
 
 ## Installation
@@ -51,7 +61,7 @@ This covers `climtools.plot`, `climtools.calc`, `climtools.cdo`,
 degrades to a no-op over one rank; `to_netcdf(..., allow_serial=True)`
 writes without MPI collectives). It does **not** cover MPI-collective
 parallel NetCDF-4 output (`to_netcdf(..., parallel=True)` under more than
-one rank) — that needs step 2 below.
+one rank) -- that needs step 2 below.
 
 ```bash
 pip install climtools
@@ -74,7 +84,7 @@ pip install "climtools[regrid]"
 
 `climtools.cdo` and `xgeo.plot.animate` shell out to the `cdo`/`nco` and
 `ffmpeg` command-line tools respectively. These are not Python packages and
-must be on `PATH` separately — see
+must be on `PATH` separately -- see
 [`env/environment.yml`](env/environment.yml), which installs them from
 conda-forge alongside everything else in this step.
 
@@ -86,7 +96,7 @@ most conda-forge builds) are serial-only: importing them works fine, but
 `to_netcdf(..., parallel=True)` raises `NetCDFWriteError` the first time it
 runs under more than one rank. climtools checks for this and prints a
 one-time hint pointing back here as soon as `climtools.mpi` is used under a
-real multi-rank launch — see `_warn_if_parallel_netcdf_missing` in
+real multi-rank launch -- see `_warn_if_parallel_netcdf_missing` in
 [`core/lib_mpi.py`](core/lib_mpi.py).
 
 Run the setup script from a clone of this repository:
@@ -105,11 +115,11 @@ Step by step, this script:
    [`env/environment.boot.yml`](env/environment.boot.yml), installing
    Miniconda first if `conda` itself is missing.
 2. Locates a parallel-enabled MPI/HDF5/NetCDF-C stack, in order:
-   - **HPC environment modules** — `module load`s a matching MPI +
+   - **HPC environment modules** -- `module load`s a matching MPI +
      `netcdf-mpi` module pair, if the `module` command exists (this is the
      fast path on most clusters, since the site has usually already built
      one).
-   - **Source build** — otherwise compiles HDF5 and NetCDF-C from source
+   - **Source build** -- otherwise compiles HDF5 and NetCDF-C from source
      against the active MPI compiler.
 
    Neither path uses a distro package manager: `apt`/`yum` are unavailable on
@@ -120,18 +130,18 @@ Step by step, this script:
    `netCDF4.__has_parallel4_support__` is `True` before continuing.
 4. Applies the rest of climtools's dependencies from
    [`env/environment.yml`](env/environment.yml) (conda environments only),
-   then re-confirms the parallel build survived the solve — a full re-solve
+   then re-confirms the parallel build survived the solve -- a full re-solve
    can occasionally pull in a replacement `mpi4py`/`netCDF4` as someone
    else's transitive dependency, so this rebuilds once if that happened.
 5. Installs `climtools` itself, editable, into whichever environment is
    active.
 
-Run it again any time to re-check or repair the parallel stack — every step
+Run it again any time to re-check or repair the parallel stack -- every step
 is idempotent.
 
 **Required on Lustre/GPFS**: HDF5 takes POSIX advisory locks by default, and
-many ranks opening the same file concurrently — or one rank reopening a file
-another rank just closed — can block on those locks indefinitely on a
+many ranks opening the same file concurrently -- or one rank reopening a file
+another rank just closed -- can block on those locks indefinitely on a
 parallel filesystem, which presents as a hang with no traceback on any rank.
 `lib_netcdf/parallel.py` sets `HDF5_USE_FILE_LOCKING=FALSE` as a
 process-local default the moment it is imported, so this is handled
@@ -225,8 +235,8 @@ See [`viz/plotting.py`](viz/plotting.py) for the full `GeoPlot` API and
 | `mpi.MPIError` | climtools's own exception for synchronized MPI failures | [`core/lib_mpi.py`](core/lib_mpi.py) |
 
 `mpi.comm` is the real `mpi4py.MPI.Intracomm`, so anything not covered by
-the accessors above — point-to-point `Send`/`Recv`, `Bcast`,
-`Scatterv`/`Gatherv`, non-blocking collectives — is reached directly as
+the accessors above -- point-to-point `Send`/`Recv`, `Bcast`,
+`Scatterv`/`Gatherv`, non-blocking collectives -- is reached directly as
 `mpi.comm.<method>` with full mpi4py signatures and IDE completion. See the
 [mpi4py documentation](https://mpi4py.readthedocs.io/en/stable/) for the
 complete API.
@@ -241,7 +251,7 @@ is **where the split lives**:
 | --- | --- | --- |
 | Each rank holds | A complete partial result (its own whole array/scalar/Dataset) | A slice of one shared dimension of a larger object |
 | Combines by | Adding/comparing whole partials together, element-wise | Reducing along the named, distributed dimension |
-| Typical source | Independent, embarrassingly-parallel work — one case per rank, then combine | `mpi.xarray.open_dataset`/`redistribute`, which partition a dimension across ranks |
+| Typical source | Independent, embarrassingly-parallel work -- one case per rank, then combine | `mpi.xarray.open_dataset`/`redistribute`, which partition a dimension across ranks |
 | Example | Each rank sums a different subset of storm events into the same `(lat, lon)` grid; `mpi.reduce.sum` adds the 8 grids together | Each rank holds a different slice of `time`; `mpi.xarray.mean(dim="time")` reduces across ranks, then repartitions the result on the longest surviving dimension |
 
 ```python
@@ -369,8 +379,8 @@ forward correctly. If the requested dimensions exclude the partition
 dimension, `mpi.xarray` now takes the same embarrassingly-parallel native
 xarray path internally, but also preserves the object's validated `mpi_meta`
 and avoids even the reduction-plan agreement collective. If the partition
-dimension is included — explicitly, in a dimension tuple, or implicitly by
-`dim=None`/`...` — `mpi.xarray` performs the required global MPI combine.
+dimension is included -- explicitly, in a dimension tuple, or implicitly by
+`dim=None`/`...` -- `mpi.xarray` performs the required global MPI combine.
 
 ### Arithmetic on distributed objects
 
@@ -460,7 +470,7 @@ Every one of `mpi.reduce`/`mpi.xarray`/`mpi.scatterv`/
 MPI-collective: every rank in `mpi.comm` must reach the same call, in the
 same order, or the call blocks forever waiting for ranks that never arrive.
 This is why the example above passes real data only on rank 0 and
-`empty_dataset()` elsewhere — every rank still calls the writer at the same
+`empty_dataset()` elsewhere -- every rank still calls the writer at the same
 point, even though only one of them supplies data.
 
 #### Rank-0-source vs. already-distributed: which one at scale
@@ -470,14 +480,14 @@ the path by inspecting the object, not by an argument you set:
 
 | Input | Path | Rank 0's peak memory |
 | --- | --- | --- |
-| A plain, **eager** (non-dask) `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Legacy scatter | The **entire** output — every variable, in full, before it is scattered out |
-| A plain, **dask-backed** `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Auto-distributed | Only rank 0's own slice — `to_netcdf` calls `mpi.xarray.distribute` internally before writing |
-| An object already carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`/`distribute`) | Distributed | Only that rank's own slice — no gather, no scatter |
+| A plain, **eager** (non-dask) `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Legacy scatter | The **entire** output -- every variable, in full, before it is scattered out |
+| A plain, **dask-backed** `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Auto-distributed | Only rank 0's own slice -- `to_netcdf` calls `mpi.xarray.distribute` internally before writing |
+| An object already carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`/`distribute`) | Distributed | Only that rank's own slice -- no gather, no scatter |
 
 The middle row is automatic: nothing about how you call `to_netcdf` changes.
-Building the same rank-0-source Dataset dask-backed instead of eager — for
+Building the same rank-0-source Dataset dask-backed instead of eager -- for
 example `xr.open_mfdataset(paths, chunks=...)` on rank 0 instead of loading
-eagerly — is enough to opt into it. `to_netcdf` logs which path it took
+eagerly -- is enough to opt into it. `to_netcdf` logs which path it took
 (search a run's log for `"rank-0 source"`), so this is visible either way:
 
 ```text
@@ -488,14 +498,14 @@ xgeo.to_netcdf (rank-0 source): rank 0 holds 42.3GiB before scatter, ~5.3GiB/ran
 The eager row's cost is unavoidable at the design level, not a bug: the
 array is already fully resident in rank 0's memory by the time `to_netcdf`
 sees it (that is what "eager" means), so there is nothing left to make lazy.
-It only matters at large `TIME_STEPS` or fine resolution — at small sizes it
-is unremarkable — but when a write is slow or failing at scale, this row is
+It only matters at large `TIME_STEPS` or fine resolution -- at small sizes it
+is unremarkable -- but when a write is slow or failing at scale, this row is
 the first thing worth ruling out. Making the *source* dask-backed (the
 middle row) is what actually avoids it.
 
 One caveat worth knowing rather than being surprised by: on the
 auto-distributed and already-distributed paths, rank 0 specifically may
-compute its own share of a dask-backed input twice — once while `to_netcdf`
+compute its own share of a dask-backed input twice -- once while `to_netcdf`
 samples dtype and shape to create the file's structure, once more during
 the actual collective write. Every other rank computes its own share
 exactly once. This is a pre-existing characteristic of the underlying
@@ -505,21 +515,21 @@ touches more than its own slice, computed twice or not.
 If the eager row's cost is uncomfortable and making the source dask-backed
 isn't an option, avoid ever holding the full array anywhere by building it
 in already-distributed form instead. This does **not** mean shipping pieces
-of a rank-0 array out to other ranks over MPI yourself — it means every rank
+of a rank-0 array out to other ranks over MPI yourself -- it means every rank
 builds the *same lazy recipe* independently, and only ever materializes its
 own slice of it.
 
 **Already on disk.** `mpi.xarray.open_dataset(path, partition_dim=...)` opens
-the file on every rank and each rank reads only its own slice from disk —
+the file on every rank and each rank reads only its own slice from disk --
 see [`mpi.xarray`: named-dimension distributed reductions](#mpixarray-named-dimension-distributed-reductions)
 and the worked example in [Parallel NetCDF output](#parallel-netcdf-4-output)
 above.
 
 **Computed, not read from a file.** If the 200 GiB comes from a computation
 rather than a direct file read, run that computation as a **dask-lazy graph,
-built identically on every rank** — building a dask graph is cheap metadata
+built identically on every rank** -- building a dask graph is cheap metadata
 work regardless of the size it describes, since no data moves until
-something calls `.load()`/`.compute()` — and hand the *lazy* result to
+something calls `.load()`/`.compute()` -- and hand the *lazy* result to
 `mpi.xarray.redistribute`, not `to_netcdf`, directly:
 
 ```python
@@ -545,17 +555,17 @@ local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
 
 This works because `redistribute` assumes its input is already the *same*
 object on every rank (see [`core/xr_mpi.py`](core/xr_mpi.py)) and slices it
-locally with no MPI communication for the data itself — which is exactly a
+locally with no MPI communication for the data itself -- which is exactly a
 lazy scatter when the input is dask-backed, and needs no special support to
 be one.
 
 **Data that can only be produced by one rank.** `redistribute` needs every
-rank to be able to rebuild `value` identically — a resource only one rank
+rank to be able to rebuild `value` identically -- a resource only one rank
 has credentials for, or a computation depending on rank-local state, breaks
 that assumption. `mpi.xarray.distribute` is for exactly that case: `value`
 is real on one rank (`root`, default rank 0) and `None` everywhere else.
-`root` slices it — lazily, if it is dask-backed, so slicing never triggers
-computation — and sends each other rank only its own slice by direct
+`root` slices it -- lazily, if it is dask-backed, so slicing never triggers
+computation -- and sends each other rank only its own slice by direct
 point-to-point message; `root` never holds more than one slice's worth of
 pickled graph in flight, and every rank materializes only what it was sent:
 
@@ -574,29 +584,29 @@ If the only thing `local` is for is this `to_netcdf` call, calling
 `distribute` explicitly like this is no longer necessary: `to_netcdf`
 detects a dask-backed rank-0-source input and does exactly this internally
 (see the table above). Calling it explicitly still matters when the result
-is needed for something *besides* the write — an `mpi.xarray`/`mpi.reduce`
-computation on the distributed data before writing it, for example — or
+is needed for something *besides* the write -- an `mpi.xarray`/`mpi.reduce`
+computation on the distributed data before writing it, for example -- or
 when explicit control over the moment slicing happens is worth having.
 
 If `full` is already a plain in-memory (non-dask) object rather than
 dask-backed, calling `distribute` on it directly still avoids `to_netcdf`'s
 own scatter-path redundant copies, but pays point-to-point pickling instead
 of `scatterv`'s zero-copy buffer transfer, and cannot undo the fact that the
-complete array already had to exist in `root`'s memory before the call —
+complete array already had to exist in `root`'s memory before the call --
 only a dask-backed source avoids ever holding more than one rank's share
 anywhere. For an eager source headed straight to `to_netcdf`, just calling
 `to_netcdf` directly (skipping `distribute` and `.load()` above) is both
 simpler and faster: it already takes the scatter path this describes.
 
-**Data with no existing source at all — you are generating it.**
+**Data with no existing source at all -- you are generating it.**
 `redistribute` needs an identical recipe every rank can already build;
 `distribute` needs a source that exists on one rank. Neither fits synthetic
-or procedurally generated data — a mock dataset for testing, a per-rank RNG
-stream, one file per rank — where there is no array or file to slice in the
+or procedurally generated data -- a mock dataset for testing, a per-rank RNG
+stream, one file per rank -- where there is no array or file to slice in the
 first place. `mpi.xarray.create_dataarray`/`create_dataset` are for this:
 every rank computes `get_balanced_bounds(length, rank, size)` independently
 (a pure function of the global length, this rank's number, and the
-communicator size — no communication at all) and calls your own function
+communicator size -- no communication at all) and calls your own function
 with only its own `(start, stop)`, so nothing is ever built on one rank and
 sent to another:
 
@@ -645,7 +655,7 @@ xgeo.to_netcdf(ds, "output.nc", partition_dim="time", parallel=True)
 `fill` is wrapped in `dask.delayed`, so it runs only when this rank's slice
 is actually needed (loaded, reduced, or written), not eagerly at the
 `create_dataset` call. A coordinate matching `dim` can be passed the same
-way as to the ordinary `xr.Dataset` constructor — a full-length array — and
+way as to the ordinary `xr.Dataset` constructor -- a full-length array -- and
 is auto-sliced to this rank's own bounds. `create_dataset` also accepts a
 bare `xr.DataArray` as a `data_vars` value (one already built by
 `create_dataarray`, for instance), exactly as `xr.Dataset`'s own constructor
@@ -656,16 +666,16 @@ accepts a bare DataArray alongside `(dims, array)` tuples. See
 full set of options.
 
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
-immediately after the collective `nc.close()` — inside
+immediately after the collective `nc.close()` -- inside
 [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/
-`write_distributed`, right next to the `close()` it protects — so that by
+`write_distributed`, right next to the `close()` it protects -- so that by
 the time the call returns on any rank, the file is fully written and closed
 everywhere, and safe to reopen through a different communicator or a
 non-parallel handle (as, for example, the test suite's own read-back
 validation does immediately afterward). An earlier version of this also
 called `nc.sync()` just before `close()`, on the theory that an explicit
 flush could only make the guarantee stronger; in practice, on HDF5 1.14
-(this project's actual deployment target — the sandbox this was first
+(this project's actual deployment target -- the sandbox this was first
 validated in only had HDF5 1.10 available), an explicit collective `sync()`
 immediately before the already-collective `close()` triggered a genuine
 `NetCDF: HDF error` on close instead. `close()` on a file opened through the
@@ -683,17 +693,17 @@ dimensions, MPI-IO hints).
 Two different chunk concepts are involved in a parallel write, computed
 independently in [`core/xr_chunks.py`](core/xr_chunks.py):
 
-- **distribution_chunks** — how much of the partition dimension each MPI
+- **distribution_chunks** -- how much of the partition dimension each MPI
   rank holds *in memory*. This is what `mpi.xarray.open_dataset`/
   `redistribute`/`distribute` decide, and it is recorded in
   `mpi_meta["chunk_info"]`. This is a single scalar chunk length per
-  dimension throughout — not an irregular, multiple-block-per-dimension
+  dimension throughout -- not an irregular, multiple-block-per-dimension
   structure like a raw Dask chunk tuple (`(1000, 1000, 240)`); see the
   design doc linked below for that unimplemented extension.
-- **save_chunks** — the actual on-disk NetCDF-4/HDF5 chunk shape written
+- **save_chunks** -- the actual on-disk NetCDF-4/HDF5 chunk shape written
   for each variable. A save chunk's length comes from dask's own
   `"auto"` byte-size heuristic against the variable's true *global*
-  shape and dtype (via a lazy `dask.array.zeros` mock — no data is ever
+  shape and dtype (via a lazy `dask.array.zeros` mock -- no data is ever
   materialized to decide this), capped to HDF5's 4 GiB per-chunk limit.
 
 Along the partition dimension specifically, that dask-proposed,
@@ -703,7 +713,7 @@ HDF5-capped length is not used as-is: `mpi.xarray.redistribute`'s
 chunk that evenly divides `chunk_info[dim]` is guaranteed to sit inside
 one rank's slab. But `get_chunk_bounds` falls back to a plain balanced
 split (`get_balanced_bounds`, no chunk structure at all) whenever there
-are fewer whole `chunk_info[dim]`-sized chunks than ranks — a case that
+are fewer whole `chunk_info[dim]`-sized chunks than ranks -- a case that
 can occur for perfectly ordinary inputs (e.g. splitting a 1000-length
 time axis across 64 ranks). In that fallback regime a divisor of
 `chunk_info[dim]` is not actually guaranteed to divide the real,
@@ -731,12 +741,12 @@ production:
 
 - The partition-dimension save_chunk still depends on `mpi_size`
   whenever the run's `distribution_chunk` ends up smaller than dask's
-  data-driven proposal (in the aligned regime above) — a save chunk
+  data-driven proposal (in the aligned regime above) -- a save chunk
   physically cannot be larger than what one rank's write can supply
   without straddling a neighbor, so at high enough rank counts some
   rank-count sensitivity is unavoidable given the current architecture.
 - If `distribution_chunk` happens to be prime and dask's capped proposal
-  is smaller than it, the only value that divides it evenly is 1 — still
+  is smaller than it, the only value that divides it evenly is 1 -- still
   correct, but a partition-dimension save_chunk of length 1 defeats
   HDF5 chunking's purpose and should be benchmarked on real dimension
   sizes, not assumed acceptable, before relying on this path at scale.
@@ -757,7 +767,7 @@ subset of ranks does not terminate the job by default: the failing ranks
 block in `MPI_Finalize` waiting for the others, and the others block in the
 collective the failing ranks never reached. `python -m mpi4py` installs a
 finalizer hook that calls `MPI_Abort` instead, converting that deadlock into
-a clean non-zero exit — see
+a clean non-zero exit -- see
 [mpi4py: Exceptions and deadlocks](https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks).
 Because the launch command is outside climtools's control, importing
 `climtools.mpi` under an MPI launcher also installs the equivalent
@@ -796,10 +806,10 @@ launcher:
 
 | File | Demonstrates |
 | --- | --- |
-| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` — both Mann-Kendall and `polyfit` — `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
-| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, and the parallel NetCDF writer — including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
+| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
+| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, the parallel NetCDF writer, and the `core/xr_meta.py` helpers `mpi.xarray` is built on -- `mpi_meta` get/set/strip round-tripping and its length-mismatch validation, `choose_partition_dim` (longest-dimension selection, declaration-order tie-breaking, `exclude`, the length-one fallback, and the short-partition warning's once-per-`(dim, length, mpi_size)` dedup), `indexer_is_scalar`, and that `climtools.core.xr_mpi` re-exports these as the same objects rather than reimplementing them -- including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
 | [`test_mpi_xarray_reductions.py`](tests/test_mpi_xarray_reductions.py) | Focused regression checks for reduction placement: communication-free non-partition reductions, mixed dimension tuples, automatic longest-dimension redistribution after the partition dimension is consumed, scalar/length-one results, explicit redistribution, attrs, extrema/logical reductions, and the absence of `mode`/`root` from `mpi.xarray` reductions. |
-| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running both original suites — `test_general.py` directly, then `test_mpi.py` on eight ranks — with the environment settings the MPI suite requires, including `HDF5_USE_FILE_LOCKING=FALSE`. |
+| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running every suite above -- `test_general.py` directly, then `test_mpi_xarray_reductions.py` and the `test_mpi.py` scale sweep on eight ranks -- with the environment settings the MPI suites require, including `HDF5_USE_FILE_LOCKING=FALSE`. |
 
 ```bash
 python tests/test_general.py
@@ -810,15 +820,15 @@ mpirun -n 8 python -m mpi4py tests/test_mpi_xarray_reductions.py
 ```
 
 Every timed check in `test_mpi.py` is tagged in the summary with a
-plain-language verdict — `MPI (faster)`, `Xarray (faster)`, or `tie` (within
-5% either way) — so the final table answers "was this actually worth
+plain-language verdict -- `MPI (faster)`, `Xarray (faster)`, or `tie` (within
+5% either way) -- so the final table answers "was this actually worth
 distributing" at a glance. Small, in-memory, single-node checks routinely
 come back `Xarray (faster)`: real speedups from `mpi.reduce`/`mpi.xarray`
 show up once ranks are on separate cores with enough data per rank to
-outweigh collective-call overhead — run with `-n <= your core count` for a
+outweigh collective-call overhead -- run with `-n <= your core count` for a
 meaningful comparison. `test_general.py` is not a scaling benchmark; every
 check there is correctness-focused and independent of core count.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT -- see [`LICENSE`](LICENSE).
