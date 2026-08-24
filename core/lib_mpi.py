@@ -905,7 +905,7 @@ class MPIRuntime:
     def watchdog(
         self,
         phase: str = "",
-        timeout: float = 1800.0,
+        timeout: float = 3600.0,
         *,
         abort: bool = True,
     ) -> Generator:

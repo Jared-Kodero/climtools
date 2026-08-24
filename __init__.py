@@ -40,10 +40,10 @@ from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import (
     LockedLogger,
     LockFile,
+    RedirectStreams,
     apply_widget_css,
     locked_print,
     n_cpus,
-    redirect_streams,
 )
 
 if TYPE_CHECKING:
@@ -65,6 +65,7 @@ __all__ = [
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
+    "RedirectStreams",
     "SerialProgressBar",
     "calc",
     "cdo",
@@ -74,7 +75,6 @@ __all__ = [
     "n_cpus",
     "operator",
     "plot",
-    "redirect_streams",
     "xgeo",
 ]
 

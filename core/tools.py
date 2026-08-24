@@ -9,7 +9,6 @@ import socket
 import sys
 import time
 import uuid
-from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
@@ -70,38 +69,46 @@ class LockFile:
         self.filepath = filepath or Path(".lock")
         self.timeout = timeout
         self.delay = delay
-        self.fd = None
+        self.fd: int | None = None
 
-    def __enter__(self):
+    def acquire(self):
+        """Acquire an exclusive lock on the file."""
         start_time = time.time()
-        # Open the file descriptor
         self.fd = os.open(self.filepath, os.O_RDWR | os.O_CREAT)
 
-        while True:
-            try:
-                # Try to acquire an exclusive, non-blocking lock
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self  # Lock acquired, enter the 'with' block
-
-            except (OSError, BlockingIOError):
-                # Lock is held by another process; check timeout and sleep
-                if (
-                    self.timeout is not None
-                    and (time.time() - start_time) >= self.timeout
-                ):
-                    os.close(self.fd)
-                    raise TimeoutError(
-                        f"Could not acquire lock on {self.filepath} within {self.timeout}s"
-                    )
-
-                time.sleep(self.delay)
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.fd is not None:
-            # Release the lock and close the file descriptor safely
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        try:
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except (OSError, BlockingIOError):
+                    if (
+                        self.timeout is not None
+                        and (time.time() - start_time) >= self.timeout
+                    ):
+                        raise TimeoutError(
+                            f"Could not acquire lock on {self.filepath} within {self.timeout}s"
+                        )
+                    time.sleep(self.delay)
+        except Exception:
             os.close(self.fd)
             self.fd = None
+            raise
+
+    def release(self) -> None:
+        """Release the acquired file lock and close the underlying file descripto"""
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
 
 
 class LockedLogger:
@@ -179,69 +186,89 @@ def locked_print(
         print(*values, sep=sep, end=end, file=file, flush=flush)
 
 
-@contextmanager
-def redirect_streams(
-    stdout: Path | None = None,
-    stderr: Path | None = None,
-):
+class RedirectStreams:
     """
-    Temporarily redirect standard output and standard error to files.
-
-    Each specified file is opened in append mode. If ``stdout`` and
-    ``stderr`` refer to the same path, both streams share a single file
-    handle. Any stream whose path is ``None`` remains unchanged.
-
-    The original streams are restored and all opened files are closed when
-    the context exits, including when an exception is raised.
-
-    Parameters
-    ----------
-    stdout : Path or None, optional
-        File path to which ``sys.stdout`` is redirected.
-    stderr : Path or None, optional
-        File path to which ``sys.stderr`` is redirected.
-
-    Yields
-    ------
-    tuple[TextIO | None, TextIO | None]
-        The opened output and error file handles, respectively.
+    Temporarily redirect standard output and standard error to files
+    or in-memory buffers, storing original streams for external access.
     """
 
-    org_stdout = sys.stdout
-    org_stderr = sys.stderr
+    def __init__(
+        self,
+        stdout_target: Path | str | TextIO | None = None,
+        stderr_target: Path | str | TextIO | None = None,
+    ):
+        self.stdout_target = stdout_target
+        self.stderr_target = stderr_target
 
-    out_file = None
-    err_file = None
+        self.orig_stdout = sys.stdout
+        self.orig_stderr = sys.stderr
 
-    try:
-        if stdout == stderr and stdout is not None:
-            out_file = open(stdout, "a")
-            err_file = out_file
+        self.stdout = None
+        self.stderr = None
+        self._managed_stdout = False
+        self._managed_stderr = False
 
+    @property
+    def original_streams(self) -> tuple[TextIO, TextIO]:
+        """Returns the original (stdout, stderr) pair."""
+        return self.orig_stdout, self.orig_stderr
+
+    @property
+    def active_streams(self) -> tuple[TextIO | None, TextIO | None]:
+        """Returns the currently active redirected (stdout, stderr) pair."""
+        return self.stdout, self.stderr
+
+    def _prepare_target(self, target: Path | str | TextIO | None, is_stdout: bool):
+        if target is None:
+            return None, False
+
+        # If it's already a stream/buffer (has a write method)
+        if hasattr(target, "write"):
+            return target, False
+
+        # Otherwise, treat it as a path/string and open it
+        file_obj = open(target, "a", encoding="utf-8")
+        return file_obj, True
+
+    def redirect(self):
+        # Handle matching targets
+        if self.stdout_target == self.stderr_target and self.stdout_target is not None:
+            self.stdout, self._managed_stdout = self._prepare_target(
+                self.stdout_target, True
+            )
+            self.stderr = self.stdout
+            self._managed_stderr = False
         else:
-            if stdout:
-                out_file = open(stdout, "a")
+            self.stdout, self._managed_stdout = self._prepare_target(
+                self.stdout_target, True
+            )
+            self.stderr, self._managed_stderr = self._prepare_target(
+                self.stderr_target, False
+            )
 
-            if stderr:
-                err_file = open(stderr, "a")
+        if self.stdout:
+            sys.stdout = self.stdout
+        if self.stderr:
+            sys.stderr = self.stderr
 
-        if out_file:
-            sys.stdout = out_file
+        return self.stdout, self.stderr
 
-        if err_file:
-            sys.stderr = err_file
+    def restore(self):
+        sys.stdout = self.orig_stdout
+        sys.stderr = self.orig_stderr
 
-        yield out_file, err_file
+        # Only close streams that this class actually opened
+        if self._managed_stdout and self.stdout:
+            self.stdout.close()
 
-    finally:
-        sys.stdout = org_stdout
-        sys.stderr = org_stderr
+        if self._managed_stderr and self.stderr and self.stderr is not self.stdout:
+            self.stderr.close()
 
-        if out_file:
-            out_file.close()
+    def __enter__(self):
+        return self.redirect()
 
-        if err_file and err_file is not out_file:
-            err_file.close()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.restore()
 
 
 def get_fsig(func: Callable) -> dict:

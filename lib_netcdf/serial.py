@@ -15,8 +15,8 @@ import netCDF4
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
-from .parallel import quiet_netcdf4_writes
 from .encoding import encode_dataset_time, encode_time, is_time_like
+from .parallel import quiet_netcdf4_writes
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -246,7 +246,7 @@ def dataset_to_netcdf(
         data_slices = SerialProgressBar(
             starts,
             description="Writing NetCDF file",
-            stdout=stdout,
+            file=stdout,
         )
     else:
         data_slices = starts
