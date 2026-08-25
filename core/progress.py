@@ -54,10 +54,7 @@ class BaseProgress:
 
     def _reset_redirect(self) -> None:
         self._temp_path = tmp / ".progress" / uuid.uuid4().hex
-        self._temp_path.parent.mkdir(
-            exist_ok=True,
-            parents=True,
-        )
+        self._temp_path.parent.mkdir(exist_ok=True, parents=True)
         self._redirect = RedirectStreams(
             stdout_target=self._temp_path,
             stderr_target=self._temp_path,
@@ -107,10 +104,7 @@ class BaseProgress:
         if self._total <= 0:
             return
 
-        pct = min(
-            100,
-            (100 * self._completed) // self._total,
-        )
+        pct = min(100, (100 * self._completed) // self._total)
         milestone = (pct // self._step_pct) * self._step_pct
 
         if milestone <= self._last_emitted:
@@ -125,11 +119,7 @@ class BaseProgress:
             else f"{milestone}%"
         )
 
-        self._print(
-            msg,
-            end=end,
-            flush=True,
-        )
+        self._print(msg, end=end, flush=True)
         self._progress_parts.append(f"{msg}{end}")
 
     def _start_redirected_output(self) -> None:
@@ -142,41 +132,25 @@ class BaseProgress:
         self._stream.flush()
 
         progress_fd = self._progress_stream.fileno()
-        progress_path = f"/proc/self/fd/{progress_fd}"
+        progress_path = self._redirect.fd_path(progress_fd)
 
-        with (
-            open(progress_path, "rb") as source,
-            self._temp_path.open("wb") as target,
-        ):
-            shutil.copyfileobj(
-                source,
-                target,
-            )
+        with open(progress_path, "rb") as source, self._temp_path.open("wb") as target:
+            shutil.copyfileobj(source, target)
 
         self._redirect.start()
 
         if self._total <= 0 or not self._description:
             return
 
-        self._print(
-            self._description,
-            end=" ",
-            flush=True,
-        )
+        self._print(self._description, end=" ", flush=True)
         self._progress_parts.append(f"{self._description} ")
         self._wrote_header = True
 
-    def _finish_redirected_output(
-        self,
-        errored: bool,
-    ) -> None:
+    def _finish_redirected_output(self, errored: bool) -> None:
         if not errored:
             if self._total > 0 and self._last_emitted < 100:
                 msg = f"100% [Finished in: {self._format_elapsed()}]"
-                self._print(
-                    msg,
-                    flush=True,
-                )
+                self._print(msg, flush=True)
                 self._progress_parts.append(f"{msg}\n")
 
         elif self._wrote_header or self._last_emitted >= 0:
@@ -191,69 +165,33 @@ class BaseProgress:
 
         try:
             self._progress_stream.flush()
-
             progress_fd = self._progress_stream.fileno()
-            progress_path = f"/proc/self/fd/{progress_fd}"
+            progress_path = self._redirect.fd_path(progress_fd)
 
-            encoding = (
-                getattr(
-                    self._progress_stream,
-                    "encoding",
-                    None,
-                )
-                or "utf-8"
-            )
-            errors = (
-                getattr(
-                    self._progress_stream,
-                    "errors",
-                    None,
-                )
-                or "strict"
-            )
+            encoding = getattr(self._progress_stream, "encoding", None) or "utf-8"
+            errors = getattr(self._progress_stream, "errors", None) or "strict"
 
             progress_text = "".join(self._progress_parts)
 
             with self._temp_path.open("ab") as target:
-                target.write(
-                    progress_text.encode(
-                        encoding,
-                        errors,
-                    )
-                )
+                target.write(progress_text.encode(encoding, errors))
 
-            with (
-                self._thread_lock,
-                self._process_lock,
-            ):
+            with self._thread_lock, self._process_lock:
                 with (
                     self._temp_path.open("rb") as source,
-                    open(
-                        progress_path,
-                        "wb",
-                    ) as target,
+                    open(progress_path, "wb") as target,
                 ):
-                    shutil.copyfileobj(
-                        source,
-                        target,
-                    )
+                    shutil.copyfileobj(source, target)
                     target.flush()
 
-                os.lseek(
-                    progress_fd,
-                    0,
-                    os.SEEK_END,
-                )
+                os.lseek(progress_fd, 0, os.SEEK_END)
 
         finally:
             self._close_progress_stream()
             self._temp_path.unlink(missing_ok=True)
 
     def _start_interactive_renderer(
-        self,
-        *,
-        transient: bool,
-        refresh_per_second: int,
+        self, *, transient: bool, refresh_per_second: int
     ) -> None:
         from rich.console import Console
         from rich.progress import (
@@ -264,10 +202,7 @@ class BaseProgress:
             TimeElapsedColumn,
         )
 
-        console = Console(
-            file=self._progress_stream,
-            force_terminal=self._isatty,
-        )
+        console = Console(file=self._progress_stream, force_terminal=self._isatty)
 
         self._progress = Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -284,16 +219,11 @@ class BaseProgress:
         self._progress.start()
 
         self._task_id = self._progress.add_task(
-            self._description,
-            total=(self._total if self._total > 0 else None),
+            self._description, total=(self._total if self._total > 0 else None)
         )
 
     def _start_progress(
-        self,
-        *,
-        total: int,
-        transient: bool,
-        refresh_per_second: int,
+        self, *, total: int, transient: bool, refresh_per_second: int
     ) -> None:
         self._start_time = time.monotonic()
 
@@ -310,25 +240,18 @@ class BaseProgress:
             self._redirect.start()
 
             self._start_interactive_renderer(
-                transient=transient,
-                refresh_per_second=(refresh_per_second),
+                transient=transient, refresh_per_second=(refresh_per_second)
             )
             return
 
         self._start_redirected_output()
 
-    def _advance(
-        self,
-        n: int = 1,
-    ) -> None:
+    def _advance(self, n: int = 1) -> None:
         self._completed += n
 
         if self._interactive:
             if self._progress is not None and self._task_id is not None:
-                self._progress.update(
-                    self._task_id,
-                    completed=self._completed,
-                )
+                self._progress.update(self._task_id, completed=self._completed)
             return
 
         self._emit_milestone()
@@ -340,29 +263,20 @@ class BaseProgress:
         self._progress = None
         self._task_id = None
 
-    def _finish_interactive_output(
-        self,
-    ) -> None:
+    def _finish_interactive_output(self) -> None:
         self._redirect.stop()
 
         try:
             if self._temp_path.exists() and self._temp_path.stat().st_size > 0:
                 content = self._temp_path.read_text(encoding="utf-8")
 
-                self._print(
-                    content,
-                    end="",
-                    flush=True,
-                )
+                self._print(content, end="", flush=True)
 
         finally:
             self._close_progress_stream()
             self._temp_path.unlink(missing_ok=True)
 
-    def _finish_progress(
-        self,
-        errored: bool,
-    ) -> None:
+    def _finish_progress(self, errored: bool) -> None:
         if (
             not errored
             and self._interactive
@@ -372,11 +286,7 @@ class BaseProgress:
             completed = self._total if self._total > 0 else self._completed
             self._completed = completed
 
-            self._progress.update(
-                self._task_id,
-                completed=completed,
-                refresh=True,
-            )
+            self._progress.update(self._task_id, completed=completed, refresh=True)
             self._progress.refresh()
 
         self._stop_renderer()
@@ -412,10 +322,7 @@ class DaskProgressBar(BaseProgress, ProgressBar):
         self._transient = transient
         self._refresh_per_second = refresh_per_second
 
-    def _start(
-        self,
-        dsk: Any,
-    ) -> None:
+    def _start(self, dsk: Any) -> None:
         self._start_progress(
             total=len(dsk),
             transient=self._transient,
@@ -460,10 +367,7 @@ class SerialProgressBar(BaseProgress):
 
         if total is not None:
             self._total = total
-        elif iterable is not None and hasattr(
-            iterable,
-            "__len__",
-        ):
+        elif iterable is not None and hasattr(iterable, "__len__"):
             self._total = len(iterable)
 
     def _start(self) -> None:
@@ -478,20 +382,14 @@ class SerialProgressBar(BaseProgress):
             refresh_per_second=(self._refresh_per_second),
         )
 
-    def update(
-        self,
-        n: int = 1,
-    ) -> None:
+    def update(self, n: int = 1) -> None:
         """Advance progress by ``n`` completed steps."""
         if not self._started:
             self._start()
 
         self._advance(n)
 
-    def _finish(
-        self,
-        errored: bool = False,
-    ) -> None:
+    def _finish(self, errored: bool = False) -> None:
         if not self._started:
             return
 
@@ -500,9 +398,7 @@ class SerialProgressBar(BaseProgress):
         finally:
             self._started = False
 
-    def __iter__(
-        self,
-    ) -> Iterator[Any]:
+    def __iter__(self) -> Iterator[Any]:
         if self._iterable is None:
             raise ValueError("No iterable provided to wrap.")
 

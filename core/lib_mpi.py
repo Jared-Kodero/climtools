@@ -274,11 +274,7 @@ class ReduceAccessor:
         return cast("T | None", recv)
 
     def sum(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> T | None:
         """Reduce values by summation.
 
@@ -299,11 +295,7 @@ class ReduceAccessor:
         return self._reduce(value, _MPI.SUM, mode=mode, root=root)
 
     def prod(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> T | None:
         """Reduce values by multiplication.
 
@@ -324,11 +316,7 @@ class ReduceAccessor:
         return self._reduce(value, _MPI.PROD, mode=mode, root=root)
 
     def min(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> T | None:
         """Reduce values by minimum.
 
@@ -349,11 +337,7 @@ class ReduceAccessor:
         return self._reduce(value, _MPI.MIN, mode=mode, root=root)
 
     def max(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> T | None:
         """Reduce values by maximum.
 
@@ -374,11 +358,7 @@ class ReduceAccessor:
         return self._reduce(value, _MPI.MAX, mode=mode, root=root)
 
     def mean(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> Any | None:
         """Reduce values by arithmetic mean across ranks.
 
@@ -402,11 +382,7 @@ class ReduceAccessor:
         return self._divide_by_ranks(result, self._runtime.comm.size)
 
     def any(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> bool | NDArray[np.bool_] | None:
         """Reduce truth values by logical OR.
 
@@ -435,11 +411,7 @@ class ReduceAccessor:
         return result
 
     def all(
-        self,
-        value: T,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
+        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
     ) -> bool | NDArray[np.bool_] | None:
         """Reduce truth values by logical AND.
 
@@ -603,10 +575,7 @@ class MPIRuntime:
         start = task * ranks_per_task
         stop = start + ranks_per_task
 
-        child_comm = self.comm.Split(
-            color=task,
-            key=self.comm.rank,
-        )
+        child_comm = self.comm.Split(color=task, key=self.comm.rank)
 
         self._child = MPIRuntime(child_comm)
         self._child.task = task
@@ -616,12 +585,7 @@ class MPIRuntime:
     # Parent-child communication
     # -------------------------------------------------------------------------
 
-    def bcast_to_children(
-        self,
-        value: T | None,
-        *,
-        root: int = 0,
-    ) -> T:
+    def bcast_to_children(self, value: T | None, *, root: int = 0) -> T:
         """Broadcast one value from the parent root to every child rank.
 
         Parameters
@@ -636,19 +600,11 @@ class MPIRuntime:
         T
             Broadcast value on every rank in every child communicator.
         """
-        result = self.comm.bcast(
-            value if self.is_root(root) else None,
-            root=root,
-        )
+        result = self.comm.bcast(value if self.is_root(root) else None, root=root)
 
         return cast("T", result)
 
-    def scatter_to_children(
-        self,
-        values: Sequence[T] | None,
-        *,
-        root: int = 0,
-    ) -> T:
+    def scatter_to_children(self, values: Sequence[T] | None, *, root: int = 0) -> T:
         """Scatter one value per child, broadcast within each child.
 
         Parameters
@@ -677,24 +633,13 @@ class MPIRuntime:
                 child_root = task * ranks_per_child
                 send[child_root] = value
 
-        received = self.comm.scatter(
-            send,
-            root=root,
-        )
+        received = self.comm.scatter(send, root=root)
 
-        result = child.comm.bcast(
-            received if child.is_root() else None,
-            root=0,
-        )
+        result = child.comm.bcast(received if child.is_root() else None, root=0)
 
         return cast("T", result)
 
-    def gather_from_children(
-        self,
-        value: T,
-        *,
-        root: int = 0,
-    ) -> list[T] | None:
+    def gather_from_children(self, value: T, *, root: int = 0) -> list[T] | None:
         """Gather one value per child, ordered by child task index.
 
         Only rank zero of each child contributes its value to the gather.
@@ -716,10 +661,7 @@ class MPIRuntime:
 
         payload = (cast("int", child.task), value) if child.is_root() else None
 
-        gathered = self.comm.gather(
-            payload,
-            root=root,
-        )
+        gathered = self.comm.gather(payload, root=root)
 
         if not self.is_root(root):
             return None
@@ -905,11 +847,7 @@ class MPIRuntime:
 
     @contextmanager
     def watchdog(
-        self,
-        phase: str = "",
-        timeout: float = 3600.0,
-        *,
-        abort: bool = True,
+        self, phase: str = "", timeout: float = 3600.0, *, abort: bool = True
     ) -> Generator:
         """Dump every rank's stack if the enclosed block stalls.
 
@@ -964,9 +902,7 @@ class MPIRuntime:
                 self.comm.Abort(1)
 
         thread = threading.Thread(
-            target=_fire,
-            name=f"climtools-mpi-watchdog-{rank}",
-            daemon=True,
+            target=_fire, name=f"climtools-mpi-watchdog-{rank}", daemon=True
         )
         thread.start()
         try:
@@ -979,10 +915,7 @@ class MPIRuntime:
     # -------------------------------------------------------------------------
 
     def raise_if_error(
-        self,
-        error: BaseException | None,
-        phase: str,
-        signature: Any = None,
+        self, error: BaseException | None, phase: str, signature: Any = None
     ) -> None:
         """Raise a synchronized error on all ranks if any rank failed.
 
@@ -1057,9 +990,7 @@ class MPIRuntime:
         previous = sys.excepthook
 
         def _abort_excepthook(
-            exc_type: type[BaseException],
-            exc_value: BaseException,
-            traceback: Any,
+            exc_type: type[BaseException], exc_value: BaseException, traceback: Any
         ) -> None:
             try:
                 previous(exc_type, exc_value, traceback)
@@ -1164,10 +1095,7 @@ class MPIRuntime:
         """
         if function is None:
             return functools.partial(
-                self,
-                all_ranks=all_ranks,
-                broadcast=broadcast,
-                root=root,
+                self, all_ranks=all_ranks, broadcast=broadcast, root=root
             )
         if not callable(function):
             raise TypeError("mpi's positional argument must be callable.")

@@ -284,6 +284,11 @@ class RedirectFd:
     """
 
     @staticmethod
+    def fd_path(fd: int) -> str:
+        """Return the /proc/self/fd path for a given file descriptor."""
+        return f"/proc/self/fd/{fd}"
+
+    @staticmethod
     def duplicate(stream: TextIO) -> TextIO:
         """Return a writable stream backed by a duplicate file descriptor."""
         stream.flush()
@@ -292,13 +297,7 @@ class RedirectFd:
         errors = getattr(stream, "errors", None) or "strict"
 
         try:
-            return os.fdopen(
-                fd,
-                "w",
-                encoding=encoding,
-                errors=errors,
-                buffering=1,
-            )
+            return os.fdopen(fd, "w", encoding=encoding, errors=errors, buffering=1)
         except BaseException:
             os.close(fd)
             raise
@@ -391,8 +390,7 @@ class RedirectStreams(RedirectFd):
 
     @staticmethod
     def _same_path(
-        first: Path | str | TextIO | None,
-        second: Path | str | TextIO | None,
+        first: Path | str | TextIO | None, second: Path | str | TextIO | None
     ) -> bool:
         if first is second:
             return first is not None
@@ -403,8 +401,7 @@ class RedirectStreams(RedirectFd):
         return False
 
     def _open_target(
-        self,
-        target: Path | str | TextIO | None,
+        self, target: Path | str | TextIO | None
     ) -> tuple[TextIO | None, bool]:
         if target is None:
             return None, False
@@ -428,9 +425,7 @@ class RedirectStreams(RedirectFd):
             self._close_targets()
             raise
 
-    def _start_python_redirect(
-        self,
-    ) -> tuple[TextIO | None, TextIO | None]:
+    def _start_python_redirect(self) -> tuple[TextIO | None, TextIO | None]:
         if self.stdout is not None:
             sys.stdout = self.stdout
 
@@ -440,9 +435,7 @@ class RedirectStreams(RedirectFd):
         self._mode = "python"
         return self.stdout, self.stderr
 
-    def _start_fd_redirect(
-        self,
-    ) -> tuple[TextIO | None, TextIO | None]:
+    def _start_fd_redirect(self) -> tuple[TextIO | None, TextIO | None]:
         if self.orig_stdout is None or self.orig_stderr is None:
             raise RuntimeError("Original streams have not been captured.")
 
@@ -465,15 +458,8 @@ class RedirectStreams(RedirectFd):
 
         return self.stdout, self.stderr
 
-    def _restore_fds(
-        self,
-        stdout_fd: int | None,
-        stderr_fd: int | None,
-    ) -> None:
-        pairs = (
-            (stdout_fd, self.orig_stdout),
-            (stderr_fd, self.orig_stderr),
-        )
+    def _restore_fds(self, stdout_fd: int | None, stderr_fd: int | None) -> None:
+        pairs = ((stdout_fd, self.orig_stdout), (stderr_fd, self.orig_stderr))
         error: BaseException | None = None
 
         for saved_fd, stream in pairs:
@@ -520,10 +506,7 @@ class RedirectStreams(RedirectFd):
         """Restore stdout and stderr and close internally opened targets."""
         try:
             if self._mode == "fd":
-                self._restore_fds(
-                    self._stdout_fd,
-                    self._stderr_fd,
-                )
+                self._restore_fds(self._stdout_fd, self._stderr_fd)
             elif self._mode == "python":
                 if self.orig_stdout is not None:
                     sys.stdout = self.orig_stdout

@@ -274,16 +274,10 @@ class ArithmeticMixin:
 
         return (
             self.redistribute(
-                left,
-                dim,
-                chunk_info=chunk_info,
-                log_partitions=log_partitions,
+                left, dim, chunk_info=chunk_info, log_partitions=log_partitions
             ),
             self.redistribute(
-                right,
-                dim,
-                chunk_info=chunk_info,
-                log_partitions=log_partitions,
+                right, dim, chunk_info=chunk_info, log_partitions=log_partitions
             ),
         )
 
@@ -336,8 +330,7 @@ class ArithmeticMixin:
         return result
 
     def _check_operands_distribution(
-        self,
-        operands: Iterable[Any],
+        self, operands: Iterable[Any]
     ) -> dict[str, Any] | None:
         """Return the mpi_meta to attach to a multi-operand call's result.
 
@@ -392,12 +385,7 @@ class ArithmeticMixin:
                     )
         return meta
 
-    def apply(
-        self,
-        func: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+    def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
         Parameters

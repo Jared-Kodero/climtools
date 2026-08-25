@@ -129,9 +129,7 @@ def _mpi_representable(dtype_string: str) -> bool:
 
 @cache
 def _partial_dtype(
-    dtype_string: str,
-    operation: str,
-    skipna: bool | None,
+    dtype_string: str, operation: str, skipna: bool | None
 ) -> np.dtype[Any]:
     """Return the dtype xarray produces for one rank's partial reduction.
 
@@ -361,11 +359,7 @@ class XarrayMPI(ArithmeticMixin):
         self._runtime.comm.Barrier()
 
         # 4. EVERY RANK OPENS ITS LAZY SLICE OF THE DATA
-        data: xr.Dataset = open_dataset(
-            filename_or_obj,
-            chunks=open_chunks,
-            **kwargs,
-        )
+        data: xr.Dataset = open_dataset(filename_or_obj, chunks=open_chunks, **kwargs)
         data = data.isel({partition_dim: slice(start, stop)})
 
         set_mpi_meta(
@@ -942,17 +936,12 @@ class XarrayMPI(ArithmeticMixin):
             )
         )
         chunk_size = get_effective_chunk_size(
-            length,
-            chunk_size,
-            self._runtime.comm.size,
+            length, chunk_size, self._runtime.comm.size
         )
         info[str(dim)] = chunk_size
 
         start, stop = get_chunk_bounds(
-            length,
-            chunk_size,
-            self._runtime.comm.rank,
-            self._runtime.comm.size,
+            length, chunk_size, self._runtime.comm.rank, self._runtime.comm.size
         )
         output = strip_mpi_meta(value).isel({dim: slice(start, stop)})
         info = prune_chunk_info(info, output)
@@ -960,19 +949,12 @@ class XarrayMPI(ArithmeticMixin):
             info.setdefault(
                 str(other_dim),
                 get_effective_chunk_size(
-                    int(other_length),
-                    None,
-                    self._runtime.comm.size,
+                    int(other_length), None, self._runtime.comm.size
                 ),
             )
 
         set_mpi_meta(
-            output,
-            dim=dim,
-            global_size=length,
-            start=start,
-            stop=stop,
-            chunk_info=info,
+            output, dim=dim, global_size=length, start=start, stop=stop, chunk_info=info
         )
         if log_partitions:
             log_partition_report(
@@ -988,8 +970,7 @@ class XarrayMPI(ArithmeticMixin):
         return output
 
     def attach_save_chunks(
-        self,
-        value: xr.Dataset | xr.DataArray,
+        self, value: xr.Dataset | xr.DataArray
     ) -> xr.Dataset | xr.DataArray:
         """Compute and attach save_chunks to an already-distributed object.
 
@@ -1183,8 +1164,7 @@ class XarrayMPI(ArithmeticMixin):
             local_index = normalized - int(meta["start"])
             result = strip_mpi_meta(value).isel({dim: local_index, **other_indexers})
         return cast(
-            "xr.Dataset | xr.DataArray",
-            self._runtime.comm.bcast(result, root=owner),
+            "xr.Dataset | xr.DataArray", self._runtime.comm.bcast(result, root=owner)
         )
 
     def sel(
@@ -1206,21 +1186,11 @@ class XarrayMPI(ArithmeticMixin):
         supplied.update(indexers_kwargs)
         meta = get_mpi_meta(value)
         if meta is None:
-            return value.sel(
-                supplied,
-                method=method,
-                tolerance=tolerance,
-                drop=drop,
-            )
+            return value.sel(supplied, method=method, tolerance=tolerance, drop=drop)
 
         dim = meta["dim"]
         if dim not in supplied:
-            return value.sel(
-                supplied,
-                method=method,
-                tolerance=tolerance,
-                drop=drop,
-            )
+            return value.sel(supplied, method=method, tolerance=tolerance, drop=drop)
 
         distributed_indexer = supplied.pop(dim)
         if indexer_is_scalar(distributed_indexer):
@@ -1242,10 +1212,7 @@ class XarrayMPI(ArithmeticMixin):
         local_indexers = dict(supplied)
         local_indexers[dim] = distributed_indexer
         output = value.sel(
-            local_indexers,
-            method=method,
-            tolerance=tolerance,
-            drop=drop,
+            local_indexers, method=method, tolerance=tolerance, drop=drop
         )
         counts = self._runtime.comm.allgather(int(output.sizes[dim]))
         new_start = sum(counts[: self._runtime.comm.rank])
@@ -1322,11 +1289,7 @@ class XarrayMPI(ArithmeticMixin):
                 dims=(dim,),
                 coords={dim: global_coord},
             )
-            selected = locator.sel(
-                {dim: label},
-                method=method,
-                tolerance=tolerance,
-            )
+            selected = locator.sel({dim: label}, method=method, tolerance=tolerance)
             if selected.ndim != 0:
                 raise NotImplementedError(
                     "Inexact distributed sel requires a unique one-dimensional index."
@@ -1347,10 +1310,7 @@ class XarrayMPI(ArithmeticMixin):
             if self._runtime.comm.rank == owner:
                 try:
                     local_index = global_index - int(meta["start"])
-                    result = strip_mpi_meta(value).isel(
-                        {dim: local_index},
-                        drop=drop,
-                    )
+                    result = strip_mpi_meta(value).isel({dim: local_index}, drop=drop)
                     if other_indexers:
                         result = result.sel(
                             other_indexers,
@@ -1414,8 +1374,7 @@ class XarrayMPI(ArithmeticMixin):
 
     @staticmethod
     def _variable_is_distributed(
-        value: xr.DataArray,
-        meta: Mapping[str, Any] | None,
+        value: xr.DataArray, meta: Mapping[str, Any] | None
     ) -> bool:
         """Return whether a variable contains the active partition dimension."""
         return meta is not None and meta["dim"] in value.dims
@@ -1472,9 +1431,7 @@ class XarrayMPI(ArithmeticMixin):
 
     @staticmethod
     def _finish_local_reduction(
-        result: xr.Dataset | xr.DataArray,
-        *,
-        old_meta: Mapping[str, Any],
+        result: xr.Dataset | xr.DataArray, *, old_meta: Mapping[str, Any]
     ) -> xr.Dataset | xr.DataArray:
         """Restore unchanged partition ownership after a rank-local reduction."""
         partition_dim = old_meta["dim"]
@@ -1574,9 +1531,7 @@ class XarrayMPI(ArithmeticMixin):
         return plan
 
     @staticmethod
-    def _guarded(
-        function: Any,
-    ) -> tuple[Any, BaseException | None]:
+    def _guarded(function: Any) -> tuple[Any, BaseException | None]:
         """Run a rank-local computation, deferring any failure.
 
         A rank-local computation that raises between two collectives removes
@@ -1647,20 +1602,14 @@ class XarrayMPI(ArithmeticMixin):
         return value.copy(data=recv)
 
     def _exchange(
-        self,
-        send: np.ndarray[Any, Any],
-        op: _MPI.Op,
+        self, send: np.ndarray[Any, Any], op: _MPI.Op
     ) -> np.ndarray[Any, Any]:
         """All-reduce an already validated contiguous send buffer."""
         recv = np.empty(send.shape, dtype=send.dtype)
         self._runtime.comm.Allreduce(send, recv, op=op)
         return recv
 
-    def _count(
-        self,
-        value: xr.DataArray,
-        dims: tuple[Hashable, ...],
-    ) -> xr.DataArray:
+    def _count(self, value: xr.DataArray, dims: tuple[Hashable, ...]) -> xr.DataArray:
         """Return the global element count across ``dims``, reduced by sum."""
         count: xr.DataArray | None = None
         error: BaseException | None = None
@@ -1772,11 +1721,7 @@ class XarrayMPI(ArithmeticMixin):
             if old_meta is not None
             else {}
         )
-        return self.redistribute(
-            result,
-            target,
-            chunk_info=chunk_info,
-        )
+        return self.redistribute(result, target, chunk_info=chunk_info)
 
     # -- per-variable combination --------------------------------------------
 
@@ -1801,9 +1746,7 @@ class XarrayMPI(ArithmeticMixin):
             partial,
             op,
             expect_dtype=_partial_dtype(
-                value.dtype.str,
-                "prod" if _op_name(op) == "PROD" else "sum",
-                skipna,
+                value.dtype.str, "prod" if _op_name(op) == "PROD" else "sum", skipna
             ),
             error=error,
             phase="MPI xarray sum/prod reduction",
@@ -1878,18 +1821,13 @@ class XarrayMPI(ArithmeticMixin):
             identity = limits.max if minimum else limits.min
         elif kind == "f":
             identity = np.asarray(
-                np.inf if minimum else -np.inf,
-                dtype=value.dtype,
+                np.inf if minimum else -np.inf, dtype=value.dtype
             ).item()
         else:
             name = "minimum" if minimum else "maximum"
             raise TypeError(f"MPI {name} is not defined for {value.dtype} data.")
 
-        template = value.sum(
-            dim=dims,
-            skipna=False,
-            keep_attrs=keep_attrs,
-        )
+        template = value.sum(dim=dims, skipna=False, keep_attrs=keep_attrs)
         return xr.full_like(template, identity, dtype=value.dtype)
 
     def _local_extreme(
@@ -1905,10 +1843,7 @@ class XarrayMPI(ArithmeticMixin):
         """Return this rank's local extreme, including for an empty partition."""
         if empty:
             return self._empty_extreme_partial(
-                variable,
-                variable_dims,
-                minimum=minimum,
-                keep_attrs=keep_attrs,
+                variable, variable_dims, minimum=minimum, keep_attrs=keep_attrs
             )
         method = variable.min if minimum else variable.max
         return method(dim=variable_dims, skipna=skipna, keep_attrs=keep_attrs)
@@ -1982,8 +1917,7 @@ class XarrayMPI(ArithmeticMixin):
         if error is None:
             try:
                 identity = np.asarray(
-                    np.inf if minimum else -np.inf,
-                    dtype=expect_dtype,
+                    np.inf if minimum else -np.inf, dtype=expect_dtype
                 ).item()
                 if skipna_enabled:
                     good = value.count(dim=dims, keep_attrs=False) > 0
@@ -2020,9 +1954,7 @@ class XarrayMPI(ArithmeticMixin):
             )
         )
         self._runtime.raise_if_error(
-            error,
-            f"MPI xarray {operation} reduction",
-            signature,
+            error, f"MPI xarray {operation} reduction", signature
         )
         if send is None or template is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
@@ -2177,35 +2109,22 @@ class XarrayMPI(ArithmeticMixin):
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta,
-            dims,
-            redistribute_on=redistribute_on,
+            old_meta, dims, redistribute_on=redistribute_on
         )
         if local_meta is not None:
             method = value.prod if product else value.sum
             local_result = method(
-                dim=local_dim,
-                skipna=skipna,
-                min_count=min_count,
-                keep_attrs=keep_attrs,
+                dim=local_dim, skipna=skipna, min_count=min_count, keep_attrs=keep_attrs
             )
             return self._finish_local_reduction(local_result, old_meta=local_meta)
 
-        plan = self._plan(
-            value,
-            dims,
-            old_meta,
-            operation=operation,
-        )
+        plan = self._plan(value, dims, old_meta, operation=operation)
 
         if isinstance(value, xr.DataArray):
             method = value.prod if product else value.sum
             local, local_error = self._guarded(
                 lambda: method(
-                    dim=local_dim,
-                    skipna=skipna,
-                    min_count=None,
-                    keep_attrs=keep_attrs,
+                    dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
                 )
             )
             if not dims:
@@ -2237,10 +2156,7 @@ class XarrayMPI(ArithmeticMixin):
             method = variable.prod if product else variable.sum
             local, local_error = self._guarded(
                 lambda method=method, entry=entry: method(
-                    dim=entry.dims,
-                    skipna=skipna,
-                    min_count=None,
-                    keep_attrs=keep_attrs,
+                    dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
                 )
             )
             if not entry.distributed:
@@ -2312,47 +2228,29 @@ class XarrayMPI(ArithmeticMixin):
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta,
-            dims,
-            redistribute_on=redistribute_on,
+            old_meta, dims, redistribute_on=redistribute_on
         )
         if local_meta is not None:
             local_result = value.mean(
-                dim=local_dim,
-                skipna=skipna,
-                keep_attrs=keep_attrs,
+                dim=local_dim, skipna=skipna, keep_attrs=keep_attrs
             )
             return self._finish_local_reduction(local_result, old_meta=local_meta)
 
-        plan = self._plan(
-            value,
-            dims,
-            old_meta,
-            operation="mean",
-        )
+        plan = self._plan(value, dims, old_meta, operation="mean")
 
         if isinstance(value, xr.DataArray):
             if not dims:
                 local_mean = value.mean(
-                    dim=local_dim,
-                    skipna=skipna,
-                    keep_attrs=keep_attrs,
+                    dim=local_dim, skipna=skipna, keep_attrs=keep_attrs
                 )
                 return local_mean
             local_sum, local_error = self._guarded(
                 lambda: value.sum(
-                    dim=local_dim,
-                    skipna=skipna,
-                    min_count=None,
-                    keep_attrs=keep_attrs,
+                    dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
                 )
             )
             result = self._combine_mean(
-                value,
-                local_sum,
-                dims,
-                skipna=skipna,
-                error=local_error,
+                value, local_sum, dims, skipna=skipna, error=local_error
             )
             return self._finish(
                 result,
@@ -2369,25 +2267,16 @@ class XarrayMPI(ArithmeticMixin):
                 continue
             if not entry.distributed:
                 variables[entry.name] = variable.mean(
-                    dim=entry.dims,
-                    skipna=skipna,
-                    keep_attrs=keep_attrs,
+                    dim=entry.dims, skipna=skipna, keep_attrs=keep_attrs
                 )
                 continue
             local_sum, local_error = self._guarded(
                 lambda variable=variable, entry=entry: variable.sum(
-                    dim=entry.dims,
-                    skipna=skipna,
-                    min_count=None,
-                    keep_attrs=keep_attrs,
+                    dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
                 )
             )
             result = self._combine_mean(
-                variable,
-                local_sum,
-                entry.dims,
-                skipna=skipna,
-                error=local_error,
+                variable, local_sum, entry.dims, skipna=skipna, error=local_error
             )
             variables[entry.name] = result
         return self._finish(
@@ -2515,25 +2404,14 @@ class XarrayMPI(ArithmeticMixin):
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta,
-            dims,
-            redistribute_on=redistribute_on,
+            old_meta, dims, redistribute_on=redistribute_on
         )
         if local_meta is not None:
             method = value.min if minimum else value.max
-            local_result = method(
-                dim=local_dim,
-                skipna=skipna,
-                keep_attrs=keep_attrs,
-            )
+            local_result = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
             return self._finish_local_reduction(local_result, old_meta=local_meta)
 
-        plan = self._plan(
-            value,
-            dims,
-            old_meta,
-            operation=operation,
-        )
+        plan = self._plan(value, dims, old_meta, operation=operation)
         empty_partition = self._partition_is_empty(value, old_meta)
 
         if isinstance(value, xr.DataArray):
@@ -2551,12 +2429,7 @@ class XarrayMPI(ArithmeticMixin):
                 )
             )
             result = self._combine_extreme(
-                value,
-                local,
-                dims,
-                minimum=minimum,
-                skipna=skipna,
-                error=local_error,
+                value, local, dims, minimum=minimum, skipna=skipna, error=local_error
             )
             return self._finish(
                 result,
@@ -2709,21 +2582,14 @@ class XarrayMPI(ArithmeticMixin):
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta,
-            dims,
-            redistribute_on=redistribute_on,
+            old_meta, dims, redistribute_on=redistribute_on
         )
         if local_meta is not None:
             method = value.all if all_values else value.any
             local_result = method(dim=local_dim, keep_attrs=keep_attrs)
             return self._finish_local_reduction(local_result, old_meta=local_meta)
 
-        plan = self._plan(
-            value,
-            dims,
-            old_meta,
-            operation=operation,
-        )
+        plan = self._plan(value, dims, old_meta, operation=operation)
 
         if isinstance(value, xr.DataArray):
             method = value.all if all_values else value.any

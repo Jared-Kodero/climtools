@@ -6,12 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any
 
-    from ..lib_netcdf.netcdf import (
-        append,
-        dataset_is_empty,
-        empty_dataset,
-        to_netcdf,
-    )
+    from ..lib_netcdf.netcdf import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..viz import cmaps
     from ..viz import plotting as plot
     from . import calc_stats as calc

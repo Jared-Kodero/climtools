@@ -25,6 +25,7 @@ import operator
 import os
 import shutil
 import time as time_module
+import uuid
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -36,7 +37,6 @@ from typing import Any
 import dask.array as dask_array
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
 from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
@@ -75,8 +75,8 @@ LONGITUDE_COUNT: int = 0
 PLEV_COUNT: int = 0
 
 
-OUTPUT_DIR = Path.home() / "scratch" / "io_mpi_test"
-TEST_DATA_PATH = OUTPUT_DIR / "mock_in.nc"
+OUTPUT_DIR = (Path.home() / "jobtmp" / "io_mpi_test").resolve()
+TEST_DATA_PATH = OUTPUT_DIR / f"{uuid.uuid4().hex}.nc"
 
 RANK: int = mpi.comm.rank
 SIZE: int = mpi.comm.size
@@ -222,12 +222,12 @@ def build_mock_dataset(
         data_vars={
             "pr": (
                 ("time", "lat", "lon"),
-                precipitation,
+                precipitation.astype(np.float32),
                 {"units": "kg m-2 s-1", "long_name": "precipitation rate"},
             ),
             "t2m": (
                 ("time", "lat", "lon"),
-                surface_temperature,
+                surface_temperature.astype(np.float32),
                 {"units": "K", "long_name": "2 m air temperature"},
             ),
             "t": (
@@ -237,7 +237,7 @@ def build_mock_dataset(
             ),
             "slmsk": (
                 ("lat", "lon"),
-                sea_land_mask,
+                sea_land_mask.astype(np.int64),
                 {"units": "1", "long_name": "sea-land-ice mask"},
             ),
         },
@@ -254,45 +254,9 @@ def build_mock_dataset(
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
 
-    # This path is a fixed scratch location, wiped and recreated by main()
-    # immediately before this call, so the specific inode being reused is
-    # not the concern. What has been observed instead: this create failed
-    # once, on a job that ran shortly after a prior job touching this same
-    # underlying storage was killed abruptly (SIGKILL, which skips the
-    # graceful close a normal exit performs). The leading hypothesis is a
-    # parallel filesystem's (Lustre, GPFS) own lock/object-cleanup recovery
-    # lagging behind that abrupt death, rather than anything about this
-    # dataset's contents -- but that is inference from one occurrence in a
-    # sandbox that cannot reproduce this cluster's storage layer, not a
-    # confirmed mechanism. The retry below is deliberately generous (minutes,
-    # not seconds: this job's walltime budget is hours) on the chance that
-    # is right, and gathers concrete diagnostics on every failed attempt so
-    # that if it recurs, the log carries actual forensic data -- disk space,
-    # directory state, any partial file left behind -- instead of only the
-    # bare "HDF error" a retry alone would still leave unexplained.
-    max_attempts = 6
-    delays = (5.0, 15.0, 30.0, 60.0, 120.0)
-    assert len(delays) == max_attempts - 1
-    for attempt in range(1, max_attempts + 1):
-        try:
-            path.unlink(missing_ok=True)
-            ds.to_netcdf(path, format="NETCDF4")
-            break
-        except OSError as exc:
-            diagnostics = _diagnose_write_failure(path)
-            if attempt == max_attempts:
-                raise OSError(
-                    f"{exc}\nDiagnostics after {max_attempts} attempts "
-                    + f"over {sum(delays):.0f}s: {diagnostics}"
-                ) from exc
-            delay = delays[attempt - 1]
-            warnings.warn(
-                f"build_mock_dataset: attempt {attempt}/{max_attempts} to "
-                + f"create {path} failed ({exc}); retrying in {delay:.0f}s. "
-                + f"Diagnostics: {diagnostics}",
-                stacklevel=2,
-            )
-            time_module.sleep(delay)
+    compression_opts = {"zlib": True, "complevel": 4}
+    encoding = {var: compression_opts for var in ds.data_vars}
+    ds.to_netcdf(path, format="NETCDF4", encoding=encoding)
 
     mpi.log(f"Mock dataset saved to {path}", timestamp=True, prefix=True)
 
@@ -4961,7 +4925,9 @@ def main() -> None:
             shutil.rmtree(OUTPUT_DIR)
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        TEST_DATA_PATH.unlink(missing_ok=True)
         build_mock_dataset(TEST_DATA_PATH, TIME_STEPS)
+
     # Every other rank waits here for rank 0 to finish writing the mock
     # dataset before touching TEST_DATA_PATH.
     mpi.comm.Barrier()

@@ -25,8 +25,7 @@ if TYPE_CHECKING:
 
 
 def resolve_unlimited_dim(
-    unlimited_dim: str | Iterable[str] | None,
-    sizes: Iterable[str],
+    unlimited_dim: str | Iterable[str] | None, sizes: Iterable[str]
 ) -> str | None:
     """Reduce an unlimited-dimension specification to a single name.
 
@@ -232,21 +231,14 @@ def dataset_to_netcdf(
         for v in data0.data_vars
     }
 
-    data0.to_netcdf(
-        file,
-        encoding=enc,
-        format=format,
-        unlimited_dims=[dim0],
-    )
+    data0.to_netcdf(file, encoding=enc, format=format, unlimited_dims=[dim0])
 
     # Append the remaining records in batches.
     starts = range(1, n_items, batch_size)
 
     if show_progress:
         data_slices = SerialProgressBar(
-            starts,
-            description="Writing NetCDF file",
-            file=stdout,
+            starts, description="Writing NetCDF file", file=stdout
         )
     else:
         data_slices = starts
@@ -408,9 +400,7 @@ def append(
                     getattr(stored, "calendar", None) if stored is not None else None
                 )
                 encoded_arrays[varname] = encode_time(
-                    da,
-                    units=units if stored is not None else None,
-                    calendar=calendar,
+                    da, units=units if stored is not None else None, calendar=calendar
                 )
 
         for varname, da in encoded_arrays.items():
@@ -487,10 +477,7 @@ def createVariable(
         kwargs["shuffle"] = shuffle
 
     ncvar = ncf.createVariable(
-        varname=varname,
-        datatype=da.dtype,
-        dimensions=da.dims,
-        **kwargs,
+        varname=varname, datatype=da.dtype, dimensions=da.dims, **kwargs
     )
     for attr_name, attr_val in da.attrs.items():
         ncvar.setncattr(attr_name, attr_val)

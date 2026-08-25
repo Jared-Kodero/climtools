@@ -27,10 +27,7 @@ def operand(operation: Callable, data: xr.DataArray, factor: float) -> xr.DataAr
 def norm_time(da: xr.DataArray) -> xr.DataArray:
 
     time = xr.DataArray(
-        pd.to_datetime(da.values),
-        dims=da.dims,
-        coords=da.coords,
-        attrs=da.attrs,
+        pd.to_datetime(da.values), dims=da.dims, coords=da.coords, attrs=da.attrs
     )
 
     _, out_units, out_calendar = encode_cf_datetime(

@@ -82,9 +82,7 @@ def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
 
 
 def get_effective_chunk_size(
-    length: int,
-    native_chunk: int | None,
-    mpi_size: int,
+    length: int, native_chunk: int | None, mpi_size: int
 ) -> int:
     """Return the distribution_chunk length climtools should retain for one dimension.
 
@@ -128,17 +126,14 @@ def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     """
     return {
         str(dim): get_effective_chunk_size(
-            int(length),
-            get_native_chunk_sizes(data, dim),
-            mpi_size,
+            int(length), get_native_chunk_sizes(data, dim), mpi_size
         )
         for dim, length in data.sizes.items()
     }
 
 
 def get_chunk_overrides(
-    data: xr.Dataset,
-    chunk_info: Mapping[str, int],
+    data: xr.Dataset, chunk_info: Mapping[str, int]
 ) -> dict[str, int]:
     """Return only distribution_chunk overrides that cannot use useful native chunks.
 
@@ -157,10 +152,7 @@ def get_chunk_overrides(
     return {
         str(dim): int(chunk_info[str(dim)])
         for dim, length in data.sizes.items()
-        if not get_usable_native_chunk(
-            int(length),
-            get_native_chunk_sizes(data, dim),
-        )
+        if not get_usable_native_chunk(int(length), get_native_chunk_sizes(data, dim))
     }
 
 
@@ -210,10 +202,7 @@ def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
 
 
 def get_chunk_bounds(
-    length: int,
-    chunk_size: int,
-    rank: int,
-    size: int,
+    length: int, chunk_size: int, rank: int, size: int
 ) -> tuple[int, int]:
     """Partition a dimension into per-rank distribution_chunk bounds on chunk boundaries.
 
@@ -249,8 +238,7 @@ def get_chunk_bounds(
 
 
 def prune_chunk_info(
-    chunk_info: Mapping[str, int],
-    value: xr.Dataset | xr.DataArray,
+    chunk_info: Mapping[str, int], value: xr.Dataset | xr.DataArray
 ) -> dict[str, int]:
     """Restrict a distribution_chunk mapping to dimensions actually present on ``value``.
 
@@ -328,9 +316,7 @@ def _cap_partition_chunk_to_hdf5_limit(preferred: int, other_bytes: int) -> int:
 
 
 def get_partition_chunk_size(
-    ds: xr.Dataset,
-    partition_dim: str | None,
-    mpi_size: int,
+    ds: xr.Dataset, partition_dim: str | None, mpi_size: int
 ) -> int | None:
     """Return the per-rank-aligned HDF5 save_chunk length for ``partition_dim``.
 
@@ -450,9 +436,7 @@ def _largest_divisor_at_most(value: int, ceiling: int) -> int:
 
 
 def compute_save_chunks(
-    value: xr.Dataset | xr.DataArray,
-    meta: Mapping[str, Any],
-    mpi_size: int,
+    value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any], mpi_size: int
 ) -> dict[str, tuple[int, ...]]:
     """Derive save chunks for a distributed object using global metadata.
 
@@ -532,18 +516,12 @@ def compute_save_chunks(
         )
         mock = dask_array.zeros(shape, dtype=variable.dtype, chunks="auto")
         other_bytes = _other_dims_bytes(
-            variable.dtype.itemsize,
-            variable.dims,
-            shape,
-            dim,
+            variable.dtype.itemsize, variable.dims, shape, dim
         )
 
         save_chunk: list[int] = []
         for var_dim, length, blocks in zip(
-            variable.dims,
-            shape,
-            mock.chunks,
-            strict=True,
+            variable.dims, shape, mock.chunks, strict=True
         ):
             proposed = int(max(blocks)) if blocks else int(length)
             if var_dim != dim:

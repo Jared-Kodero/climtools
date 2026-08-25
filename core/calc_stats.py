@@ -20,10 +20,7 @@ except ImportError:
     )
 
 
-def _mktrend_test(
-    array: np.ndarray,
-    scale: float = 1,
-) -> np.ndarray:
+def _mktrend_test(array: np.ndarray, scale: float = 1) -> np.ndarray:
     nan_array = np.array([np.nan] * 7)
 
     df = pd.DataFrame({"array": array})

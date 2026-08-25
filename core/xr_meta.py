@@ -31,8 +31,7 @@ def _partitions_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool
 
 
 def _validate_mpi_meta(
-    value: xr.Dataset | xr.DataArray,
-    meta: Any,
+    value: xr.Dataset | xr.DataArray, meta: Any
 ) -> dict[str, Any] | None:
     """Return ``meta`` when it describes a valid partition of ``value``."""
     if not isinstance(meta, dict):
@@ -170,8 +169,7 @@ def set_mpi_meta(
 
 
 def set_save_chunks(
-    value: xr.Dataset | xr.DataArray,
-    save_chunks: Mapping[str, tuple[int, ...]],
+    value: xr.Dataset | xr.DataArray, save_chunks: Mapping[str, tuple[int, ...]]
 ) -> None:
     """Attach save_chunks to ``value``'s existing MPI distribution metadata.
 
@@ -275,14 +273,7 @@ def log_partition_report(
     """Print a structured, compact description of the rank-local partition layout."""
     comm = runtime.comm
     first, last = _edge_labels(data, dim)
-    local = (
-        int(comm.rank),
-        int(start),
-        int(stop),
-        first,
-        last,
-        int(data.nbytes),
-    )
+    local = (int(comm.rank), int(start), int(stop), first, last, int(data.nbytes))
     rows = comm.gather(local, root=0)
     if comm.rank != 0 or rows is None:
         return
@@ -427,12 +418,7 @@ def _resolve_sizes(
     return resolved
 
 
-def _localize_coord(
-    spec: Any,
-    global_size: int,
-    start: int,
-    stop: int,
-) -> Any:
+def _localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
     """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
 
     Accepts a coordinate in any of the three forms
@@ -455,10 +441,7 @@ def _localize_coord(
 
 
 def _delayed_local(
-    fn: Callable[..., Any],
-    args: tuple[Any, ...],
-    shape: tuple[int, ...],
-    dtype: Any,
+    fn: Callable[..., Any], args: tuple[Any, ...], shape: tuple[int, ...], dtype: Any
 ) -> Any:
     """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
 

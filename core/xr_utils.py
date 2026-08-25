@@ -29,9 +29,7 @@ _dask_client = None
 _dask_cluster = None
 
 
-def get_spatial_dims(
-    da: xr.DataArray | xr.Dataset,
-) -> tuple[str, str]:
+def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
     """Return the longitude and latitude coordinate names."""
     ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
 
@@ -50,9 +48,7 @@ def get_spatial_dims(
 
 
 def set_edges_to_nan(
-    da: xr.DataArray,
-    dims: str | Sequence[str],
-    width: int = 1,
+    da: xr.DataArray, dims: str | Sequence[str], width: int = 1
 ) -> xr.DataArray:
     """Set edge cells along selected dimensions to NaN."""
     if width < 0:
@@ -235,10 +231,7 @@ def sel_transect(
 
     latlon = geometry == "latlon"
 
-    def longitude_delta(
-        values: xr.DataArray,
-        centre: float,
-    ) -> xr.DataArray:
+    def longitude_delta(values: xr.DataArray, centre: float) -> xr.DataArray:
         """Signed shortest longitude difference in degrees."""
         return (values - centre + 180.0) % 360.0 - 180.0
 
@@ -289,10 +282,7 @@ def sel_transect(
 
         cross_track = (xc - x0) * normal_x + (yc - y0) * normal_y
 
-        cell_width = np.hypot(
-            normal_x * dx,
-            normal_y * dy,
-        )
+        cell_width = np.hypot(normal_x * dx, normal_y * dy)
 
         mask = np.abs(cross_track) <= 0.5 * width * cell_width
         return data.where(mask, drop=drop)
@@ -305,8 +295,7 @@ def sel_transect(
     cross_east_weight = abs(np.cos(theta))
 
     cell_width = np.hypot(
-        cross_north_weight * dy,
-        cross_east_weight * dx * np.cos(phi0),
+        cross_north_weight * dy, cross_east_weight * dx * np.cos(phi0)
     )
 
     anchor = np.array(
@@ -393,10 +382,7 @@ def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
     """Return a deterministic hexadecimal identifier for a lat-lon grid."""
     signature = f"lat-{coord_id(coords['lat'])}_lon-{coord_id(coords['lon'])}"
 
-    return hashlib.blake2b(
-        signature.encode("utf-8"),
-        digest_size=8,
-    ).hexdigest()
+    return hashlib.blake2b(signature.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def remap(
@@ -485,10 +471,7 @@ def remap(
         reuse_weights=reuse,
     )
 
-    return regridder(
-        grid_in,
-        output_chunks=output_chunks,
-    )
+    return regridder(grid_in, output_chunks=output_chunks)
 
 
 def mask(
