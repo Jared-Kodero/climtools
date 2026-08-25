@@ -16,9 +16,7 @@ from .tools import n_cpus, tmp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from typing import Literal
-
-    from typing_extensions import Self
+    from typing import Literal, Self
 
 xr.set_options(display_expand_attrs=False)
 

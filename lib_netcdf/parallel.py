@@ -9,33 +9,12 @@ from __future__ import annotations
 
 import contextlib
 import math
-import os
 import sys
 import traceback
 import warnings
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-# HDF5 (via netCDF4's parallel4 backend) takes out a file lock on open and
-# expects a clean release on close. On network/parallel filesystems commonly
-# used for HPC scratch space (Lustre, GPFS, and some NFS configurations),
-# that lock is not always visible as released to a *different* opener the
-# instant a collective MPI-IO close returns on this rank: the underlying
-# filesystem's lock/lease state propagates to the metadata server
-# asynchronously. A file written collectively with `parallel=True` and then
-# immediately reopened without `parallel=True` (as `to_netcdf`'s serial
-# readback path does) can therefore block indefinitely waiting for a lock
-# that, from HDF5's point of view, is still held. Disabling HDF5's own file
-# locking sidesteps the race entirely; climtools already serializes
-# concurrent access to a given path through explicit MPI barriers, so HDF5's
-# additional locking is redundant defense-in-depth, not the only thing
-# preventing concurrent writers. See
-# https://docs.hdfgroup.org/hdf5/rfc/RFC_file_locking.pdf and
-# https://forum.hdfgroup.org for background on this behavior. A caller that
-# has already set the variable (e.g. because their filesystem needs the
-# opposite setting) is left alone.
-os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import dask
 import netCDF4

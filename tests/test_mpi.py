@@ -36,6 +36,7 @@ from typing import Any
 import dask.array as dask_array
 import numpy as np
 import xarray as xr
+
 from climtools import mpi, xgeo
 from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
@@ -808,6 +809,116 @@ def test_mpi_reduction_contracts() -> None:
         correct,
         0.0,
         0.0,
+        note="correctness-focused",
+    )
+
+
+@run_test
+def test_mpi_decompose_and_children() -> None:
+    """Check MPIRuntime.decompose, .child, and the parent<->child collectives.
+
+    Two decompositions are exercised on every run regardless of ``SIZE``:
+    ``ntasks=SIZE`` (one rank per child, valid for any communicator size)
+    and, when ``SIZE`` is even and at least 2, ``ntasks=SIZE // 2`` (two
+    ranks per child), which is the only way to exercise the child-root-only
+    contribution semantics of ``gather_from_children`` and the
+    scatter-then-broadcast-within-child semantics of ``scatter_to_children``
+    on more than one rank per child.
+    """
+    t0 = time_module.perf_counter()
+
+    # `.child` before `.decompose()` has ever been called on this runtime
+    # must fail clearly rather than returning a stale or partial runtime.
+    child_before_decompose_raises = call_raises(RuntimeError, lambda: mpi.child)
+
+    # decompose() must reject an ntasks that does not evenly divide the
+    # communicator; SIZE + 1 never divides SIZE for SIZE >= 1.
+    decompose_validates = call_raises(
+        ValueError,
+        mpi.decompose,
+        SIZE + 1,
+        contains=f"({SIZE})",
+    )
+
+    # --- one rank per child: valid for any SIZE ---
+    mpi.decompose(SIZE)
+    child = mpi.child
+
+    single_shape_ok = bool(
+        child.task == RANK and child.info == (RANK,) and child.comm.size == 1
+    )
+
+    bcast_value = {"payload": 42} if mpi.is_root() else None
+    bcast_ok = mpi.bcast_to_children(bcast_value, root=0) == {"payload": 42}
+
+    scatter_values = list(range(SIZE)) if mpi.is_root() else None
+    scatter_ok = mpi.scatter_to_children(scatter_values, root=0) == RANK
+
+    gathered = mpi.gather_from_children(RANK * 10, root=0)
+    gather_ok = (
+        gathered == [rank * 10 for rank in range(SIZE)]
+        if mpi.is_root()
+        else gathered is None
+    )
+
+    correct_single = bool(single_shape_ok and bcast_ok and scatter_ok and gather_ok)
+
+    # --- two ranks per child: only meaningful when SIZE supports it ---
+    correct_multi = True
+    if SIZE >= 2 and SIZE % 2 == 0:
+        ntasks = SIZE // 2
+        ranks_per_task = SIZE // ntasks
+
+        mpi.decompose(ntasks)
+        child = mpi.child
+
+        expected_task = RANK // ranks_per_task
+        expected_start = expected_task * ranks_per_task
+        expected_info = tuple(range(expected_start, expected_start + ranks_per_task))
+
+        multi_shape_ok = bool(
+            child.task == expected_task
+            and child.info == expected_info
+            and child.comm.size == ranks_per_task
+        )
+
+        bcast_value = "root-value" if mpi.is_root() else None
+        bcast_ok = mpi.bcast_to_children(bcast_value, root=0) == "root-value"
+
+        scatter_values = (
+            [f"child-{task}" for task in range(ntasks)] if mpi.is_root() else None
+        )
+        scattered = mpi.scatter_to_children(scatter_values, root=0)
+        scatter_ok = scattered == f"child-{expected_task}"
+
+        # Only each child's rank 0 contributes; gather_from_children must
+        # order results by child task index regardless of which parent
+        # ranks those child roots happen to be.
+        contribution = expected_task * 100 + child.comm.rank
+        gathered = mpi.gather_from_children(contribution, root=0)
+        gather_ok = (
+            gathered == [task * 100 for task in range(ntasks)]
+            if mpi.is_root()
+            else gathered is None
+        )
+
+        correct_multi = bool(multi_shape_ok and bcast_ok and scatter_ok and gather_ok)
+
+    correct = bool(
+        mpi.reduce.all(
+            child_before_decompose_raises
+            and decompose_validates
+            and correct_single
+            and correct_multi
+        )
+    )
+    elapsed = time_module.perf_counter() - t0
+    record_result(
+        "mpi.decompose/child/bcast_to_children/scatter_to_children/"
+        "gather_from_children",
+        correct,
+        0.0,
+        elapsed,
         note="correctness-focused",
     )
 
@@ -4895,6 +5006,7 @@ def main() -> None:
     test_mpi_runtime_helpers()
     test_mpi_logging_and_error_propagation()
     test_mpi_reduction_contracts()
+    test_mpi_decompose_and_children()
 
     mpi.log("\n--- core.xr_meta helpers ---")
     test_xr_meta_reexports()

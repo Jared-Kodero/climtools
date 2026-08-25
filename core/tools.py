@@ -271,7 +271,68 @@ def locked_print(
         print(*values, sep=sep, end=end, file=file, flush=flush)
 
 
-class RedirectStreams:
+class RedirectFd:
+    """Duplicate and repoint a single stream's underlying file descriptor.
+
+    Holds only the ``dup``/``dup2`` primitives that descriptor-level
+    redirection needs, one stream at a time: nothing here knows about
+    stdout/stderr as a pair, target selection, or path handling. Those
+    policies live in :class:`RedirectStreams`, which inherits this class for
+    its fd-level mode and falls back to plain Python stream substitution
+    when descriptor duplication is unavailable (e.g. a closed or non-real
+    file descriptor).
+    """
+
+    @staticmethod
+    def duplicate(stream: TextIO) -> TextIO:
+        """Return a writable stream backed by a duplicate file descriptor."""
+        stream.flush()
+        fd = os.dup(stream.fileno())
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        errors = getattr(stream, "errors", None) or "strict"
+
+        try:
+            return os.fdopen(
+                fd,
+                "w",
+                encoding=encoding,
+                errors=errors,
+                buffering=1,
+            )
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def point(source: TextIO, target: TextIO) -> int:
+        """Point ``source``'s file descriptor at ``target`` and return a
+        duplicate of the original descriptor, for a later :meth:`reset`."""
+        source.flush()
+        source_fd = source.fileno()
+        saved_fd = os.dup(source_fd)
+
+        try:
+            os.dup2(target.fileno(), source_fd)
+        except BaseException:
+            os.close(saved_fd)
+            raise
+
+        return saved_fd
+
+    @staticmethod
+    def reset(saved_fd: int | None, stream: TextIO | None) -> None:
+        """Restore a descriptor saved by :meth:`point` and close the copy."""
+        if saved_fd is None or stream is None:
+            return
+
+        try:
+            stream.flush()
+            os.dup2(saved_fd, stream.fileno())
+        finally:
+            os.close(saved_fd)
+
+
+class RedirectStreams(RedirectFd):
     """Temporarily redirect standard output and standard error.
 
     Descriptor-level redirection ensures that code holding existing references
@@ -329,26 +390,6 @@ class RedirectStreams:
         return self.stdout, self.stderr
 
     @staticmethod
-    def duplicate(stream: TextIO) -> TextIO:
-        """Return a writable stream backed by a duplicate file descriptor."""
-        stream.flush()
-        fd = os.dup(stream.fileno())
-        encoding = getattr(stream, "encoding", None) or "utf-8"
-        errors = getattr(stream, "errors", None) or "strict"
-
-        try:
-            return os.fdopen(
-                fd,
-                "w",
-                encoding=encoding,
-                errors=errors,
-                buffering=1,
-            )
-        except BaseException:
-            os.close(fd)
-            raise
-
-    @staticmethod
     def _same_path(
         first: Path | str | TextIO | None,
         second: Path | str | TextIO | None,
@@ -387,20 +428,6 @@ class RedirectStreams:
             self._close_targets()
             raise
 
-    @staticmethod
-    def _redirect_fd(source: TextIO, target: TextIO) -> int:
-        source.flush()
-        source_fd = source.fileno()
-        saved_fd = os.dup(source_fd)
-
-        try:
-            os.dup2(target.fileno(), source_fd)
-        except BaseException:
-            os.close(saved_fd)
-            raise
-
-        return saved_fd
-
     def _start_python_redirect(
         self,
     ) -> tuple[TextIO | None, TextIO | None]:
@@ -424,16 +451,10 @@ class RedirectStreams:
 
         try:
             if self.stdout is not None:
-                stdout_fd = self._redirect_fd(
-                    self.orig_stdout,
-                    self.stdout,
-                )
+                stdout_fd = self.point(self.orig_stdout, self.stdout)
 
             if self.stderr is not None:
-                stderr_fd = self._redirect_fd(
-                    self.orig_stderr,
-                    self.stderr,
-                )
+                stderr_fd = self.point(self.orig_stderr, self.stderr)
         except BaseException:
             self._restore_fds(stdout_fd, stderr_fd)
             raise
@@ -456,17 +477,11 @@ class RedirectStreams:
         error: BaseException | None = None
 
         for saved_fd, stream in pairs:
-            if saved_fd is None or stream is None:
-                continue
-
             try:
-                stream.flush()
-                os.dup2(saved_fd, stream.fileno())
+                self.reset(saved_fd, stream)
             except BaseException as exc:
                 if error is None:
                     error = exc
-            finally:
-                os.close(saved_fd)
 
         if error is not None:
             raise error
@@ -520,14 +535,6 @@ class RedirectStreams:
             self._stderr_fd = None
             self._mode = None
             self._close_targets()
-
-    def redirect(self) -> tuple[TextIO | None, TextIO | None]:
-        """Alias for :meth:`start`."""
-        return self.start()
-
-    def restore(self) -> None:
-        """Alias for :meth:`stop`."""
-        self.stop()
 
     def __enter__(self) -> tuple[TextIO | None, TextIO | None]:
         return self.start()

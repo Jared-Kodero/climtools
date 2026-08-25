@@ -29,9 +29,12 @@ package works without it.
 
 from __future__ import annotations
 
+import os
 import warnings
 from importlib import import_module
 from typing import TYPE_CHECKING
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import dask.diagnostics
 
@@ -40,6 +43,7 @@ from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import (
     LockedLogger,
     LockFile,
+    RedirectFd,
     RedirectStreams,
     apply_widget_css,
     locked_print,
@@ -65,6 +69,7 @@ __all__ = [
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
+    "RedirectFd",
     "RedirectStreams",
     "SerialProgressBar",
     "calc",

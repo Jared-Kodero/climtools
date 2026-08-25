@@ -96,8 +96,8 @@ most conda-forge builds) are serial-only: importing them works fine, but
 `to_netcdf(..., parallel=True)` raises `NetCDFWriteError` the first time it
 runs under more than one rank. climtools checks for this and prints a
 one-time hint pointing back here as soon as `climtools.mpi` is used under a
-real multi-rank launch -- see `_warn_if_parallel_netcdf_missing` in
-[`core/lib_mpi.py`](core/lib_mpi.py).
+real multi-rank launch -- see `MPIRuntime._warn_if_parallel_netcdf_missing`
+in [`core/lib_mpi.py`](core/lib_mpi.py).
 
 Run the setup script from a clone of this repository:
 
@@ -141,13 +141,15 @@ is idempotent.
 
 **Required on Lustre/GPFS**: HDF5 takes POSIX advisory locks by default, and
 many ranks opening the same file concurrently -- or one rank reopening a file
-another rank just closed -- can block on those locks indefinitely on a
-parallel filesystem, which presents as a hang with no traceback on any rank.
-`lib_netcdf/parallel.py` sets `HDF5_USE_FILE_LOCKING=FALSE` as a
-process-local default the moment it is imported, so this is handled
-automatically for anything going through `xgeo.to_netcdf`. If your own code
-opens NetCDF files directly (not through `xgeo.to_netcdf`), set it yourself,
-before those opens happen:
+another rank just closed -- can block or fail (a generic `HDF error` on
+open) on those locks on a parallel filesystem whose lock/lease state hasn't
+finished propagating. `climtools/__init__.py` sets
+`HDF5_USE_FILE_LOCKING=FALSE` as a process-local default the moment the
+`climtools` package is imported -- before any submodule, so this covers
+every NetCDF open in the process, including plain `xarray.Dataset.to_netcdf`/
+`open_dataset` calls that never go through `xgeo.to_netcdf`. If your code
+needs the variable set before `import climtools` even runs (e.g. a
+subprocess that imports `netCDF4` directly), set it yourself:
 
 ```bash
 export HDF5_USE_FILE_LOCKING=FALSE
@@ -806,17 +808,15 @@ launcher:
 
 | File | Demonstrates |
 | --- | --- |
-| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
+| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`, and `RedirectStreams`/`RedirectFd` -- fd-level and Python-level redirection, shared-target merging, truncate/append, and re-entry rejection), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
 | [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, the parallel NetCDF writer, and the `core/xr_meta.py` helpers `mpi.xarray` is built on -- `mpi_meta` get/set/strip round-tripping and its length-mismatch validation, `choose_partition_dim` (longest-dimension selection, declaration-order tie-breaking, `exclude`, the length-one fallback, and the short-partition warning's once-per-`(dim, length, mpi_size)` dedup), `indexer_is_scalar`, and that `climtools.core.xr_mpi` re-exports these as the same objects rather than reimplementing them -- including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
-| [`test_mpi_xarray_reductions.py`](tests/test_mpi_xarray_reductions.py) | Focused regression checks for reduction placement: communication-free non-partition reductions, mixed dimension tuples, automatic longest-dimension redistribution after the partition dimension is consumed, scalar/length-one results, explicit redistribution, attrs, extrema/logical reductions, and the absence of `mode`/`root` from `mpi.xarray` reductions. |
-| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running every suite above -- `test_general.py` directly, then `test_mpi_xarray_reductions.py` and the `test_mpi.py` scale sweep on eight ranks -- with the environment settings the MPI suites require, including `HDF5_USE_FILE_LOCKING=FALSE`. |
+| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running `test_general.py` once, then `test_mpi.py` across the full `{8,16,32 tasks} x {0.5,0.25,0.1 deg} x {24,168,720,8760,43800 time steps}` matrix -- the same coverage that first surfaced the HDF file-locking bug fixed by `HDF5_USE_FILE_LOCKING=FALSE` (set unconditionally at import time in [`__init__.py`](__init__.py); see below). Every configuration runs regardless of earlier failures, and the script exits nonzero if any did. |
 
 ```bash
 python tests/test_general.py
 
 python -m mpi4py tests/test_mpi.py
-mpirun -n 8 python -m mpi4py tests/test_mpi.py --time-steps 7200
-mpirun -n 8 python -m mpi4py tests/test_mpi_xarray_reductions.py
+mpirun -n 8 python -m mpi4py tests/test_mpi.py --time-steps 7200 --resolution 0.25
 ```
 
 Every timed check in `test_mpi.py` is tagged in the summary with a

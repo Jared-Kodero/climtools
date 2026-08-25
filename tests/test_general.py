@@ -17,6 +17,7 @@ MPI launcher; this script does not and is not affected by one being present.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -25,6 +26,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -35,10 +37,9 @@ matplotlib.use("Agg")  # headless: this suite never needs an on-screen figure
 import numpy as np
 import pandas as pd
 import xarray as xr
-
 from climtools import calc, cmaps, xgeo
 from climtools import plot as ctplot
-from climtools.core.tools import AttrDict, LockFile, n_cpus
+from climtools.core.tools import AttrDict, LockFile, RedirectFd, RedirectStreams, n_cpus
 from climtools.lib_netcdf import serial as lib_serial
 
 warnings.filterwarnings("ignore")
@@ -595,6 +596,167 @@ def test_attr_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
+# climtools.core.tools: RedirectStreams / RedirectFd
+# ---------------------------------------------------------------------------
+
+
+@run_test
+def test_redirect_class_hierarchy() -> None:
+    """RedirectStreams inherits the fd-duplication primitives from RedirectFd."""
+    is_subclass = issubclass(RedirectStreams, RedirectFd)
+    not_same_class = RedirectStreams is not RedirectFd
+    has_primitives = all(
+        hasattr(RedirectFd, name) for name in ("duplicate", "point", "reset")
+    )
+    correct = bool(is_subclass and not_same_class and has_primitives)
+    record_result(
+        "core.tools.RedirectStreams inherits RedirectFd's fd primitives", correct
+    )
+
+
+@run_test
+def test_redirect_fd_point_and_reset(tmp_dir: Path) -> None:
+    """RedirectFd.point/reset swap and restore a stream's raw file descriptor."""
+    target_path = tmp_dir / "redirect_fd_target.txt"
+
+    with open(target_path, "w", encoding="utf-8") as target:
+        saved_fd = RedirectFd.point(sys.stdout, target)
+        try:
+            os.write(sys.stdout.fileno(), b"captured via fd\n")
+        finally:
+            RedirectFd.reset(saved_fd, sys.stdout)
+
+    captured = target_path.read_text(encoding="utf-8")
+    correct = "captured via fd" in captured
+
+    # After reset, writes must go back to the original descriptor, not the
+    # (now closed) target file.
+    still_usable = True
+    try:
+        print(end="", file=sys.stdout, flush=True)
+    except (ValueError, OSError):
+        still_usable = False
+
+    record_result(
+        "core.tools.RedirectFd.point/reset swap and restore a raw fd",
+        bool(correct and still_usable),
+        note=captured.strip(),
+    )
+
+
+@run_test
+def test_redirect_streams_fd_level(tmp_dir: Path) -> None:
+    """RedirectStreams(fd_level=True) captures writes at the descriptor level."""
+    out_path = tmp_dir / "redirect_streams_fd.txt"
+    orig_stdout = sys.stdout
+
+    redirect = RedirectStreams(stdout_target=out_path, fd_level=True, truncate=True)
+    redirect.start()
+    try:
+        # Descriptor-level redirection must be transparent to code holding a
+        # pre-existing reference to sys.stdout (e.g. captured before start()).
+        print("hello from redirected stdout", file=orig_stdout, flush=True)
+    finally:
+        redirect.stop()
+
+    content = out_path.read_text(encoding="utf-8")
+    captured = "hello from redirected stdout" in content
+    restored = sys.stdout is orig_stdout
+
+    record_result(
+        "core.tools.RedirectStreams(fd_level=True) captures pre-existing stdout refs",
+        bool(captured and restored),
+    )
+
+
+@run_test
+def test_redirect_streams_python_level() -> None:
+    """RedirectStreams(fd_level=False) falls back to swapping sys.stdout/stderr."""
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    stdout_buffer = StringIO()
+    stderr_buffer = StringIO()
+
+    with RedirectStreams(stdout_target=stdout_buffer, stderr_target=stderr_buffer):
+        print("to stdout")
+        print("to stderr", file=sys.stderr)
+
+    restored = sys.stdout is orig_stdout and sys.stderr is orig_stderr
+    correct = bool(
+        "to stdout" in stdout_buffer.getvalue()
+        and "to stderr" in stderr_buffer.getvalue()
+        and restored
+    )
+    record_result(
+        "core.tools.RedirectStreams(fd_level=False) swaps sys.stdout/stderr", correct
+    )
+
+
+@run_test
+def test_redirect_streams_shared_target(tmp_dir: Path) -> None:
+    """Identical stdout/stderr targets are combined into a single stream."""
+    combined_path = tmp_dir / "redirect_streams_combined.txt"
+
+    redirect = RedirectStreams(
+        stdout_target=combined_path,
+        stderr_target=combined_path,
+        truncate=True,
+    )
+    redirect.start()
+    same_stream = redirect.stdout is redirect.stderr
+    redirect.stop()
+
+    record_result(
+        "core.tools.RedirectStreams merges identical stdout/stderr targets",
+        bool(same_stream),
+    )
+
+
+@run_test
+def test_redirect_streams_truncate_vs_append(tmp_dir: Path) -> None:
+    """truncate=True overwrites; truncate=False (default) appends."""
+    path = tmp_dir / "redirect_streams_truncate.txt"
+    path.write_text("existing\n", encoding="utf-8")
+
+    with RedirectStreams(stdout_target=path, truncate=False):
+        print("appended", file=sys.stdout)
+    appended_content = path.read_text(encoding="utf-8")
+    append_ok = "existing" in appended_content and "appended" in appended_content
+
+    with RedirectStreams(stdout_target=path, truncate=True):
+        print("overwritten", file=sys.stdout)
+    truncated_content = path.read_text(encoding="utf-8")
+    truncate_ok = "existing" not in truncated_content and "overwritten" in (
+        truncated_content
+    )
+
+    record_result(
+        "core.tools.RedirectStreams truncate=True/False controls open mode",
+        bool(append_ok and truncate_ok),
+    )
+
+
+@run_test
+def test_redirect_streams_double_start_raises() -> None:
+    """Calling start() while already active raises instead of leaking state."""
+    stdout_buffer = StringIO()
+    redirect = RedirectStreams(stdout_target=stdout_buffer)
+    redirect.start()
+    try:
+        raised = False
+        try:
+            redirect.start()
+        except RuntimeError:
+            raised = True
+    finally:
+        redirect.stop()
+
+    record_result(
+        "core.tools.RedirectStreams.start() rejects re-entry while active",
+        bool(raised),
+    )
+
+
+# ---------------------------------------------------------------------------
 # climtools.cdo (conditional: only meaningful with the cdo binary on PATH)
 # ---------------------------------------------------------------------------
 
@@ -705,6 +867,13 @@ def main() -> None:
         test_n_cpus()
         test_lock_file(tmp_dir)
         test_attr_dict()
+        test_redirect_class_hierarchy()
+        test_redirect_fd_point_and_reset(tmp_dir)
+        test_redirect_streams_fd_level(tmp_dir)
+        test_redirect_streams_python_level()
+        test_redirect_streams_shared_target(tmp_dir)
+        test_redirect_streams_truncate_vs_append(tmp_dir)
+        test_redirect_streams_double_start_raises()
 
         if not arguments.skip_cdo:
             print("\n--- climtools.cdo ---")

@@ -69,237 +69,189 @@ _OP_LABELS: tuple[tuple[Any, str], ...] = (
 )
 
 
-def _op_label(op: _MPI.Op) -> str:
-    """Return a picklable, rank-stable label for a reduction operation.
-
-    Op handles are unhashable and their repr embeds an address that differs
-    between ranks, so neither can be compared across ranks. The label can be.
-    """
-    for candidate, name in _OP_LABELS:
-        if op == candidate:
-            return name
-    return "OP"
-
-
-def mpi_alive(comm: _MPI.Comm) -> bool:
-    if comm.Get_size() > 1 or builtins.any(key in os.environ for key in _LAUNCH_ENV):
-        return True
-    try:
-        return _MPI.Comm.Get_parent() != _MPI.COMM_NULL
-    except (AttributeError, RuntimeError):
-        return False
-
-
 class MPIError(Exception):
     """MPI runtime or synchronized distributed-execution error."""
 
 
-def install_abort_excepthook() -> bool:
-    """Abort ``MPI_COMM_WORLD`` on an unhandled exception.
+class ReduceAccessor:
+    """Typed element-wise reductions across MPI ranks.
 
-    mpi4py calls ``MPI_Init_thread`` on import and registers ``MPI_Finalize``
-    to run at interpreter exit. An unhandled exception on a subset of ranks
-    therefore does not terminate the job: the failing ranks block in
-    ``MPI_Finalize`` waiting for the others, while the others block in the
-    collective the failing ranks never reached. mpi4py's documented remedy is
-    to launch with ``python -m mpi4py``, whose finalizer hook calls
-    ``MPI_Abort``; see
-    https://mpi4py.readthedocs.io/en/stable/mpi4py.run.html#exceptions-and-deadlocks
-
-    That remedy depends on the launch command, which climtools does not
-    control, so the same hook is installed here as a fallback for scripts
-    started with a plain ``python``. It is a no-op on a single rank with no
-    launcher, and a no-op under ``python -m mpi4py``, which installs the same
-    hook itself.
-
-    Returns
-    -------
-    bool
-        True if this call installed the hook.
-    """
-    # Already running under `python -m mpi4py`, which installs its own hook.
-    if getattr(sys.excepthook, "__module__", "") == "mpi4py.run":
-        return False
-    if getattr(sys.excepthook, "_climtools_mpi_abort", False):
-        return False
-    if not mpi_alive(_MPI.COMM_WORLD):
-        return False
-
-    previous = sys.excepthook
-
-    def _abort_excepthook(
-        exc_type: type[BaseException],
-        exc_value: BaseException,
-        traceback: Any,
-    ) -> None:
-        try:
-            previous(exc_type, exc_value, traceback)
-            sys.stderr.write(
-                f"[MPI RANK {_MPI.COMM_WORLD.Get_rank()}] unhandled "
-                + f"{exc_type.__name__}; aborting MPI_COMM_WORLD so the "
-                + "remaining ranks do not deadlock in the next collective.\n"
-            )
-            sys.stderr.flush()
-        finally:
-            _MPI.COMM_WORLD.Abort(1)
-
-    _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
-    sys.excepthook = _abort_excepthook
-    return True
-
-
-def _warn_if_parallel_netcdf_missing(comm: _MPI.Comm) -> None:
-    """Print a one-time, root-only hint when parallel NetCDF-4 looks unset up.
-
-    A plain ``pip``/conda-forge ``netCDF4`` wheel is not built against a
-    parallel-enabled HDF5/NetCDF-C, so ``to_netcdf(..., parallel=True)``
-    raises a clear ``NetCDFWriteError`` the first time it is called under
-    more than one rank -- but only then, which means a user can get all the
-    way to a multi-node production run before discovering it. This checks the
-    one cheap, already-imported attribute that predicts that failure
-    (``netCDF4.__has_parallel4_support__``) as soon as the MPI runtime itself
-    is constructed, under an actual multi-rank launch, and points at
-    ``env/setup_env.sh``, which builds the required stack. It never raises:
-    a build without the parallel writer is completely usable for everything
-    else in climtools, including ``mpi.reduce``/``mpi.xarray``.
-    """
-    if comm.Get_size() <= 1 or comm.Get_rank() != 0:
-        return
-    try:
-        import netCDF4
-
-        if netCDF4.__has_parallel4_support__:
-            return
-    except Exception:
-        return
-    sys.stderr.write(
-        "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
-        + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
-        + f"this {comm.Get_size()}-rank run. mpi.reduce, mpi.xarray, and "
-        + "everything else are unaffected. To build the parallel stack, "
-        + "run `env/setup_env.sh` from the climtools repository (see the "
-        + "README's Installation section); nothing else needs it.\n"
-    )
-    sys.stderr.flush()
-
-
-def is_dataarray(value: Any) -> bool:
-    """Check if value is an xarray DataArray."""
-
-    return isinstance(value, xr.DataArray)
-
-
-def is_dataset(value: Any) -> bool:
-    """Check if value is an xarray Dataset."""
-
-    return isinstance(value, xr.Dataset)
-
-
-def _divide_by_ranks(value: Any, size: int) -> Any:
-    """Divide a reduced value by the rank count without widening its dtype.
-
-    A float32 array divided by a Python int stays float32, but the divisor is
-    built in the value's own dtype so the result cannot be promoted on any
-    NumPy promotion rule. Integer and Boolean inputs keep NumPy's own mean
-    semantics, which produce a floating result.
+    NumPy arrays use mpi4py's uppercase buffer collectives (``Allreduce``/
+    ``Reduce``); other Python objects use the lowercase object collectives.
+    xarray ``DataArray``/``Dataset`` inputs are reduced per variable and
+    rewrapped with their original dims, coords, and attrs.
 
     Parameters
     ----------
-    value : Any
-        Reduced scalar, NumPy array, or xarray object.
-    size : int
-        Number of MPI ranks contributing to the reduction.
-
-    Returns
-    -------
-    Any
-        ``value`` divided by ``size``.
+    runtime : MPIRuntime
+        Runtime that owns the active communicator.
     """
-    dtype = getattr(value, "dtype", None)
-    if dtype is not None and np.dtype(dtype).kind in "fc":
-        return value / np.dtype(dtype).type(size)
-    return value / size
 
+    def __init__(self, runtime: MPIRuntime) -> None:
+        self._runtime = runtime
 
-def mpi_comm_reduce(
-    runtime: MPIRuntime,
-    value: Any,
-    op: _MPI.Op,
-    *,
-    mode: Literal["all", "root"] = "all",
-    root: int = 0,
-) -> T | None:
-    """Execute a reduction collective for the active communicator.
+    @staticmethod
+    def _label(op: _MPI.Op) -> str:
+        """Return a picklable, rank-stable label for a reduction operator."""
+        for candidate, name in _OP_LABELS:
+            if op == candidate:
+                return name
+        return "OP"
 
-    Parameters
-    ----------
-    runtime : _MPIRuntime
-        MPI runtime that owns the active communicator.
-    value : T
-        Python object, NumPy array, or xarray DataArray/Dataset to reduce.
-        xarray inputs are reduced element-wise per variable and rewrapped
-        with the original dims, coords, and attrs.
-    op : mpi4py.MPI.Op
-        MPI reduction operator.
-    mode : {"all", "root"}, optional
-        ``"all"`` selects ``Allreduce``/``allreduce`` and returns the result
-        on every rank. ``"root"`` selects ``Reduce``/``reduce`` and returns
-        the result only on ``root``. Default is ``"all"``.
-    root : int, optional
-        Destination rank when ``mode="root"``. Ignored when ``mode="all"``.
-        Default is 0.
+    @staticmethod
+    def _is_dataarray(value: Any) -> bool:
+        """Return whether ``value`` is an xarray DataArray."""
+        return isinstance(value, xr.DataArray)
 
-    Returns
-    -------
-    T or None
-        Reduced value according to ``mode``.
-    """
-    if mode not in ("all", "root"):
-        raise ValueError("mode must be either 'all' or 'root'.")
+    @staticmethod
+    def _is_dataset(value: Any) -> bool:
+        """Return whether ``value`` is an xarray Dataset."""
+        return isinstance(value, xr.Dataset)
 
-    comm = runtime.comm
-    if mode == "root":
-        if isinstance(root, bool) or not isinstance(root, Integral) or root < 0:
-            raise ValueError("root must be a non-negative integer rank.")
-        if root >= comm.size:
-            raise ValueError(f"root {root} is outside [0, {comm.size}).")
+    @staticmethod
+    def _divide_by_ranks(value: Any, size: int) -> Any:
+        """Divide a reduced value by ``size`` without widening its dtype."""
+        dtype = getattr(value, "dtype", None)
+        if dtype is not None and np.dtype(dtype).kind in "fc":
+            return value / np.dtype(dtype).type(size)
+        return value / size
 
-    if is_dataset(value):
-        # Validate every variable and stage its send buffer before posting
-        # any collective. The dtypes/shapes are identical on every rank, so
-        # an unsupported variable raises on all ranks at the same point
-        # instead of leaving some ranks blocked inside a collective the
-        # failing rank never reaches.
-        arrays: dict[Hashable, np.ndarray[Any, Any]] = {}
-        for name, da in value.data_vars.items():
-            array = np.asarray(da.values)
-            if array.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
-                raise MPIError(f"Unsupported MPI NumPy dtype: {array.dtype}.")
-            if not array.flags.c_contiguous:
-                array = np.ascontiguousarray(array)
-            arrays[name] = array
+    def _reduce(
+        self,
+        value: Any,
+        op: _MPI.Op,
+        *,
+        mode: Literal["all", "root"] = "all",
+        root: int = 0,
+    ) -> T | None:
+        """Execute a reduction collective for the active communicator.
 
-        # A Dataset reduces one variable per Allreduce/Reduce call (shapes
-        # differ between variables, so the buffer collectives themselves
-        # cannot be merged), but the buffer-agreement check that precedes
-        # each one is independent of the reduction itself. Checking every
-        # variable's signature inside a single allgather here, instead of
-        # letting each variable's own recursive call open its own allgather,
-        # halves the collective count for a Dataset with many variables
-        # (2 * n_vars -> n_vars + 1), which matters on latency-bound
-        # networks with climate Datasets that commonly hold dozens of
-        # variables.
-        if CHECK_COLLECTIVE_BUFFERS and comm.size > 1 and arrays:
-            signature = tuple(
-                (
-                    str(name),
-                    _op_label(op),
-                    mode,
-                    int(root),
-                    array.dtype.str,
-                    tuple(int(length) for length in array.shape),
+        Parameters
+        ----------
+        value : Any
+            Python object, NumPy array, or xarray DataArray/Dataset.
+        op : mpi4py.MPI.Op
+            MPI reduction operator.
+        mode : {"all", "root"}, optional
+            "all" returns the result on every rank; "root" only on ``root``.
+        root : int, optional
+            Destination rank for ``mode="root"``. Default 0.
+
+        Returns
+        -------
+        Any or None
+            Reduced value according to ``mode``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` or ``root`` is invalid.
+        MPIError
+            If an unsupported dtype is posted, or ranks disagree on the
+            reduction buffer signature.
+        """
+        if mode not in ("all", "root"):
+            raise ValueError("mode must be either 'all' or 'root'.")
+
+        comm = self._runtime.comm
+        if mode == "root":
+            if isinstance(root, bool) or not isinstance(root, Integral) or root < 0:
+                raise ValueError("root must be a non-negative integer rank.")
+            if root >= comm.size:
+                raise ValueError(f"root {root} is outside [0, {comm.size}).")
+
+        if self._is_dataset(value):
+            # Validate every variable and stage its send buffer before
+            # posting any collective, so an unsupported variable raises on
+            # every rank at the same point instead of leaving some ranks
+            # blocked inside a collective the failing rank never reaches.
+            arrays: dict[Hashable, np.ndarray[Any, Any]] = {}
+            for name, da in value.data_vars.items():
+                array = np.asarray(da.values)
+                if array.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
+                    raise MPIError(f"Unsupported MPI NumPy dtype: {array.dtype}.")
+                if not array.flags.c_contiguous:
+                    array = np.ascontiguousarray(array)
+                arrays[name] = array
+
+            # A Dataset reduces one variable per Allreduce/Reduce call, but
+            # every variable's buffer-agreement signature is checked inside
+            # a single allgather here rather than one per variable, halving
+            # the collective count for a Dataset with many variables.
+            if CHECK_COLLECTIVE_BUFFERS and comm.size > 1 and arrays:
+                signature = tuple(
+                    (
+                        str(name),
+                        self._label(op),
+                        mode,
+                        int(root),
+                        array.dtype.str,
+                        tuple(int(length) for length in array.shape),
+                    )
+                    for name, array in arrays.items()
                 )
-                for name, array in arrays.items()
+                gathered = comm.allgather(signature)
+                if len(set(gathered)) != 1:
+                    disagreeing = [
+                        index
+                        for index, item in enumerate(gathered)
+                        if item != gathered[0]
+                    ]
+                    raise MPIError(
+                        "MPI ranks posted different reduction buffers for a "
+                        + f"Dataset reduction. Rank 0 has {gathered[0]!r}, ranks "
+                        + f"{disagreeing} disagree (rank {disagreeing[0]} has "
+                        + f"{gathered[disagreeing[0]]!r})."
+                    )
+
+            reduced_vars: dict[Hashable, np.ndarray[Any, Any]] = {}
+            for name, array in arrays.items():
+                if mode == "all":
+                    recv = np.empty(array.shape, dtype=array.dtype)
+                    comm.Allreduce(array, recv, op=op)
+                else:
+                    recv = (
+                        np.empty(array.shape, dtype=array.dtype)
+                        if comm.rank == root
+                        else None
+                    )
+                    comm.Reduce(array, recv, op=op, root=root)
+                reduced_vars[name] = recv
+
+            if mode == "root" and comm.rank != root:
+                return None
+            return cast("T", value.copy(data=reduced_vars))
+
+        if self._is_dataarray(value):
+            reduced = self._reduce(np.asarray(value.values), op, mode=mode, root=root)
+            if reduced is None:
+                return None
+            return cast("T", value.copy(data=reduced))
+
+        if not isinstance(value, np.ndarray):
+            if mode == "all":
+                return cast("T", comm.allreduce(value, op=op))
+            return cast("T | None", comm.reduce(value, op=op, root=root))
+
+        send = np.asarray(value)
+        if not send.flags.c_contiguous:
+            send = np.ascontiguousarray(send)
+        if send.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
+            raise MPIError(f"Unsupported MPI NumPy dtype: {send.dtype}.")
+
+        # Buffer-like arguments let mpi4py infer the MPI datatype from the
+        # NumPy dtype for fixed-size collectives (Allreduce/Reduce); vector
+        # collectives such as scatterv still need it spelled out explicitly.
+        # Allreduce/Reduce require an identical count and datatype on every
+        # rank -- a mismatch hangs some ranks with no error, so the buffer
+        # signature is compared first to turn that into a named exception.
+        if CHECK_COLLECTIVE_BUFFERS and comm.size > 1:
+            signature = (
+                self._label(op),
+                mode,
+                int(root),
+                send.dtype.str,
+                tuple(int(length) for length in send.shape),
             )
             gathered = comm.allgather(signature)
             if len(set(gathered)) != 1:
@@ -307,112 +259,19 @@ def mpi_comm_reduce(
                     index for index, item in enumerate(gathered) if item != gathered[0]
                 ]
                 raise MPIError(
-                    "MPI ranks posted different reduction buffers for a "
-                    + f"Dataset reduction. Rank 0 has {gathered[0]!r}, ranks "
-                    + f"{disagreeing} disagree (rank {disagreeing[0]} has "
-                    + f"{gathered[disagreeing[0]]!r}). This would deadlock or "
-                    + "silently corrupt the reduction."
+                    "MPI ranks posted different reduction buffers. Rank 0 has "
+                    + f"{gathered[0]!r}, ranks {disagreeing} disagree "
+                    + f"(rank {disagreeing[0]} has {gathered[disagreeing[0]]!r})."
                 )
 
-        reduced_vars: dict[Hashable, np.ndarray[Any, Any]] = {}
-        for name, array in arrays.items():
-            if mode == "all":
-                recv = np.empty(array.shape, dtype=array.dtype)
-                comm.Allreduce(array, recv, op=op)
-            else:
-                recv = (
-                    np.empty(array.shape, dtype=array.dtype)
-                    if comm.rank == root
-                    else None
-                )
-                comm.Reduce(array, recv, op=op, root=root)
-            reduced_vars[name] = recv
-
-        if mode == "root" and comm.rank != root:
-            return None
-        return cast("T", value.copy(data=reduced_vars))
-
-    if is_dataarray(value):
-        reduced = mpi_comm_reduce(
-            runtime, np.asarray(value.values), op, mode=mode, root=root
-        )
-        if reduced is None:
-            return None
-        return cast("T", value.copy(data=reduced))
-
-    if not isinstance(value, np.ndarray):
         if mode == "all":
-            return cast("T", comm.allreduce(value, op=op))
-        return cast("T | None", comm.reduce(value, op=op, root=root))
+            recv = np.empty(send.shape, dtype=send.dtype)
+            comm.Allreduce(send, recv, op=op)
+            return cast("T", recv)
 
-    send = np.asarray(value)
-    if not send.flags.c_contiguous:
-        send = np.ascontiguousarray(send)
-    if send.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
-        raise MPIError(f"Unsupported MPI NumPy dtype: {send.dtype}.")
-
-    # Pass the buffer-provider array directly rather than the explicit
-    # [array, MPI.Datatype] form: mpi4py infers the MPI datatype from the
-    # NumPy dtype automatically for buffer-like arguments to fixed-size
-    # collectives such as Allreduce/Reduce. See the mpi4py tutorial,
-    # "Communication of buffer-like objects". Vector collectives such as
-    # scatterv still need the datatype spelled out explicitly; that
-    # inference does not extend to them.
-    # Allocate the receive buffer with the send buffer's own dtype and a
-    # C-contiguous layout. np.empty_like inherits the source memory order,
-    # which can differ from the contiguous copy actually being sent.
-    # Allreduce and Reduce require an identical count and datatype on every
-    # rank. A mismatch is undefined behaviour: ranks posting the smaller
-    # buffer can return while the rest block forever, which presents as a
-    # hang with no error and no indication of which rank is inconsistent.
-    # Comparing the signature first turns that into a named exception on
-    # every rank.
-    if CHECK_COLLECTIVE_BUFFERS and comm.size > 1:
-        signature = (
-            _op_label(op),
-            mode,
-            int(root),
-            send.dtype.str,
-            tuple(int(length) for length in send.shape),
-        )
-        gathered = comm.allgather(signature)
-        if len(set(gathered)) != 1:
-            disagreeing = [
-                index for index, item in enumerate(gathered) if item != gathered[0]
-            ]
-            raise MPIError(
-                "MPI ranks posted different reduction buffers. Rank 0 has "
-                + f"{gathered[0]!r}, ranks {disagreeing} disagree "
-                + f"(rank {disagreeing[0]} has {gathered[disagreeing[0]]!r}). "
-                + "This would deadlock or silently corrupt the reduction."
-            )
-
-    if mode == "all":
-        recv = np.empty(send.shape, dtype=send.dtype)
-        comm.Allreduce(send, recv, op=op)
-        return cast("T", recv)
-
-    recv = np.empty(send.shape, dtype=send.dtype) if comm.rank == root else None
-    comm.Reduce(send, recv, op=op, root=root)
-    return cast("T | None", recv)
-
-
-class ReduceAccessor:
-    """Typed reduction operations for the active communicator.
-
-    Reduction methods select either an all-reduce or a reduce-to-root
-    operation through ``mode``. NumPy arrays use mpi4py's uppercase
-    buffer collectives, while other Python objects use lowercase object
-    collectives.
-
-    Parameters
-    ----------
-    runtime : _MPIRuntime
-        MPI runtime that owns the active communicator.
-    """
-
-    def __init__(self, runtime: MPIRuntime) -> None:
-        self._runtime = runtime
+        recv = np.empty(send.shape, dtype=send.dtype) if comm.rank == root else None
+        comm.Reduce(send, recv, op=op, root=root)
+        return cast("T | None", recv)
 
     def sum(
         self,
@@ -426,24 +285,18 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Python object or NumPy array to reduce.
+            Value to reduce.
         mode : {"all", "root"}, optional
-            Reduction mode. ``"all"`` performs ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` performs
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
         T or None
-            Reduced value on every rank for ``mode="all"``. For
-            ``mode="root"``, the reduced value is returned on ``root``
-            and None is returned on other ranks.
+            Reduced value, or None on non-root ranks when ``mode="root"``.
         """
-        return mpi_comm_reduce(self._runtime, value, _MPI.SUM, mode=mode, root=root)
+        return self._reduce(value, _MPI.SUM, mode=mode, root=root)
 
     def prod(
         self,
@@ -457,22 +310,18 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Python object or NumPy array to reduce.
+            Value to reduce.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
         T or None
-            Reduced value according to ``mode``.
+            Reduced value, or None on non-root ranks when ``mode="root"``.
         """
-        return mpi_comm_reduce(self._runtime, value, _MPI.PROD, mode=mode, root=root)
+        return self._reduce(value, _MPI.PROD, mode=mode, root=root)
 
     def min(
         self,
@@ -486,22 +335,18 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Python object or NumPy array to reduce.
+            Value to reduce.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
         T or None
-            Reduced value according to ``mode``.
+            Reduced value, or None on non-root ranks when ``mode="root"``.
         """
-        return mpi_comm_reduce(self._runtime, value, _MPI.MIN, mode=mode, root=root)
+        return self._reduce(value, _MPI.MIN, mode=mode, root=root)
 
     def max(
         self,
@@ -515,22 +360,18 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Python object or NumPy array to reduce.
+            Value to reduce.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
         T or None
-            Reduced value according to ``mode``.
+            Reduced value, or None on non-root ranks when ``mode="root"``.
         """
-        return mpi_comm_reduce(self._runtime, value, _MPI.MAX, mode=mode, root=root)
+        return self._reduce(value, _MPI.MAX, mode=mode, root=root)
 
     def mean(
         self,
@@ -544,25 +385,21 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Python object or NumPy array to average.
+            Value to average.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
         Any or None
-            Arithmetic mean according to ``mode``.
+            Mean value, or None on non-root ranks when ``mode="root"``.
         """
         result = self.sum(value, mode=mode, root=root)
         if result is None:
             return None
-        return _divide_by_ranks(result, self._runtime.comm.size)
+        return self._divide_by_ranks(result, self._runtime.comm.size)
 
     def any(
         self,
@@ -576,31 +413,24 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Scalar-like value, NumPy array, or xarray DataArray/Dataset
-            converted to Boolean values.
+            Scalar, array, or xarray DataArray/Dataset, cast to bool.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
-        bool, numpy.ndarray, xarray.DataArray, xarray.Dataset, or None
+        bool, numpy.ndarray, xarray object, or None
             Logical-OR reduction according to ``mode``.
         """
         boolean_value = (
             value.astype(bool)
-            if is_dataset(value) or is_dataarray(value)
+            if self._is_dataset(value) or self._is_dataarray(value)
             else np.asarray(value, dtype=bool)
         )
-        result = mpi_comm_reduce(
-            self._runtime, boolean_value, _MPI.LOR, mode=mode, root=root
-        )
-        if not is_dataset(value) and np.ndim(value) == 0 and result is not None:
+        result = self._reduce(boolean_value, _MPI.LOR, mode=mode, root=root)
+        if not self._is_dataset(value) and np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
@@ -616,31 +446,24 @@ class ReduceAccessor:
         Parameters
         ----------
         value : T
-            Scalar-like value, NumPy array, or xarray DataArray/Dataset
-            converted to Boolean values.
+            Scalar, array, or xarray DataArray/Dataset, cast to bool.
         mode : {"all", "root"}, optional
-            Collective mode. ``"all"`` selects ``Allreduce``/``allreduce``
-            and returns the result on every rank. ``"root"`` selects
-            ``Reduce``/``reduce`` and returns the result only on ``root``.
-            Default is ``"all"``.
+            "all" returns the result on every rank; "root" only on ``root``.
         root : int, optional
-            Destination rank when ``mode="root"``. Ignored when
-            ``mode="all"``. Default is 0.
+            Destination rank for ``mode="root"``. Default 0.
 
         Returns
         -------
-        bool, numpy.ndarray, xarray.DataArray, xarray.Dataset, or None
+        bool, numpy.ndarray, xarray object, or None
             Logical-AND reduction according to ``mode``.
         """
         boolean_value = (
             value.astype(bool)
-            if is_dataset(value) or is_dataarray(value)
+            if self._is_dataset(value) or self._is_dataarray(value)
             else np.asarray(value, dtype=bool)
         )
-        result = mpi_comm_reduce(
-            self._runtime, boolean_value, _MPI.LAND, mode=mode, root=root
-        )
-        if not is_dataset(value) and np.ndim(value) == 0 and result is not None:
+        result = self._reduce(boolean_value, _MPI.LAND, mode=mode, root=root)
+        if not self._is_dataset(value) and np.ndim(value) == 0 and result is not None:
             return bool(np.asarray(result).item())
         return result
 
@@ -648,30 +471,14 @@ class ReduceAccessor:
 class MPIRuntime:
     """User-facing MPI runtime namespace.
 
-    The runtime owns one intracommunicator and exposes it directly through
-    :attr:`comm`, preserving the native :class:`mpi4py.MPI.Intracomm` type,
-    method signatures, IDE completion, and third-party interoperability.
-    Direct MPI reductions are grouped under :attr:`reduce`, while MPI-aware
-    xarray operations are grouped under :attr:`xarray`.
+    Owns one intracommunicator, exposed directly through :attr:`comm`.
+    Direct reductions live under :attr:`reduce`; MPI-aware xarray operations
+    live under :attr:`xarray`.
 
     Parameters
     ----------
     comm : mpi4py.MPI.Intracomm or None, optional
-        Intracommunicator used by the runtime. If None, use
-        ``MPI.COMM_WORLD``.
-
-    Attributes
-    ----------
-    MPI : module
-        The :mod:`mpi4py.MPI` module for MPI constants and object types.
-    MPIError : type[MPIError]
-        Exception type used for synchronized MPI failures.
-    comm : mpi4py.MPI.Intracomm
-        Native intracommunicator used by the runtime.
-    reduce : ReduceAccessor
-        Direct element-wise reductions across MPI ranks.
-    xarray : XarrayMPI
-        MPI-aware xarray indexing, redistribution, and named-dimension reductions.
+        Communicator used by the runtime. None uses ``MPI.COMM_WORLD``.
     """
 
     MPI = _MPI
@@ -689,19 +496,37 @@ class MPIRuntime:
         self._child: MPIRuntime | None = None
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
-        install_abort_excepthook()
-        _warn_if_parallel_netcdf_missing(self.comm)
+        self._install_abort_hook()
+        self._warn_if_parallel_netcdf_missing()
 
-    @property
-    def launched(self) -> bool:
-        """Return whether this process appears to have been launched by MPI.
+    @staticmethod
+    def alive(comm: _MPI.Comm) -> bool:
+        """Return whether a process appears to have been launched by MPI.
+
+        Parameters
+        ----------
+        comm : mpi4py.MPI.Comm
+            Communicator to inspect.
 
         Returns
         -------
         bool
-            True when an MPI or Slurm launch environment is detected.
+            True if ``comm`` has more than one rank, a known launch
+            environment variable is set, or this process has an MPI parent.
         """
-        return mpi_alive(self.comm)
+        if comm.Get_size() > 1 or builtins.any(
+            key in os.environ for key in _LAUNCH_ENV
+        ):
+            return True
+        try:
+            return _MPI.Comm.Get_parent() != _MPI.COMM_NULL
+        except (AttributeError, RuntimeError):
+            return False
+
+    @property
+    def launched(self) -> bool:
+        """bool: Whether this process appears to have been launched by MPI."""
+        return self.alive(self.comm)
 
     def is_root(self, root: int = 0) -> bool:
         """Return whether this process has the requested root rank.
@@ -709,7 +534,7 @@ class MPIRuntime:
         Parameters
         ----------
         root : int, optional
-            Root rank to compare against. Default is 0.
+            Root rank to compare against. Default 0.
 
         Returns
         -------
@@ -720,35 +545,17 @@ class MPIRuntime:
 
     @property
     def xarray(self) -> XarrayMPI:
-        """Return the MPI-aware xarray accessor.
-
-        Returns
-        -------
-        XarrayMPI
-            MPI-aware xarray indexing, redistribution, and reductions.
-        """
+        """XarrayMPI: MPI-aware xarray indexing, redistribution, reductions."""
         return self._xarray
 
     @property
     def reduce(self) -> ReduceAccessor:
-        """Return direct MPI reduction operations.
-
-        Returns
-        -------
-        ReduceAccessor
-            Element-wise cross-rank ``sum``, ``prod``, ``min``, ``max``,
-            ``mean``, ``any``, and ``all`` operations.
-        """
+        """ReduceAccessor: Element-wise cross-rank reductions."""
         return self._reduce
 
     @property
     def child(self) -> MPIRuntime:
-        """Return the child MPI runtime.
-
-        Returns
-        -------
-        MPIRuntime
-            Runtime associated with the current rank's child communicator.
+        """MPIRuntime: Runtime for this rank's child communicator.
 
         Raises
         ------
@@ -765,34 +572,23 @@ class MPIRuntime:
     # -------------------------------------------------------------------------
 
     def decompose(self, ntasks: int) -> None:
-        """Decompose the communicator into equally sized child communicators.
+        """Split the communicator into ``ntasks`` equally sized children.
+
+        Every rank belongs to exactly one child, available through
+        :attr:`child`; ``child.task`` is the zero-based child index and
+        ``child.info`` holds the parent ranks belonging to it. All ranks in
+        the current communicator must call this.
 
         Parameters
         ----------
         ntasks : int
-            Number of independent child communicators. The current communicator
-            size must be exactly divisible by ``ntasks``.
-
-        Returns
-        -------
-        None
+            Number of child communicators. Must evenly divide the current
+            communicator size.
 
         Raises
         ------
         ValueError
             If the communicator size is not divisible by ``ntasks``.
-
-        Notes
-        -----
-        All ranks in the current communicator must call this method.
-
-        Each rank belongs to exactly one child communicator. The parent
-        communicator remains unchanged. The child runtime is available through
-        :attr:`child`.
-
-        ``child.task`` gives the zero-based child index and ``child.info``
-        contains the ranks from the parent communicator that belong to the
-        child.
         """
         size = self.comm.size
 
@@ -826,26 +622,19 @@ class MPIRuntime:
         *,
         root: int = 0,
     ) -> T:
-        """Broadcast one value to all child communicators.
+        """Broadcast one value from the parent root to every child rank.
 
         Parameters
         ----------
         value : T or None
-            Value supplied by the parent ``root`` rank. Non-root ranks may pass
-            None.
+            Value on the parent ``root`` rank. Non-root ranks may pass None.
         root : int, optional
-            Root rank in the parent communicator. Default is 0.
+            Root rank in the parent communicator. Default 0.
 
         Returns
         -------
         T
             Broadcast value on every rank in every child communicator.
-
-        Notes
-        -----
-        All ranks in the parent communicator must call this method. Since every
-        child rank is also a member of the parent communicator, the parent
-        broadcast reaches every child directly.
         """
         result = self.comm.bcast(
             value if self.is_root(root) else None,
@@ -860,27 +649,20 @@ class MPIRuntime:
         *,
         root: int = 0,
     ) -> T:
-        """Scatter one value to each child communicator.
+        """Scatter one value per child, broadcast within each child.
 
         Parameters
         ----------
         values : sequence of T or None
-            Sequence containing one value per child communicator on the parent
-            ``root`` rank. Non-root ranks may pass None.
+            One value per child on the parent ``root`` rank. Non-root ranks
+            may pass None.
         root : int, optional
-            Root rank in the parent communicator. Default is 0.
+            Root rank in the parent communicator. Default 0.
 
         Returns
         -------
         T
-            Value assigned to the current child communicator. Every rank within
-            the child receives the same value.
-
-        Notes
-        -----
-        All ranks in the parent communicator must call this method. Values are
-        first scattered to the root rank of each child and then broadcast within
-        that child communicator.
+            Value assigned to this rank's child; identical across the child.
         """
         child = self.child
         ranks_per_child = child.comm.size
@@ -913,26 +695,22 @@ class MPIRuntime:
         *,
         root: int = 0,
     ) -> list[T] | None:
-        """Gather one value from each child communicator.
+        """Gather one value per child, ordered by child task index.
+
+        Only rank zero of each child contributes its value to the gather.
 
         Parameters
         ----------
         value : T
-            Value associated with the current child communicator. Only rank zero
-            of each child contributes its value to the parent gather.
+            This child's complete result.
         root : int, optional
-            Root rank in the parent communicator. Default is 0.
+            Root rank in the parent communicator. Default 0.
 
         Returns
         -------
         list of T or None
-            Values from each child, ordered by child task index, on the parent
-            ``root`` rank. All other ranks return None.
-
-        Notes
-        -----
-        All ranks in the parent communicator must call this method. ``value``
-        must already represent one complete result for the current child.
+            Values ordered by child task index, on the parent ``root``
+            rank. None on every other rank.
         """
         child = self.child
 
@@ -961,7 +739,7 @@ class MPIRuntime:
         Parameters
         ----------
         dtype : numpy.dtype or type
-            NumPy dtype to convert to an MPI datatype.
+            NumPy dtype to convert.
 
         Returns
         -------
@@ -971,12 +749,7 @@ class MPIRuntime:
         Raises
         ------
         MPIError
-            If ``dtype`` is not a supported boolean, integer, floating-point,
-            or complex NumPy dtype.
-
-        Notes
-        -----
-        Conversion is delegated to :func:`mpi4py.util.dtlib.from_numpy_dtype`.
+            If ``dtype`` has no supported MPI mapping.
         """
         key = np.dtype(dtype)
         if key.kind not in _REDUCIBLE_DTYPE_KINDS:
@@ -997,22 +770,21 @@ class MPIRuntime:
     ) -> NDArray[Any]:
         """Scatter unequal contiguous leading-axis slabs from one rank.
 
-        This is a NumPy convenience wrapper around :meth:`MPI.Comm.Scatterv`.
-        Use ``mpi.comm.Scatterv`` directly for the complete mpi4py buffer API.
+        NumPy convenience wrapper around :meth:`MPI.Comm.Scatterv`; use
+        ``mpi.comm.Scatterv`` directly for the full mpi4py buffer API.
 
         Parameters
         ----------
         array : numpy.ndarray or None
             Source array on ``root``. Non-root ranks may pass None.
         counts : sequence of int
-            Number of leading-axis rows sent to each rank. The sequence must
-            contain exactly ``mpi.comm.size`` entries.
+            Leading-axis rows sent to each rank; one entry per rank.
         recv_shape : sequence of int
-            Shape of the local receive array on this rank.
+            Shape of this rank's local receive array.
         dtype : numpy.dtype or type
-            NumPy dtype of the send and receive arrays.
+            Dtype of the send and receive arrays.
         root : int, optional
-            Rank that owns ``array``. Default is 0.
+            Rank that owns ``array``. Default 0.
 
         Returns
         -------
@@ -1022,10 +794,9 @@ class MPIRuntime:
         Raises
         ------
         ValueError
-            If ``counts`` does not contain one entry per rank, or if ``array``
-            is None on the root rank.
+            If ``counts`` is the wrong length, or ``array`` is None on root.
         MPIError
-            If ``dtype`` has no supported MPI datatype mapping.
+            If ``dtype`` has no supported MPI mapping.
         """
         counts_array = np.asarray(counts, dtype=np.int64)
         if counts_array.shape != (self.comm.size,):
@@ -1074,32 +845,24 @@ class MPIRuntime:
         logger: Callable[..., None] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Emit a message from a specific MPI rank.
+        """Emit a message from a specific MPI rank (default: :func:`print`).
 
         Parameters
         ----------
         message : str
-            Message or format string to be logged.
+            Message or format string.
         *args : Any
-            Positional arguments passed to ``logger``. If ``logger`` is None,
-            these trigger percent-formatting of ``message`` before printing.
+            Passed to ``logger``, or used for %-formatting when no logger.
         root : int, optional
-            Rank allowed to emit the message. Default is 0. If -1, log all.
+            Rank allowed to log. -1 logs on every rank. Default 0.
         timestamp : bool, optional
-            If True, prepends a standard ISO-like timestamp to the message.
-            Only applies when falling back to the built-in print. Default is False.
+            Prepend a timestamp (print fallback only). Default False.
         prefix : bool, optional
-            If True, prepends an MPI rank indicator to the message
-            for both the built-in print and custom loggers. Default is True.
+            Prepend an ``[MPI RANK n]`` tag. Default True.
         logger : callable, optional
-            Callable used to emit the message. Default is None, which falls back
-            to the built-in :func:`print`.
+            Callable used instead of :func:`print`. Default None.
         **kwargs : Any
-            Keyword arguments forwarded to the ``logger`` (or :func:`print`).
-
-        Returns
-        -------
-        None
+            Forwarded to ``logger`` (or :func:`print`).
         """
         if root != -1 and not self.is_root(root):
             return
@@ -1148,29 +911,22 @@ class MPIRuntime:
         *,
         abort: bool = True,
     ) -> Generator:
-        """Dump every rank's stack if the enclosed block stops making progress.
+        """Dump every rank's stack if the enclosed block stalls.
 
-        A bounded barrier cannot observe a rank already blocked inside a
-        collective, because such a rank never reaches the barrier and no
-        timeout is ever evaluated. This instead arms a daemon thread inside
-        each rank. mpi4py releases the GIL for the duration of a blocking MPI
-        call, so the thread still runs while the main thread is stuck in
-        ``Allreduce`` or in a blocking read, and it prints that rank's own
-        traceback naming the exact line it is stuck on.
-
-        Every rank dumps independently, so the log identifies both the ranks
-        that arrived and the ranks that did not, which is what distinguishes a
-        mismatched collective sequence from a rank blocked in file I/O.
+        Arms a daemon thread per rank so a rank blocked inside a collective
+        (which never reaches a barrier) still gets its traceback printed,
+        naming the line it is stuck on. Every rank dumps independently, so
+        the log shows both the ranks that arrived and the ones that did not.
 
         Parameters
         ----------
         phase : str, optional
             Label reported with the traceback dump.
         timeout : float, optional
-            Seconds of no progress before dumping. Default is 600 s. Zero or
-            negative disables the watchdog, leaving the block unguarded.
+            Seconds of no progress before dumping. <= 0 disables the
+            watchdog. Default 3600.
         abort : bool, optional
-            If True, call ``MPI_Abort`` after dumping. Default is True.
+            Call ``MPI_Abort`` after dumping. Default True.
 
         Yields
         ------
@@ -1195,15 +951,10 @@ class MPIRuntime:
             faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             sys.stderr.flush()
             # Give every rank a chance to print its own stack before the
-            # first one tears the job down, or the log records only whichever
-            # rank happened to fire first. The delay must not depend on this
-            # rank's own number: sleeping `5.0 + 0.25 * rank` gave rank 0 the
-            # *shortest* delay of all, so whichever rank was genuinely stuck
-            # (frequently rank 0, since it usually does the actual
-            # rank-0-only work) tended to call Abort first, tearing the job
-            # down before higher-ranked ranks had flushed their dumps. Every
-            # rank instead waits the same worst-case delay, so no rank can
-            # abort before every rank has had at least that long to print.
+            # first one tears the job down. The delay must not depend on
+            # this rank's own number, or the rank actually stuck (often
+            # rank 0) can end up with the shortest delay and abort before
+            # higher-ranked ranks have flushed their dumps.
             if abort:
                 time.sleep(5.0 + 0.25 * (self.comm.size - 1))
                 sys.stderr.write(
@@ -1242,14 +993,11 @@ class MPIRuntime:
         phase : str
             Label reported in the synchronized error message.
         signature : Any, optional
-            Description of the collective this rank is about to post, such as
-            the operation, mode, root, dtype and shape of a reduction buffer.
-            When given, every rank's signature is compared inside the same
-            all-gather that synchronizes errors, so a divergent collective
-            sequence raises immediately on all ranks instead of blocking
-            forever inside the following buffer collective. The comparison is
-            free in communication terms because it reuses an all-gather that
-            is posted regardless.
+            Description of the collective this rank is about to post (op,
+            mode, root, dtype, shape). When given, it is compared across
+            ranks in the same all-gather that synchronizes errors, so a
+            divergent collective sequence raises immediately instead of
+            hanging in the next collective.
         """
         gathered = self.comm.allgather((error is not None, signature))
         failed = [state for state, _ in gathered]
@@ -1267,8 +1015,7 @@ class MPIRuntime:
                     + f"Ranks {disagreeing} disagree with rank 0 "
                     + f"({signatures[0]!r} on rank 0, "
                     + f"{signatures[disagreeing[0]]!r} on rank "
-                    + f"{disagreeing[0]}), which would deadlock the following "
-                    + "collective."
+                    + f"{disagreeing[0]})."
                 )
 
         if not builtins.any(failed):
@@ -1287,6 +1034,73 @@ class MPIRuntime:
             raise MPIError(f"Rank {first} failed during {phase}.")
         name, message = detail
         raise MPIError(f"Rank {first} failed during {phase} with {name}: {message}")
+
+    def _install_abort_hook(self) -> bool:
+        """Install a fallback ``sys.excepthook`` that calls ``MPI_Abort``.
+
+        Prevents remaining ranks from deadlocking when a script starts with
+        plain ``python`` instead of ``python -m mpi4py``.
+
+        Returns
+        -------
+        bool
+            True if this call installed the hook.
+        """
+        # Already running under `python -m mpi4py`, which installs its own hook.
+        if getattr(sys.excepthook, "__module__", "") == "mpi4py.run":
+            return False
+        if getattr(sys.excepthook, "_climtools_mpi_abort", False):
+            return False
+        if not self.alive(_MPI.COMM_WORLD):
+            return False
+
+        previous = sys.excepthook
+
+        def _abort_excepthook(
+            exc_type: type[BaseException],
+            exc_value: BaseException,
+            traceback: Any,
+        ) -> None:
+            try:
+                previous(exc_type, exc_value, traceback)
+                sys.stderr.write(
+                    f"[MPI RANK {_MPI.COMM_WORLD.Get_rank()}] unhandled "
+                    + f"{exc_type.__name__}; aborting MPI_COMM_WORLD so the "
+                    + "remaining ranks do not deadlock in the next collective.\n"
+                )
+                sys.stderr.flush()
+            finally:
+                _MPI.COMM_WORLD.Abort(1)
+
+        _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
+        sys.excepthook = _abort_excepthook
+        return True
+
+    def _warn_if_parallel_netcdf_missing(self) -> None:
+        """Print a one-time root-only hint if parallel NetCDF-4 is missing.
+
+        Never raises; a build without the parallel writer still works for
+        everything else in climtools.
+        """
+        comm = self.comm
+        if comm.Get_size() <= 1 or comm.Get_rank() != 0:
+            return
+        try:
+            import netCDF4
+
+            if netCDF4.__has_parallel4_support__:
+                return
+        except Exception:
+            return
+        sys.stderr.write(
+            "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
+            + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
+            + f"this {comm.Get_size()}-rank run. mpi.reduce, mpi.xarray, and "
+            + "everything else are unaffected. To build the parallel stack, "
+            + "run `env/setup_env.sh` from the climtools repository (see the "
+            + "README's Installation section); nothing else needs it.\n"
+        )
+        sys.stderr.flush()
 
     # -------------------------------------------------------------------------
     # Decorator interface
@@ -1308,60 +1122,45 @@ class MPIRuntime:
     ):
         """Decorate a function for MPI-aware execution.
 
-        By default, the decorated function executes only on the designated
-        root rank. It can instead execute on all ranks, or execute on ``root``
-        and broadcast its return value to every rank.
+        By default the function runs only on ``root``. It can instead run
+        on every rank, or run on ``root`` and broadcast its return value.
 
         Parameters
         ----------
         function : callable or None, optional
-            Function to decorate. Passed positionally when using ``@mpi``.
-            None supports decorator use with keyword arguments.
+            Function to decorate (positional, for bare ``@mpi`` use).
         all_ranks : bool, optional
-            If True, execute the function on every rank. Default is False.
+            Run on every rank. Default False.
         broadcast : bool, optional
-            If True, execute on ``root`` and broadcast its return value to
-            every rank. Default is False.
+            Run on ``root`` and broadcast the result to every rank. Default
+            False.
         root : int, optional
-            Root rank used for root-only execution and broadcasting. Default
-            is 0.
+            Root rank for root-only execution/broadcasting. Default 0.
 
         Returns
         -------
         callable
-            Decorated function, or a decorator closure when ``function`` is
-            None. Root-only execution returns None on non-root ranks; broadcast
-            mode returns the root result on every rank.
+            Decorated function, or a decorator when ``function`` is None.
+            Root-only mode returns None on non-root ranks.
 
         Raises
         ------
         TypeError
             If the positional argument is not callable.
         ValueError
-            If ``broadcast`` and ``all_ranks`` are both True, or if ``root`` is
-            not a non-negative integer rank.
+            If ``broadcast`` and ``all_ranks`` are both True, or ``root`` is
+            invalid.
         MPIError
             If distributed execution fails on only a subset of ranks.
 
         Examples
         --------
-        Run a function on the root rank only.
-
         >>> @mpi
-        ... def compute_metrics():
-        ...     pass
-
-        Run a function on every rank.
-
+        ... def compute_metrics(): ...
         >>> @mpi(all_ranks=True)
-        ... def initialize_worker():
-        ...     pass
-
-        Run a function on the root rank and broadcast the result.
-
+        ... def initialize_worker(): ...
         >>> @mpi(broadcast=True)
-        ... def load_shared_configuration():
-        ...     return {"learning_rate": 0.01}
+        ... def load_shared_configuration(): ...
         """
         if function is None:
             return functools.partial(
