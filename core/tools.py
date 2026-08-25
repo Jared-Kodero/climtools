@@ -11,7 +11,7 @@ import time
 import uuid
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,6 +34,91 @@ current_dask_cluster = None
 current_dask_client = None
 widget_css_applied = False
 fix_widget = True
+
+
+def apply_widget_css() -> None:
+    """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
+
+    global widget_css_applied
+
+    if "ipykernel" not in sys.modules or widget_css_applied:
+        return
+
+    from IPython.display import HTML, display
+
+    css = """
+    <style>
+    /* 1. Force transparent backgrounds on all widget containers */
+    .cell-output-ipywidget-background,
+    .jupyter-widgets,
+    .jupyter-matplotlib,
+    .jupyter-matplotlib-figure,
+    .jupyter-matplotlib-canvas-container,
+    .jupyter-matplotlib-canvas-div {
+        background: transparent !important;
+        background-color: transparent !important;
+    }
+
+    /* 2. Map standard Jupyter variables to VS Code editor settings */
+    :root {
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText);
+        --jp-widgets-font-size:
+            var(--vscode-editor-font-size);
+    }
+
+    /* 3. Use the active environment foreground color */
+    .jupyter-widgets,
+    .jupyter-matplotlib {
+        color: var(--vscode-editor-foreground, CanvasText) !important;
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText) !important;
+    }
+
+    /* 4. VS Code theme-class fallbacks */
+    .vscode-dark .jupyter-widgets,
+    .vscode-light .jupyter-widgets {
+        color: var(--vscode-editor-foreground, CanvasText) !important;
+        --jp-widgets-color:
+            var(--vscode-editor-foreground, CanvasText) !important;
+    }
+    </style>
+    """
+    display(HTML(css))
+    widget_css_applied = True
+
+
+def get_fsig(func: Callable) -> dict:
+    """
+    Map the named parameters of ``func`` to their default values.
+
+    Variadic parameters (``*args`` and ``**kwargs``) are excluded: they are not
+    keywords a caller can bind by name, so including them would let the literal
+    names ``args`` and ``kwargs`` pass through keyword filters built from this
+    mapping.
+
+    Parameters
+    ----------
+    func : Callable
+        Function, method or class whose signature is inspected.
+
+    Returns
+    -------
+    dict
+        Parameter name mapped to its default, or to None when the parameter
+        has no default.
+    """
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    params = {}
+
+    for name, param in inspect.signature(func).parameters.items():
+        if param.kind in variadic:
+            continue
+        params[name] = (
+            None if param.default is inspect.Parameter.empty else param.default
+        )
+
+    return params
 
 
 class AttrDict(dict):
@@ -222,8 +307,8 @@ class RedirectStreams:
         self.fd_level = fd_level
         self.truncate = truncate
 
-        self.orig_stdout = sys.stdout
-        self.orig_stderr = sys.stderr
+        self.orig_stdout: TextIO | None = None
+        self.orig_stderr: TextIO | None = None
         self.stdout: TextIO | None = None
         self.stderr: TextIO | None = None
 
@@ -231,32 +316,55 @@ class RedirectStreams:
         self._own_stderr = False
         self._stdout_fd: int | None = None
         self._stderr_fd: int | None = None
-        self._fd_active = False
-        self._py_active = False
+        self._mode: Literal["fd", "python"] | None = None
 
     @property
-    def original_streams(self) -> tuple[TextIO, TextIO]:
-        """Return the streams active when the instance was created.
-
-        Returns
-        -------
-        tuple of TextIO
-            Original ``(stdout, stderr)`` streams.
-        """
+    def original_streams(self) -> tuple[TextIO | None, TextIO | None]:
+        """Return streams active immediately before redirection."""
         return self.orig_stdout, self.orig_stderr
 
     @property
     def active_streams(self) -> tuple[TextIO | None, TextIO | None]:
-        """Return the prepared redirection streams.
-
-        Returns
-        -------
-        tuple of TextIO or None
-            Active ``(stdout, stderr)`` target streams.
-        """
+        """Return the prepared redirection targets."""
         return self.stdout, self.stderr
 
-    def _open(self, target: Path | str | TextIO | None) -> tuple[TextIO | None, bool]:
+    @staticmethod
+    def duplicate(stream: TextIO) -> TextIO:
+        """Return a writable stream backed by a duplicate file descriptor."""
+        stream.flush()
+        fd = os.dup(stream.fileno())
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        errors = getattr(stream, "errors", None) or "strict"
+
+        try:
+            return os.fdopen(
+                fd,
+                "w",
+                encoding=encoding,
+                errors=errors,
+                buffering=1,
+            )
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def _same_path(
+        first: Path | str | TextIO | None,
+        second: Path | str | TextIO | None,
+    ) -> bool:
+        if first is second:
+            return first is not None
+
+        if isinstance(first, (str, Path)) and isinstance(second, (str, Path)):
+            return os.fspath(first) == os.fspath(second)
+
+        return False
+
+    def _open_target(
+        self,
+        target: Path | str | TextIO | None,
+    ) -> tuple[TextIO | None, bool]:
         if target is None:
             return None, False
 
@@ -266,32 +374,21 @@ class RedirectStreams:
         mode = "w" if self.truncate else "a"
         return open(target, mode, encoding="utf-8"), True
 
-    def _setup(self) -> None:
-        if self.stdout_target == self.stderr_target and self.stdout_target is not None:
-            self.stdout, self._own_stdout = self._open(self.stdout_target)
-            self.stderr = self.stdout
-            self._own_stderr = False
-            return
+    def _prepare_targets(self) -> None:
+        try:
+            if self._same_path(self.stdout_target, self.stderr_target):
+                self.stdout, self._own_stdout = self._open_target(self.stdout_target)
+                self.stderr = self.stdout
+                return
 
-        self.stdout, self._own_stdout = self._open(self.stdout_target)
-        self.stderr, self._own_stderr = self._open(self.stderr_target)
+            self.stdout, self._own_stdout = self._open_target(self.stdout_target)
+            self.stderr, self._own_stderr = self._open_target(self.stderr_target)
+        except BaseException:
+            self._close_targets()
+            raise
 
     @staticmethod
-    def redirect_fd(source: TextIO, target: TextIO) -> int:
-        """Redirect one file descriptor and preserve its original destination.
-
-        Parameters
-        ----------
-        source : TextIO
-            Stream whose file descriptor will be redirected.
-        target : TextIO
-            Stream providing the new file-descriptor destination.
-
-        Returns
-        -------
-        int
-            Duplicated file descriptor for restoring ``source`` later.
-        """
+    def _redirect_fd(source: TextIO, target: TextIO) -> int:
         source.flush()
         source_fd = source.fileno()
         saved_fd = os.dup(source_fd)
@@ -304,65 +401,81 @@ class RedirectStreams:
 
         return saved_fd
 
-    def _py_redirect(self) -> tuple[TextIO | None, TextIO | None]:
+    def _start_python_redirect(
+        self,
+    ) -> tuple[TextIO | None, TextIO | None]:
         if self.stdout is not None:
             sys.stdout = self.stdout
 
         if self.stderr is not None:
             sys.stderr = self.stderr
 
-        self._py_active = True
+        self._mode = "python"
         return self.stdout, self.stderr
 
-    def _fd_redirect(self) -> tuple[TextIO | None, TextIO | None]:
+    def _start_fd_redirect(
+        self,
+    ) -> tuple[TextIO | None, TextIO | None]:
+        if self.orig_stdout is None or self.orig_stderr is None:
+            raise RuntimeError("Original streams have not been captured.")
+
         stdout_fd: int | None = None
         stderr_fd: int | None = None
 
         try:
             if self.stdout is not None:
-                stdout_fd = self.redirect_fd(self.orig_stdout, self.stdout)
+                stdout_fd = self._redirect_fd(
+                    self.orig_stdout,
+                    self.stdout,
+                )
 
             if self.stderr is not None:
-                stderr_fd = self.redirect_fd(self.orig_stderr, self.stderr)
+                stderr_fd = self._redirect_fd(
+                    self.orig_stderr,
+                    self.stderr,
+                )
         except BaseException:
-            self._fd_restore(stdout_fd, stderr_fd)
+            self._restore_fds(stdout_fd, stderr_fd)
             raise
 
         self._stdout_fd = stdout_fd
         self._stderr_fd = stderr_fd
-        self._fd_active = True
+        self._mode = "fd"
+
         return self.stdout, self.stderr
 
-    def _fd_restore(
+    def _restore_fds(
         self,
         stdout_fd: int | None,
         stderr_fd: int | None,
     ) -> None:
-        self.orig_stdout.flush()
-        self.orig_stderr.flush()
+        pairs = (
+            (stdout_fd, self.orig_stdout),
+            (stderr_fd, self.orig_stderr),
+        )
+        error: BaseException | None = None
 
-        try:
-            if stdout_fd is not None:
-                os.dup2(stdout_fd, self.orig_stdout.fileno())
+        for saved_fd, stream in pairs:
+            if saved_fd is None or stream is None:
+                continue
 
-            if stderr_fd is not None:
-                os.dup2(stderr_fd, self.orig_stderr.fileno())
-        finally:
-            if stdout_fd is not None:
-                os.close(stdout_fd)
+            try:
+                stream.flush()
+                os.dup2(saved_fd, stream.fileno())
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            finally:
+                os.close(saved_fd)
 
-            if stderr_fd is not None:
-                os.close(stderr_fd)
+        if error is not None:
+            raise error
 
-    def _close(self) -> None:
+    def _close_targets(self) -> None:
         if self._own_stdout and self.stdout is not None:
             self.stdout.close()
 
-        if (
-            self._own_stderr
-            and self.stderr is not None
-            and self.stderr is not self.stdout
-        ):
+        if self._own_stderr and self.stderr is not None:
             self.stderr.close()
 
         self.stdout = None
@@ -370,152 +483,54 @@ class RedirectStreams:
         self._own_stdout = False
         self._own_stderr = False
 
-    def redirect(self) -> tuple[TextIO | None, TextIO | None]:
-        """Activate stdout and stderr redirection.
+    def start(self) -> tuple[TextIO | None, TextIO | None]:
+        """Activate stdout and stderr redirection."""
+        if self._mode is not None:
+            raise RuntimeError("Stream redirection is already active.")
 
-        Descriptor-level redirection is attempted when ``fd_level=True``. If
-        the source or target streams do not expose usable file descriptors,
-        redirection falls back to replacing ``sys.stdout`` and ``sys.stderr``.
+        self.orig_stdout = sys.stdout
+        self.orig_stderr = sys.stderr
+        self._prepare_targets()
 
-        Returns
-        -------
-        tuple of TextIO or None
-            Active ``(stdout, stderr)`` target streams.
-        """
-        self._setup()
+        if self.fd_level:
+            try:
+                return self._start_fd_redirect()
+            except (AttributeError, OSError, ValueError):
+                self._close_targets()
+                self._prepare_targets()
 
-        if not self.fd_level:
-            return self._py_redirect()
+        return self._start_python_redirect()
 
+    def stop(self) -> None:
+        """Restore stdout and stderr and close internally opened targets."""
         try:
-            self.orig_stdout.fileno()
-            self.orig_stderr.fileno()
+            if self._mode == "fd":
+                self._restore_fds(
+                    self._stdout_fd,
+                    self._stderr_fd,
+                )
+            elif self._mode == "python":
+                if self.orig_stdout is not None:
+                    sys.stdout = self.orig_stdout
 
-            if self.stdout is not None:
-                self.stdout.fileno()
-
-            if self.stderr is not None:
-                self.stderr.fileno()
-        except (AttributeError, OSError, ValueError):
-            self._close()
-            self._setup()
-            return self._py_redirect()
-
-        try:
-            return self._fd_redirect()
-        except (AttributeError, OSError, ValueError):
-            self._close()
-            self._setup()
-            return self._py_redirect()
-
-    def restore(self) -> None:
-        """Restore the original stdout and stderr destinations.
-
-        Notes
-        -----
-        Saved file descriptors are restored and closed after descriptor-level
-        redirection. Streams opened internally for path targets are also
-        closed.
-        """
-        if self._fd_active:
-            self._fd_restore(self._stdout_fd, self._stderr_fd)
+                if self.orig_stderr is not None:
+                    sys.stderr = self.orig_stderr
+        finally:
             self._stdout_fd = None
             self._stderr_fd = None
-            self._fd_active = False
-        elif self._py_active:
-            sys.stdout = self.orig_stdout
-            sys.stderr = self.orig_stderr
-            self._py_active = False
+            self._mode = None
+            self._close_targets()
 
-        self._close()
+    def redirect(self) -> tuple[TextIO | None, TextIO | None]:
+        """Alias for :meth:`start`."""
+        return self.start()
+
+    def restore(self) -> None:
+        """Alias for :meth:`stop`."""
+        self.stop()
 
     def __enter__(self) -> tuple[TextIO | None, TextIO | None]:
-        return self.redirect()
+        return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.restore()
-
-
-def get_fsig(func: Callable) -> dict:
-    """
-    Map the named parameters of ``func`` to their default values.
-
-    Variadic parameters (``*args`` and ``**kwargs``) are excluded: they are not
-    keywords a caller can bind by name, so including them would let the literal
-    names ``args`` and ``kwargs`` pass through keyword filters built from this
-    mapping.
-
-    Parameters
-    ----------
-    func : Callable
-        Function, method or class whose signature is inspected.
-
-    Returns
-    -------
-    dict
-        Parameter name mapped to its default, or to None when the parameter
-        has no default.
-    """
-    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    params = {}
-
-    for name, param in inspect.signature(func).parameters.items():
-        if param.kind in variadic:
-            continue
-        params[name] = (
-            None if param.default is inspect.Parameter.empty else param.default
-        )
-
-    return params
-
-
-def apply_widget_css() -> None:
-    """Inject theme-aware styling for Jupyter and Matplotlib widgets."""
-
-    global widget_css_applied
-
-    if "ipykernel" not in sys.modules or widget_css_applied:
-        return
-
-    from IPython.display import HTML, display
-
-    css = """
-    <style>
-    /* 1. Force transparent backgrounds on all widget containers */
-    .cell-output-ipywidget-background,
-    .jupyter-widgets,
-    .jupyter-matplotlib,
-    .jupyter-matplotlib-figure,
-    .jupyter-matplotlib-canvas-container,
-    .jupyter-matplotlib-canvas-div {
-        background: transparent !important;
-        background-color: transparent !important;
-    }
-
-    /* 2. Map standard Jupyter variables to VS Code editor settings */
-    :root {
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText);
-        --jp-widgets-font-size:
-            var(--vscode-editor-font-size);
-    }
-
-    /* 3. Use the active environment foreground color */
-    .jupyter-widgets,
-    .jupyter-matplotlib {
-        color: var(--vscode-editor-foreground, CanvasText) !important;
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText) !important;
-    }
-
-    /* 4. VS Code theme-class fallbacks */
-    .vscode-dark .jupyter-widgets,
-    .vscode-light .jupyter-widgets {
-        color: var(--vscode-editor-foreground, CanvasText) !important;
-        --jp-widgets-color:
-            var(--vscode-editor-foreground, CanvasText) !important;
-    }
-    </style>
-    """
-    display(HTML(css))
-    widget_css_applied = True
+        self.stop()
