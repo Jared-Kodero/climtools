@@ -83,7 +83,7 @@ class BaseProgress:
 
         self._progress_stream = None
 
-    def _safe_print(self, *args, **kwargs) -> None:
+    def _print(self, *args, **kwargs) -> None:
         """Print safely to the live progress destination."""
         if "file" not in kwargs:
             kwargs["file"] = self._progress_stream or self._stream
@@ -125,7 +125,7 @@ class BaseProgress:
             else f"{milestone}%"
         )
 
-        self._safe_print(
+        self._print(
             msg,
             end=end,
             flush=True,
@@ -158,7 +158,7 @@ class BaseProgress:
         if self._total <= 0 or not self._description:
             return
 
-        self._safe_print(
+        self._print(
             self._description,
             end=" ",
             flush=True,
@@ -173,14 +173,14 @@ class BaseProgress:
         if not errored:
             if self._total > 0 and self._last_emitted < 100:
                 msg = f"100% [Finished in: {self._format_elapsed()}]"
-                self._safe_print(
+                self._print(
                     msg,
                     flush=True,
                 )
                 self._progress_parts.append(f"{msg}\n")
 
         elif self._wrote_header or self._last_emitted >= 0:
-            self._safe_print(flush=True)
+            self._print(flush=True)
             self._progress_parts.append("\n")
 
         self._redirect.stop()
@@ -349,7 +349,7 @@ class BaseProgress:
             if self._temp_path.exists() and self._temp_path.stat().st_size > 0:
                 content = self._temp_path.read_text(encoding="utf-8")
 
-                self._safe_print(
+                self._print(
                     content,
                     end="",
                     flush=True,
