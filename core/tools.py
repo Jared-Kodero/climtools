@@ -187,87 +187,252 @@ def locked_print(
 
 
 class RedirectStreams:
-    """
-    Temporarily redirect standard output and standard error to files
-    or in-memory buffers, storing original streams for external access.
+    """Temporarily redirect standard output and standard error.
+
+    Descriptor-level redirection ensures that code holding existing references
+    to ``sys.stdout`` or ``sys.stderr`` follows the redirection, including
+    existing ``logging.StreamHandler`` instances. If descriptor-level
+    redirection is unavailable, the class falls back to replacing the Python
+    stream objects.
+
+    Parameters
+    ----------
+    stdout_target : pathlib.Path, str, TextIO, or None, optional
+        Destination for standard output. ``None`` leaves stdout unchanged.
+    stderr_target : pathlib.Path, str, TextIO, or None, optional
+        Destination for standard error. ``None`` leaves stderr unchanged.
+    fd_level : bool, optional
+        Redirect underlying file descriptors when ``True``. Defaults to
+        ``False``.
+    truncate : bool, optional
+        Open path targets in write mode when ``True`` and append mode when
+        ``False``. Defaults to ``False``.
     """
 
     def __init__(
         self,
         stdout_target: Path | str | TextIO | None = None,
         stderr_target: Path | str | TextIO | None = None,
-    ):
+        *,
+        fd_level: bool = False,
+        truncate: bool = False,
+    ) -> None:
         self.stdout_target = stdout_target
         self.stderr_target = stderr_target
+        self.fd_level = fd_level
+        self.truncate = truncate
 
         self.orig_stdout = sys.stdout
         self.orig_stderr = sys.stderr
+        self.stdout: TextIO | None = None
+        self.stderr: TextIO | None = None
 
-        self.stdout = None
-        self.stderr = None
-        self._managed_stdout = False
-        self._managed_stderr = False
+        self._own_stdout = False
+        self._own_stderr = False
+        self._stdout_fd: int | None = None
+        self._stderr_fd: int | None = None
+        self._fd_active = False
+        self._py_active = False
 
     @property
     def original_streams(self) -> tuple[TextIO, TextIO]:
-        """Returns the original (stdout, stderr) pair."""
+        """Return the streams active when the instance was created.
+
+        Returns
+        -------
+        tuple of TextIO
+            Original ``(stdout, stderr)`` streams.
+        """
         return self.orig_stdout, self.orig_stderr
 
     @property
     def active_streams(self) -> tuple[TextIO | None, TextIO | None]:
-        """Returns the currently active redirected (stdout, stderr) pair."""
+        """Return the prepared redirection streams.
+
+        Returns
+        -------
+        tuple of TextIO or None
+            Active ``(stdout, stderr)`` target streams.
+        """
         return self.stdout, self.stderr
 
-    def _prepare_target(self, target: Path | str | TextIO | None, is_stdout: bool):
+    def _open(self, target: Path | str | TextIO | None) -> tuple[TextIO | None, bool]:
         if target is None:
             return None, False
 
-        # If it's already a stream/buffer (has a write method)
         if hasattr(target, "write"):
             return target, False
 
-        # Otherwise, treat it as a path/string and open it
-        file_obj = open(target, "a", encoding="utf-8")
-        return file_obj, True
+        mode = "w" if self.truncate else "a"
+        return open(target, mode, encoding="utf-8"), True
 
-    def redirect(self):
-        # Handle matching targets
+    def _setup(self) -> None:
         if self.stdout_target == self.stderr_target and self.stdout_target is not None:
-            self.stdout, self._managed_stdout = self._prepare_target(
-                self.stdout_target, True
-            )
+            self.stdout, self._own_stdout = self._open(self.stdout_target)
             self.stderr = self.stdout
-            self._managed_stderr = False
-        else:
-            self.stdout, self._managed_stdout = self._prepare_target(
-                self.stdout_target, True
-            )
-            self.stderr, self._managed_stderr = self._prepare_target(
-                self.stderr_target, False
-            )
+            self._own_stderr = False
+            return
 
-        if self.stdout:
+        self.stdout, self._own_stdout = self._open(self.stdout_target)
+        self.stderr, self._own_stderr = self._open(self.stderr_target)
+
+    @staticmethod
+    def redirect_fd(source: TextIO, target: TextIO) -> int:
+        """Redirect one file descriptor and preserve its original destination.
+
+        Parameters
+        ----------
+        source : TextIO
+            Stream whose file descriptor will be redirected.
+        target : TextIO
+            Stream providing the new file-descriptor destination.
+
+        Returns
+        -------
+        int
+            Duplicated file descriptor for restoring ``source`` later.
+        """
+        source.flush()
+        source_fd = source.fileno()
+        saved_fd = os.dup(source_fd)
+
+        try:
+            os.dup2(target.fileno(), source_fd)
+        except BaseException:
+            os.close(saved_fd)
+            raise
+
+        return saved_fd
+
+    def _py_redirect(self) -> tuple[TextIO | None, TextIO | None]:
+        if self.stdout is not None:
             sys.stdout = self.stdout
-        if self.stderr:
+
+        if self.stderr is not None:
             sys.stderr = self.stderr
 
+        self._py_active = True
         return self.stdout, self.stderr
 
-    def restore(self):
-        sys.stdout = self.orig_stdout
-        sys.stderr = self.orig_stderr
+    def _fd_redirect(self) -> tuple[TextIO | None, TextIO | None]:
+        stdout_fd: int | None = None
+        stderr_fd: int | None = None
 
-        # Only close streams that this class actually opened
-        if self._managed_stdout and self.stdout:
+        try:
+            if self.stdout is not None:
+                stdout_fd = self.redirect_fd(self.orig_stdout, self.stdout)
+
+            if self.stderr is not None:
+                stderr_fd = self.redirect_fd(self.orig_stderr, self.stderr)
+        except BaseException:
+            self._fd_restore(stdout_fd, stderr_fd)
+            raise
+
+        self._stdout_fd = stdout_fd
+        self._stderr_fd = stderr_fd
+        self._fd_active = True
+        return self.stdout, self.stderr
+
+    def _fd_restore(
+        self,
+        stdout_fd: int | None,
+        stderr_fd: int | None,
+    ) -> None:
+        self.orig_stdout.flush()
+        self.orig_stderr.flush()
+
+        try:
+            if stdout_fd is not None:
+                os.dup2(stdout_fd, self.orig_stdout.fileno())
+
+            if stderr_fd is not None:
+                os.dup2(stderr_fd, self.orig_stderr.fileno())
+        finally:
+            if stdout_fd is not None:
+                os.close(stdout_fd)
+
+            if stderr_fd is not None:
+                os.close(stderr_fd)
+
+    def _close(self) -> None:
+        if self._own_stdout and self.stdout is not None:
             self.stdout.close()
 
-        if self._managed_stderr and self.stderr and self.stderr is not self.stdout:
+        if (
+            self._own_stderr
+            and self.stderr is not None
+            and self.stderr is not self.stdout
+        ):
             self.stderr.close()
 
-    def __enter__(self):
+        self.stdout = None
+        self.stderr = None
+        self._own_stdout = False
+        self._own_stderr = False
+
+    def redirect(self) -> tuple[TextIO | None, TextIO | None]:
+        """Activate stdout and stderr redirection.
+
+        Descriptor-level redirection is attempted when ``fd_level=True``. If
+        the source or target streams do not expose usable file descriptors,
+        redirection falls back to replacing ``sys.stdout`` and ``sys.stderr``.
+
+        Returns
+        -------
+        tuple of TextIO or None
+            Active ``(stdout, stderr)`` target streams.
+        """
+        self._setup()
+
+        if not self.fd_level:
+            return self._py_redirect()
+
+        try:
+            self.orig_stdout.fileno()
+            self.orig_stderr.fileno()
+
+            if self.stdout is not None:
+                self.stdout.fileno()
+
+            if self.stderr is not None:
+                self.stderr.fileno()
+        except (AttributeError, OSError, ValueError):
+            self._close()
+            self._setup()
+            return self._py_redirect()
+
+        try:
+            return self._fd_redirect()
+        except (AttributeError, OSError, ValueError):
+            self._close()
+            self._setup()
+            return self._py_redirect()
+
+    def restore(self) -> None:
+        """Restore the original stdout and stderr destinations.
+
+        Notes
+        -----
+        Saved file descriptors are restored and closed after descriptor-level
+        redirection. Streams opened internally for path targets are also
+        closed.
+        """
+        if self._fd_active:
+            self._fd_restore(self._stdout_fd, self._stderr_fd)
+            self._stdout_fd = None
+            self._stderr_fd = None
+            self._fd_active = False
+        elif self._py_active:
+            sys.stdout = self.orig_stdout
+            sys.stderr = self.orig_stderr
+            self._py_active = False
+
+        self._close()
+
+    def __enter__(self) -> tuple[TextIO | None, TextIO | None]:
         return self.redirect()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.restore()
 
 
