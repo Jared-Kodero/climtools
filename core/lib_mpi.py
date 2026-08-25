@@ -81,6 +81,15 @@ def _op_label(op: _MPI.Op) -> str:
     return "OP"
 
 
+def mpi_alive(comm: _MPI.Comm) -> bool:
+    if comm.Get_size() > 1 or builtins.any(key in os.environ for key in _LAUNCH_ENV):
+        return True
+    try:
+        return _MPI.Comm.Get_parent() != _MPI.COMM_NULL
+    except (AttributeError, RuntimeError):
+        return False
+
+
 class MPIError(Exception):
     """MPI runtime or synchronized distributed-execution error."""
 
@@ -137,15 +146,6 @@ def install_abort_excepthook() -> bool:
     _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
     sys.excepthook = _abort_excepthook
     return True
-
-
-def mpi_alive(comm: _MPI.Comm) -> bool:
-    if comm.Get_size() > 1 or builtins.any(key in os.environ for key in _LAUNCH_ENV):
-        return True
-    try:
-        return _MPI.Comm.Get_parent() != _MPI.COMM_NULL
-    except (AttributeError, RuntimeError):
-        return False
 
 
 def _warn_if_parallel_netcdf_missing(comm: _MPI.Comm) -> None:
@@ -677,18 +677,20 @@ class MPIRuntime:
     MPI = _MPI
     MPIError = MPIError
 
+    # -------------------------------------------------------------------------
+    # Runtime state and accessors
+    # -------------------------------------------------------------------------
+
     def __init__(self, comm: Intracomm | None = None) -> None:
         self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
         self._reduce: ReduceAccessor = ReduceAccessor(self)
         self._xarray: XarrayMPI = XarrayMPI(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
+        self._child: MPIRuntime | None = None
+        self.info: tuple[int, ...] = ()
+        self.task: int | None = None
         install_abort_excepthook()
         _warn_if_parallel_netcdf_missing(self.comm)
-
-    @property
-    def xarray(self) -> XarrayMPI:
-        """Return MPI-aware xarray indexing, redistribution, and reductions."""
-        return self._xarray
 
     @property
     def launched(self) -> bool:
@@ -716,82 +718,273 @@ class MPIRuntime:
         """
         return self.comm.rank == root
 
-    def log(
-        self,
-        message: str,
-        *args: Any,
-        root: int = 0,
-        timestamp: bool = False,
-        prefix: bool = True,
-        logger: Callable[..., None] | None = None,
-        **kwargs: Any,
-    ) -> None:
+    @property
+    def xarray(self) -> XarrayMPI:
+        """Return the MPI-aware xarray accessor.
+
+        Returns
+        -------
+        XarrayMPI
+            MPI-aware xarray indexing, redistribution, and reductions.
         """
-        Emit a message from a specific MPI rank.
+        return self._xarray
+
+    @property
+    def reduce(self) -> ReduceAccessor:
+        """Return direct MPI reduction operations.
+
+        Returns
+        -------
+        ReduceAccessor
+            Element-wise cross-rank ``sum``, ``prod``, ``min``, ``max``,
+            ``mean``, ``any``, and ``all`` operations.
+        """
+        return self._reduce
+
+    @property
+    def child(self) -> MPIRuntime:
+        """Return the child MPI runtime.
+
+        Returns
+        -------
+        MPIRuntime
+            Runtime associated with the current rank's child communicator.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`decompose` has not been called.
+        """
+        if self._child is None:
+            raise RuntimeError("MPI runtime has not been decomposed.")
+
+        return self._child
+
+    # -------------------------------------------------------------------------
+    # Child communicator decomposition
+    # -------------------------------------------------------------------------
+
+    def decompose(self, ntasks: int) -> None:
+        """Decompose the communicator into equally sized child communicators.
 
         Parameters
         ----------
-        message : str
-            Message or format string to be logged.
-        *args : Any
-            Positional arguments passed to ``logger``. If ``logger`` is None,
-            these trigger percent-formatting of ``message`` before printing.
-        root : int, optional
-            Rank allowed to emit the message. Default is 0. If -1, log all.
-        timestamp : bool, optional
-            If True, prepends a standard ISO-like timestamp to the message.
-            Only applies when falling back to the built-in print. Default is False.
-        prefix : bool, optional
-            If True, prepends an MPI rank indicator to the message
-            for both the built-in print and custom loggers. Default is True.
-        logger : callable, optional
-            Callable used to emit the message. Default is None, which falls back
-            to the built-in :func:`print`.
-        **kwargs : Any
-            Keyword arguments forwarded to the ``logger`` (or :func:`print`).
+        ntasks : int
+            Number of independent child communicators. The current communicator
+            size must be exactly divisible by ``ntasks``.
 
         Returns
         -------
         None
+
+        Raises
+        ------
+        ValueError
+            If the communicator size is not divisible by ``ntasks``.
+
+        Notes
+        -----
+        All ranks in the current communicator must call this method.
+
+        Each rank belongs to exactly one child communicator. The parent
+        communicator remains unchanged. The child runtime is available through
+        :attr:`child`.
+
+        ``child.task`` gives the zero-based child index and ``child.info``
+        contains the ranks from the parent communicator that belong to the
+        child.
         """
-        if root != -1 and not self.is_root(root):
-            return
+        size = self.comm.size
 
-        current_rank = root if root != -1 else self.comm.rank
+        if size % ntasks != 0:
+            raise ValueError(
+                f"MPI size ({size}) must be divisible by ntasks ({ntasks})."
+            )
 
-        # Space-pad the rank using the calculated length
-        mpi_str = f"[MPI RANK {current_rank:{len(str(self.comm.size))}d}]"
+        ranks_per_task = size // ntasks
+        task = self.comm.rank // ranks_per_task
 
-        if logger is None:
-            # Apply string formatting if args exist
-            if args:
-                message = message % args
+        start = task * ranks_per_task
+        stop = start + ranks_per_task
 
-            # Build the prefix dynamically based on boolean flags for print
-            msg_prefix = ""
-            if timestamp:
-                time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                msg_prefix += f"{time_str} - "
+        child_comm = self.comm.Split(
+            color=task,
+            key=self.comm.rank,
+        )
 
-            if prefix:
-                msg_prefix += f"{mpi_str} "
+        self._child = MPIRuntime(child_comm)
+        self._child.task = task
+        self._child.info = tuple(range(start, stop))
 
-            # Print the final assembled string. Flush by default: rank
-            # output under a batch launcher is redirected to a file and is
-            # therefore block-buffered, so an un-flushed log leaves the last
-            # message before a hang sitting in the buffer and makes the
-            # deadlock appear to be somewhere it is not.
-            kwargs.setdefault("flush", True)
+    # -------------------------------------------------------------------------
+    # Parent-child communication
+    # -------------------------------------------------------------------------
 
-            with self._mpi_lock:
-                print(f"{msg_prefix}{message}", **kwargs)
+    def bcast_to_children(
+        self,
+        value: T | None,
+        *,
+        root: int = 0,
+    ) -> T:
+        """Broadcast one value to all child communicators.
 
-        else:
-            # Respect the prefix flag for custom loggers
-            if prefix:
-                message = f"{mpi_str} {message}"
-            with self._mpi_lock:
-                logger(message, *args, **kwargs)
+        Parameters
+        ----------
+        value : T or None
+            Value supplied by the parent ``root`` rank. Non-root ranks may pass
+            None.
+        root : int, optional
+            Root rank in the parent communicator. Default is 0.
+
+        Returns
+        -------
+        T
+            Broadcast value on every rank in every child communicator.
+
+        Notes
+        -----
+        All ranks in the parent communicator must call this method. Since every
+        child rank is also a member of the parent communicator, the parent
+        broadcast reaches every child directly.
+        """
+        result = self.comm.bcast(
+            value if self.is_root(root) else None,
+            root=root,
+        )
+
+        return cast("T", result)
+
+    def scatter_to_children(
+        self,
+        values: Sequence[T] | None,
+        *,
+        root: int = 0,
+    ) -> T:
+        """Scatter one value to each child communicator.
+
+        Parameters
+        ----------
+        values : sequence of T or None
+            Sequence containing one value per child communicator on the parent
+            ``root`` rank. Non-root ranks may pass None.
+        root : int, optional
+            Root rank in the parent communicator. Default is 0.
+
+        Returns
+        -------
+        T
+            Value assigned to the current child communicator. Every rank within
+            the child receives the same value.
+
+        Notes
+        -----
+        All ranks in the parent communicator must call this method. Values are
+        first scattered to the root rank of each child and then broadcast within
+        that child communicator.
+        """
+        child = self.child
+        ranks_per_child = child.comm.size
+
+        send: list[T | None] | None = None
+
+        if self.is_root(root):
+            source = cast("Sequence[T]", values)
+            send = [None] * self.comm.size
+
+            for task, value in enumerate(source):
+                child_root = task * ranks_per_child
+                send[child_root] = value
+
+        received = self.comm.scatter(
+            send,
+            root=root,
+        )
+
+        result = child.comm.bcast(
+            received if child.is_root() else None,
+            root=0,
+        )
+
+        return cast("T", result)
+
+    def gather_from_children(
+        self,
+        value: T,
+        *,
+        root: int = 0,
+    ) -> list[T] | None:
+        """Gather one value from each child communicator.
+
+        Parameters
+        ----------
+        value : T
+            Value associated with the current child communicator. Only rank zero
+            of each child contributes its value to the parent gather.
+        root : int, optional
+            Root rank in the parent communicator. Default is 0.
+
+        Returns
+        -------
+        list of T or None
+            Values from each child, ordered by child task index, on the parent
+            ``root`` rank. All other ranks return None.
+
+        Notes
+        -----
+        All ranks in the parent communicator must call this method. ``value``
+        must already represent one complete result for the current child.
+        """
+        child = self.child
+
+        payload = (cast("int", child.task), value) if child.is_root() else None
+
+        gathered = self.comm.gather(
+            payload,
+            root=root,
+        )
+
+        if not self.is_root(root):
+            return None
+
+        results = [item for item in gathered if item is not None]
+        results.sort(key=lambda item: item[0])
+
+        return [item[1] for item in results]
+
+    # -------------------------------------------------------------------------
+    # NumPy and MPI helpers
+    # -------------------------------------------------------------------------
+
+    def datatype(self, dtype: DTypeLike) -> _MPI.Datatype:
+        """Return the MPI datatype corresponding to a NumPy dtype.
+
+        Parameters
+        ----------
+        dtype : numpy.dtype or type
+            NumPy dtype to convert to an MPI datatype.
+
+        Returns
+        -------
+        mpi4py.MPI.Datatype
+            MPI datatype corresponding to ``dtype``.
+
+        Raises
+        ------
+        MPIError
+            If ``dtype`` is not a supported boolean, integer, floating-point,
+            or complex NumPy dtype.
+
+        Notes
+        -----
+        Conversion is delegated to :func:`mpi4py.util.dtlib.from_numpy_dtype`.
+        """
+        key = np.dtype(dtype)
+        if key.kind not in _REDUCIBLE_DTYPE_KINDS:
+            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.")
+        try:
+            return _dtlib.from_numpy_dtype(key)
+        except (KeyError, ValueError) as exc:
+            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
 
     def scatterv(
         self,
@@ -867,39 +1060,85 @@ class MPIRuntime:
         self.comm.Scatterv(send, [recv, mpi_type], root=root)
         return recv
 
-    @property
-    def reduce(self) -> ReduceAccessor:
-        """Return direct MPI reduction operations.
+    # -------------------------------------------------------------------------
+    # Logging and diagnostics
+    # -------------------------------------------------------------------------
+
+    def log(
+        self,
+        message: str,
+        *args: Any,
+        root: int = 0,
+        timestamp: bool = False,
+        prefix: bool = True,
+        logger: Callable[..., None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Emit a message from a specific MPI rank.
+
+        Parameters
+        ----------
+        message : str
+            Message or format string to be logged.
+        *args : Any
+            Positional arguments passed to ``logger``. If ``logger`` is None,
+            these trigger percent-formatting of ``message`` before printing.
+        root : int, optional
+            Rank allowed to emit the message. Default is 0. If -1, log all.
+        timestamp : bool, optional
+            If True, prepends a standard ISO-like timestamp to the message.
+            Only applies when falling back to the built-in print. Default is False.
+        prefix : bool, optional
+            If True, prepends an MPI rank indicator to the message
+            for both the built-in print and custom loggers. Default is True.
+        logger : callable, optional
+            Callable used to emit the message. Default is None, which falls back
+            to the built-in :func:`print`.
+        **kwargs : Any
+            Keyword arguments forwarded to the ``logger`` (or :func:`print`).
 
         Returns
         -------
-        ReduceAccessor
-            Element-wise cross-rank ``sum``, ``prod``, ``min``, ``max``,
-            ``mean``, ``any``, and ``all`` operations.
+        None
         """
-        return self._reduce
+        if root != -1 and not self.is_root(root):
+            return
 
-    def datatype(self, dtype: DTypeLike) -> _MPI.Datatype:
-        """Return the MPI datatype corresponding to a NumPy dtype.
+        current_rank = root if root != -1 else self.comm.rank
 
-        Backed by :func:`mpi4py.util.dtlib.from_numpy_dtype`, the datatype
-        conversion mpi4py itself maintains, rather than a hand-kept mapping.
+        # Space-pad the rank using the calculated length
+        mpi_str = f"[MPI RANK {current_rank:{len(str(self.comm.size))}d}]"
 
-        Raises
-        ------
-        MPIError
-            If ``dtype`` is not boolean, integer, float, or complex; other
-            kinds (strings, objects, structured dtypes) are not meaningful
-            for the reductions in this module even though ``dtlib`` itself
-            would still produce an opaque derived type for them.
-        """
-        key = np.dtype(dtype)
-        if key.kind not in _REDUCIBLE_DTYPE_KINDS:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.")
-        try:
-            return _dtlib.from_numpy_dtype(key)
-        except (KeyError, ValueError) as exc:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
+        if logger is None:
+            # Apply string formatting if args exist
+            if args:
+                message = message % args
+
+            # Build the prefix dynamically based on boolean flags for print
+            msg_prefix = ""
+            if timestamp:
+                time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                msg_prefix += f"{time_str} - "
+
+            if prefix:
+                msg_prefix += f"{mpi_str} "
+
+            # Print the final assembled string. Flush by default: rank
+            # output under a batch launcher is redirected to a file and is
+            # therefore block-buffered, so an un-flushed log leaves the last
+            # message before a hang sitting in the buffer and makes the
+            # deadlock appear to be somewhere it is not.
+            kwargs.setdefault("flush", True)
+
+            with self._mpi_lock:
+                print(f"{msg_prefix}{message}", **kwargs)
+
+        else:
+            # Respect the prefix flag for custom loggers
+            if prefix:
+                message = f"{mpi_str} {message}"
+            with self._mpi_lock:
+                logger(message, *args, **kwargs)
 
     @contextmanager
     def watchdog(
@@ -984,6 +1223,10 @@ class MPIRuntime:
         finally:
             finished.set()
 
+    # -------------------------------------------------------------------------
+    # Collective error handling
+    # -------------------------------------------------------------------------
+
     def raise_if_error(
         self,
         error: BaseException | None,
@@ -1044,6 +1287,10 @@ class MPIRuntime:
             raise MPIError(f"Rank {first} failed during {phase}.")
         name, message = detail
         raise MPIError(f"Rank {first} failed during {phase} with {name}: {message}")
+
+    # -------------------------------------------------------------------------
+    # Decorator interface
+    # -------------------------------------------------------------------------
 
     def __call__(
         self,
