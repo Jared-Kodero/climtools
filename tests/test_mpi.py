@@ -37,6 +37,7 @@ from typing import Any
 import dask.array as dask_array
 import numpy as np
 import xarray as xr
+
 from climtools import mpi, xgeo
 from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
@@ -266,7 +267,7 @@ def build_mock_dataset(
         },
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
-
+    ds = ds.chunk("auto")
     compression_opts = {"zlib": True, "complevel": 4}
     encoding = {var: compression_opts for var in ds.data_vars}
     ds.to_netcdf(path, format="NETCDF4", encoding=encoding)
