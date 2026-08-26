@@ -27,7 +27,7 @@ MAX_SAVE_CHUNK_BYTES = 2**31
 
 
 def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
-    """Return a representative native on-disk chunk size for a dimension.
+    """Return the common native on-disk chunk size for a dimension.
 
     Parameters
     ----------
@@ -39,26 +39,25 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
     Returns
     -------
     int or None
-        Representative chunk size for the dimension, or None if unavailable.
+        Common chunk size for the dimension, or None if unavailable or inconsistent.
     """
-    candidates = [
-        variable for variable in data.data_vars.values() if dim in variable.dims
-    ]
-    if not candidates:
-        return None
+    sizes: set[int] = set()
+    for variable in data.data_vars.values():
+        if dim not in variable.dims:
+            continue
+        chunksizes = variable.encoding.get("chunksizes")
+        if chunksizes is not None:
+            size = int(chunksizes[variable.get_axis_num(dim)])
+        else:
+            preferred = variable.encoding.get("preferred_chunks")
+            if not isinstance(preferred, dict) or dim not in preferred:
+                return None
+            size = int(preferred[dim])
+        if size <= 0:
+            return None
+        sizes.add(size)
 
-    variable = max(candidates, key=lambda item: item.nbytes)
-    chunksizes = variable.encoding.get("chunksizes")
-    if chunksizes is not None:
-        size = int(chunksizes[variable.get_axis_num(dim)])
-        return size if size > 0 else None
-
-    preferred = variable.encoding.get("preferred_chunks")
-    if isinstance(preferred, dict) and dim in preferred:
-        size = int(preferred[dim])
-        return size if size > 0 else None
-
-    return None
+    return sizes.pop() if len(sizes) == 1 else None
 
 
 def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
