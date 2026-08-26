@@ -37,7 +37,6 @@ from typing import Any
 import dask.array as dask_array
 import numpy as np
 import xarray as xr
-
 from climtools import mpi, xgeo
 from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
@@ -132,7 +131,7 @@ def timer(
 
             mpi.raise_if_error(error, func.__name__)
             mpi.comm.barrier()
-            elapsed = mpi.reduce.max(mpi.MPI.Wtime() - start)
+            elapsed = max_ranks(mpi.MPI.Wtime() - start)
             return result, elapsed
 
         return timed
@@ -267,7 +266,7 @@ def build_mock_dataset(
         },
         attrs={"title": "climtools MPI deterministic test dataset"},
     )
-    ds = ds.chunk("auto")
+    # ds = ds.chunk("auto")
     compression_opts = {"zlib": True, "complevel": 4}
     encoding = {var: compression_opts for var in ds.data_vars}
     ds.to_netcdf(path, format="NETCDF4", encoding=encoding)
@@ -401,6 +400,26 @@ def call_raises(
     except BaseException:
         return False
     return False
+
+
+def all_ranks(value: bool) -> bool:
+    """Return whether ``value`` is true on every rank."""
+    return bool(mpi.comm.allreduce(bool(value), op=mpi.MPI.LAND))
+
+
+def any_rank(value: bool) -> bool:
+    """Return whether ``value`` is true on at least one rank."""
+    return bool(mpi.comm.allreduce(bool(value), op=mpi.MPI.LOR))
+
+
+def sum_ranks(value: float) -> float:
+    """Return the sum of a floating-point contribution across ranks."""
+    return float(mpi.comm.allreduce(value, op=mpi.MPI.SUM))
+
+
+def max_ranks(value: float) -> float:
+    """Return the maximum floating-point contribution across ranks."""
+    return float(mpi.comm.allreduce(value, op=mpi.MPI.MAX))
 
 
 def record_result(
@@ -539,31 +558,40 @@ def load_test_dataset(
 
 @run_test
 def test_mpi_runtime_helpers() -> None:
-    """Check the small MPIRuntime helpers exposed alongside the collectives."""
+    """Check MPIRuntime state and object-communication convenience methods."""
     alternate_root = min(1, SIZE - 1)
-    supported_dtypes = (
-        np.bool_,
-        np.int32,
-        np.int64,
-        np.float32,
-        np.float64,
-        np.complex64,
-        np.complex128,
+
+    broadcast_value = mpi.broadcast(
+        "shared" if RANK == alternate_root else None, root=alternate_root
     )
-    datatype_ok = all(
-        mpi.datatype(dtype).Get_size() == np.dtype(dtype).itemsize
-        for dtype in supported_dtypes
+    scatter_values = list(range(SIZE)) if RANK == alternate_root else None
+    scattered = mpi.scatter(scatter_values, root=alternate_root)
+    gathered = mpi.gather(RANK, root=alternate_root)
+
+    point_to_point_ok = True
+    if SIZE > 1:
+        tag = 0x7465_7374
+        if RANK == 0:
+            mpi.send({"rank": 0}, dest=1, tag=tag)
+        elif RANK == 1:
+            point_to_point_ok = mpi.receive(source=0, tag=tag) == {"rank": 0}
+
+    gather_ok = (
+        gathered == list(range(SIZE)) if RANK == alternate_root else gathered is None
     )
     correct = (
         mpi.is_root() == (RANK == 0)
         and mpi.is_root(alternate_root) == (RANK == alternate_root)
         and isinstance(mpi.launched, bool)
-        and datatype_ok
         and issubclass(mpi.MPIError, Exception)
+        and broadcast_value == "shared"
+        and scattered == RANK
+        and gather_ok
+        and point_to_point_ok
     )
-    correct = bool(mpi.reduce.all(correct))
+    correct = all_ranks(correct)
     record_result(
-        "mpi runtime helpers (is_root/launched/datatype/MPIError)",
+        "mpi runtime helpers and object communication",
         correct,
         0.0,
         0.0,
@@ -657,7 +685,7 @@ def test_mpi_logging_and_error_propagation() -> None:
             subset_error_ok = False
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             logger_ok
             and root_filter_ok
             and timestamp_ok
@@ -676,172 +704,102 @@ def test_mpi_logging_and_error_propagation() -> None:
 
 
 @run_test
-def test_mpi_reduction_contracts() -> None:
-    """Exercise reduction validation, non-contiguous buffers, and nonzero roots."""
-    scalar = mpi.reduce.sum(RANK + 1)
-    expected_scalar = SIZE * (SIZE + 1) // 2
-
-    base = np.arange(24, dtype=np.float64).reshape(4, 6)
-    noncontiguous = base[:, ::2]
-    noncontiguous_result = mpi.reduce.sum(noncontiguous)
-    noncontiguous_ok = bool(np.array_equal(noncontiguous_result, noncontiguous * SIZE))
-
-    dataset = xr.Dataset(
-        {
-            "a": ("x", np.asarray([RANK + 1.0, 2.0 * (RANK + 1.0)])),
-            "b": ("x", np.asarray([1.0, -1.0]) * (RANK + 1.0)),
-        },
-        attrs={"source": "synthetic"},
-    )
-    dataset_result = mpi.reduce.sum(dataset)
-    rank_sum = SIZE * (SIZE + 1) / 2.0
-    dataset_ok = (
-        isinstance(dataset_result, xr.Dataset)
-        and dataset_result.attrs == dataset.attrs
-        and bool(
-            np.array_equal(
-                dataset_result["a"].values,
-                np.asarray([rank_sum, 2.0 * rank_sum]),
-            )
-        )
-        and bool(
-            np.array_equal(
-                dataset_result["b"].values,
-                np.asarray([rank_sum, -rank_sum]),
-            )
-        )
-    )
-    any_scalar = mpi.reduce.any(RANK == 0)
-    all_scalar = mpi.reduce.all(RANK >= 0)
-    scalar_logical_ok = (
-        isinstance(any_scalar, bool)
-        and isinstance(all_scalar, bool)
-        and any_scalar
-        and all_scalar
-    )
-
-    root = SIZE - 1
-    root_result = mpi.reduce.max(float(RANK), mode="root", root=root)
-    root_ok = root_result == float(SIZE - 1) if RANK == root else root_result is None
-
-    validation_ok = all(
-        (
-            call_raises(
-                ValueError,
-                mpi.reduce.sum,
-                1.0,
-                mode="invalid",
-                contains="mode",
-            ),
-            call_raises(
-                ValueError,
-                mpi.reduce.sum,
-                1.0,
-                mode="root",
-                root=-1,
-                contains="root",
-            ),
-            call_raises(
-                ValueError,
-                mpi.reduce.sum,
-                1.0,
-                mode="root",
-                root=True,
-                contains="root",
-            ),
-            call_raises(
-                ValueError,
-                mpi.reduce.sum,
-                1.0,
-                mode="root",
-                root=SIZE,
-                contains="outside",
-            ),
-            call_raises(
-                mpi.MPIError,
-                mpi.reduce.sum,
-                np.asarray(["unsupported"], dtype=object),
-                contains="Unsupported MPI NumPy dtype",
-            ),
-            call_raises(
-                mpi.MPIError,
-                mpi.datatype,
-                np.dtype("U1"),
-                contains="Unsupported MPI NumPy dtype",
-            ),
-        )
-    )
-
-    correct = bool(
-        mpi.reduce.all(
-            scalar == expected_scalar
-            and noncontiguous_ok
-            and dataset_ok
-            and scalar_logical_ok
-            and root_ok
-            and validation_ok
-        )
-    )
-    record_result(
-        "mpi runtime/reduce contracts (validation/noncontiguous/nonzero root)",
-        correct,
-        0.0,
-        0.0,
-        note="correctness-focused",
-    )
-
-
-@run_test
 def test_mpi_decompose_and_children() -> None:
-    """Check MPIRuntime.decompose, .child, and the parent<->child collectives.
+    """Check decomposition, child-local runtime behavior, and data direction.
 
-    Two decompositions are exercised on every run regardless of ``SIZE``:
-    ``ntasks=SIZE`` (one rank per child, valid for any communicator size)
-    and, when ``SIZE`` is even and at least 2, ``ntasks=SIZE // 2`` (two
-    ranks per child), which is the only way to exercise the child-root-only
-    contribution semantics of ``gather_from_children`` and the
-    scatter-then-broadcast-within-child semantics of ``scatter_to_children``
-    on more than one rank per child.
+    ``mpi.child`` is a complete MPIRuntime over this rank's child
+    communicator. ``mpi.to_children`` moves parent-owned values into the
+    logical child groups; ``mpi.from_children`` moves one result per child
+    back to a parent rank.
     """
     t0 = time_module.perf_counter()
+    alternate_root = min(1, SIZE - 1)
 
-    # `.child` before `.decompose()` has ever been called on this runtime
-    # must fail clearly rather than returning a stale or partial runtime.
+    # Directional namespaces require an established child topology.
     child_before_decompose_raises = call_raises(RuntimeError, lambda: mpi.child)
-
-    # decompose() must reject an ntasks that does not evenly divide the
-    # communicator; SIZE + 1 never divides SIZE for SIZE >= 1.
-    decompose_validates = call_raises(
-        ValueError,
-        mpi.decompose,
-        SIZE + 1,
-        contains=f"({SIZE})",
+    to_before_decompose_raises = call_raises(
+        RuntimeError,
+        mpi.to_children.broadcast,
+        None,
+    )
+    from_before_decompose_raises = call_raises(
+        RuntimeError,
+        mpi.from_children.gather,
+        None,
     )
 
-    # --- one rank per child: valid for any SIZE ---
+    decompose_validates = (
+        call_raises(TypeError, mpi.decompose, True, contains="integer")
+        and call_raises(ValueError, mpi.decompose, 0, contains="at least 1")
+        and call_raises(
+            ValueError,
+            mpi.decompose,
+            SIZE + 1,
+            contains=f"({SIZE})",
+        )
+    )
+
+    # --- one rank per child: valid for every communicator size ---
     mpi.decompose(SIZE)
     child = mpi.child
 
+    child_log: list[str] = []
+
+    def capture_child(message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        child_log.append(message % args if args else message)
+
+    child.log("child-log", prefix=False, logger=capture_child)
+
     single_shape_ok = bool(
-        child.task == RANK and child.info == (RANK,) and child.comm.size == 1
+        type(child) is type(mpi)
+        and child.task == RANK
+        and child.info == (RANK,)
+        and child.comm.size == 1
+        and child.comm.rank == 0
+        and child_log == ["child-log"]
     )
 
-    bcast_value = {"payload": 42} if mpi.is_root() else None
-    bcast_ok = mpi.bcast_to_children(bcast_value, root=0) == {"payload": 42}
+    child_local = child.broadcast(
+        f"child-{child.task}" if child.is_root() else None,
+        root=0,
+    )
+    child_runtime_ok = child_local == f"child-{RANK}"
 
-    scatter_values = list(range(SIZE)) if mpi.is_root() else None
-    scatter_ok = mpi.scatter_to_children(scatter_values, root=0) == RANK
+    bcast_value = {"payload": 42} if RANK == alternate_root else None
+    bcast_ok = mpi.to_children.broadcast(bcast_value, root=alternate_root) == {
+        "payload": 42
+    }
 
-    gathered = mpi.gather_from_children(RANK * 10, root=0)
+    scatter_values = list(range(SIZE)) if RANK == alternate_root else None
+    scatter_ok = mpi.to_children.scatter(scatter_values, root=alternate_root) == RANK
+
+    gathered = mpi.from_children.gather(RANK * 10, root=alternate_root)
     gather_ok = (
         gathered == [rank * 10 for rank in range(SIZE)]
-        if mpi.is_root()
+        if RANK == alternate_root
         else gathered is None
     )
 
-    correct_single = bool(single_shape_ok and bcast_ok and scatter_ok and gather_ok)
+    malformed = [] if RANK == alternate_root else None
+    scatter_validation_ok = call_raises(
+        (ValueError, mpi.MPIError),
+        mpi.to_children.scatter,
+        malformed,
+        root=alternate_root,
+        contains="exactly",
+    )
 
-    # --- two ranks per child: only meaningful when SIZE supports it ---
+    correct_single = bool(
+        single_shape_ok
+        and child_runtime_ok
+        and bcast_ok
+        and scatter_ok
+        and gather_ok
+        and scatter_validation_ok
+    )
+
+    # --- two ranks per child: exercises leader-only parent communication ---
     correct_multi = True
     if SIZE >= 2 and SIZE % 2 == 0:
         ntasks = SIZE // 2
@@ -855,36 +813,57 @@ def test_mpi_decompose_and_children() -> None:
         expected_info = tuple(range(expected_start, expected_start + ranks_per_task))
 
         multi_shape_ok = bool(
-            child.task == expected_task
+            type(child) is type(mpi)
+            and child.task == expected_task
             and child.info == expected_info
             and child.comm.size == ranks_per_task
+            and child.comm.rank == RANK - expected_start
         )
 
-        bcast_value = "root-value" if mpi.is_root() else None
-        bcast_ok = mpi.bcast_to_children(bcast_value, root=0) == "root-value"
+        # A normal child-runtime broadcast stays inside the current child.
+        local_value = child.broadcast(
+            f"local-{expected_task}" if child.is_root() else None,
+            root=0,
+        )
+        child_runtime_ok = local_value == f"local-{expected_task}"
+
+        # root=1 is deliberately not a child leader when each child has two
+        # ranks, proving parent roots and child leaders are independent.
+        parent_root = 1
+        bcast_value = "root-value" if RANK == parent_root else None
+        bcast_ok = (
+            mpi.to_children.broadcast(bcast_value, root=parent_root) == "root-value"
+        )
 
         scatter_values = (
-            [f"child-{task}" for task in range(ntasks)] if mpi.is_root() else None
+            [f"child-{task}" for task in range(ntasks)] if RANK == parent_root else None
         )
-        scattered = mpi.scatter_to_children(scatter_values, root=0)
+        scattered = mpi.to_children.scatter(scatter_values, root=parent_root)
         scatter_ok = scattered == f"child-{expected_task}"
 
-        # Only each child's rank 0 contributes; gather_from_children must
-        # order results by child task index regardless of which parent
-        # ranks those child roots happen to be.
+        # Nonleaders deliberately hold different values; only child rank 0
+        # contributes to the parent gather.
         contribution = expected_task * 100 + child.comm.rank
-        gathered = mpi.gather_from_children(contribution, root=0)
+        gathered = mpi.from_children.gather(contribution, root=parent_root)
         gather_ok = (
             gathered == [task * 100 for task in range(ntasks)]
-            if mpi.is_root()
+            if RANK == parent_root
             else gathered is None
         )
 
-        correct_multi = bool(multi_shape_ok and bcast_ok and scatter_ok and gather_ok)
+        correct_multi = bool(
+            multi_shape_ok
+            and child_runtime_ok
+            and bcast_ok
+            and scatter_ok
+            and gather_ok
+        )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             child_before_decompose_raises
+            and to_before_decompose_raises
+            and from_before_decompose_raises
             and decompose_validates
             and correct_single
             and correct_multi
@@ -892,8 +871,7 @@ def test_mpi_decompose_and_children() -> None:
     )
     elapsed = time_module.perf_counter() - t0
     record_result(
-        "mpi.decompose/child/bcast_to_children/scatter_to_children/"
-        "gather_from_children",
+        "mpi.decompose/child/to_children/from_children",
         correct,
         0.0,
         elapsed,
@@ -920,7 +898,7 @@ def test_xr_meta_reexports() -> None:
     from climtools.core import xr_mpi as xr_mpi_module
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             xr_mpi_module.choose_partition_dim is xr_meta.choose_partition_dim
             and xr_mpi_module.indexer_is_scalar is xr_meta.indexer_is_scalar
             and "choose_partition_dim" in xr_mpi_module.__all__
@@ -950,7 +928,7 @@ def test_indexer_is_scalar() -> None:
     correct = all(not xr_meta.indexer_is_scalar(value) for value in non_scalar) and all(
         xr_meta.indexer_is_scalar(value) for value in scalar
     )
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     record_result(
         "indexer_is_scalar (slice/list/tuple/ndarray/DataArray vs. label)",
         correct,
@@ -989,7 +967,7 @@ def test_choose_partition_dim_selection() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             longest == "lon"
             and tie_break == "a"
             and excluded == "lat"
@@ -1063,7 +1041,7 @@ def test_mpi_meta_round_trip() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             no_meta_yet
             and round_trip_ok
             and strip_ok
@@ -1122,297 +1100,12 @@ def test_dataset_reduction_coordinate_filtering() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
-            lat_coord_dropped and lon_coord_kept and attrs_kept and values_ok
-        )
+        all_ranks(lat_coord_dropped and lon_coord_kept and attrs_kept and values_ok)
     )
     record_result(
         "mpi.xarray Dataset reduction drops reduced-dim coords, "
         "keeps the rest plus attrs",
         correct,
-        0.0,
-        0.0,
-        note="correctness-focused",
-    )
-
-
-# ---------------------------------------------------------------------------
-# mpi.reduce -- element-wise collective reductions
-# ---------------------------------------------------------------------------
-
-
-@run_test
-def test_reduce_scalar_sum(n_total: int) -> None:
-    """Scalar mpi.reduce.sum using mock precipitation values."""
-    with xr.open_dataset(TEST_DATA_PATH) as source:
-        n_lat = int(source.sizes["lat"])
-        n_lon = int(source.sizes["lon"])
-
-    n_rows = min(n_lat, max(1, (n_total + n_lon - 1) // n_lon))
-    start, stop = partition_bounds(n_rows)
-    local = load_test_variable(
-        "pr",
-        time=0,
-        lat=slice(start, stop),
-    )
-
-    @timer
-    def parallel_sum() -> float:
-        local_partial = float(local.sum(skipna=True))
-        return mpi.reduce.sum(local_partial)
-
-    combined, parallel_s = parallel_sum()
-
-    @mpi(broadcast=True)
-    @timer(synchronize=False)
-    def serial_fn() -> float:
-        field = load_test_variable("pr", time=0, lat=slice(0, n_rows))
-        return float(field.sum(skipna=True))
-
-    expected, serial_s = serial_fn()
-    correct = bool(
-        np.isclose(
-            combined,
-            expected,
-            rtol=relative_tolerance_for_dtype(local.values),
-            equal_nan=True,
-        )
-    )
-    record_result(
-        f"mpi.reduce.sum scalar ({n_rows * n_lon} mock pr values)",
-        correct,
-        serial_s,
-        parallel_s,
-    )
-
-
-@run_test
-def test_reduce_array_sum(n_events_total: int, ny: int, nx: int) -> None:
-    """mpi.reduce.sum on mock precipitation fields from rank-selected times."""
-    with xr.open_dataset(TEST_DATA_PATH) as source:
-        n_time = int(source.sizes["time"])
-        n_lat = min(int(source.sizes["lat"]), ny)
-        n_lon = min(int(source.sizes["lon"]), nx)
-
-    max_points_per_rank = max(1, n_events_total // SIZE)
-    if n_lat * n_lon > max_points_per_rank:
-        n_lat = max(1, min(n_lat, max_points_per_rank // max(1, n_lon)))
-
-    def load_rank_field(rank: int) -> np.ndarray:
-        field = load_test_variable(
-            "pr",
-            time=rank % n_time,
-            lat=slice(0, n_lat),
-            lon=slice(0, n_lon),
-        )
-        return np.asarray(field.values)
-
-    local = load_rank_field(RANK)
-
-    @timer
-    def parallel_sum() -> Any:
-        return mpi.reduce.sum(local)
-
-    combined, parallel_s = parallel_sum()
-
-    @mpi(broadcast=True)
-    @timer(synchronize=False)
-    def serial_fn() -> np.ndarray:
-        fields = [load_rank_field(rank) for rank in range(SIZE)]
-        return np.sum(np.stack(fields, axis=0), axis=0)
-
-    expected, serial_s = serial_fn()
-    correct = (
-        bool(
-            np.allclose(
-                combined,
-                expected,
-                rtol=relative_tolerance_for_dtype(local),
-                equal_nan=True,
-            )
-        )
-        and combined.dtype == local.dtype
-    )
-    record_result(
-        f"mpi.reduce.sum mock pr fields ({n_lat}x{n_lon}, {SIZE} rank selections)",
-        correct,
-        serial_s,
-        parallel_s,
-    )
-
-
-@run_test
-def test_reduce_dataarray_sum(ny: int, nx: int) -> None:
-    """mpi.reduce.sum on a mock xarray DataArray with metadata preserved."""
-    with xr.open_dataset(TEST_DATA_PATH) as source:
-        n_time = int(source.sizes["time"])
-        n_lat = min(int(source.sizes["lat"]), ny)
-        n_lon = min(int(source.sizes["lon"]), nx)
-
-    def load_rank_field(rank: int) -> xr.DataArray:
-        return load_test_variable(
-            "t2m",
-            time=rank % n_time,
-            lat=slice(0, n_lat),
-            lon=slice(0, n_lon),
-        )
-
-    local = load_rank_field(RANK)
-
-    @timer
-    def parallel_sum() -> Any:
-        return mpi.reduce.sum(local)
-
-    combined, parallel_s = parallel_sum()
-
-    @mpi(broadcast=True)
-    @timer(synchronize=False)
-    def serial_fn() -> np.ndarray:
-        fields = [load_rank_field(rank).values for rank in range(SIZE)]
-        return np.sum(np.stack(fields, axis=0), axis=0)
-
-    expected, serial_s = serial_fn()
-    correct = bool(
-        np.allclose(
-            combined.values,
-            expected,
-            rtol=relative_tolerance_for_dtype(local.values),
-            equal_nan=True,
-        )
-    ) and combined.attrs.get("units") == local.attrs.get("units")
-    record_result(
-        "mpi.reduce.sum mock t2m DataArray (dims/attrs kept)",
-        correct,
-        serial_s,
-        parallel_s,
-        note="correctness-focused",
-    )
-
-
-@run_test
-def test_reduce_all_operations() -> None:
-    """Exercise every mpi.reduce operation using mock values."""
-    with xr.open_dataset(TEST_DATA_PATH) as source:
-        n_time = int(source.sizes["time"])
-        n_lat = int(source.sizes["lat"])
-        n_lon = int(source.sizes["lon"])
-
-    numeric_width = min(2, n_lon)
-    logical_width = min(3, n_lon)
-
-    def load_numeric(rank: int) -> np.ndarray:
-        data = load_test_variable(
-            "t2m",
-            time=rank % n_time,
-            lat=rank % n_lat,
-            lon=slice(0, numeric_width),
-        )
-        return np.asarray(data.values)
-
-    def load_logical(rank: int) -> np.ndarray:
-        mask = load_test_variable(
-            "slmsk",
-            time=rank % n_time,
-            lat=rank % n_lat,
-            lon=slice(0, logical_width),
-        )
-        return np.asarray(mask.values == 1)
-
-    numeric = load_numeric(RANK)
-    numeric_stack = np.stack([load_numeric(rank) for rank in range(SIZE)], axis=0)
-    logical = load_logical(RANK)
-    logical_stack = np.stack([load_logical(rank) for rank in range(SIZE)], axis=0)
-
-    cases = (
-        ("sum", numeric, numeric_stack.sum(axis=0)),
-        ("prod", numeric, numeric_stack.prod(axis=0)),
-        ("min", numeric, numeric_stack.min(axis=0)),
-        ("max", numeric, numeric_stack.max(axis=0)),
-        ("mean", numeric, numeric_stack.mean(axis=0)),
-        ("any", logical, logical_stack.any(axis=0)),
-        ("all", logical, logical_stack.all(axis=0)),
-    )
-
-    for op_name, value, expected in cases:
-        op = getattr(mpi.reduce, op_name)
-
-        @timer
-        def parallel_reduce(op, value) -> Any:
-            return op(value)
-
-        result, parallel_s = parallel_reduce(op, value)
-
-        root_result = op(value, mode="root", root=0)
-        tolerance = relative_tolerance_for_dtype(expected)
-        all_mode_ok = bool(
-            np.allclose(result, expected, rtol=tolerance, equal_nan=True)
-        )
-        root_mode_ok = (
-            bool(np.allclose(root_result, expected, rtol=tolerance, equal_nan=True))
-            if RANK == 0
-            else root_result is None
-        )
-        correct = bool(mpi.reduce.all(all_mode_ok and root_mode_ok))
-        record_result(
-            f"mpi.reduce.{op_name} mock values (all/root modes)",
-            correct,
-            0.0,
-            parallel_s,
-            note="correctness-focused",
-        )
-
-    mask = load_test_variable(
-        "slmsk",
-        time=RANK % n_time,
-        lat=RANK % n_lat,
-        lon=slice(0, logical_width),
-    )
-    logical_dataset = xr.Dataset(
-        {
-            "land": mask == 1,
-            "nonsea": mask != 0,
-        }
-    )
-    dataset_any = mpi.reduce.any(logical_dataset)
-    dataset_all = mpi.reduce.all(logical_dataset)
-
-    land_stack = np.stack(
-        [
-            load_test_variable(
-                "slmsk",
-                time=rank % n_time,
-                lat=rank % n_lat,
-                lon=slice(0, logical_width),
-            ).values
-            == 1
-            for rank in range(SIZE)
-        ],
-        axis=0,
-    )
-    nonsea_stack = np.stack(
-        [
-            load_test_variable(
-                "slmsk",
-                time=rank % n_time,
-                lat=rank % n_lat,
-                lon=slice(0, logical_width),
-            ).values
-            != 0
-            for rank in range(SIZE)
-        ],
-        axis=0,
-    )
-    dataset_ok = (
-        isinstance(dataset_any, xr.Dataset)
-        and isinstance(dataset_all, xr.Dataset)
-        and bool(np.array_equal(dataset_any["land"].values, land_stack.any(axis=0)))
-        and bool(np.array_equal(dataset_any["nonsea"].values, nonsea_stack.any(axis=0)))
-        and bool(np.array_equal(dataset_all["land"].values, land_stack.all(axis=0)))
-        and bool(np.array_equal(dataset_all["nonsea"].values, nonsea_stack.all(axis=0)))
-    )
-    record_result(
-        "mpi.reduce.any/all mock slmsk Dataset",
-        bool(mpi.reduce.all(dataset_ok)),
         0.0,
         0.0,
         note="correctness-focused",
@@ -1462,7 +1155,7 @@ def test_distributed_open_dataset() -> None:
         and variable_meta.get("dim") == "lat"
     )
     correct = bool(np.array_equal(assembled, expected, equal_nan=True)) and bool(
-        mpi.reduce.all(local_meta_ok)
+        all_ranks(local_meta_ok)
     )
 
     open_validation_ok = call_raises(
@@ -1472,7 +1165,7 @@ def test_distributed_open_dataset() -> None:
         partition_dim="missing",
         contains="partition_dim",
     )
-    correct = correct and bool(mpi.reduce.all(open_validation_ok))
+    correct = correct and bool(all_ranks(open_validation_ok))
 
     @mpi(broadcast=True)
     @timer(synchronize=False)
@@ -1536,7 +1229,7 @@ def test_distributed_redistribution(ny: int, nx: int) -> None:
                 equal_nan=True,
             )
         )
-        and bool(mpi.reduce.all(local_ok))
+        and bool(all_ranks(local_ok))
     )
     record_result(
         "mpi.xarray.redistribute mock pr (explicit/auto)",
@@ -1589,7 +1282,7 @@ def test_distributed_isel(ny: int, nx: int) -> None:
         bool(np.array_equal(assembled, expected_slice, equal_nan=True))
         and bool(np.array_equal(scalar.values, expected_scalar, equal_nan=True))
         and "mpi_meta" not in scalar.attrs
-        and bool(mpi.reduce.all(local_meta_ok))
+        and bool(all_ranks(local_meta_ok))
     )
     record_result(
         "mpi.xarray.isel mock pr (global latitude slice/scalar)",
@@ -1646,7 +1339,7 @@ def test_distributed_sel(ny: int, nx: int) -> None:
         and bool(np.array_equal(nearest.values, expected_nearest, equal_nan=True))
         and "mpi_meta" not in scalar.attrs
         and "mpi_meta" not in nearest.attrs
-        and bool(mpi.reduce.all(local_meta_ok))
+        and bool(all_ranks(local_meta_ok))
     )
     record_result(
         "mpi.xarray.sel mock pr (global latitude slice/scalar)",
@@ -1700,7 +1393,7 @@ def test_distributed_numeric_reduction(
         and bool(np.allclose(result.values, expected, rtol=tolerance, equal_nan=True))
         and result.attrs.get("units") == full.attrs.get("units")
     )
-    correct = bool(mpi.reduce.all(all_mode_ok))
+    correct = bool(all_ranks(all_mode_ok))
     record_result(
         f"mpi.xarray.{op_name} mock t over {full.sizes['plev']} pressure levels",
         correct,
@@ -1739,7 +1432,7 @@ def test_distributed_logical_reduction(
 
     expected, serial_s = serial_fn()
     all_mode_ok = result is not None and bool(np.array_equal(result.values, expected))
-    correct = bool(mpi.reduce.all(all_mode_ok))
+    correct = bool(all_ranks(all_mode_ok))
     record_result(
         f"mpi.xarray.{op_name} mock slmsk land mask ({full.sizes['lat']} latitudes)",
         correct,
@@ -1848,7 +1541,7 @@ def test_distributed_dataset_reduction(ny: int, nx: int) -> None:
             )
         )
     )
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     record_result(
         "mpi.xarray Dataset reductions (mock distributed/static variables)",
         correct,
@@ -1927,7 +1620,7 @@ def test_redistribution_candidate_restriction() -> None:
         )
     )
 
-    correct = bool(mpi.reduce.all(auto_ok and explicit_ok and invalid_ok and scalar_ok))
+    correct = bool(all_ranks(auto_ok and explicit_ok and invalid_ok and scalar_ok))
     record_result(
         "mpi.xarray auto/explicit redistribution never targets a static variable",
         correct,
@@ -1999,7 +1692,7 @@ def test_short_partition_warning_deduplication() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(repeat_ok and distinct_ok and rank_gate_ok and still_works)
+        all_ranks(repeat_ok and distinct_ok and rank_gate_ok and still_works)
     )
     record_result(
         "choose_partition_dim short-partition warning dedup (once per condition)",
@@ -2153,7 +1846,7 @@ def test_distributed_xarray_contracts() -> None:
     boolean_distributed = mpi.xarray.redistribute(boolean_full, "sample")
     boolean_min = mpi.xarray.min(boolean_distributed, dim="sample")
     boolean_max = mpi.xarray.max(boolean_distributed, dim="sample")
-    empty_partition_seen = mpi.reduce.any(int(integer_distributed.sizes["sample"]) == 0)
+    empty_partition_seen = any_rank(int(integer_distributed.sizes["sample"]) == 0)
     empty_partition_ok = SIZE == 1 or empty_partition_seen
 
     reduction_ok = (
@@ -2243,7 +1936,7 @@ def test_distributed_xarray_contracts() -> None:
     )
 
     # mpi.xarray reductions have no root placement: every rank must observe
-    # the identical all-reduced global result, unlike mpi.reduce's mode="root".
+    # the identical all-reduced global result on every rank.
     gathered_total_sum = mpi.comm.allgather(float(total_sum.item()))
     all_reduce_agreement_ok = all(
         value == gathered_total_sum[0] for value in gathered_total_sum
@@ -2339,7 +2032,7 @@ def test_distributed_xarray_contracts() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             indexing_ok
             and local_reduction_ok
             and reduction_ok
@@ -2681,7 +2374,7 @@ def test_distributed_arithmetic() -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             apply_ok
             and broadcast_ok
             and mismatch_ok
@@ -2764,7 +2457,7 @@ def test_reduction_redistribution(n_lat_max: int, nx: int) -> None:
                 equal_nan=True,
             )
         )
-        and bool(mpi.reduce.all(local_meta_ok))
+        and bool(all_ranks(local_meta_ok))
     )
     record_result(
         "mpi.xarray.mean(mock t2m, redistribute_on='lon')",
@@ -2775,122 +2468,7 @@ def test_reduction_redistribution(n_lat_max: int, nx: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# mpi.scatterv -- vector scatter (data movement, not a compute reduction)
-# ---------------------------------------------------------------------------
-
-
-@run_test
-def test_scatterv_rows(n_total: int) -> None:
-    """Scatter rows from a mock t2m field."""
-    with xr.open_dataset(TEST_DATA_PATH) as source_ds:
-        n_lat = int(source_ds.sizes["lat"])
-        n_lon = min(3, int(source_ds.sizes["lon"]))
-        dtype = np.dtype(source_ds["t2m"].dtype)
-
-    total = min(n_lat, max(1, n_total // max(1, n_lon)))
-    counts = [total // SIZE + (1 if rank < total % SIZE else 0) for rank in range(SIZE)]
-
-    @timer
-    def scatter_rows() -> np.ndarray:
-        source = None
-        if RANK == 0:
-            source = load_test_variable(
-                "t2m",
-                time=0,
-                lat=slice(0, total),
-                lon=slice(0, n_lon),
-            ).values
-        return mpi.scatterv(source, counts, (counts[RANK], n_lon), dtype, root=0)
-
-    recv, parallel_s = scatter_rows()
-
-    start = sum(counts[:RANK])
-    expected_local = load_test_variable(
-        "t2m",
-        time=0,
-        lat=slice(start, start + counts[RANK]),
-        lon=slice(0, n_lon),
-    ).values
-    correct = bool(np.array_equal(recv, expected_local, equal_nan=True))
-    record_result(
-        f"mpi.scatterv mock t2m ({total} rows across {SIZE} rank(s))",
-        bool(mpi.reduce.all(correct)),
-        0.0,
-        parallel_s,
-        note="data movement, no serial-compute equivalent",
-    )
-
-
-@run_test
-def test_scatterv_validation_and_edge_cases() -> None:
-    """Exercise scatterv validation, nonzero roots, non-contiguous sends,
-    and zero rows.
-    """
-    invalid_counts_ok = call_raises(
-        ValueError,
-        mpi.scatterv,
-        None,
-        [0] * (SIZE + 1),
-        (0,),
-        np.float64,
-        contains="counts",
-    )
-    unsupported_dtype_ok = call_raises(
-        mpi.MPIError,
-        mpi.scatterv,
-        None,
-        [0] * SIZE,
-        (0,),
-        np.dtype(object),
-        contains="Unsupported MPI NumPy dtype",
-    )
-    missing_root_array_ok = True
-    if SIZE == 1:
-        missing_root_array_ok = call_raises(
-            ValueError,
-            mpi.scatterv,
-            None,
-            [1],
-            (1,),
-            np.float64,
-            contains="cannot be None",
-        )
-
-    root = SIZE - 1
-    total = max(1, SIZE - 1)
-    counts = [total // SIZE + (1 if rank < total % SIZE else 0) for rank in range(SIZE)]
-    expected_source = np.arange(total * 4, dtype=np.float64).reshape(total, 4)[:, ::2]
-    source = expected_source if RANK == root else None
-    received = mpi.scatterv(
-        source,
-        counts,
-        (counts[RANK], 2),
-        np.float64,
-        root=root,
-    )
-    start = sum(counts[:RANK])
-    expected = expected_source[start : start + counts[RANK]]
-    scatter_ok = bool(np.array_equal(received, expected))
-
-    correct = bool(
-        mpi.reduce.all(
-            invalid_counts_ok
-            and unsupported_dtype_ok
-            and missing_root_array_ok
-            and scatter_ok
-        )
-    )
-    record_result(
-        "mpi.scatterv contracts (validation/nonzero root/noncontiguous/zero rows)",
-        correct,
-        0.0,
-        0.0,
-        note="correctness-focused",
-    )
-
-
-# ---------------------------------------------------------------------------
-# A realistic xarray + mpi.reduce composition: cosine-latitude weighted mean
+# A realistic xarray + MPI scalar-collective composition: weighted mean
 # ---------------------------------------------------------------------------
 
 
@@ -2914,8 +2492,8 @@ def test_cosine_weighted_mean(n_lat_total: int, n_lon: int) -> None:
         weights = np.cos(np.deg2rad(local["lat"]))
         local_weighted_sum = (local * weights).sum(skipna=True)
         local_weight_sum = (xr.ones_like(local) * weights).where(local.notnull()).sum()
-        global_weighted_sum = mpi.reduce.sum(float(local_weighted_sum))
-        global_weight_sum = mpi.reduce.sum(float(local_weight_sum))
+        global_weighted_sum = sum_ranks(float(local_weighted_sum))
+        global_weight_sum = sum_ranks(float(local_weight_sum))
         return global_weighted_sum / global_weight_sum
 
     weighted_mean, parallel_s = parallel_weighted_mean()
@@ -3059,7 +2637,7 @@ def test_mpi_decorator_modes() -> None:
     )
 
     overall = bool(
-        mpi.reduce.all(
+        all_ranks(
             ok_root_only
             and ok_all_ranks
             and ok_broadcast
@@ -3126,9 +2704,7 @@ def test_xgeo_interface_contracts(out_dir: str) -> None:
     )
 
     correct = bool(
-        mpi.reduce.all(
-            exports_ok and placeholder_ok and invalid_type_ok and mismatch_ok
-        )
+        all_ranks(exports_ok and placeholder_ok and invalid_type_ok and mismatch_ok)
     )
     record_result(
         "xgeo helpers/to_netcdf front-door validation",
@@ -3347,7 +2923,7 @@ def test_parallel_netcdf_writer_options(out_dir: str) -> None:
         )
 
     correct = bool(
-        mpi.reduce.all(
+        all_ranks(
             invalid_partition_ok
             and invalid_compression_ok
             and invalid_unlimited_ok
@@ -3466,7 +3042,7 @@ def test_parallel_netcdf_write(out_dir: str) -> None:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         # Gathered rather than reduced: which rank's slice failed, and why,
         # is exactly what a real regression needs the summary to show.
@@ -3610,7 +3186,7 @@ def test_parallel_netcdf_write_numpy_coords(out_dir: str) -> None:
         correct = False
         note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(note, root=0)
         if RANK == 0:
@@ -3738,7 +3314,7 @@ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
         timestamp=True,
         flush=True,
     )
-    correct = bool(mpi.reduce.all(local_meta_ok))
+    correct = bool(all_ranks(local_meta_ok))
     integrity_note = ""
 
     try:
@@ -3762,7 +3338,7 @@ def test_distributed_netcdf_roundtrip(out_dir: str) -> None:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(integrity_note, root=0)
         if RANK == 0:
@@ -3894,7 +3470,7 @@ def test_distributed_dataarray_roundtrip(out_dir: str) -> None:
         correct = False
         integrity_note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(integrity_note, root=0)
         if RANK == 0:
@@ -3995,7 +3571,7 @@ def test_create_dataarray() -> None:
         correct = False
         note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(note, root=0)
         if RANK == 0:
@@ -4178,7 +3754,7 @@ def test_create_dataset(out_dir: str) -> None:
         correct = False
         note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(note, root=0)
         if RANK == 0:
@@ -4240,7 +3816,7 @@ def test_create_dataset(out_dir: str) -> None:
         correct = False
         note = f"{type(exc).__name__}: {exc}"
 
-    correct = bool(mpi.reduce.all(correct))
+    correct = bool(all_ranks(correct))
     if not correct:
         notes = mpi.comm.gather(note, root=0)
         if RANK == 0:
@@ -4278,76 +3854,42 @@ def _reference_reduction(field: xr.DataArray, op_name: str, dim: str) -> np.ndar
 
 @run_test
 def test_rank0_source_distribution(ny: int, nx: int) -> None:
-    """Reductions over data that initially exists only on rank 0.
-
-    The realistic ingest pattern is that one rank reads or generates a field
-    and the others hold nothing. This checks both routes from that state into
-    a distributed object: broadcasting the whole field and then partitioning
-    it, and scattering rows directly. Both must agree with the serial answer
-    and must leave every rank in the same collective sequence.
-    """
-    source = load_test_variable("t2m", time=0, lat=slice(0, ny), lon=slice(0, nx))
-
-    @mpi(broadcast=True)
-    def read_on_root_only() -> xr.DataArray:
-        return source
-
-    replicated = read_on_root_only()
-    only_root_had_data = bool(mpi.reduce.all(isinstance(replicated, xr.DataArray)))
-
-    distributed = mpi.xarray.redistribute(replicated, "lat")
+    """Reduce xarray data that initially exists only on rank 0."""
+    source = (
+        load_test_variable("t2m", time=0, lat=slice(0, ny), lon=slice(0, nx))
+        if RANK == 0
+        else None
+    )
+    distributed = mpi.xarray.distribute(source, "lat", root=0)
 
     @timer
-    def reduce_broadcast_source() -> tuple[Any, Any]:
+    def reduce_distributed_source() -> tuple[Any, Any]:
         return (
             mpi.xarray.sum(distributed, dim="lat", redistribute_on=None),
             mpi.xarray.mean(distributed, dim="lat", redistribute_on=None),
         )
 
-    (total, average), parallel_s = reduce_broadcast_source()
+    (total, average), parallel_s = reduce_distributed_source()
 
-    # Scatter route: rank 0 owns the rows, every other rank starts empty.
-    rows = np.ascontiguousarray(source.values, dtype=np.float64)
-    counts = np.asarray(
-        [
-            partition_bounds(ny, rank)[1] - partition_bounds(ny, rank)[0]
-            for rank in range(SIZE)
-        ],
-        dtype=np.int64,
-    )
-    local_rows = int(counts[RANK])
-    scattered = mpi.scatterv(
-        rows if RANK == 0 else None,
-        counts,
-        (local_rows, nx),
-        rows.dtype,
-        root=0,
-    )
-    scattered_total = mpi.reduce.sum(scattered.sum())
+    @mpi(broadcast=True)
+    def reference() -> tuple[np.ndarray, np.ndarray]:
+        full = load_test_variable("t2m", time=0, lat=slice(0, ny), lon=slice(0, nx))
+        return (
+            _reference_reduction(full, "sum", "lat"),
+            _reference_reduction(full, "mean", "lat"),
+        )
 
-    expected_sum = _reference_reduction(source, "sum", "lat")
-    expected_mean = _reference_reduction(source, "mean", "lat")
+    expected_sum, expected_mean = reference()
     tolerance = relative_tolerance_for_dtype(expected_sum)
     correct = (
-        only_root_had_data
-        and total is not None
+        total is not None
         and average is not None
         and bool(np.allclose(total.values, expected_sum, rtol=tolerance))
         and bool(np.allclose(average.values, expected_mean, rtol=tolerance))
-        and bool(
-            np.isclose(
-                float(scattered_total),
-                float(source.sum()),
-                # The rows are widened to float64 for transport, but the
-                # values are float32, so the tolerance must come from the
-                # source precision rather than from the transport dtype.
-                rtol=relative_tolerance_for_dtype(source.values),
-            )
-        )
     )
-    correct = bool(mpi.reduce.all(correct))
+    correct = all_ranks(correct)
     record_result(
-        "rank-0-only source (broadcast and scatterv routes into distributed form)",
+        "rank-0-only xarray source distributed without raw NumPy scatter",
         correct,
         0.0,
         parallel_s,
@@ -4406,7 +3948,7 @@ def test_distributed_open_reductions() -> None:
     )
     distributed.close()
 
-    correct = bool(mpi.reduce.all(all(checks)))
+    correct = bool(all_ranks(all(checks)))
     record_result(
         "mpi.xarray reductions on a distributed open_dataset (lazy, chunk bounds)",
         correct,
@@ -4440,7 +3982,7 @@ def test_empty_partition_reductions() -> None:
             continue
         distributed = mpi.xarray.redistribute(profile, "plev")
         empty_here = int(distributed.sizes["plev"]) == 0
-        checks.append(bool(mpi.reduce.any(empty_here)) or length >= SIZE)
+        checks.append(bool(any_rank(empty_here)) or length >= SIZE)
 
         for op_name in ("sum", "prod", "mean", "min", "max"):
             result = getattr(mpi.xarray, op_name)(distributed, dim="plev")
@@ -4483,7 +4025,7 @@ def test_empty_partition_reductions() -> None:
                 )
             )
 
-    correct = bool(mpi.reduce.all(all(checks)))
+    correct = bool(all_ranks(all(checks)))
     record_result(
         f"empty-partition reductions (plev lengths {lengths} over {SIZE} rank(s))",
         correct,
@@ -4610,7 +4152,7 @@ def test_collective_sequence_symmetry() -> None:
     finally:
         mpi.comm = real_comm
 
-    correct = bool(mpi.reduce.all(not divergent))
+    correct = bool(all_ranks(not divergent))
     record_result(
         "identical collective sequence on every rank (all reductions)",
         correct,
@@ -4659,7 +4201,7 @@ def test_reduction_dtype_contracts() -> None:
                 result is not None and float(result.item()) == float(expected.item())
             )
 
-    correct = bool(mpi.reduce.all(all(checks)))
+    correct = bool(all_ranks(all(checks)))
     record_result(
         "reduction dtype contracts (MPI-representable dtypes, empty partitions)",
         correct,
@@ -4711,9 +4253,7 @@ def test_shared_configuration_agreement() -> None:
     shapes = mpi.comm.allgather(derived.shape)
     derived_agreed = len(set(shapes)) == 1
 
-    correct = bool(
-        mpi.reduce.all(agreed and populated and matches_file and derived_agreed)
-    )
+    correct = bool(all_ranks(agreed and populated and matches_file and derived_agreed))
     note = "correctness-focused" if correct else f"rank {RANK} has {constants}"
     record_result(
         "shared configuration constants identical on every rank",
@@ -4724,68 +4264,14 @@ def test_shared_configuration_agreement() -> None:
     )
 
 
-@run_test
-def test_reduce_buffer_agreement() -> None:
-    """A mismatched reduction buffer must raise, not deadlock.
-
-    This is the failure mode that a rank-dependent constant produces. Ranks
-    posting the shorter buffer can return from the collective while the rest
-    block indefinitely, so the guard has to fire before the collective is
-    posted rather than detect the problem afterwards.
-    """
-    if SIZE == 1:
-        record_result(
-            "mismatched reduction buffers raise instead of deadlocking",
-            True,
-            0.0,
-            0.0,
-            note="skipped: needs more than one rank",
-        )
-        return
-
-    # Rank 0 posts a longer buffer, exactly as a rank-0-only constant would
-    # cause. Without the guard this deadlocks.
-    mismatched = np.ones(8 if RANK == 0 else 4, dtype=np.float32)
-    raised = call_raises(
-        mpi.MPIError,
-        mpi.reduce.sum,
-        mismatched,
-        contains="different reduction buffers",
-    )
-
-    # A dtype mismatch is equally undefined and equally caught.
-    wrong_dtype = np.ones(4, dtype=np.float64 if RANK == 0 else np.float32)
-    raised_dtype = call_raises(
-        mpi.MPIError,
-        mpi.reduce.sum,
-        wrong_dtype,
-        contains="different reduction buffers",
-    )
-
-    # Matching buffers must still reduce normally afterwards.
-    matched = np.full(4, float(RANK), dtype=np.float32)
-    total = mpi.reduce.sum(matched)
-    expected = float(sum(range(SIZE)))
-    recovered = bool(np.allclose(total, expected))
-
-    correct = bool(mpi.reduce.all(raised and raised_dtype and recovered))
-    record_result(
-        "mismatched reduction buffers raise instead of deadlocking",
-        correct,
-        0.0,
-        0.0,
-        note="correctness-focused",
-    )
-
-
 def print_test_summary() -> int:
     """Print the final result table and return the number of failed checks.
 
     Serial timings throughout this suite are always plain xarray running on
     rank 0 alone, under ``@mpi(broadcast=True)`` + ``@timer(synchronize=False)``
     -- no MPI collective is on the serial side of the comparison. Parallel
-    timings are the same operation through ``mpi.xarray``/``mpi.reduce``
-    across every rank, synchronized with a barrier and reported as the
+    timings use ``mpi.xarray`` or direct scalar MPI collectives across every
+    rank, synchronized with a barrier and reported as the
     slowest rank. "Faster" reflects exactly that comparison, not a guess.
     """
     mpi.log("\n" + "=" * 100)
@@ -4881,7 +4367,7 @@ def print_test_summary() -> int:
     if SIZE == 1:
         mpi.log(
             "\nRan on 1 rank: speedups will be ~1x or worse. "
-            + "mpi.reduce/mpi.xarray/\n"
+            + "mpi.xarray/direct MPI collectives/\n"
             + "the parallel NetCDF writer all still pay collective-call overhead "
             + "even\nwith nothing to parallelize against. Run `mpirun -n N python -m "
             + "mpi4py test_mpi.py`\nwith N >= 2 real cores to see actual speedups."
@@ -4904,7 +4390,7 @@ def parse_arguments() -> argparse.Namespace:
 
     The defaults reproduce the full-resolution cluster configuration. Smaller
     values let the suite run on a workstation, which matters because the
-    collective-symmetry and buffer-agreement checks do not depend on
+    collective-symmetry and collective-agreement checks do not depend on
     resolution: they need many ranks, not much data.
     """
     parser = argparse.ArgumentParser(description=__doc__)
@@ -4949,7 +4435,7 @@ def main() -> None:
     mpi.log("[SETUP] validating test dataset visibility", timestamp=True, flush=True)
     visible = TEST_DATA_PATH.is_file()
 
-    if not bool(mpi.reduce.all(visible)):
+    if not bool(all_ranks(visible)):
         mpi.log(
             "[SETUP FAILED] test dataset is not visible on every rank: "
             + f"{TEST_DATA_PATH}",
@@ -4978,14 +4464,10 @@ def main() -> None:
     mpi.log(f"climtools MPI test suite -- {SIZE} rank(s), mpi.launched={mpi.launched}")
     mpi.log("=" * 88)
 
-    n_points = LATITUDE_COUNT * LONGITUDE_COUNT
-
     mpi.log("\n--- mpi runtime helpers ---")
     test_shared_configuration_agreement()
-    test_reduce_buffer_agreement()
     test_mpi_runtime_helpers()
     test_mpi_logging_and_error_propagation()
-    test_mpi_reduction_contracts()
     test_mpi_decompose_and_children()
 
     mpi.log("\n--- core.xr_meta helpers ---")
@@ -4994,12 +4476,6 @@ def main() -> None:
     test_choose_partition_dim_selection()
     test_mpi_meta_round_trip()
     test_dataset_reduction_coordinate_filtering()
-
-    mpi.log("\n--- mpi.reduce ---")
-    test_reduce_scalar_sum(n_points)
-    test_reduce_array_sum(n_points, LATITUDE_COUNT, LONGITUDE_COUNT)
-    test_reduce_dataarray_sum(LATITUDE_COUNT, LONGITUDE_COUNT)
-    test_reduce_all_operations()
 
     mpi.log("\n--- mpi.xarray ---")
     test_distributed_open_dataset()
@@ -5033,11 +4509,7 @@ def main() -> None:
     test_rank0_source_distribution(LATITUDE_COUNT, LONGITUDE_COUNT)
     test_distributed_open_reductions()
 
-    mpi.log("\n--- mpi.scatterv ---")
-    test_scatterv_rows(n_points)
-    test_scatterv_validation_and_edge_cases()
-
-    mpi.log("\n--- xarray operations + mpi.reduce ---")
+    mpi.log("\n--- xarray operations + scalar MPI collectives ---")
     test_cosine_weighted_mean(LATITUDE_COUNT, LONGITUDE_COUNT)
     test_mpi_decorator_modes()
 

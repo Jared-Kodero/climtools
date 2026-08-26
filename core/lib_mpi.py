@@ -11,17 +11,13 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Generator, Hashable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from numbers import Integral
-from typing import Any, Literal, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar, cast
 
-import numpy as np
-import xarray as xr
 from mpi4py import MPI as _MPI
 from mpi4py.MPI import Intracomm
-from mpi4py.util import dtlib as _dtlib
-from numpy.typing import DTypeLike, NDArray
 
 from .tools import LockFile, tmp
 from .xr_mpi import XarrayMPI
@@ -29,23 +25,6 @@ from .xr_mpi import XarrayMPI
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
-
-
-# NumPy dtype kinds mpi4py.util.dtlib can translate to a meaningful MPI
-# datatype: boolean, unsigned/signed integer, float, complex. Other kinds
-# (strings, objects, structured dtypes) produce an opaque byte-derived type
-# that is not meaningful for the reductions in this module.
-_REDUCIBLE_DTYPE_KINDS = "biufc"
-
-# Verify that every rank posts the same buffer signature before a reduction.
-# The check costs one small all-gather per array reduction, which is
-# negligible beside the reduction itself but is not free, so it can be
-# disabled for latency-bound production runs by setting
-# CLIMTOOLS_CHECK_COLLECTIVES=0. It is on by default because a mismatched
-# buffer is undefined behaviour: depending on the algorithm the MPI library
-# selects, it either returns silently wrong data or deadlocks, and both are
-# far more expensive to diagnose than the all-gather is to post.
-CHECK_COLLECTIVE_BUFFERS = os.environ.get("CLIMTOOLS_CHECK_COLLECTIVES", "1") != "0"
 
 _LAUNCH_ENV = (
     "OMPI_COMM_WORLD_RANK",
@@ -57,395 +36,234 @@ _LAUNCH_ENV = (
 )
 
 
-_OP_LABELS: tuple[tuple[Any, str], ...] = (
-    (_MPI.SUM, "SUM"),
-    (_MPI.PROD, "PROD"),
-    (_MPI.MIN, "MIN"),
-    (_MPI.MAX, "MAX"),
-    (_MPI.LAND, "LAND"),
-    (_MPI.LOR, "LOR"),
-    (_MPI.BAND, "BAND"),
-    (_MPI.BOR, "BOR"),
-)
-
-
 class MPIError(Exception):
     """MPI runtime or synchronized distributed-execution error."""
 
 
-class ReduceAccessor:
-    """Typed element-wise reductions across MPI ranks.
+class ToChildrenRuntime:
+    """Parent-to-child-group communication namespace.
 
-    NumPy arrays use mpi4py's uppercase buffer collectives (``Allreduce``/
-    ``Reduce``); other Python objects use the lowercase object collectives.
-    xarray ``DataArray``/``Dataset`` inputs are reduced per variable and
-    rewrapped with their original dims, coords, and attrs.
+    Accessed through :attr:`MPIRuntime.to_children` after
+    :meth:`MPIRuntime.decompose`. Operations originate on a parent rank and
+    deliver values to the logical child communicators.
 
     Parameters
     ----------
     runtime : MPIRuntime
-        Runtime that owns the active communicator.
+        Parent runtime owning the decomposed child communicators.
     """
 
     def __init__(self, runtime: MPIRuntime) -> None:
         self._runtime = runtime
 
-    @staticmethod
-    def _label(op: _MPI.Op) -> str:
-        """Return a picklable, rank-stable label for a reduction operator."""
-        for candidate, name in _OP_LABELS:
-            if op == candidate:
-                return name
-        return "OP"
-
-    @staticmethod
-    def _is_dataarray(value: Any) -> bool:
-        """Return whether ``value`` is an xarray DataArray."""
-        return isinstance(value, xr.DataArray)
-
-    @staticmethod
-    def _is_dataset(value: Any) -> bool:
-        """Return whether ``value`` is an xarray Dataset."""
-        return isinstance(value, xr.Dataset)
-
-    @staticmethod
-    def _divide_by_ranks(value: Any, size: int) -> Any:
-        """Divide a reduced value by ``size`` without widening its dtype."""
-        dtype = getattr(value, "dtype", None)
-        if dtype is not None and np.dtype(dtype).kind in "fc":
-            return value / np.dtype(dtype).type(size)
-        return value / size
-
-    def _reduce(
-        self,
-        value: Any,
-        op: _MPI.Op,
-        *,
-        mode: Literal["all", "root"] = "all",
-        root: int = 0,
-    ) -> T | None:
-        """Execute a reduction collective for the active communicator.
+    def broadcast(self, value: T | None, *, root: int = 0) -> T:
+        """Broadcast one parent-root value to every rank in every child.
 
         Parameters
         ----------
-        value : Any
-            Python object, NumPy array, or xarray DataArray/Dataset.
-        op : mpi4py.MPI.Op
-            MPI reduction operator.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
+        value : T or None
+            Value on the parent ``root`` rank. Non-root ranks may pass None.
         root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
+            Source rank in the parent communicator. Default 0.
 
         Returns
         -------
-        Any or None
-            Reduced value according to ``mode``.
+        T
+            Broadcast value on every rank in every child communicator.
 
         Raises
         ------
+        RuntimeError
+            If :meth:`MPIRuntime.decompose` has not been called.
         ValueError
-            If ``mode`` or ``root`` is invalid.
+            If ``root`` is not a valid parent rank.
         MPIError
-            If an unsupported dtype is posted, or ranks disagree on the
-            reduction buffer signature.
+            If ranks disagree on the collective call.
         """
-        if mode not in ("all", "root"):
-            raise ValueError("mode must be either 'all' or 'root'.")
+        runtime = self._runtime
+        _ = runtime.child
+        comm = runtime.comm
 
-        comm = self._runtime.comm
-        if mode == "root":
-            if isinstance(root, bool) or not isinstance(root, Integral) or root < 0:
-                raise ValueError("root must be a non-negative integer rank.")
-            if root >= comm.size:
+        error: BaseException | None = None
+        signature: tuple[str, int] | None = None
+        try:
+            if isinstance(root, bool) or not isinstance(root, Integral):
+                raise TypeError("root must be a non-negative integer rank.")
+            if root < 0 or root >= comm.size:
+                raise ValueError(f"root {root} is outside [0, {comm.size}).")
+            signature = ("to_children.broadcast", int(root))
+        except BaseException as exc:
+            error = exc
+
+        runtime.raise_if_error(
+            error,
+            "mpi.to_children.broadcast",
+            signature=signature,
+        )
+        return cast(
+            "T",
+            comm.bcast(value if runtime.is_root(root) else None, root=root),
+        )
+
+    def scatter(self, values: Sequence[T] | None, *, root: int = 0) -> T:
+        """Scatter one parent-root value per child and replicate within it.
+
+        ``root`` supplies exactly one value per child communicator. The
+        parent communicator sends each value to that child's leader, which
+        then broadcasts it within the child.
+
+        Parameters
+        ----------
+        values : sequence of T or None
+            One value per child on the parent ``root`` rank. Non-root ranks
+            may pass None.
+        root : int, optional
+            Source rank in the parent communicator. Default 0.
+
+        Returns
+        -------
+        T
+            Value assigned to this rank's child; identical on every rank in
+            that child.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`MPIRuntime.decompose` has not been called.
+        ValueError
+            If ``root`` is invalid, ``values`` is None on ``root``, or the
+            number of values does not equal the number of children.
+        MPIError
+            If ranks disagree on the collective call or root-side validation
+            fails on only a subset of ranks.
+        """
+        runtime = self._runtime
+        child = runtime.child
+        comm = runtime.comm
+        ranks_per_child = child.comm.size
+        ntasks = comm.size // ranks_per_child
+
+        error: BaseException | None = None
+        signature: tuple[str, int, int] | None = None
+        send: list[T | None] | None = None
+
+        try:
+            if isinstance(root, bool) or not isinstance(root, Integral):
+                raise TypeError("root must be a non-negative integer rank.")
+            if root < 0 or root >= comm.size:
                 raise ValueError(f"root {root} is outside [0, {comm.size}).")
 
-        if self._is_dataset(value):
-            # Validate every variable and stage its send buffer before
-            # posting any collective, so an unsupported variable raises on
-            # every rank at the same point instead of leaving some ranks
-            # blocked inside a collective the failing rank never reaches.
-            arrays: dict[Hashable, np.ndarray[Any, Any]] = {}
-            for name, da in value.data_vars.items():
-                array = np.asarray(da.values)
-                if array.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
-                    raise MPIError(f"Unsupported MPI NumPy dtype: {array.dtype}.")
-                if not array.flags.c_contiguous:
-                    array = np.ascontiguousarray(array)
-                arrays[name] = array
-
-            # A Dataset reduces one variable per Allreduce/Reduce call, but
-            # every variable's buffer-agreement signature is checked inside
-            # a single allgather here rather than one per variable, halving
-            # the collective count for a Dataset with many variables.
-            if CHECK_COLLECTIVE_BUFFERS and comm.size > 1 and arrays:
-                signature = tuple(
-                    (
-                        str(name),
-                        self._label(op),
-                        mode,
-                        int(root),
-                        array.dtype.str,
-                        tuple(int(length) for length in array.shape),
-                    )
-                    for name, array in arrays.items()
-                )
-                gathered = comm.allgather(signature)
-                if len(set(gathered)) != 1:
-                    disagreeing = [
-                        index
-                        for index, item in enumerate(gathered)
-                        if item != gathered[0]
-                    ]
-                    raise MPIError(
-                        "MPI ranks posted different reduction buffers for a "
-                        + f"Dataset reduction. Rank 0 has {gathered[0]!r}, ranks "
-                        + f"{disagreeing} disagree (rank {disagreeing[0]} has "
-                        + f"{gathered[disagreeing[0]]!r})."
+            if runtime.is_root(root):
+                if values is None:
+                    raise ValueError("values cannot be None on the parent root.")
+                if len(values) != ntasks:
+                    raise ValueError(
+                        f"values must contain exactly {ntasks} items, one per "
+                        + f"child; got {len(values)}."
                     )
 
-            reduced_vars: dict[Hashable, np.ndarray[Any, Any]] = {}
-            for name, array in arrays.items():
-                if mode == "all":
-                    recv = np.empty(array.shape, dtype=array.dtype)
-                    comm.Allreduce(array, recv, op=op)
-                else:
-                    recv = (
-                        np.empty(array.shape, dtype=array.dtype)
-                        if comm.rank == root
-                        else None
-                    )
-                    comm.Reduce(array, recv, op=op, root=root)
-                reduced_vars[name] = recv
+                send = [None] * comm.size
+                for task, value in enumerate(values):
+                    send[task * ranks_per_child] = value
 
-            if mode == "root" and comm.rank != root:
-                return None
-            return cast("T", value.copy(data=reduced_vars))
+            signature = ("to_children.scatter", int(root), ntasks)
+        except BaseException as exc:
+            error = exc
 
-        if self._is_dataarray(value):
-            reduced = self._reduce(np.asarray(value.values), op, mode=mode, root=root)
-            if reduced is None:
-                return None
-            return cast("T", value.copy(data=reduced))
+        runtime.raise_if_error(
+            error,
+            "mpi.to_children.scatter",
+            signature=signature,
+        )
 
-        if not isinstance(value, np.ndarray):
-            if mode == "all":
-                return cast("T", comm.allreduce(value, op=op))
-            return cast("T | None", comm.reduce(value, op=op, root=root))
+        received = comm.scatter(send, root=root)
+        return cast(
+            "T",
+            child.comm.bcast(
+                received if child.is_root() else None,
+                root=0,
+            ),
+        )
 
-        send = np.asarray(value)
-        if not send.flags.c_contiguous:
-            send = np.ascontiguousarray(send)
-        if send.dtype.kind not in _REDUCIBLE_DTYPE_KINDS:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {send.dtype}.")
 
-        # Buffer-like arguments let mpi4py infer the MPI datatype from the
-        # NumPy dtype for fixed-size collectives (Allreduce/Reduce); vector
-        # collectives such as scatterv still need it spelled out explicitly.
-        # Allreduce/Reduce require an identical count and datatype on every
-        # rank -- a mismatch hangs some ranks with no error, so the buffer
-        # signature is compared first to turn that into a named exception.
-        if CHECK_COLLECTIVE_BUFFERS and comm.size > 1:
-            signature = (
-                self._label(op),
-                mode,
-                int(root),
-                send.dtype.str,
-                tuple(int(length) for length in send.shape),
-            )
-            gathered = comm.allgather(signature)
-            if len(set(gathered)) != 1:
-                disagreeing = [
-                    index for index, item in enumerate(gathered) if item != gathered[0]
-                ]
-                raise MPIError(
-                    "MPI ranks posted different reduction buffers. Rank 0 has "
-                    + f"{gathered[0]!r}, ranks {disagreeing} disagree "
-                    + f"(rank {disagreeing[0]} has {gathered[disagreeing[0]]!r})."
-                )
+class FromChildrenRuntime:
+    """Child-group-to-parent communication namespace.
 
-        if mode == "all":
-            recv = np.empty(send.shape, dtype=send.dtype)
-            comm.Allreduce(send, recv, op=op)
-            return cast("T", recv)
+    Accessed through :attr:`MPIRuntime.from_children` after
+    :meth:`MPIRuntime.decompose`. Operations collect one logical result from
+    each child communicator back onto the parent communicator.
 
-        recv = np.empty(send.shape, dtype=send.dtype) if comm.rank == root else None
-        comm.Reduce(send, recv, op=op, root=root)
-        return cast("T | None", recv)
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        Parent runtime owning the decomposed child communicators.
+    """
 
-    def sum(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> T | None:
-        """Reduce values by summation.
+    def __init__(self, runtime: MPIRuntime) -> None:
+        self._runtime = runtime
+
+    def gather(self, value: T, *, root: int = 0) -> list[T] | None:
+        """Gather one child result onto one parent rank.
+
+        Only rank zero of each child contributes ``value`` to the parent
+        gather. Results on ``root`` are ordered by child task index.
 
         Parameters
         ----------
         value : T
-            Value to reduce.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
+            This child's result. Only the child leader contributes it.
         root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
+            Destination rank in the parent communicator. Default 0.
 
         Returns
         -------
-        T or None
-            Reduced value, or None on non-root ranks when ``mode="root"``.
+        list of T or None
+            One value per child, ordered by child task index, on ``root``.
+            None on every other parent rank.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`MPIRuntime.decompose` has not been called.
+        ValueError
+            If ``root`` is not a valid parent rank.
+        MPIError
+            If ranks disagree on the collective call.
         """
-        return self._reduce(value, _MPI.SUM, mode=mode, root=root)
+        runtime = self._runtime
+        child = runtime.child
+        comm = runtime.comm
 
-    def prod(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> T | None:
-        """Reduce values by multiplication.
+        error: BaseException | None = None
+        signature: tuple[str, int] | None = None
+        try:
+            if isinstance(root, bool) or not isinstance(root, Integral):
+                raise TypeError("root must be a non-negative integer rank.")
+            if root < 0 or root >= comm.size:
+                raise ValueError(f"root {root} is outside [0, {comm.size}).")
+            signature = ("from_children.gather", int(root))
+        except BaseException as exc:
+            error = exc
 
-        Parameters
-        ----------
-        value : T
-            Value to reduce.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
+        runtime.raise_if_error(error, "mpi.from_children.gather", signature=signature)
 
-        Returns
-        -------
-        T or None
-            Reduced value, or None on non-root ranks when ``mode="root"``.
-        """
-        return self._reduce(value, _MPI.PROD, mode=mode, root=root)
+        payload = (cast("int", child.task), value) if child.is_root() else None
+        gathered = comm.gather(payload, root=root)
 
-    def min(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> T | None:
-        """Reduce values by minimum.
-
-        Parameters
-        ----------
-        value : T
-            Value to reduce.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
-
-        Returns
-        -------
-        T or None
-            Reduced value, or None on non-root ranks when ``mode="root"``.
-        """
-        return self._reduce(value, _MPI.MIN, mode=mode, root=root)
-
-    def max(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> T | None:
-        """Reduce values by maximum.
-
-        Parameters
-        ----------
-        value : T
-            Value to reduce.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
-
-        Returns
-        -------
-        T or None
-            Reduced value, or None on non-root ranks when ``mode="root"``.
-        """
-        return self._reduce(value, _MPI.MAX, mode=mode, root=root)
-
-    def mean(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> Any | None:
-        """Reduce values by arithmetic mean across ranks.
-
-        Parameters
-        ----------
-        value : T
-            Value to average.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
-
-        Returns
-        -------
-        Any or None
-            Mean value, or None on non-root ranks when ``mode="root"``.
-        """
-        result = self.sum(value, mode=mode, root=root)
-        if result is None:
+        if not runtime.is_root(root):
             return None
-        return self._divide_by_ranks(result, self._runtime.comm.size)
 
-    def any(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> bool | NDArray[np.bool_] | None:
-        """Reduce truth values by logical OR.
-
-        Parameters
-        ----------
-        value : T
-            Scalar, array, or xarray DataArray/Dataset, cast to bool.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
-
-        Returns
-        -------
-        bool, numpy.ndarray, xarray object, or None
-            Logical-OR reduction according to ``mode``.
-        """
-        boolean_value = (
-            value.astype(bool)
-            if self._is_dataset(value) or self._is_dataarray(value)
-            else np.asarray(value, dtype=bool)
-        )
-        result = self._reduce(boolean_value, _MPI.LOR, mode=mode, root=root)
-        if not self._is_dataset(value) and np.ndim(value) == 0 and result is not None:
-            return bool(np.asarray(result).item())
-        return result
-
-    def all(
-        self, value: T, *, mode: Literal["all", "root"] = "all", root: int = 0
-    ) -> bool | NDArray[np.bool_] | None:
-        """Reduce truth values by logical AND.
-
-        Parameters
-        ----------
-        value : T
-            Scalar, array, or xarray DataArray/Dataset, cast to bool.
-        mode : {"all", "root"}, optional
-            "all" returns the result on every rank; "root" only on ``root``.
-        root : int, optional
-            Destination rank for ``mode="root"``. Default 0.
-
-        Returns
-        -------
-        bool, numpy.ndarray, xarray object, or None
-            Logical-AND reduction according to ``mode``.
-        """
-        boolean_value = (
-            value.astype(bool)
-            if self._is_dataset(value) or self._is_dataarray(value)
-            else np.asarray(value, dtype=bool)
-        )
-        result = self._reduce(boolean_value, _MPI.LAND, mode=mode, root=root)
-        if not self._is_dataset(value) and np.ndim(value) == 0 and result is not None:
-            return bool(np.asarray(result).item())
-        return result
+        results = [item for item in gathered if item is not None]
+        results.sort(key=lambda item: item[0])
+        return [item[1] for item in results]
 
 
 class MPIRuntime:
     """User-facing MPI runtime namespace.
 
     Owns one intracommunicator, exposed directly through :attr:`comm`.
-    Direct reductions live under :attr:`reduce`; MPI-aware xarray operations
-    live under :attr:`xarray`.
+    MPI-aware xarray operations, including distributed reductions, live
+    under :attr:`xarray`.
 
     Parameters
     ----------
@@ -462,14 +280,49 @@ class MPIRuntime:
 
     def __init__(self, comm: Intracomm | None = None) -> None:
         self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
-        self._reduce: ReduceAccessor = ReduceAccessor(self)
         self._xarray: XarrayMPI = XarrayMPI(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIRuntime | None = None
+        self._to_children = ToChildrenRuntime(self)
+        self._from_children = FromChildrenRuntime(self)
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
         self._install_abort_hook()
         self._warn_if_parallel_netcdf_missing()
+
+    @property
+    def xarray(self) -> XarrayMPI:
+        """XarrayMPI: MPI-aware xarray indexing, redistribution, reductions."""
+        return self._xarray
+
+    @property
+    def to_children(self) -> ToChildrenRuntime:
+        """ToChildrenRuntime: Parent-to-child-group communication namespace."""
+        return self._to_children
+
+    @property
+    def from_children(self) -> FromChildrenRuntime:
+        """FromChildrenRuntime: Child-group-to-parent communication namespace."""
+        return self._from_children
+
+    @property
+    def child(self) -> MPIRuntime:
+        """MPIRuntime: Runtime for this rank's child communicator.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`decompose` has not been called.
+        """
+        if self._child is None:
+            raise RuntimeError("MPI runtime has not been decomposed.")
+
+        return self._child
+
+    @property
+    def launched(self) -> bool:
+        """bool: Whether this process appears to have been launched by MPI."""
+        return self.alive(self.comm)
 
     @staticmethod
     def alive(comm: _MPI.Comm) -> bool:
@@ -495,11 +348,6 @@ class MPIRuntime:
         except (AttributeError, RuntimeError):
             return False
 
-    @property
-    def launched(self) -> bool:
-        """bool: Whether this process appears to have been launched by MPI."""
-        return self.alive(self.comm)
-
     def is_root(self, root: int = 0) -> bool:
         """Return whether this process has the requested root rank.
 
@@ -515,30 +363,6 @@ class MPIRuntime:
         """
         return self.comm.rank == root
 
-    @property
-    def xarray(self) -> XarrayMPI:
-        """XarrayMPI: MPI-aware xarray indexing, redistribution, reductions."""
-        return self._xarray
-
-    @property
-    def reduce(self) -> ReduceAccessor:
-        """ReduceAccessor: Element-wise cross-rank reductions."""
-        return self._reduce
-
-    @property
-    def child(self) -> MPIRuntime:
-        """MPIRuntime: Runtime for this rank's child communicator.
-
-        Raises
-        ------
-        RuntimeError
-            If :meth:`decompose` has not been called.
-        """
-        if self._child is None:
-            raise RuntimeError("MPI runtime has not been decomposed.")
-
-        return self._child
-
     # -------------------------------------------------------------------------
     # Child communicator decomposition
     # -------------------------------------------------------------------------
@@ -548,8 +372,15 @@ class MPIRuntime:
 
         Every rank belongs to exactly one child, available through
         :attr:`child`; ``child.task`` is the zero-based child index and
-        ``child.info`` holds the parent ranks belonging to it. All ranks in
-        the current communicator must call this.
+        ``child.info`` holds the parent ranks belonging to it. The child is a
+        complete :class:`MPIRuntime`, so ordinary operations such as
+        ``child.log()``, ``child.broadcast()``, and ``child.xarray`` operate
+        within that child communicator.
+
+        Parent-to-child-group communication is exposed through
+        :attr:`to_children`; child-group-to-parent communication is exposed
+        through :attr:`from_children`. All ranks in the current communicator
+        must call this method with the same ``ntasks`` value.
 
         Parameters
         ----------
@@ -559,219 +390,139 @@ class MPIRuntime:
 
         Raises
         ------
+        TypeError
+            If ``ntasks`` is not an integer.
         ValueError
-            If the communicator size is not divisible by ``ntasks``.
+            If ``ntasks`` is less than one, exceeds the communicator size,
+            or does not evenly divide it.
+        MPIError
+            If ranks call this method with different valid ``ntasks`` values,
+            or validation fails on only a subset of ranks.
         """
-        size = self.comm.size
+        comm = self.comm
+        error: BaseException | None = None
+        signature: tuple[str, int] | None = None
 
-        if size % ntasks != 0:
-            raise ValueError(
-                f"MPI size ({size}) must be divisible by ntasks ({ntasks})."
-            )
+        try:
+            if isinstance(ntasks, bool) or not isinstance(ntasks, Integral):
+                raise TypeError("ntasks must be an integer.")
+            if ntasks < 1:
+                raise ValueError("ntasks must be at least 1.")
+            if ntasks > comm.size:
+                raise ValueError(
+                    f"ntasks ({ntasks}) cannot exceed MPI size ({comm.size})."
+                )
+            if comm.size % ntasks != 0:
+                raise ValueError(
+                    f"MPI size ({comm.size}) must be divisible by ntasks ({ntasks})."
+                )
+            signature = ("decompose", int(ntasks))
+        except BaseException as exc:
+            error = exc
 
-        ranks_per_task = size // ntasks
-        task = self.comm.rank // ranks_per_task
+        self.raise_if_error(error, "mpi.decompose", signature=signature)
 
+        ranks_per_task = comm.size // ntasks
+        task = comm.rank // ranks_per_task
         start = task * ranks_per_task
         stop = start + ranks_per_task
 
-        child_comm = self.comm.Split(color=task, key=self.comm.rank)
-
-        self._child = MPIRuntime(child_comm)
-        self._child.task = task
-        self._child.info = tuple(range(start, stop))
+        child_comm = comm.Split(color=task, key=comm.rank)
+        child = MPIRuntime(child_comm)
+        child.task = task
+        child.info = tuple(range(start, stop))
+        self._child = child
 
     # -------------------------------------------------------------------------
-    # Parent-child communication
+    # Point-to-point and collective object communication
     # -------------------------------------------------------------------------
 
-    def bcast_to_children(self, value: T | None, *, root: int = 0) -> T:
-        """Broadcast one value from the parent root to every child rank.
-
-        Parameters
-        ----------
-        value : T or None
-            Value on the parent ``root`` rank. Non-root ranks may pass None.
-        root : int, optional
-            Root rank in the parent communicator. Default 0.
-
-        Returns
-        -------
-        T
-            Broadcast value on every rank in every child communicator.
-        """
-        result = self.comm.bcast(value if self.is_root(root) else None, root=root)
-
-        return cast("T", result)
-
-    def scatter_to_children(self, values: Sequence[T] | None, *, root: int = 0) -> T:
-        """Scatter one value per child, broadcast within each child.
-
-        Parameters
-        ----------
-        values : sequence of T or None
-            One value per child on the parent ``root`` rank. Non-root ranks
-            may pass None.
-        root : int, optional
-            Root rank in the parent communicator. Default 0.
-
-        Returns
-        -------
-        T
-            Value assigned to this rank's child; identical across the child.
-        """
-        child = self.child
-        ranks_per_child = child.comm.size
-
-        send: list[T | None] | None = None
-
-        if self.is_root(root):
-            source = cast("Sequence[T]", values)
-            send = [None] * self.comm.size
-
-            for task, value in enumerate(source):
-                child_root = task * ranks_per_child
-                send[child_root] = value
-
-        received = self.comm.scatter(send, root=root)
-
-        result = child.comm.bcast(received if child.is_root() else None, root=0)
-
-        return cast("T", result)
-
-    def gather_from_children(self, value: T, *, root: int = 0) -> list[T] | None:
-        """Gather one value per child, ordered by child task index.
-
-        Only rank zero of each child contributes its value to the gather.
+    def send(self, value: T, dest: int, *, tag: int = 0) -> None:
+        """Send a Python object to one rank.
 
         Parameters
         ----------
         value : T
-            This child's complete result.
+            Object to send.
+        dest : int
+            Destination rank.
+        tag : int, optional
+            MPI message tag. Default 0.
+        """
+        self.comm.send(value, dest=dest, tag=tag)
+
+    def receive(
+        self,
+        source: int = _MPI.ANY_SOURCE,
+        *,
+        tag: int = _MPI.ANY_TAG,
+    ) -> T:
+        """Receive a Python object from one rank.
+
+        Parameters
+        ----------
+        source : int, optional
+            Source rank. Default ``MPI.ANY_SOURCE``.
+        tag : int, optional
+            MPI message tag. Default ``MPI.ANY_TAG``.
+
+        Returns
+        -------
+        T
+            Received object.
+        """
+        return cast("T", self.comm.recv(source=source, tag=tag))
+
+    def broadcast(self, value: T | None, *, root: int = 0) -> T:
+        """Broadcast one Python object from ``root`` to every rank.
+
+        Parameters
+        ----------
+        value : T or None
+            Object on ``root``. Non-root ranks may pass None.
         root : int, optional
-            Root rank in the parent communicator. Default 0.
+            Broadcasting rank. Default 0.
+
+        Returns
+        -------
+        T
+            Broadcast object on every rank.
+        """
+        return cast("T", self.comm.bcast(value, root=root))
+
+    def scatter(self, values: Sequence[T] | None, *, root: int = 0) -> T:
+        """Scatter one Python object from ``root`` to each rank.
+
+        Parameters
+        ----------
+        values : sequence of T or None
+            One value per rank on ``root``. Non-root ranks may pass None.
+        root : int, optional
+            Source rank. Default 0.
+
+        Returns
+        -------
+        T
+            Object assigned to this rank.
+        """
+        return cast("T", self.comm.scatter(values, root=root))
+
+    def gather(self, value: T, *, root: int = 0) -> list[T] | None:
+        """Gather one Python object from every rank onto ``root``.
+
+        Parameters
+        ----------
+        value : T
+            This rank's contribution.
+        root : int, optional
+            Destination rank. Default 0.
 
         Returns
         -------
         list of T or None
-            Values ordered by child task index, on the parent ``root``
-            rank. None on every other rank.
+            Rank-ordered values on ``root``; None on all other ranks.
         """
-        child = self.child
-
-        payload = (cast("int", child.task), value) if child.is_root() else None
-
-        gathered = self.comm.gather(payload, root=root)
-
-        if not self.is_root(root):
-            return None
-
-        results = [item for item in gathered if item is not None]
-        results.sort(key=lambda item: item[0])
-
-        return [item[1] for item in results]
-
-    # -------------------------------------------------------------------------
-    # NumPy and MPI helpers
-    # -------------------------------------------------------------------------
-
-    def datatype(self, dtype: DTypeLike) -> _MPI.Datatype:
-        """Return the MPI datatype corresponding to a NumPy dtype.
-
-        Parameters
-        ----------
-        dtype : numpy.dtype or type
-            NumPy dtype to convert.
-
-        Returns
-        -------
-        mpi4py.MPI.Datatype
-            MPI datatype corresponding to ``dtype``.
-
-        Raises
-        ------
-        MPIError
-            If ``dtype`` has no supported MPI mapping.
-        """
-        key = np.dtype(dtype)
-        if key.kind not in _REDUCIBLE_DTYPE_KINDS:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.")
-        try:
-            return _dtlib.from_numpy_dtype(key)
-        except (KeyError, ValueError) as exc:
-            raise MPIError(f"Unsupported MPI NumPy dtype: {key}.") from exc
-
-    def scatterv(
-        self,
-        array: NDArray[Any] | None,
-        counts: Sequence[int],
-        recv_shape: Sequence[int],
-        dtype: DTypeLike,
-        *,
-        root: int = 0,
-    ) -> NDArray[Any]:
-        """Scatter unequal contiguous leading-axis slabs from one rank.
-
-        NumPy convenience wrapper around :meth:`MPI.Comm.Scatterv`; use
-        ``mpi.comm.Scatterv`` directly for the full mpi4py buffer API.
-
-        Parameters
-        ----------
-        array : numpy.ndarray or None
-            Source array on ``root``. Non-root ranks may pass None.
-        counts : sequence of int
-            Leading-axis rows sent to each rank; one entry per rank.
-        recv_shape : sequence of int
-            Shape of this rank's local receive array.
-        dtype : numpy.dtype or type
-            Dtype of the send and receive arrays.
-        root : int, optional
-            Rank that owns ``array``. Default 0.
-
-        Returns
-        -------
-        numpy.ndarray
-            Contiguous local slab received by this rank.
-
-        Raises
-        ------
-        ValueError
-            If ``counts`` is the wrong length, or ``array`` is None on root.
-        MPIError
-            If ``dtype`` has no supported MPI mapping.
-        """
-        counts_array = np.asarray(counts, dtype=np.int64)
-        if counts_array.shape != (self.comm.size,):
-            raise ValueError(f"counts must contain {self.comm.size} values.")
-
-        shape = tuple(int(length) for length in recv_shape)
-        recv = np.empty(shape, dtype=dtype)
-        row_size = int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
-        element_counts = counts_array * row_size
-        offsets = np.zeros(self.comm.size, dtype=np.int64)
-        offsets[1:] = np.cumsum(element_counts[:-1])
-        mpi_type = self.datatype(np.dtype(dtype))
-
-        send: Any = None
-        if self.is_root(root):
-            if array is None:
-                raise ValueError("array cannot be None on the scatter root.")
-            source_dtype = np.asarray(array).dtype
-            if source_dtype != np.dtype(dtype):
-                raise MPIError(
-                    f"scatterv source dtype {source_dtype} does not match the "
-                    + f"requested dtype {np.dtype(dtype)}. Pass the array's own "
-                    + "dtype; silent conversion would copy the whole buffer."
-                )
-            send = [
-                np.ascontiguousarray(array, dtype=dtype),
-                element_counts,
-                offsets,
-                mpi_type,
-            ]
-
-        self.comm.Scatterv(send, [recv, mpi_type], root=root)
-        return recv
+        return cast("list[T] | None", self.comm.gather(value, root=root))
 
     # -------------------------------------------------------------------------
     # Logging and diagnostics
@@ -1026,8 +777,8 @@ class MPIRuntime:
         sys.stderr.write(
             "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
             + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
-            + f"this {comm.Get_size()}-rank run. mpi.reduce, mpi.xarray, and "
-            + "everything else are unaffected. To build the parallel stack, "
+            + f"this {comm.Get_size()}-rank run. mpi.xarray and the rest of the "
+            + "MPI runtime are unaffected. To build the parallel stack, "
             + "run `env/setup_env.sh` from the climtools repository (see the "
             + "README's Installation section); nothing else needs it.\n"
         )
@@ -1127,5 +878,6 @@ class MPIRuntime:
 
 
 mpi: MPIRuntime = MPIRuntime()
+
 
 __all__ = ["mpi"]

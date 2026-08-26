@@ -27,7 +27,7 @@ MAX_SAVE_CHUNK_BYTES = 2**31
 
 
 def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
-    """Return the common native on-disk chunk size for a dimension.
+    """Return the common native-aligned boundary interval for a dimension.
 
     Parameters
     ----------
@@ -39,7 +39,8 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
     Returns
     -------
     int or None
-        Common chunk size for the dimension, or None if unavailable or inconsistent.
+        Smallest interval whose boundaries align with every available native
+        chunk grid, or None if native chunking is unavailable.
     """
     sizes: set[int] = set()
     for variable in data.data_vars.values():
@@ -57,7 +58,7 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
             return None
         sizes.add(size)
 
-    return sizes.pop() if len(sizes) == 1 else None
+    return math.lcm(*sizes) if sizes else None
 
 
 def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:

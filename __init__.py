@@ -1,65 +1,67 @@
 """climtools: utilities for climate data analysis and plotting.
 
-The package collects the routines used repeatedly when exploring and
-publishing gridded climate data with xarray:
+The package collects routines used repeatedly when exploring and publishing
+gridded climate data with xarray:
 
 - ``plot``      Cartopy map plotting. Entry point :func:`climtools.plot.geo`.
-- ``xgeo``      Geospatial operations and NetCDF output: regridding, masking, transects, local solar time.
-- ``calc``      Trends, correlations and difference-of-means testing.
-- ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib and cmocean.
+- ``xgeo``      Geospatial operations and NetCDF output: regridding, masking,
+  transects, and local solar time.
+- ``calc``      Trends, correlations, and difference-of-means testing.
+- ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib,
+  and cmocean.
 - ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
-- ``mpi``       MPI runtime: ``mpi.comm`` for the raw communicator, ``mpi.reduce`` for collective reductions.
+- ``mpi``       MPI runtime: ``mpi.comm`` for the raw communicator and
+  ``mpi.reduce`` for collective reductions.
 
 Two access patterns are supported and are equivalent::
 
     from climtools import xgeo as xg
     xg.plot.geo(da, method="contourf")
 
-    import climtools            # registers the accessor
+    import climtools
     da.xgeo.plot.geo(method="contourf")
 
-Importing the package registers the ``.xgeo`` accessor on ``xarray.DataArray``
-and ``xarray.Dataset``, replaces the dask progress bar with the styled one from
-:mod:`climtools.core.progress`, and, inside a Jupyter kernel, applies the widget CSS
-fix and switches inline figures to retina resolution.
+Importing the package registers the ``.xgeo`` accessor on
+``xarray.DataArray`` and ``xarray.Dataset``, replaces the dask progress bar
+with the styled one from :mod:`climtools.core.progress`, and, inside a
+Jupyter kernel, applies the widget CSS fix and switches inline figures to
+retina resolution.
 
-Regridding requires ``xesmf``, which is imported on first use. The rest of the
-package works without it.
+Regridding requires ``xesmf``, which is imported on first use. The rest of
+the package works without it.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
-from importlib import import_module
-from typing import TYPE_CHECKING
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
+import warnings
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 import dask.diagnostics
 
-from .accessors.xarray_accessors import *
-from .core.progress import DaskProgressBar, SerialProgressBar
-from .core.tools import (
-    LockedLogger,
-    LockFile,
-    RedirectStreams,
-    apply_widget_css,
-    locked_print,
-    n_cpus,
-)
+from .accessors import xarray_accessors as _xarray_accessors  # noqa: F401
+from .core.progress import DaskProgressBar
+from .core.tools import apply_widget_css, n_cpus
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from .cdo import pycdo as cdo
     from .core import _operator as operator
     from .core import calc_stats as calc
-    from .core import xgeo as xgeo
+    from .core import xgeo
     from .core.lib_mpi import mpi
-    from .viz import cmaps as cmaps
+    from .core.progress import SerialProgressBar
+    from .core.tools import (
+        LockedLogger,
+        LockFile,
+        RedirectStreams,
+        locked_print,
+    )
+    from .viz import cmaps
     from .viz import plotting as plot
-
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("always", module=r"climtools\..*")
@@ -83,13 +85,18 @@ __all__ = [
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "mpi": (".core.lib_mpi", "mpi"),
     "calc": (".core.calc_stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),
     "operator": (".core._operator", None),
     "plot": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
+    "mpi": (".core.lib_mpi", "mpi"),
+    "LockedLogger": (".core.tools", "LockedLogger"),
+    "LockFile": (".core.tools", "LockFile"),
+    "RedirectStreams": (".core.tools", "RedirectStreams"),
+    "SerialProgressBar": (".core.tools", "SerialProgressBar"),
+    "locked_print": (".core.tools", "locked_print"),
 }
 
 
@@ -111,22 +118,12 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
-# from .update import _self_update
-
-# _self_update()
-
 try:
     from .accessors.xarray_patch import fix_xarray
 
-    modified = fix_xarray()
-    if modified:
-        print("Modified", modified)
+    fix_xarray()
 except Exception:
     ...
 
-
-# Setup
-
 apply_widget_css()
-
 dask.diagnostics.ProgressBar = DaskProgressBar
