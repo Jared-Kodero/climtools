@@ -43,7 +43,6 @@ from .core.progress import DaskProgressBar, SerialProgressBar
 from .core.tools import (
     LockedLogger,
     LockFile,
-    RedirectFd,
     RedirectStreams,
     apply_widget_css,
     locked_print,
@@ -69,7 +68,6 @@ __all__ = [
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
-    "RedirectFd",
     "RedirectStreams",
     "SerialProgressBar",
     "calc",

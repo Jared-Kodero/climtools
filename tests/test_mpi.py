@@ -76,10 +76,23 @@ PLEV_COUNT: int = 0
 
 
 OUTPUT_DIR = (Path.home() / "jobtmp" / "io_mpi_test").resolve()
-TEST_DATA_PATH = OUTPUT_DIR / f"{uuid.uuid4().hex}.nc"
 
 RANK: int = mpi.comm.rank
 SIZE: int = mpi.comm.size
+
+# The dataset filename must be identical on every rank. Each rank under
+# srun is an independent process running its own Python interpreter, so an
+# uncoordinated uuid.uuid4() call here draws a different random hex per
+# rank. Rank 0 would then write to a path that no other rank ever queries,
+# and the "[SETUP] validating test dataset visibility" check below fails
+# unanimity on every run, for every matrix cell, regardless of tasks,
+# resolution, or time-steps -- which is exactly the deterministic
+# "[SETUP FAILED] test dataset is not visible on every rank" failure mode
+# this suite hit. Generating the name on rank 0 and broadcasting it removes
+# the uncoordinated randomness while keeping the name unique per job.
+_dataset_name = uuid.uuid4().hex if RANK == 0 else None
+_dataset_name = mpi.comm.bcast(_dataset_name, root=0)
+TEST_DATA_PATH = OUTPUT_DIR / f"{_dataset_name}.nc"
 
 
 # ---------------------------------------------------------------------------
