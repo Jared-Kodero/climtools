@@ -19,12 +19,13 @@ from typing import TYPE_CHECKING, Any
 import dask
 import netCDF4
 import numpy as np
-import xarray as xr
 from mpi4py import MPI
 
+import xarray as xr
+
 from ..core.lib_mpi import mpi
-from ..core.xr_chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
-from ..core.xr_meta import MPI_META, _format_bytes, get_mpi_meta
+from ..xarray.chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
+from ..xarray.meta import MPI_META, _format_bytes, get_mpi_meta
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:

@@ -18,13 +18,14 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
 
+import xarray as xr
+
 from ..core.tools import get_fsig
-from ..core.xr_utils import (
+from ..xarray.utils import (
     add_cyclic_point,
     get_spatial_dims,
     set_edges_to_nan,

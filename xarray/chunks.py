@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, cast
 
-import xarray as xr
 from dask import array as dask_array
+
+import xarray as xr
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping

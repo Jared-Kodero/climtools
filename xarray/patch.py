@@ -14,14 +14,13 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     if xarray_spec is None or xarray_spec.origin is None:
         raise RuntimeError("Cannot locate the xarray package.")
 
-    marker = Path(xarray_spec.origin).resolve().parent / ".xgeo_patch"
+    marker = Path(xarray_spec.origin).resolve().parent / "_xgeo_patch.py"
 
     if not force and marker.exists():
         return ()
 
     # Everything below this point is only needed to create a new patch.
     import inspect
-    import json
     import os
     import sys
 
@@ -34,11 +33,10 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     end = "XGEO_IDE_TYPING END"
     guard = "_XGEO_TYPE_CHECKING"
 
-    # Corrected dynamic module path to prevent duplication
-    type_module = f"{__package__}.xgeo_types"
+    type_module = "xarray._xgeo_patch"
 
     # (class, class name, accessors registered by climtools on that class).
-    # Each accessor is (attribute name, exported type name in xgeo_types).
+    # Each accessor is (attribute name, exported type name in _xgeo_patch).
     targets: tuple[tuple[type, str, tuple[tuple[str, str], ...]], ...] = (
         (xr.DataArray, "DataArray", (("xgeo", "GeoDataArray"),)),
         (xr.Dataset, "Dataset", (("xgeo", "GeoDataset"),)),
@@ -96,7 +94,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
 
         return {
             "schema": 3,
-            "python": (f"{sys.version_info.major}.{sys.version_info.minor}"),
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "files": {label: stat_of(path) for label, path in sources.items()},
             "integrations": integrations,
         }
@@ -289,12 +287,24 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             )
             changed.append(path)
 
+    meta: dict = signature()
+
+    bridge = [
+        "from __future__ import annotations",
+        "from climtools.xarray.accessors import GeoDataArray as GeoDataArray",
+        "from climtools.xarray.accessors import GeoDataset as GeoDataset",
+        "__all__ = [GeoDataArray, GeoDataset]",
+        "\n",
+        f"meta: dict = {meta!r}\n",
+    ]
+
+    bridge = "\n".join(bridge)
+
+    compile(bridge, str(marker), "exec")
+
     tmp = marker.with_suffix(marker.suffix + ".tmp")
     tmp.write_text(
-        json.dumps(
-            signature(),
-            sort_keys=True,
-        ),
+        bridge,
         encoding="utf-8",
     )
 

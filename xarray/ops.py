@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import xarray as xr
 
-from .xr_meta import _partitions_match, get_mpi_meta, set_mpi_meta
+from .meta import _partitions_match, get_mpi_meta, set_mpi_meta
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping

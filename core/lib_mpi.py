@@ -19,8 +19,8 @@ from typing import Any, ParamSpec, TypeVar, cast
 from mpi4py import MPI as _MPI
 from mpi4py.MPI import Intracomm
 
+from ..xarray.mpi import XarrayMPI
 from .tools import LockFile, tmp
-from .xr_mpi import XarrayMPI
 
 P = ParamSpec("P")
 R = TypeVar("R")

@@ -7,12 +7,13 @@ from collections.abc import Hashable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+
 import xarray as xr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .lib_mpi import MPIRuntime
+    from ..core.lib_mpi import MPIRuntime
 
 MPI_META = "mpi_meta"
 # The subset of a partition's metadata that decides whether two partitions

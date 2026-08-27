@@ -43,9 +43,9 @@ from typing import TYPE_CHECKING, Any
 
 import dask.diagnostics
 
-from .accessors import xarray_accessors as _xarray_accessors  # noqa: F401
 from .core.progress import DaskProgressBar
 from .core.tools import apply_widget_css, n_cpus
+from .xarray import accessors as _xarray_accessors  # noqa: F401
 
 if TYPE_CHECKING:
     from .cdo import pycdo as cdo
@@ -119,7 +119,7 @@ def __dir__() -> list[str]:
 
 
 try:
-    from .accessors.xarray_patch import fix_xarray
+    from .xarray.patch import fix_xarray
 
     fix_xarray()
 except Exception:

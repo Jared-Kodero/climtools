@@ -12,11 +12,12 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import numpy as np
-import xarray as xr
 from mpi4py import MPI as _MPI
 from mpi4py.util import dtlib as _dtlib
 
-from .xr_chunks import (
+import xarray as xr
+
+from .chunks import (
     compute_save_chunks,
     get_balanced_bounds,
     get_chunk_bounds,
@@ -27,7 +28,7 @@ from .xr_chunks import (
     get_usable_native_chunk,
     prune_chunk_info,
 )
-from .xr_meta import (
+from .meta import (
     _delayed_local,
     _localize_coord,
     _resolve_sizes,
@@ -39,7 +40,7 @@ from .xr_meta import (
     set_save_chunks,
     strip_mpi_meta,
 )
-from .xr_ops import ArithmeticMixin
+from .ops import ArithmeticMixin
 
 # Re-export communicator-free chunk and metadata helpers for compatibility.
 # Their implementations live in xr_chunks.py and xr_meta.py.
@@ -60,7 +61,7 @@ __all__ = [
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .lib_mpi import MPIRuntime
+    from ..core.lib_mpi import MPIRuntime
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (
     (_MPI.SUM, "SUM"),

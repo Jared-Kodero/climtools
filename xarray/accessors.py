@@ -202,7 +202,7 @@ class GeoBase:
         xarray.Dataset or xarray.DataArray
             The object with one extra longitude point.
         """
-        from ..core.xr_utils import add_cyclic_point
+        from .utils import add_cyclic_point
 
         return add_cyclic_point(self._obj, lon=lon)
 

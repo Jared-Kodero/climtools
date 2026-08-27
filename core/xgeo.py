@@ -9,11 +9,7 @@ if TYPE_CHECKING:
     from ..lib_netcdf.netcdf import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..viz import cmaps
     from ..viz import plotting as plot
-    from . import calc_stats as calc
-    from .preprocess_data import preprocess_era5
-    from .progress import DaskProgressBar, SerialProgressBar
-    from .tools import n_cpus
-    from .xr_utils import (
+    from ..xarray.utils import (
         SetupDask,
         add_local_solar_time,
         mask,
@@ -21,6 +17,10 @@ if TYPE_CHECKING:
         sel_transect,
         to_lon180,
     )
+    from . import calc_stats as calc
+    from .preprocess_data import preprocess_era5
+    from .progress import DaskProgressBar, SerialProgressBar
+    from .tools import n_cpus
 
 __all__ = [
     "DaskProgressBar",

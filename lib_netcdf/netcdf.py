@@ -5,7 +5,7 @@ from typing import Any
 
 import xarray as xr
 
-from ..core.xr_meta import get_mpi_meta
+from ..xarray.meta import get_mpi_meta
 from .parallel import to_netcdf_parallel
 from .serial import append, to_netcdf_serial
 
