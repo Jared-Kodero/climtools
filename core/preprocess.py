@@ -2,9 +2,8 @@ import operator as op
 from collections.abc import Callable
 
 import pandas as pd
-from xarray.coding.times import encode_cf_datetime
-
 import xarray as xr
+from xarray.coding.times import encode_cf_datetime
 
 attributes = {
     "t2m": {"units": "degC", "factor": 273.15, "operand": op.sub},

@@ -32,7 +32,7 @@ def identity(x: Any, *_, **__) -> Any:
     return x
 
 
-def affine(x: Any, coefficients: tuple[float, float]) -> Any:
+def affine(x: Any, *, m: float, b: float) -> Any:
     r"""Apply an affine transformation.
 
     Implements
@@ -53,13 +53,16 @@ def affine(x: Any, coefficients: tuple[float, float]) -> Any:
     Any
         Affine-transformed input.
     """
-    m, b = coefficients
+
     return m * x + b
 
 
 def quadratic(
     x: Any,
-    coefficients: tuple[float, float, float],
+    *,
+    a: float,
+    b: float,
+    c: float,
 ) -> Any:
     r"""Evaluate a quadratic polynomial.
 
@@ -80,7 +83,6 @@ def quadratic(
     Any
         Quadratic polynomial evaluated at ``x``.
     """
-    a, b, c = coefficients
     return a * x**2 + b * x + c
 
 
