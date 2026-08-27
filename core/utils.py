@@ -55,12 +55,10 @@ if is_mpi:
         or (home / "jobtmp" if (home / "jobtmp").exists() else None)
         or home
     )
-    tmp = base / ".xgeo" / tmp_id
+    tmp = base / ".tmp" / ".xgeo" / tmp_id
 else:
     tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
 
-
-print(tmp)
 
 tmp.mkdir(parents=True, exist_ok=True)
 

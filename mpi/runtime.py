@@ -14,7 +14,7 @@ from mpi4py import MPI
 from mpi4py.MPI import Intracomm
 
 from ..core.utils import _LAUNCH_ENV, LockFile, tmp
-from ..xarray.mpi import XarrayMPI
+from ..xarray.mpi import MPIXarray
 from .diagnostics import MPIDiagnostics, MPIError
 
 P = ParamSpec("P")
@@ -261,7 +261,7 @@ class MPIRuntime(MPIDiagnostics):
 
     def __init__(self, comm: Intracomm | None = None) -> None:
         self.comm: Intracomm = comm if comm is not None else MPI.COMM_WORLD
-        self._xarray: XarrayMPI = XarrayMPI(self)
+        self._xarray: MPIXarray = MPIXarray(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIRuntime | None = None
         self._to_children = ToChildrenRuntime(self)
@@ -272,7 +272,7 @@ class MPIRuntime(MPIDiagnostics):
         self.missing_pnetcdf()
 
     @property
-    def xarray(self) -> XarrayMPI:
+    def xarray(self) -> MPIXarray:
         """XarrayMPI: MPI-aware xarray indexing, redistribution, reductions."""
         return self._xarray
 

@@ -62,7 +62,7 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
 }
 
 
-class ArithmeticMixin:
+class Arithmetic:
     """Alignment and arithmetic methods mixed into ``XarrayMPI``.
 
     Assumes the host class provides ``self.redistribute`` (used by

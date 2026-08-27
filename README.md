@@ -35,17 +35,26 @@ and MPI-collective parallel NetCDF-4 output.
 | `climtools.calc` | Trends, correlations, difference-of-means testing. | [`core/calc_stats.py`](core/calc_stats.py) |
 | `climtools.cmaps` | Colormaps: local IPCC tables, matplotlib, cmocean. | [`viz/cmaps.py`](viz/cmaps.py) |
 | `climtools.cdo` | Thin xarray-aware wrapper over the CDO command-line tool. | [`cdo/pycdo.py`](cdo/pycdo.py) |
-| `climtools.mpi` | MPI runtime: `mpi.comm`, `mpi.reduce`, `mpi.xarray`, `mpi.scatterv`, the `@mpi` decorator, `mpi.watchdog`. | [`core/lib_mpi.py`](core/lib_mpi.py), [`core/xr_mpi.py`](core/xr_mpi.py), [`core/xr_meta.py`](core/xr_meta.py) |
+| `climtools.mpi` | MPI runtime: `mpi.comm`, `mpi.reduce`, `mpi.xarray`, `mpi.scatterv`, the `@mpi` decorator, `mpi.watchdog`. | [`mpi/runtime.py`](mpi/runtime.py), [`xarray/mpi.py`](xarray/mpi.py), [`xarray/meta.py`](xarray/meta.py) |
 
-`core/xr_mpi.py` holds the `XarrayMPI` accessor and the collective-communication
-code that actually needs an MPI communicator (reduction planning, buffer
-collectives, redistribution). `core/xr_meta.py` holds the shared,
-communicator-free xarray/MPI-metadata helpers used by both `xr_mpi.py` and
-`xr_chunks.py`: partition metadata (`get_mpi_meta`/`set_mpi_meta`/
-`strip_mpi_meta`), the partition-report logger, automatic partition-dimension
-selection (`choose_partition_dim`), and the coordinate/dask-delayed helpers
-behind `create_dataarray`/`create_dataset`. Splitting them this way keeps
-`xr_mpi.py` focused on code that genuinely touches `mpi.comm`.
+`xarray/mpi.py` defines the `XarrayMPI` interface itself (the class
+`mpi.xarray` is an instance of) and re-exports chunk/metadata helpers for
+compatibility; the implementation is split by concern across sibling
+modules -- `xarray/io.py` (open/distribute/redistribute/create),
+`xarray/indexing.py` (`isel`/`sel`), `xarray/reductions.py`
+(`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`),
+`xarray/statistics.py` (`std`/`var`), `xarray/groupby.py`
+(`groupby_reduce`/`resample_reduce`), `xarray/engine.py` (the
+rank-independent reduction-planning primitives every reduction mixin builds
+on), and `xarray/common.py` (communicator-free constants and dtype helpers).
+`xarray/meta.py` holds the shared, communicator-free xarray/MPI-metadata
+helpers used across that split and by `xarray/chunks.py`: partition metadata
+(`get_mpi_meta`/`set_mpi_meta`/`strip_mpi_meta`), the partition-report
+logger, automatic partition-dimension selection (`choose_partition_dim`),
+and the coordinate/dask-delayed helpers behind `create_dataarray`/
+`create_dataset`. Splitting the collective-communication code out this way
+keeps each module focused on one concern, with `xarray/engine.py` as the
+only place that both touches `mpi.comm` and is shared by every reduction.
 
 The `.xgeo` accessor is registered on `xarray.DataArray`/`xarray.Dataset` as
 soon as `climtools` is imported (`import climtools` is enough; you do not
@@ -97,7 +106,7 @@ most conda-forge builds) are serial-only: importing them works fine, but
 runs under more than one rank. climtools checks for this and prints a
 one-time hint pointing back here as soon as `climtools.mpi` is used under a
 real multi-rank launch -- see `MPIRuntime._warn_if_parallel_netcdf_missing`
-in [`core/lib_mpi.py`](core/lib_mpi.py).
+in [`mpi/runtime.py`](mpi/runtime.py).
 
 Run the setup script from a clone of this repository:
 
@@ -224,17 +233,17 @@ See [`viz/plotting.py`](viz/plotting.py) for the full `GeoPlot` API and
 ## The MPI runtime
 
 `climtools.mpi` is a single object (an `MPIRuntime`, defined in
-[`core/lib_mpi.py`](core/lib_mpi.py)) exposing:
+[`mpi/runtime.py`](mpi/runtime.py)) exposing:
 
 | Attribute | What it is | Source |
 | --- | --- | --- |
-| `mpi.comm` | The native `mpi4py.MPI.Intracomm` (`MPI.COMM_WORLD` by default) | [`core/lib_mpi.py`](core/lib_mpi.py) |
-| `mpi.reduce` | Element-wise collective reductions over whole objects | [`core/lib_mpi.py`](core/lib_mpi.py) (`ReduceAccessor`) |
-| `mpi.xarray` | Distributed reductions/indexing/arithmetic along a named dimension | [`core/xr_mpi.py`](core/xr_mpi.py) (`XarrayMPI`) |
-| `mpi.scatterv` | Scatter leading-axis slabs of a NumPy array | [`core/lib_mpi.py`](core/lib_mpi.py) |
-| `@mpi` | Decorator: run a function on rank 0 (default), every rank, or broadcast the result | [`core/lib_mpi.py`](core/lib_mpi.py) |
-| `mpi.watchdog` | Context manager: dump every rank's stack and abort after a period with no progress | [`core/lib_mpi.py`](core/lib_mpi.py) |
-| `mpi.MPIError` | climtools's own exception for synchronized MPI failures | [`core/lib_mpi.py`](core/lib_mpi.py) |
+| `mpi.comm` | The native `mpi4py.MPI.Intracomm` (`MPI.COMM_WORLD` by default) | [`mpi/runtime.py`](mpi/runtime.py) |
+| `mpi.reduce` | Element-wise collective reductions over whole objects | [`mpi/runtime.py`](mpi/runtime.py) (`ReduceAccessor`) |
+| `mpi.xarray` | Distributed reductions/indexing/arithmetic along a named dimension | [`xarray/mpi.py`](xarray/mpi.py) (`XarrayMPI`) |
+| `mpi.scatterv` | Scatter leading-axis slabs of a NumPy array | [`mpi/runtime.py`](mpi/runtime.py) |
+| `@mpi` | Decorator: run a function on rank 0 (default), every rank, or broadcast the result | [`mpi/runtime.py`](mpi/runtime.py) |
+| `mpi.watchdog` | Context manager: dump every rank's stack and abort after a period with no progress | [`mpi/runtime.py`](mpi/runtime.py) |
+| `mpi.MPIError` | climtools's own exception for synchronized MPI failures | [`mpi/runtime.py`](mpi/runtime.py) |
 
 `mpi.comm` is the real `mpi4py.MPI.Intracomm`, so anything not covered by
 the accessors above -- point-to-point `Send`/`Recv`, `Bcast`,
@@ -356,7 +365,7 @@ planning remains variable-specific: a variable that does not carry the active
 partition dimension is reduced locally even when another variable in the same
 Dataset requires an MPI combine. `mpi.xarray.open_dataset`/`redistribute`/
 `distribute`/`isel`/`sel` produce the distributed objects these reductions
-consume; see [`core/xr_mpi.py`](core/xr_mpi.py) for their full signatures.
+consume; see [`xarray/mpi.py`](xarray/mpi.py) for their full signatures.
 
 ### Native `.mean()`/`.sum()`/etc. on a distributed object are node-local
 
@@ -420,7 +429,7 @@ operator precedence applies:
 result = mpi.xarray.evaluate("(a + b) * c - d / e", a=ds1, b=ds2, c=ds3, d=ds4, e=ds5)
 ```
 
-See [`core/xr_mpi.py`](core/xr_mpi.py) for the full `apply`/`align`/
+See [`xarray/mpi.py`](xarray/mpi.py) for the full `apply`/`align`/
 `evaluate` API, including the exact no-data-movement cases `align` resolves
 locally.
 
@@ -556,7 +565,7 @@ local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
 ```
 
 This works because `redistribute` assumes its input is already the *same*
-object on every rank (see [`core/xr_mpi.py`](core/xr_mpi.py)) and slices it
+object on every rank (see [`xarray/mpi.py`](xarray/mpi.py)) and slices it
 locally with no MPI communication for the data itself -- which is exactly a
 lazy scatter when the input is dask-backed, and needs no special support to
 be one.
@@ -664,7 +673,7 @@ bare `xr.DataArray` as a `data_vars` value (one already built by
 accepts a bare DataArray alongside `(dims, array)` tuples. See
 `create_dataarray`'s and `create_dataset`'s docstrings in
 
-[`core/xr_mpi.py`](core/xr_mpi.py) for the single-DataArray form and the
+[`xarray/mpi.py`](xarray/mpi.py) for the single-DataArray form and the
 full set of options.
 
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
@@ -693,7 +702,7 @@ dimensions, MPI-IO hints).
 #### On-disk chunking: distribution_chunks vs save_chunks
 
 Two different chunk concepts are involved in a parallel write, computed
-independently in [`core/xr_chunks.py`](core/xr_chunks.py):
+independently in [`xarray/chunks.py`](xarray/chunks.py):
 
 - **distribution_chunks** -- how much of the partition dimension each MPI
   rank holds *in memory*. This is what `mpi.xarray.open_dataset`/
@@ -753,7 +762,7 @@ production:
   HDF5 chunking's purpose and should be benchmarked on real dimension
   sizes, not assumed acceptable, before relying on this path at scale.
 
-See [`core/xr_chunks.py`](core/xr_chunks.py)'s module docstring for the
+See [`xarray/chunks.py`](xarray/chunks.py)'s module docstring for the
 full derivation, and
 [`docs/phase2-rank-distribution-design.md`](docs/phase2-rank-distribution-design.md)
 for the (not yet implemented) design that would remove the residual
@@ -809,7 +818,8 @@ launcher:
 | File | Demonstrates |
 | --- | --- |
 | [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`, and `RedirectStreams`/`RedirectFd` -- fd-level and Python-level redirection, shared-target merging, truncate/append, and re-entry rejection), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
-| [`test_mpi.py`](tests/test_mpi.py) | Correctness and scaling suite for `mpi.reduce`, `mpi.xarray` (`open_dataset`/`redistribute`/`distribute`/`isel`/`sel`, `apply`/`align`/`evaluate`), `mpi.scatterv`, the parallel NetCDF writer, and the `core/xr_meta.py` helpers `mpi.xarray` is built on -- `mpi_meta` get/set/strip round-tripping and its length-mismatch validation, `choose_partition_dim` (longest-dimension selection, declaration-order tie-breaking, `exclude`, the length-one fallback, and the short-partition warning's once-per-`(dim, length, mpi_size)` dedup), `indexer_is_scalar`, and that `climtools.core.xr_mpi` re-exports these as the same objects rather than reimplementing them -- including all three `to_netcdf(parallel=True)` input paths (eager, dask-backed auto-distributed, already-distributed) and a scale sweep (`SCALE_SWEEP_CASES`) across several `(time, lat, lon)` sizes, specifically including the exact size that caused a historical hang, so a regression there is caught directly rather than depending on which `--time-steps` a particular run happens to use. Self-contained: rank 0 builds a deterministic mock NetCDF file. `--time-steps`/`--resolution` set its size. |
+| [`test_mpi.py`](tests/test_mpi.py) | Entry point: imports and runs every `test_mpi_*.py` module below in one process, then reports one pass/fail summary. Covers `mpi.xarray`'s `IOMixin` (`redistribute`/`create_dataarray`/`create_dataset`), `IndexingMixin` (`isel`/`sel`, scalar and slice, global coordinates), `ReductionMixin` (`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`, against a serial xarray reference, with NaNs including an all-missing column), `StatisticsMixin` (`std`/`var`, both `ddof`), and `GroupbyMixin` (`groupby_reduce`/`resample_reduce`, including group boundaries that cross MPI rank boundaries) -- both `DataArray` and `Dataset`, and both the case where the target dimension is the active MPI partition dimension and the case where it isn't. Does not cover `mpi.reduce`, `ArithmeticMixin` (`apply`/`align`/`evaluate`), or the parallel NetCDF writer; those need separate coverage. |
+| [`test_mpi_io.py`](tests/test_mpi_io.py), [`test_mpi_indexing.py`](tests/test_mpi_indexing.py), [`test_mpi_reductions.py`](tests/test_mpi_reductions.py), [`test_mpi_statistics.py`](tests/test_mpi_statistics.py), [`test_mpi_groupby.py`](tests/test_mpi_groupby.py) | One file per `xarray/mpi.py` sibling module (see [Package layout](#package-layout)); each is runnable standalone (`mpirun -n N python -m mpi4py tests/test_mpi_io.py`, etc.) or together via `test_mpi.py`. Shared deterministic fixtures and the pass/fail aggregator live in [`mpi_fixtures.py`](tests/mpi_fixtures.py) (not itself a test module). |
 | [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running `test_general.py` once, then `test_mpi.py` across the full `{8,16,32 tasks} x {0.5,0.25,0.1 deg} x {24,168,720,8760,43800 time steps}` matrix -- the same coverage that first surfaced the HDF file-locking bug fixed by `HDF5_USE_FILE_LOCKING=FALSE` (set unconditionally at import time in [`__init__.py`](__init__.py); see below). Every configuration runs regardless of earlier failures, and the script exits nonzero if any did. |
 
 ```bash

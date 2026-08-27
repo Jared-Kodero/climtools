@@ -7,7 +7,6 @@ from collections.abc import Hashable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
-
 import xarray as xr
 
 if TYPE_CHECKING:

@@ -204,16 +204,8 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             props.append(f"        def {attr}(self) -> {alias[attr]}: ...\n")
 
         return (
-            region(
-                f"imports {class_name}",
-                "",
-                imports,
-            ),
-            region(
-                f"properties {class_name}",
-                "    ",
-                props,
-            ),
+            region(f"imports {class_name}", "", imports),
+            region(f"properties {class_name}", "    ", props),
         )
 
     discovered = discover()
@@ -227,10 +219,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         pristine = strip(raw)
 
         if not backup.exists():
-            backup.write_text(
-                pristine,
-                encoding="utf-8",
-            )
+            backup.write_text(pristine, encoding="utf-8")
 
         stubs: list = [
             *((attr, type_module, type_name) for attr, type_name in own_accessors),
@@ -246,10 +235,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             stubs,
         )
 
-        tree = ast.parse(
-            pristine,
-            filename=str(path),
-        )
+        tree = ast.parse(pristine, filename=str(path))
 
         node = next(
             (

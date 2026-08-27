@@ -88,7 +88,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "operator": (".core.operator", None),
     "plotting": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
-    "mpi": (".mpi.runtime ", "mpi"),
+    "mpi": (".mpi.runtime", "mpi"),
     "LockedLogger": (".core.utils", "LockedLogger"),
     "LockFile": (".core.utils", "LockFile"),
     "RedirectStreams": (".core.utils", "RedirectStreams"),
