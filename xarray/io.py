@@ -13,6 +13,7 @@ from numbers import Integral
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+
 import xarray as xr
 
 from .chunks import (

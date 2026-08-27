@@ -397,35 +397,6 @@ class GeoBase:
         )
 
 
-class PreprocessAccessor:
-    """Dataset-specific preprocessing namespace."""
-
-    __slots__ = ("_obj",)
-
-    def __init__(self, ds: xr.Dataset):
-        self._obj = ds
-
-    def era5(self) -> xr.Dataset:
-        """Preprocess an ERA5 dataset to standardize variable names, dimensions, and attributes."""
-        return xgeo.preprocess.era5(self._obj)
-
-    def era5_land(self) -> xr.Dataset:
-        """Preprocess an ERA5-Land dataset."""
-        return xgeo.preprocess.era5_land(self._obj)
-
-    def imerg(self) -> xr.Dataset:
-        """Preprocess a GPM IMERG dataset."""
-        return xgeo.preprocess.imerg(self._obj)
-
-    def cmorph(self) -> xr.Dataset:
-        """Preprocess a CMORPH dataset."""
-        return xgeo.preprocess.cmorph(self._obj)
-
-    def gpcp(self) -> xr.Dataset:
-        """Preprocess a GPCP dataset."""
-        return xgeo.preprocess.gpcp(self._obj)
-
-
 class PlotAccessor:
     """Plotting namespace of the ``.xgeo`` accessor.
 
@@ -1073,6 +1044,35 @@ class CalcAccessor:
             dask_scheduler=dask_scheduler,
             polyfit=polyfit,
         )
+
+
+class PreprocessAccessor:
+    """Dataset-specific preprocessing namespace."""
+
+    __slots__ = ("_obj",)
+
+    def __init__(self, ds: xr.Dataset):
+        self._obj = ds
+
+    def era5(self) -> xr.Dataset:
+        """Preprocess an ERA5 dataset to standardize variable names, dimensions, and attributes."""
+        return xgeo.preprocess.era5(self._obj)
+
+    def era5_land(self) -> xr.Dataset:
+        """Preprocess an ERA5-Land dataset."""
+        return xgeo.preprocess.era5_land(self._obj)
+
+    def imerg(self) -> xr.Dataset:
+        """Preprocess a GPM IMERG dataset."""
+        return xgeo.preprocess.imerg(self._obj)
+
+    def cmorph(self) -> xr.Dataset:
+        """Preprocess a CMORPH dataset."""
+        return xgeo.preprocess.cmorph(self._obj)
+
+    def gpcp(self) -> xr.Dataset:
+        """Preprocess a GPCP dataset."""
+        return xgeo.preprocess.gpcp(self._obj)
 
 
 @xr.register_dataarray_accessor("xgeo")
