@@ -388,13 +388,18 @@ class Arithmetic:
     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
+        Operations that reduce along the partition dimension should not be
+        performed inside the callable (e.g., calling raw ``ds.mean("time")``
+        when ``time`` is the partition dimension leads to a rank-local-only
+        reduction error; use the corresponding ``mpi.xarray`` method instead).
+
         Parameters
         ----------
         func : callable
-            Any function of the given ``args``/``kwargs``.
+            Any function of the given ``args`` and ``kwargs``.
         *args : Any
-            Positional arguments to ``func``: xarray Datasets/DataArrays
-            (distributed or not) or plain scalars/arrays, in any mix.
+            Positional arguments to ``func``: xarray Datasets or DataArrays
+            (distributed or not) or plain scalars and arrays, in any mix.
         **kwargs : Any
             Keyword arguments to ``func``, checked for distribution
             metadata exactly like ``args``.
@@ -402,8 +407,8 @@ class Arithmetic:
         Returns
         -------
         Any
-            ``func(*args, **kwargs)``. When any argument was distributed,
-            the result is tagged with the same distribution metadata.
+            The result of ``func(*args, **kwargs)``. When any argument is
+            distributed, the result is tagged with the same distribution metadata.
 
         Raises
         ------
