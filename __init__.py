@@ -45,7 +45,7 @@ import dask.diagnostics
 
 from .core.progress import DaskProgressBar
 from .core.utils import apply_widget_css, n_cpus
-from .xarray import accessors as _xarray_accessors  # noqa: F401
+from .xarray.accessors import fix_xarray
 
 if TYPE_CHECKING:
     from .cdo import pycdo as cdo
@@ -116,8 +116,6 @@ def __dir__() -> list[str]:
 
 
 try:
-    from .xarray.patch import fix_xarray
-
     fix_xarray()
 except Exception:
     ...

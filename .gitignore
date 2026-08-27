@@ -1,6 +1,7 @@
 __pycache__
 update.py
 cmaps.pyi
+xgeo_patch.py
 .vscode/
 *.log
 **/__pycache__

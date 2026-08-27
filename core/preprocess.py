@@ -132,3 +132,199 @@ def era5(ds: xr.Dataset) -> xr.Dataset:
 
     ds = ds.transpose(*dims)
     return ds
+
+
+def era5_land(ds: xr.Dataset) -> xr.Dataset:
+    """Preprocess an ERA5-Land dataset."""
+    return era5(ds)
+
+
+def imerg(ds: xr.Dataset) -> xr.Dataset:
+    """Preprocess a GPM IMERG dataset."""
+
+    if not isinstance(ds, xr.Dataset):
+        raise TypeError("Input must be an xarray Dataset.")
+
+    rename = {}
+
+    if "latitude" in ds.dims and "lat" not in ds.dims:
+        rename["latitude"] = "lat"
+
+    if "longitude" in ds.dims and "lon" not in ds.dims:
+        rename["longitude"] = "lon"
+
+    if rename:
+        ds = ds.rename(rename)
+
+    if "time" in ds.coords:
+        ds["time"] = norm_time(ds["time"])
+
+    ds["lon"] = ((ds["lon"] + 180) % 360) - 180
+
+    ds["lat"].attrs = {
+        "standard_name": "latitude",
+        "long_name": "latitude",
+        "units": "degrees_north",
+        "axis": "Y",
+    }
+    ds["lon"].attrs = {
+        "standard_name": "longitude",
+        "long_name": "longitude",
+        "units": "degrees_east",
+        "axis": "X",
+    }
+
+    for name in (
+        "precipitation",
+        "precipitationCal",
+        "precipitationUncal",
+        "MWprecipitation",
+        "IRprecipitation",
+        "HQprecipitation",
+    ):
+        if name not in ds.data_vars:
+            continue
+
+        attrs = ds[name].attrs.copy()
+
+        ds[name] = ds[name].clip(
+            min=0,
+            keep_attrs=True,
+        )
+
+        attrs["units"] = "mm/hr"
+        ds[name].attrs = attrs
+
+    dims = [dim for dim in ("time", "lat", "lon") if dim in ds.dims]
+
+    ds = ds.sortby(dims)
+
+    return ds.transpose(*dims, ...)
+
+
+def cmorph(ds: xr.Dataset) -> xr.Dataset:
+    """Preprocess a CMORPH precipitation dataset."""
+
+    if not isinstance(ds, xr.Dataset):
+        raise TypeError("Input must be an xarray Dataset.")
+
+    rename = {}
+
+    if "latitude" in ds.dims and "lat" not in ds.dims:
+        rename["latitude"] = "lat"
+
+    if "longitude" in ds.dims and "lon" not in ds.dims:
+        rename["longitude"] = "lon"
+
+    if rename:
+        ds = ds.rename(rename)
+
+    if "time" in ds.coords:
+        ds["time"] = norm_time(ds["time"])
+
+    ds["lon"] = ((ds["lon"] + 180) % 360) - 180
+
+    ds["lat"].attrs = {
+        "standard_name": "latitude",
+        "long_name": "latitude",
+        "units": "degrees_north",
+        "axis": "Y",
+    }
+    ds["lon"].attrs = {
+        "standard_name": "longitude",
+        "long_name": "longitude",
+        "units": "degrees_east",
+        "axis": "X",
+    }
+
+    for name in (
+        "cmorph_precip",
+        "mmw_precip",
+        "precip",
+        "precipitation",
+    ):
+        if name not in ds.data_vars:
+            continue
+
+        attrs = ds[name].attrs.copy()
+        units = str(attrs.get("units", "")).lower()
+
+        if units in {
+            "mm/day",
+            "mm d-1",
+            "mm d^-1",
+        }:
+            ds[name] = ds[name] / 24.0
+
+        ds[name] = ds[name].clip(
+            min=0,
+            keep_attrs=True,
+        )
+
+        attrs["units"] = "mm/hr"
+        ds[name].attrs = attrs
+
+    dims = [dim for dim in ("time", "lat", "lon") if dim in ds.dims]
+
+    ds = ds.sortby(dims)
+
+    return ds.transpose(*dims, ...)
+
+
+def gpcp(ds: xr.Dataset) -> xr.Dataset:
+    """Preprocess a GPCP precipitation dataset."""
+
+    if not isinstance(ds, xr.Dataset):
+        raise TypeError("Input must be an xarray Dataset.")
+
+    rename = {}
+
+    if "latitude" in ds.dims and "lat" not in ds.dims:
+        rename["latitude"] = "lat"
+
+    if "longitude" in ds.dims and "lon" not in ds.dims:
+        rename["longitude"] = "lon"
+
+    if rename:
+        ds = ds.rename(rename)
+
+    if "time" in ds.coords:
+        ds["time"] = norm_time(ds["time"])
+
+    ds["lon"] = ((ds["lon"] + 180) % 360) - 180
+
+    ds["lat"].attrs = {
+        "standard_name": "latitude",
+        "long_name": "latitude",
+        "units": "degrees_north",
+        "axis": "Y",
+    }
+    ds["lon"].attrs = {
+        "standard_name": "longitude",
+        "long_name": "longitude",
+        "units": "degrees_east",
+        "axis": "X",
+    }
+
+    for name in ("precip", "precip_error"):
+        if name not in ds.data_vars:
+            continue
+
+        attrs = ds[name].attrs.copy()
+
+        ds[name] = ds[name] / 24.0
+
+        if name == "precip":
+            ds[name] = ds[name].clip(
+                min=0,
+                keep_attrs=True,
+            )
+
+        attrs["units"] = "mm/hr"
+        ds[name].attrs = attrs
+
+    dims = [dim for dim in ("time", "lat", "lon") if dim in ds.dims]
+
+    ds = ds.sortby(dims)
+
+    return ds.transpose(*dims, ...)

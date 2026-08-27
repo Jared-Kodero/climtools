@@ -17,8 +17,7 @@ if TYPE_CHECKING:
         sel_transect,
         to_lon180,
     )
-    from . import stats
-    from .preprocess import era5
+    from . import preprocess, stats
     from .progress import DaskProgressBar, SerialProgressBar
     from .utils import n_cpus
 
@@ -31,10 +30,10 @@ __all__ = [
     "cmaps",
     "dataset_is_empty",
     "empty_dataset",
-    "era5",
     "mask",
     "n_cpus",
     "plot",
+    "preprocess",
     "remap",
     "sel_transect",
     "stats",
@@ -56,7 +55,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "mask": (".xr_utils", "mask"),
     "n_cpus": (".tools", "n_cpus"),
     "plot": ("..viz.plotting", None),
-    "preprocess_era5": (".preprocess_data", "preprocess_era5"),
+    "preprocess": (".preprocess", None),
     "remap": (".xr_utils", "remap"),
     "sel_transect": (".xr_utils", "sel_transect"),
     "to_lon180": (".xr_utils", "to_lon180"),
