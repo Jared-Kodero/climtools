@@ -2,9 +2,6 @@
 
 This module re-exports the standard operators from :mod:`operator` and adds
 general mathematical transformations commonly used with scientific data.
-
-Import this module instead of :mod:`operator` when the extended operator
-interface is required.
 """
 
 from operator import *

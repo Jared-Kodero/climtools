@@ -88,7 +88,7 @@ packages = [
     "climtools.accessors",
     "climtools.cdo",
     "climtools.core",
-    "climtools.lib_netcdf",
+    "climtools.netcdf",
     "climtools.viz",
 ]
 package-dir = { climtools = "." }

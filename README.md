@@ -31,7 +31,7 @@ and MPI-collective parallel NetCDF-4 output.
 | Namespace | Purpose | Source |
 | --- | --- | --- |
 | `climtools.plot` | Cartopy map plotting. Entry point `plot.geo`. | [`viz/plotting.py`](viz/plotting.py) |
-| `climtools.xgeo` | Geospatial operations and NetCDF output: regridding, masking, transects, local solar time, `to_netcdf`. | [`core/xgeo.py`](core/xgeo.py), [`lib_netcdf/`](lib_netcdf/) |
+| `climtools.xgeo` | Geospatial operations and NetCDF output: regridding, masking, transects, local solar time, `to_netcdf`. | [`core/xgeo.py`](core/xgeo.py), [`netcdf/`](netcdf/) |
 | `climtools.calc` | Trends, correlations, difference-of-means testing. | [`core/calc_stats.py`](core/calc_stats.py) |
 | `climtools.cmaps` | Colormaps: local IPCC tables, matplotlib, cmocean. | [`viz/cmaps.py`](viz/cmaps.py) |
 | `climtools.cdo` | Thin xarray-aware wrapper over the CDO command-line tool. | [`cdo/pycdo.py`](cdo/pycdo.py) |
@@ -669,7 +669,7 @@ full set of options.
 
 Internally, `to_netcdf(..., parallel=True)` posts an `mpi.comm.Barrier()`
 immediately after the collective `nc.close()` -- inside
-[`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)'s `write_partitioned`/
+[`netcdf/parallel.py`](netcdf/parallel.py)'s `write_partitioned`/
 `write_distributed`, right next to the `close()` it protects -- so that by
 the time the call returns on any rank, the file is fully written and closed
 everywhere, and safe to reopen through a different communicator or a
@@ -686,7 +686,7 @@ synchronizing flush; calling `sync()` first was both redundant and, on the
 stricter parallel-consistency checking newer HDF5 versions do, actively
 harmful. Removed.
 
-See [`core/xgeo.py`](core/xgeo.py) and [`lib_netcdf/parallel.py`](lib_netcdf/parallel.py)
+See [`core/xgeo.py`](core/xgeo.py) and [`netcdf/parallel.py`](netcdf/parallel.py)
 for the full `to_netcdf` signature (chunking, compression, unlimited
 dimensions, MPI-IO hints).
 

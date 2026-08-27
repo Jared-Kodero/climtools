@@ -12,7 +12,7 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import numpy as np
-from mpi4py import MPI as _MPI
+from mpi4py import MPI
 from mpi4py.util import dtlib as _dtlib
 
 import xarray as xr
@@ -40,7 +40,7 @@ from .meta import (
     set_save_chunks,
     strip_mpi_meta,
 )
-from .ops import ArithmeticMixin
+from .operator import ArithmeticMixin
 
 # Re-export communicator-free chunk and metadata helpers for compatibility.
 # Their implementations live in xr_chunks.py and xr_meta.py.
@@ -61,19 +61,19 @@ __all__ = [
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..core.lib_mpi import MPIRuntime
+    from ..mpi.runtime import MPIRuntime
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (
-    (_MPI.SUM, "SUM"),
-    (_MPI.PROD, "PROD"),
-    (_MPI.MIN, "MIN"),
-    (_MPI.MAX, "MAX"),
-    (_MPI.LAND, "LAND"),
-    (_MPI.LOR, "LOR"),
+    (MPI.SUM, "SUM"),
+    (MPI.PROD, "PROD"),
+    (MPI.MIN, "MIN"),
+    (MPI.MAX, "MAX"),
+    (MPI.LAND, "LAND"),
+    (MPI.LOR, "LOR"),
 )
 
 
-def _op_name(op: _MPI.Op) -> str:
+def _op_name(op: MPI.Op) -> str:
     """Return a rank-stable label for an MPI reduction operation."""
     for candidate, name in _OP_LIST:
         if op == candidate:
@@ -1354,7 +1354,7 @@ class XarrayMPI(ArithmeticMixin):
     def _comm_reduce(
         self,
         value: xr.DataArray | None,
-        op: _MPI.Op,
+        op: MPI.Op,
         *,
         expect_dtype: np.dtype[Any] | None = None,
         error: BaseException | None = None,
@@ -1398,9 +1398,7 @@ class XarrayMPI(ArithmeticMixin):
         recv = self._exchange(send, op)
         return value.copy(data=recv)
 
-    def _exchange(
-        self, send: np.ndarray[Any, Any], op: _MPI.Op
-    ) -> np.ndarray[Any, Any]:
+    def _exchange(self, send: np.ndarray[Any, Any], op: MPI.Op) -> np.ndarray[Any, Any]:
         """All-reduce a validated contiguous NumPy buffer."""
         recv = np.empty(send.shape, dtype=send.dtype)
         self._runtime.comm.Allreduce(send, recv, op=op)
@@ -1416,7 +1414,7 @@ class XarrayMPI(ArithmeticMixin):
             error = exc
         return self._comm_reduce(
             count,
-            _MPI.SUM,
+            MPI.SUM,
             expect_dtype=_partial_dtype(value.dtype.str, "count", None),
             error=error,
             phase="MPI xarray count reduction",
@@ -1495,7 +1493,7 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.DataArray,
         partial: xr.DataArray,
         dims: tuple[Hashable, ...],
-        op: _MPI.Op,
+        op: MPI.Op,
         *,
         skipna: bool | None,
         min_count: int | None,
@@ -1537,7 +1535,7 @@ class XarrayMPI(ArithmeticMixin):
         """Combine rank-local sums and counts into a global mean."""
         global_sum = self._comm_reduce(
             partial_sum,
-            _MPI.SUM,
+            MPI.SUM,
             expect_dtype=_partial_dtype(value.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray mean reduction",
@@ -1625,13 +1623,13 @@ class XarrayMPI(ArithmeticMixin):
         if kind == "b":
             return self._comm_reduce(
                 partial,
-                _MPI.LAND if minimum else _MPI.LOR,
+                MPI.LAND if minimum else MPI.LOR,
                 expect_dtype=expect_dtype,
                 error=error,
                 phase=f"MPI xarray {operation} reduction",
             )
 
-        op = _MPI.MIN if minimum else _MPI.MAX
+        op = MPI.MIN if minimum else MPI.MAX
         if kind != "f":
             return self._comm_reduce(
                 partial,
@@ -1747,7 +1745,7 @@ class XarrayMPI(ArithmeticMixin):
         return self._sum_prod(
             value,
             dim,
-            op=_MPI.SUM,
+            op=MPI.SUM,
             product=False,
             skipna=skipna,
             min_count=min_count,
@@ -1796,7 +1794,7 @@ class XarrayMPI(ArithmeticMixin):
         return self._sum_prod(
             value,
             dim,
-            op=_MPI.PROD,
+            op=MPI.PROD,
             product=True,
             skipna=skipna,
             min_count=min_count,
@@ -1809,7 +1807,7 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.Dataset | xr.DataArray,
         dim: str | Iterable[Hashable] | EllipsisType | None,
         *,
-        op: _MPI.Op,
+        op: MPI.Op,
         product: bool,
         skipna: bool | None,
         min_count: int | None,
@@ -2179,7 +2177,7 @@ class XarrayMPI(ArithmeticMixin):
         return self._logical(
             value,
             dim,
-            op=_MPI.LOR,
+            op=MPI.LOR,
             all_values=False,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
@@ -2214,7 +2212,7 @@ class XarrayMPI(ArithmeticMixin):
         return self._logical(
             value,
             dim,
-            op=_MPI.LAND,
+            op=MPI.LAND,
             all_values=True,
             keep_attrs=keep_attrs,
             redistribute_on=redistribute_on,
@@ -2225,7 +2223,7 @@ class XarrayMPI(ArithmeticMixin):
         value: xr.Dataset | xr.DataArray,
         dim: str | Iterable[Hashable] | EllipsisType | None,
         *,
-        op: _MPI.Op,
+        op: MPI.Op,
         all_values: bool,
         keep_attrs: bool | None,
         redistribute_on: Hashable | Literal["auto"] | None,

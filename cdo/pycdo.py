@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Literal
 
 import xarray as xr
 
-from ..core.tools import n_cpus
+from ..core.utils import n_cpus
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable

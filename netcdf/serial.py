@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import netCDF4
+
 import xarray as xr
 
 from ..core.progress import SerialProgressBar

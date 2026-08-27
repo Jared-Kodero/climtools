@@ -110,7 +110,7 @@ def to_netcdf(
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
-    from ..core.lib_mpi import mpi
+    from ..mpi.runtime import mpi
 
     target_path = Path(file)
 

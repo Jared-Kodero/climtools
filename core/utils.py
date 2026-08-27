@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import fcntl
 import getpass
 import inspect
@@ -12,6 +13,8 @@ import uuid
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TextIO
+
+from mpi4py.MPI import COMM_WORLD
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,7 +29,39 @@ ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 
 
-tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
+_LAUNCH_ENV = (
+    "OMPI_COMM_WORLD_RANK",
+    "PMI_RANK",
+    "PMIX_RANK",
+    "SLURM_PROCID",
+    "MV2_COMM_WORLD_RANK",
+    "I_MPI_COMM_WORLD_RANK",
+)
+
+is_mpi = COMM_WORLD.Get_size() > 1 or builtins.any(
+    key in os.environ for key in _LAUNCH_ENV
+)
+
+if is_mpi:
+    tmp_id = uuid.uuid4().hex if COMM_WORLD.Get_rank() == 0 else None
+    tmp_id = COMM_WORLD.bcast(tmp_id, root=0)
+
+    home = Path.home()
+
+    base = Path(
+        os.environ.get("SCRATCH")
+        or os.environ.get("WORK")
+        or (home / "scratch" if (home / "scratch").exists() else None)
+        or (home / "jobtmp" if (home / "jobtmp").exists() else None)
+        or home
+    )
+    tmp = base / ".xgeo" / tmp_id
+else:
+    tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
+
+
+print(tmp)
+
 tmp.mkdir(parents=True, exist_ok=True)
 
 

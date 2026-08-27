@@ -974,7 +974,7 @@ class CalcAccessor:
         xarray.Dataset
             Dataset holding ``corr`` and ``p_value``.
         """
-        from ..core import calc_stats as calc
+        from ..core import stats as calc
 
         return calc.corr(
             self._obj,
@@ -1002,7 +1002,7 @@ class CalcAccessor:
         xarray.DataArray
             Pointwise p-values of a Welch t-test.
         """
-        from ..core import calc_stats as calc
+        from ..core import stats as calc
 
         return calc.pvalues(self._obj, other, dim=dim)
 
@@ -1035,7 +1035,7 @@ class CalcAccessor:
         xarray.Dataset
             Trend statistics, including the slope and its p-value.
         """
-        from ..core import calc_stats as calc
+        from ..core import stats as calc
 
         return calc.trends(
             self._obj,
@@ -1088,4 +1088,4 @@ class GeoDataset(GeoBase):
         xarray.Dataset
             The standardized dataset.
         """
-        return xgeo.preprocess_era5(self._obj)
+        return xgeo.era5(self._obj)

@@ -9,8 +9,9 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-import xarray as xr
 from scipy import stats
+
+import xarray as xr
 
 try:
     import pymannkendall as mk

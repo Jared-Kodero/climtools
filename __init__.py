@@ -44,24 +44,21 @@ from typing import TYPE_CHECKING, Any
 import dask.diagnostics
 
 from .core.progress import DaskProgressBar
-from .core.tools import apply_widget_css, n_cpus
+from .core.utils import apply_widget_css, n_cpus
 from .xarray import accessors as _xarray_accessors  # noqa: F401
 
 if TYPE_CHECKING:
     from .cdo import pycdo as cdo
-    from .core import _operator as operator
-    from .core import calc_stats as calc
-    from .core import xgeo
-    from .core.lib_mpi import mpi
+    from .core import operator, stats, xgeo
     from .core.progress import SerialProgressBar
-    from .core.tools import (
+    from .core.utils import (
         LockedLogger,
         LockFile,
         RedirectStreams,
         locked_print,
     )
-    from .viz import cmaps
-    from .viz import plotting as plot
+    from .mpi.runtime import mpi
+    from .viz import cmaps, plotting
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("always", module=r"climtools\..*")
@@ -72,31 +69,31 @@ __all__ = [
     "LockedLogger",
     "RedirectStreams",
     "SerialProgressBar",
-    "calc",
     "cdo",
     "cmaps",
     "locked_print",
     "mpi",
     "n_cpus",
     "operator",
-    "plot",
+    "plotting",
+    "stats",
     "xgeo",
 ]
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "calc": (".core.calc_stats", None),
+    "stats": (".core.stats", None),
     "cdo": (".cdo.pycdo", None),
     "cmaps": (".viz.cmaps", None),
-    "operator": (".core._operator", None),
-    "plot": (".viz.plotting", None),
+    "operator": (".core.operator", None),
+    "plotting": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
-    "mpi": (".core.lib_mpi", "mpi"),
-    "LockedLogger": (".core.tools", "LockedLogger"),
-    "LockFile": (".core.tools", "LockFile"),
-    "RedirectStreams": (".core.tools", "RedirectStreams"),
-    "SerialProgressBar": (".core.tools", "SerialProgressBar"),
-    "locked_print": (".core.tools", "locked_print"),
+    "mpi": (".mpi.runtime ", "mpi"),
+    "LockedLogger": (".core.utils", "LockedLogger"),
+    "LockFile": (".core.utils", "LockFile"),
+    "RedirectStreams": (".core.utils", "RedirectStreams"),
+    "SerialProgressBar": (".core.progress", "SerialProgressBar"),
+    "locked_print": (".core.utils", "locked_print"),
 }
 
 

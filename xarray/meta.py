@@ -13,7 +13,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..core.lib_mpi import MPIRuntime
+    from ..mpi.runtime import MPIRuntime
 
 MPI_META = "mpi_meta"
 # The subset of a partition's metadata that decides whether two partitions

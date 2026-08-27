@@ -2,8 +2,9 @@ import operator as op
 from collections.abc import Callable
 
 import pandas as pd
-import xarray as xr
 from xarray.coding.times import encode_cf_datetime
+
+import xarray as xr
 
 attributes = {
     "t2m": {"units": "degC", "factor": 273.15, "operand": op.sub},
@@ -60,7 +61,7 @@ def get_valid_time(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def preprocess_era5(ds: xr.Dataset) -> xr.Dataset:
+def era5(ds: xr.Dataset) -> xr.Dataset:
     """Preprocess an ERA5 dataset to standardize variable names, dimensions, and attributes."""
 
     if not isinstance(ds, xr.Dataset):

@@ -1,43 +1,25 @@
 """Small user-facing MPI namespace built on :mod:`mpi4py`."""
 
-# lib_mpi.py
+# mpi.py
 from __future__ import annotations
 
 import builtins
-import datetime
-import faulthandler
 import functools
 import os
-import sys
-import threading
-import time
-from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Sequence
 from numbers import Integral
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import ParamSpec, TypeVar, cast
 
-from mpi4py import MPI as _MPI
+from mpi4py import MPI
 from mpi4py.MPI import Intracomm
 
+from ..core.utils import _LAUNCH_ENV, LockFile, tmp
 from ..xarray.mpi import XarrayMPI
-from .tools import LockFile, tmp
+from .diagnostics import MPIDiagnostics, MPIError
 
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
-
-_LAUNCH_ENV = (
-    "OMPI_COMM_WORLD_RANK",
-    "PMI_RANK",
-    "PMIX_RANK",
-    "SLURM_PROCID",
-    "MV2_COMM_WORLD_RANK",
-    "I_MPI_COMM_WORLD_RANK",
-)
-
-
-class MPIError(Exception):
-    """MPI runtime or synchronized distributed-execution error."""
 
 
 class ToChildrenRuntime:
@@ -258,7 +240,7 @@ class FromChildrenRuntime:
         return [item[1] for item in results]
 
 
-class MPIRuntime:
+class MPIRuntime(MPIDiagnostics):
     """User-facing MPI runtime namespace.
 
     Owns one intracommunicator, exposed directly through :attr:`comm`.
@@ -271,7 +253,6 @@ class MPIRuntime:
         Communicator used by the runtime. None uses ``MPI.COMM_WORLD``.
     """
 
-    MPI = _MPI
     MPIError = MPIError
 
     # -------------------------------------------------------------------------
@@ -279,7 +260,7 @@ class MPIRuntime:
     # -------------------------------------------------------------------------
 
     def __init__(self, comm: Intracomm | None = None) -> None:
-        self.comm: Intracomm = comm if comm is not None else _MPI.COMM_WORLD
+        self.comm: Intracomm = comm if comm is not None else MPI.COMM_WORLD
         self._xarray: XarrayMPI = XarrayMPI(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIRuntime | None = None
@@ -288,7 +269,7 @@ class MPIRuntime:
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
         self._install_abort_hook()
-        self._warn_if_parallel_netcdf_missing()
+        self.missing_pnetcdf()
 
     @property
     def xarray(self) -> XarrayMPI:
@@ -325,7 +306,7 @@ class MPIRuntime:
         return self.alive(self.comm)
 
     @staticmethod
-    def alive(comm: _MPI.Comm) -> bool:
+    def alive(comm: MPI.Comm) -> bool:
         """Return whether a process appears to have been launched by MPI.
 
         Parameters
@@ -344,7 +325,7 @@ class MPIRuntime:
         ):
             return True
         try:
-            return _MPI.Comm.Get_parent() != _MPI.COMM_NULL
+            return MPI.Comm.Get_parent() != MPI.COMM_NULL
         except (AttributeError, RuntimeError):
             return False
 
@@ -453,9 +434,9 @@ class MPIRuntime:
 
     def receive(
         self,
-        source: int = _MPI.ANY_SOURCE,
+        source: int = MPI.ANY_SOURCE,
         *,
-        tag: int = _MPI.ANY_TAG,
+        tag: int = MPI.ANY_TAG,
     ) -> T:
         """Receive a Python object from one rank.
 
@@ -523,266 +504,6 @@ class MPIRuntime:
             Rank-ordered values on ``root``; None on all other ranks.
         """
         return cast("list[T] | None", self.comm.gather(value, root=root))
-
-    # -------------------------------------------------------------------------
-    # Logging and diagnostics
-    # -------------------------------------------------------------------------
-
-    def log(
-        self,
-        message: str,
-        *args: Any,
-        root: int = 0,
-        timestamp: bool = False,
-        prefix: bool = True,
-        logger: Callable[..., None] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Emit a message from a specific MPI rank (default: :func:`print`).
-
-        Parameters
-        ----------
-        message : str
-            Message or format string.
-        *args : Any
-            Passed to ``logger``, or used for %-formatting when no logger.
-        root : int, optional
-            Rank allowed to log. -1 logs on every rank. Default 0.
-        timestamp : bool, optional
-            Prepend a timestamp (print fallback only). Default False.
-        prefix : bool, optional
-            Prepend an ``[MPI RANK n]`` tag. Default True.
-        logger : callable, optional
-            Callable used instead of :func:`print`. Default None.
-        **kwargs : Any
-            Forwarded to ``logger`` (or :func:`print`).
-        """
-        if root != -1 and not self.is_root(root):
-            return
-
-        current_rank = root if root != -1 else self.comm.rank
-
-        # Space-pad the rank using the calculated length
-        mpi_str = f"[MPI RANK {current_rank:{len(str(self.comm.size))}d}]"
-
-        if logger is None:
-            # Apply string formatting if args exist
-            if args:
-                message = message % args
-
-            # Build the prefix dynamically based on boolean flags for print
-            msg_prefix = ""
-            if timestamp:
-                time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                msg_prefix += f"{time_str} - "
-
-            if prefix:
-                msg_prefix += f"{mpi_str} "
-
-            # Print the final assembled string. Flush by default: rank
-            # output under a batch launcher is redirected to a file and is
-            # therefore block-buffered, so an un-flushed log leaves the last
-            # message before a hang sitting in the buffer and makes the
-            # deadlock appear to be somewhere it is not.
-            kwargs.setdefault("flush", True)
-
-            with self._mpi_lock:
-                print(f"{msg_prefix}{message}", **kwargs)
-
-        else:
-            # Respect the prefix flag for custom loggers
-            if prefix:
-                message = f"{mpi_str} {message}"
-            with self._mpi_lock:
-                logger(message, *args, **kwargs)
-
-    @contextmanager
-    def watchdog(
-        self, phase: str = "", timeout: float = 3600.0, *, abort: bool = True
-    ) -> Generator:
-        """Dump every rank's stack if the enclosed block stalls.
-
-        Arms a daemon thread per rank so a rank blocked inside a collective
-        (which never reaches a barrier) still gets its traceback printed,
-        naming the line it is stuck on. Every rank dumps independently, so
-        the log shows both the ranks that arrived and the ones that did not.
-
-        Parameters
-        ----------
-        phase : str, optional
-            Label reported with the traceback dump.
-        timeout : float, optional
-            Seconds of no progress before dumping. <= 0 disables the
-            watchdog. Default 3600.
-        abort : bool, optional
-            Call ``MPI_Abort`` after dumping. Default True.
-
-        Yields
-        ------
-        None
-        """
-        if timeout <= 0.0:
-            yield
-            return
-
-        finished = threading.Event()
-        rank = self.comm.rank
-        label = phase or "unnamed phase"
-
-        def _fire() -> None:
-            if finished.wait(timeout):
-                return
-            sys.stderr.write(
-                f"\n[MPI RANK {rank}] WATCHDOG: no progress for {timeout:g} s "
-                + f"at {label}. Stack for this rank follows.\n"
-            )
-            sys.stderr.flush()
-            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-            sys.stderr.flush()
-            # Give every rank a chance to print its own stack before the
-            # first one tears the job down. The delay must not depend on
-            # this rank's own number, or the rank actually stuck (often
-            # rank 0) can end up with the shortest delay and abort before
-            # higher-ranked ranks have flushed their dumps.
-            if abort:
-                time.sleep(5.0 + 0.25 * (self.comm.size - 1))
-                sys.stderr.write(
-                    f"[MPI RANK {rank}] WATCHDOG: aborting MPI_COMM_WORLD.\n"
-                )
-                sys.stderr.flush()
-                self.comm.Abort(1)
-
-        thread = threading.Thread(
-            target=_fire, name=f"climtools-mpi-watchdog-{rank}", daemon=True
-        )
-        thread.start()
-        try:
-            yield
-        finally:
-            finished.set()
-
-    # -------------------------------------------------------------------------
-    # Collective error handling
-    # -------------------------------------------------------------------------
-
-    def raise_if_error(
-        self, error: BaseException | None, phase: str, signature: Any = None
-    ) -> None:
-        """Raise a synchronized error on all ranks if any rank failed.
-
-        Parameters
-        ----------
-        error : BaseException or None
-            This rank's pending error, if any.
-        phase : str
-            Label reported in the synchronized error message.
-        signature : Any, optional
-            Description of the collective this rank is about to post (op,
-            mode, root, dtype, shape). When given, it is compared across
-            ranks in the same all-gather that synchronizes errors, so a
-            divergent collective sequence raises immediately instead of
-            hanging in the next collective.
-        """
-        gathered = self.comm.allgather((error is not None, signature))
-        failed = [state for state, _ in gathered]
-
-        if signature is not None and not builtins.any(failed):
-            signatures = [item for _, item in gathered]
-            if builtins.any(item != signatures[0] for item in signatures):
-                disagreeing = [
-                    index
-                    for index, item in enumerate(signatures)
-                    if item != signatures[0]
-                ]
-                raise MPIError(
-                    f"MPI ranks posted different collectives during {phase}. "
-                    + f"Ranks {disagreeing} disagree with rank 0 "
-                    + f"({signatures[0]!r} on rank 0, "
-                    + f"{signatures[disagreeing[0]]!r} on rank "
-                    + f"{disagreeing[0]})."
-                )
-
-        if not builtins.any(failed):
-            return
-
-        failed_ranks = [index for index, state in enumerate(failed) if state]
-        first = failed_ranks[0]
-        if error is not None and len(failed_ranks) == self.comm.size:
-            raise error
-
-        detail = None
-        if self.comm.rank == first and error is not None:
-            detail = (type(error).__name__, str(error))
-        detail = self.comm.bcast(detail, root=first)
-        if detail is None:
-            raise MPIError(f"Rank {first} failed during {phase}.")
-        name, message = detail
-        raise MPIError(f"Rank {first} failed during {phase} with {name}: {message}")
-
-    def _install_abort_hook(self) -> bool:
-        """Install a fallback ``sys.excepthook`` that calls ``MPI_Abort``.
-
-        Prevents remaining ranks from deadlocking when a script starts with
-        plain ``python`` instead of ``python -m mpi4py``.
-
-        Returns
-        -------
-        bool
-            True if this call installed the hook.
-        """
-        # Already running under `python -m mpi4py`, which installs its own hook.
-        if getattr(sys.excepthook, "__module__", "") == "mpi4py.run":
-            return False
-        if getattr(sys.excepthook, "_climtools_mpi_abort", False):
-            return False
-        if not self.alive(_MPI.COMM_WORLD):
-            return False
-
-        previous = sys.excepthook
-
-        def _abort_excepthook(
-            exc_type: type[BaseException], exc_value: BaseException, traceback: Any
-        ) -> None:
-            try:
-                previous(exc_type, exc_value, traceback)
-                sys.stderr.write(
-                    f"[MPI RANK {_MPI.COMM_WORLD.Get_rank()}] unhandled "
-                    + f"{exc_type.__name__}; aborting MPI_COMM_WORLD so the "
-                    + "remaining ranks do not deadlock in the next collective.\n"
-                )
-                sys.stderr.flush()
-            finally:
-                _MPI.COMM_WORLD.Abort(1)
-
-        _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
-        sys.excepthook = _abort_excepthook
-        return True
-
-    def _warn_if_parallel_netcdf_missing(self) -> None:
-        """Print a one-time root-only hint if parallel NetCDF-4 is missing.
-
-        Never raises; a build without the parallel writer still works for
-        everything else in climtools.
-        """
-        comm = self.comm
-        if comm.Get_size() <= 1 or comm.Get_rank() != 0:
-            return
-        try:
-            import netCDF4
-
-            if netCDF4.__has_parallel4_support__:
-                return
-        except Exception:
-            return
-        sys.stderr.write(
-            "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
-            + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
-            + f"this {comm.Get_size()}-rank run. mpi.xarray and the rest of the "
-            + "MPI runtime are unaffected. To build the parallel stack, "
-            + "run `env/setup_env.sh` from the climtools repository (see the "
-            + "README's Installation section); nothing else needs it.\n"
-        )
-        sys.stderr.flush()
 
     # -------------------------------------------------------------------------
     # Decorator interface

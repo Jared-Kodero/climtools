@@ -24,7 +24,7 @@ from matplotlib.ticker import MaxNLocator
 
 import xarray as xr
 
-from ..core.tools import get_fsig
+from ..core.utils import get_fsig
 from ..xarray.utils import (
     add_cyclic_point,
     get_spatial_dims,

@@ -13,7 +13,7 @@ from cf_xarray import *
 
 import xarray as xr
 
-from ..core.tools import n_cpus, tmp
+from ..core.utils import n_cpus, tmp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

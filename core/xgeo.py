@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any
 
-    from ..lib_netcdf.netcdf import append, dataset_is_empty, empty_dataset, to_netcdf
+    from ..netcdf.io import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..viz import cmaps
     from ..viz import plotting as plot
     from ..xarray.utils import (
@@ -17,10 +17,10 @@ if TYPE_CHECKING:
         sel_transect,
         to_lon180,
     )
-    from . import calc_stats as calc
-    from .preprocess_data import preprocess_era5
+    from . import stats
+    from .preprocess import era5
     from .progress import DaskProgressBar, SerialProgressBar
-    from .tools import n_cpus
+    from .utils import n_cpus
 
 __all__ = [
     "DaskProgressBar",
@@ -28,16 +28,16 @@ __all__ = [
     "SetupDask",
     "add_local_solar_time",
     "append",
-    "calc",
     "cmaps",
     "dataset_is_empty",
     "empty_dataset",
+    "era5",
     "mask",
     "n_cpus",
     "plot",
-    "preprocess_era5",
     "remap",
     "sel_transect",
+    "stats",
     "to_lon180",
     "to_netcdf",
 ]
@@ -48,9 +48,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": (".xr_utils", "SetupDask"),
     "add_local_solar_time": (".xr_utils", "add_local_solar_time"),
-    "append": ("..lib_netcdf.netcdf", "append"),
-    "empty_dataset": ("..lib_netcdf.netcdf", "empty_dataset"),
-    "dataset_is_empty": ("..lib_netcdf.netcdf", "dataset_is_empty"),
+    "append": ("..netcdf.netcdf", "append"),
+    "empty_dataset": ("..netcdf.netcdf", "empty_dataset"),
+    "dataset_is_empty": ("..netcdf.netcdf", "dataset_is_empty"),
     "calc": (".calc_stats", None),
     "cmaps": ("..viz.cmaps", None),
     "mask": (".xr_utils", "mask"),
@@ -60,7 +60,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "remap": (".xr_utils", "remap"),
     "sel_transect": (".xr_utils", "sel_transect"),
     "to_lon180": (".xr_utils", "to_lon180"),
-    "to_netcdf": ("..lib_netcdf.netcdf", "to_netcdf"),
+    "to_netcdf": ("..netcdf.netcdf", "to_netcdf"),
 }
 
 

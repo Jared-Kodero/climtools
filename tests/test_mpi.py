@@ -36,10 +36,11 @@ from typing import Any
 
 import dask.array as dask_array
 import numpy as np
-import xarray as xr
 from climtools import mpi, xgeo
 from climtools.core import xr_meta
 from climtools.core.xr_mpi import get_balanced_bounds
+
+import xarray as xr
 
 # Raised from 100 to make the local per-rank compute in every reduction
 # large relative to the fixed per-call MPI overhead (the collective-agreement
