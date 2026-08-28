@@ -14,6 +14,14 @@ implementation is split by concern across sibling modules in this package:
   ``last``/``any``/``all``.
 - :mod:`.statistics`  ``std``/``var``.
 - :mod:`.groupby`     ``groupby_reduce``/``resample_reduce``.
+- :mod:`.operator`    ``align``/``apply``/``evaluate`` -- rank-local
+  arithmetic restricted to partition-preserving operations, plus an
+  ``ast``-based expression evaluator built on top of ``apply``; and the
+  dedicated implementations for the operations that legitimately need to
+  reduce or communicate across the partition dimension:
+  ``matmul`` (MPI-reduced distributed matrix multiplication) and
+  ``rolling_reduce``/``halo_exchange`` (windowed reductions via
+  point-to-point boundary exchange with the adjacent ranks).
 
 Chunk and metadata helpers below are communicator-free and re-exported here
 only for backward compatibility; their implementations live in
@@ -73,8 +81,13 @@ class MPIXarray(IO, Indexing, Reduction, Statistics, Groupby, Arithmetic):
       ``min``/``max``/``first``/``last``/``any``/``all``.
     - :class:`~.statistics.Statistics` -- ``std``/``var``.
     - :class:`~.groupby.Groupby` -- ``groupby_reduce``/``resample_reduce``.
-    - :class:`~.ops.Arithmetic` -- element-wise arithmetic that aligns
-      distributed operands.
+    - :class:`~.operator.Arithmetic` -- ``align``/``apply``/``evaluate``:
+      rank-local arithmetic restricted to partition-preserving, rank-local
+      operations, validated after every call rather than by inspecting the
+      callable beforehand; plus ``matmul`` and ``rolling_reduce``/
+      ``halo_exchange``, the dedicated implementations for contraction and
+      windowed operations that legitimately need an MPI reduction or a
+      neighboring rank's boundary values.
 
     ``Reduction``, ``Statistics``, and ``Groupby`` all build on
     :class:`~.engine.ReductionPlanning` for collective planning;

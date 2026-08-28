@@ -398,13 +398,30 @@ dimension is included -- explicitly, in a dimension tuple, or implicitly by
 `mpi.xarray.apply(func, *args, **kwargs)` calls `func(*args, **kwargs)`
 rank-locally with no MPI communication, after checking that every
 distributed xarray argument shares one partition and every replicated
-argument that carries the distributed dimension matches its length: either
-no argument is distributed, every distributed argument is distributed
-identically (same dimension, same global size, same per-rank bounds), or an
-argument is distributed and the rest are replicated. Anything else raises
-`ValueError` rather than silently combining misaligned data. This is a
-`pandas.DataFrame.apply`-style interface: `func` can be any callable, not
-only a binary operator.
+argument that carries the distributed dimension matches both its length
+*and* its coordinate labels (equal length alone does not imply equal
+coordinates): either no argument is distributed, every distributed argument
+is distributed identically (same dimension, same global size, same per-rank
+bounds), or an argument is distributed and the rest are replicated.
+Anything else raises `ValueError` rather than silently combining misaligned
+data.
+
+This is a `pandas.DataFrame.apply`-style interface, but `func` must be any
+**partition-preserving, rank-local** callable, not an arbitrary one: for the
+distributed dimension `d`, `output[d]` on rank `r` must represent exactly
+the same global `[start_r:stop_r)` indices as the input. `func` must not
+reduce, resize, reorder, rename, repartition, or require values owned by
+another rank along `d` -- use the corresponding `mpi.xarray` reduction,
+indexing, or groupby method for a dimension change, or
+`mpi.xarray.rolling_reduce`/`halo_exchange` (below) for a windowed
+operation that genuinely needs a neighboring rank's boundary values.
+Since arbitrary Python
+callables cannot be statically inspected, `apply` checks this after calling
+`func`: the distributed dimension must still be present, its local length
+unchanged, and its coordinate labels unchanged, before the original MPI
+metadata is reattached to the result. A callable that violates any of these
+raises `ValueError` instead of silently producing an object tagged with
+metadata that no longer describes it.
 
 ```python
 anomaly = mpi.xarray.apply(operator.sub, t2m_distributed, climatology_distributed)
@@ -422,16 +439,82 @@ anomaly = mpi.xarray.apply(operator.sub, t2m, climatology)
 ```
 
 `mpi.xarray.evaluate(expression, **variables)` parses `expression` with the
-standard-library `ast` module and evaluates it through `apply`, so ordinary
-operator precedence applies:
+standard-library `ast` module and evaluates every arithmetic, comparison,
+bitwise, and unary operator through `apply` (so the same partition-preserving
+checks and `_agree` collective apply uniformly), and ordinary operator
+precedence applies:
 
 ```python
 result = mpi.xarray.evaluate("(a + b) * c - d / e", a=ds1, b=ds2, c=ds3, d=ds4, e=ds5)
 ```
 
+`and`/`or` are the one operator pair `evaluate` restricts rather than
+computes: they use Python truth-value checks, which are not defined for a
+multi-element `xarray.DataArray`/`Dataset`. `evaluate` raises `ValueError`
+if either operand is an xarray object and points to the elementwise `&`/`|`
+forms instead, e.g. `"(a > 0) & (b < 1)"`.
+
+`@` (matrix multiplication), by contrast, is not restricted -- it is
+computed correctly. `xarray.DataArray.__matmul__` contracts over every
+dimension common to both operands
+(`C_ij = sum_k A_ik * B_kj`); when the distributed dimension is one of
+those, `evaluate("a @ b", ...)` (equivalently `mpi.xarray.matmul(a, b)`)
+has each rank compute its local partial contraction over its own owned
+slice, then combines the partials with one `MPI_Allreduce(MPI.SUM)`:
+
+```text
+C_ij = sum_k A_ik B_kj = sum_r ( sum_{k in rank r} A_ik B_kj ) = sum_r C_ij^(r)
+```
+
+The result is fully replicated (no `mpi_meta`) once the distributed
+dimension has been contracted away. When the distributed dimension is
+*not* one of the contracted dimensions, the operation never touches
+another rank's data and is routed through the same partition-preserving
+path as any other `apply` call, keeping its partition metadata as usual.
+
+```python
+c = mpi.xarray.evaluate("a @ b", a=a_distributed, b=b_distributed)  # == mpi.xarray.matmul(a, b)
+```
+
+`apply` itself is MPI-aware for this the same way `evaluate` is: it
+recognizes `operator.matmul`/`numpy.matmul` by identity and redirects a
+plain two-argument call to `matmul`, so `mpi.xarray.apply(operator.matmul, a, b)`
+gives the same correct, MPI-reduced result as the two calls above, instead
+of running an ordinary rank-local `matmul` that would either silently drop
+MPI-owned data or fail the post-call partition check whenever the
+distributed dimension happened to be one of the contracted dimensions.
+
+### Windowed reductions across the partition boundary
+
+`mpi.xarray.rolling_reduce(value, dim, window, reduce="mean", *, center=True, min_periods=None)`
+is the dedicated implementation for windowed/rolling reductions along the
+active partition dimension -- the case `apply`'s docstring warns cannot be
+done inside a callable, because a window spanning a rank boundary needs
+values owned by a neighboring rank
+(`x.rolling(time=5, center=True).mean()` when `time` is distributed is
+exactly the unsafe pattern this replaces). It fetches the missing boundary
+values with `mpi.xarray.halo_exchange` (point-to-point `Isend`/`Irecv`
+with the immediately adjacent ranks only, no collective), rolls over the
+padded local array, then trims the halo back off so the result is
+partition-preserving:
+
+```python
+smoothed = mpi.xarray.rolling_reduce(t2m_distributed, "time", window=5, reduce="mean")
+```
+
+`halo_exchange(value, dim=None, *, before, after)` is the lower-level
+primitive this builds on, for other operations that need `before`/`after`
+neighbor-owned elements padded onto the local partition; a rank can only
+forward data it owns, so it raises if the requested halo is wider than
+this rank's own local partition, and at a true global edge that side is
+padded with 0 elements rather than an invented value (a windowed reduction
+built on the result then naturally reports "undefined" there via
+`min_periods`, matching plain `xarray.DataArray.rolling`'s own boundary
+behavior).
+
 See [`xarray/mpi.py`](xarray/mpi.py) for the full `apply`/`align`/
-`evaluate` API, including the exact no-data-movement cases `align` resolves
-locally.
+`evaluate`/`matmul`/`rolling_reduce`/`halo_exchange` API, including the
+exact no-data-movement cases `align` resolves locally.
 
 ### Parallel NetCDF-4 output
 
