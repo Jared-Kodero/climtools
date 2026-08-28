@@ -1,6 +1,6 @@
 """Distribution and I/O for MPI-backed xarray objects.
 
-Opening, distributing, redistributing, and creating datasets/data arrays
+Opening, distributing, repartitioning, and creating datasets/data arrays
 across ranks: everything that establishes or changes ``mpi_meta`` without
 performing a numerical reduction.
 """
@@ -228,7 +228,7 @@ class IO:
         """Distribute a root-owned xarray object across MPI ranks.
 
         The root slices the object along ``dim`` and sends each rank only its local
-        piece. Use :meth:`redistribute` when the full object already exists on every
+        piece. Use :meth:`repartition` when the full object already exists on every
         rank.
 
         Parameters
@@ -283,7 +283,7 @@ class IO:
                 if not stripped.dims:
                     # Nothing to partition: send the (necessarily small)
                     # whole object to every rank as replicated data,
-                    # mirroring redistribute's handling of the same case.
+                    # mirroring repartition's handling of the same case.
                     replicated_value = stripped
                 else:
                     automatic = dim == "auto"
@@ -605,7 +605,7 @@ class IO:
             )
         return ds
 
-    def redistribute(
+    def repartition(
         self,
         value: xr.Dataset | xr.DataArray,
         dim: Hashable | Literal["auto"] = "auto",
@@ -638,7 +638,7 @@ class IO:
             If ``value`` is already distributed or ``dim`` is invalid."""
         if get_mpi_meta(value) is not None:
             raise ValueError(
-                "Cannot redistribute an already distributed object. "
+                "Cannot repartition an already distributed object. "
                 + "Reduce or gather its distributed dimension first."
             )
 
@@ -651,7 +651,7 @@ class IO:
             )
 
         if dim not in value.dims:
-            raise ValueError(f"Redistribution dimension {dim!r} does not exist.")
+            raise ValueError(f"Repartition dimension {dim!r} does not exist.")
 
         info = dict(chunk_info or {})
         length = int(value.sizes[dim])
@@ -687,7 +687,7 @@ class IO:
                 self._runtime,
                 output,
                 dim,
-                origin="mpi.xarray.redistribute",
+                origin="mpi.xarray.repartition",
                 global_size=length,
                 start=start,
                 stop=stop,

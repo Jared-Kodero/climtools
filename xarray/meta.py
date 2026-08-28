@@ -18,7 +18,7 @@ MPI_META = "mpi_meta"
 # The subset of a partition's metadata that decides whether two partitions
 # describe the same rank-local ownership. chunk_info and save_chunks are
 # deliberately excluded: they record how the split/write was computed for
-# the benefit of a later redistribute(..., chunk_info=...) or a NetCDF
+# the benefit of a later repartition(..., chunk_info=...) or a NetCDF
 # write, not the ownership itself, so two partitions with different (or
 # absent) chunk_info/save_chunks but identical dim/global_size/start/stop
 # still own the exact same data and are still equal.
@@ -202,7 +202,7 @@ def set_save_chunks(
     if meta is None:
         raise ValueError(
             "value carries no MPI distribution metadata; call set_mpi_meta "
-            + "(e.g. via mpi.xarray.redistribute/open_dataset) before "
+            + "(e.g. via mpi.xarray.repartition/open_dataset) before "
             + "attaching save_chunks."
         )
     updated = dict(meta)

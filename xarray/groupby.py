@@ -135,7 +135,7 @@ class Groupby(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Reduce ``value`` over ``dim``, grouped by ``labels``.
 
@@ -155,7 +155,7 @@ class Groupby(ReductionPlanningMixin):
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after grouping; ``"auto"`` may place the
             result on the new group dimension. Default is ``"auto"``.
 
@@ -178,7 +178,7 @@ class Groupby(ReductionPlanningMixin):
         group = xr.DataArray(np.asarray(labels), dims=dim, name=_GROUP_DIM)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
 
         if local_meta is not None:
@@ -214,7 +214,7 @@ class Groupby(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
+                partition_dim=partition_dim,
                 auto_candidates=frozenset({_GROUP_DIM}),
             )
 
@@ -238,7 +238,7 @@ class Groupby(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
             auto_candidates=frozenset({_GROUP_DIM}),
         )
 
@@ -251,7 +251,7 @@ class Groupby(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Resample a datetime dimension to ``freq``, then reduce.
 
@@ -268,5 +268,5 @@ class Groupby(ReductionPlanningMixin):
             op,
             skipna=skipna,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )

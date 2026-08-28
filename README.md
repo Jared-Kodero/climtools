@@ -40,7 +40,7 @@ and MPI-collective parallel NetCDF-4 output.
 `xarray/mpi.py` defines the `XarrayMPI` interface itself (the class
 `mpi.xarray` is an instance of) and re-exports chunk/metadata helpers for
 compatibility; the implementation is split by concern across sibling
-modules -- `xarray/io.py` (open/distribute/redistribute/create),
+modules -- `xarray/io.py` (open/distribute/repartition/create),
 `xarray/indexing.py` (`isel`/`sel`), `xarray/reductions.py`
 (`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`),
 `xarray/statistics.py` (`std`/`var`), `xarray/groupby.py`
@@ -262,7 +262,7 @@ is **where the split lives**:
 | --- | --- | --- |
 | Each rank holds | A complete partial result (its own whole array/scalar/Dataset) | A slice of one shared dimension of a larger object |
 | Combines by | Adding/comparing whole partials together, element-wise | Reducing along the named, distributed dimension |
-| Typical source | Independent, embarrassingly-parallel work -- one case per rank, then combine | `mpi.xarray.open_dataset`/`redistribute`, which partition a dimension across ranks |
+| Typical source | Independent, embarrassingly-parallel work -- one case per rank, then combine | `mpi.xarray.open_dataset`/`repartition`, which partition a dimension across ranks |
 | Example | Each rank sums a different subset of storm events into the same `(lat, lon)` grid; `mpi.reduce.sum` adds the 8 grids together | Each rank holds a different slice of `time`; `mpi.xarray.mean(dim="time")` reduces across ranks, then repartitions the result on the longest surviving dimension |
 
 ```python
@@ -273,7 +273,7 @@ composite = mpi.reduce.sum(local_composite)  # same (lat, lon) result on every r
 
 # mpi.xarray: every rank holds a different slice of the "time" dimension of
 # the *same* field; reduce across that shared dimension.
-local_slice = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
+local_slice = mpi.xarray.repartition(t2m, "time")  # each rank: its own time slice
 time_mean = mpi.xarray.mean(local_slice, dim="time")
 # "time" is gone, so climtools repartitions time_mean on the longest
 # surviving dimension whose length is greater than one.
@@ -311,7 +311,7 @@ locally, performs no MPI collective, and preserves the existing partition
 metadata. For an object partitioned on `time`, for example:
 
 ```python
-local = mpi.xarray.redistribute(t2m, "time")
+local = mpi.xarray.repartition(t2m, "time")
 local_zonal_mean = mpi.xarray.mean(local, dim="lon")
 # no MPI traffic; every rank still owns the same global time[start:stop] slab
 ```
@@ -330,42 +330,87 @@ across ranks whenever the partition dimension participates.
 Once a reduction consumes the partition dimension, the old ownership metadata
 is no longer valid. The rank-local partials are combined with `Allreduce`, so
 the complete global reduction exists briefly on every rank. By default every
-`mpi.xarray` reduction has `redistribute_on="auto"`: climtools immediately
+`mpi.xarray` reduction has `partition_dim="auto"`: climtools immediately
 repartitions that global result along its longest surviving dimension whose
 length is greater than one. This keeps large post-reduction fields distributed
 for subsequent work instead of leaving a complete copy on every rank. A scalar,
 or a result whose surviving dimensions are all length one, remains replicated.
-Pass `redistribute_on=<dim>` to choose the new partition explicitly, or
-`redistribute_on=None` to disable post-reduction redistribution and deliberately
+Pass `partition_dim=<dim>` to choose the new partition explicitly, or
+`partition_dim=None` to disable post-reduction repartition and deliberately
 leave the complete global result replicated on every rank. When the original
 partition dimension survives the reduction, `"auto"` and None both preserve
 that existing partition; naming a different partition dimension is invalid
-because no redistribution is needed or implied by a local reduction.
+because no repartition is needed or implied by a local reduction.
 
 Result-placement options such as `mode="root"` and `root=` belong exclusively
 to `mpi.reduce`; they do not exist on the `mpi.xarray` reduction API.
 
 ```python
-local = mpi.xarray.redistribute(t2m, "time")
+local = mpi.xarray.repartition(t2m, "time")
 
 time_mean = mpi.xarray.mean(local, dim="time")
-# redistribute_on="auto" is the default. "time" is gone, so if lon is the
+# partition_dim="auto" is the default. "time" is gone, so if lon is the
 # longest surviving dimension (>1), time_mean now carries mpi_meta for lon.
 
-replicated_mean = mpi.xarray.mean(local, dim="time", redistribute_on=None)
+replicated_mean = mpi.xarray.mean(local, dim="time", partition_dim=None)
 # The same global (lat, lon) mean is deliberately left complete on every rank.
 
 global_max = mpi.xarray.max(local)
 # dim=None means all dimensions: each rank computes its local scalar maximum,
-# MPI.MAX combines those scalars, and no dimension remains to redistribute.
+# MPI.MAX combines those scalars, and no dimension remains to repartition.
 ```
 
 Every reduction accepts a `DataArray` or a `Dataset` interchangeably. Dataset
 planning remains variable-specific: a variable that does not carry the active
 partition dimension is reduced locally even when another variable in the same
-Dataset requires an MPI combine. `mpi.xarray.open_dataset`/`redistribute`/
+Dataset requires an MPI combine. `mpi.xarray.open_dataset`/`repartition`/
 `distribute`/`isel`/`sel` produce the distributed objects these reductions
 consume; see [`xarray/mpi.py`](xarray/mpi.py) for their full signatures.
+
+### Indexing a distributed object: `isel`/`sel`
+
+`mpi.xarray.isel`/`sel` accept **global** coordinates on the active partition
+dimension -- the same integer positions or coordinate labels you would use
+against the undistributed source, not each rank's own local slice. A scalar
+selection (`isel(time=0)`, `sel(time=label)`) resolves on whichever rank owns
+that index, then broadcasts the single result to every rank, so it always
+comes back replicated. A slice (`isel(time=slice(10, 20))`) instead clips
+each rank's own local shard against the requested global bounds -- no
+communication for the data itself, just an `allgather` of the resulting
+per-rank sizes to keep `mpi_meta` correct.
+
+A slice that happens to leave exactly one global element behind is a
+degenerate case of that: only the one rank that owns it ends up with any
+data, every other rank holds a length-0 slice on that dimension. Left alone,
+that is often fine -- but if you intend to keep working with the result in
+parallel, one rank holding everything and the rest holding nothing defeats
+the purpose. Pass `partition_dim` to spread that single element back out
+across every rank along a different, still-full-length dimension:
+
+```python
+local = mpi.xarray.repartition(t2m, "time")  # dims: (time, lat, lon)
+
+snapshot = mpi.xarray.isel(local, time=slice(5, 6))
+# Default partition_dim=None: still partitioned on "time" (global_size=1),
+# but only the owning rank has the row; every other rank's "time" is empty.
+
+snapshot = mpi.xarray.isel(local, time=slice(5, 6), partition_dim="auto")
+# Scatters the owning rank's (1, lat, lon) slab across every rank along
+# whichever of lat/lon is longer, so mpi_meta now tracks that dimension
+# instead. "auto" is a no-op if every other dimension is also length one.
+
+snapshot = mpi.xarray.isel(local, time=slice(5, 6), partition_dim="lat")
+# Same idea, but you choose the target dimension explicitly.
+```
+
+This repartition step moves the least data a redistribution of that single
+owned chunk can: the owning rank computes each other rank's balanced share
+of the target dimension and scatters exactly those slices (one point-to-point
+transfer per rank), rather than broadcasting the whole chunk to everyone and
+trimming it down locally. `partition_dim` only applies to this one
+slice-collapses-to-one case; a true scalar `isel`/`sel` already drops the
+dimension entirely and broadcasts, and any slice leaving more than one
+element behaves exactly as before regardless of `partition_dim`.
 
 ### Native `.mean()`/`.sum()`/etc. on a distributed object are node-local
 
@@ -378,7 +423,7 @@ worth stating plainly:
 > returns only this rank's partial reduction, not the global result.**
 
 ```python
-distributed = mpi.xarray.redistribute(t2m, "time")  # each rank: its own time slice
+distributed = mpi.xarray.repartition(t2m, "time")  # each rank: its own time slice
 
 distributed.mean()  # WRONG: this rank's mean over its own slice only
 mpi.xarray.mean(distributed, dim="time")  # RIGHT: combined across every rank
@@ -576,7 +621,7 @@ the path by inspecting the object, not by an argument you set:
 | --- | --- | --- |
 | A plain, **eager** (non-dask) `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Legacy scatter | The **entire** output -- every variable, in full, before it is scattered out |
 | A plain, **dask-backed** `Dataset`/`DataArray` on rank 0, `empty_dataset()` elsewhere | Auto-distributed | Only rank 0's own slice -- `to_netcdf` calls `mpi.xarray.distribute` internally before writing |
-| An object already carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`redistribute`/`distribute`) | Distributed | Only that rank's own slice -- no gather, no scatter |
+| An object already carrying `mpi_meta` (from `mpi.xarray.open_dataset`/`repartition`/`distribute`) | Distributed | Only that rank's own slice -- no gather, no scatter |
 
 The middle row is automatic: nothing about how you call `to_netcdf` changes.
 Building the same rank-0-source Dataset dask-backed instead of eager -- for
@@ -624,7 +669,7 @@ rather than a direct file read, run that computation as a **dask-lazy graph,
 built identically on every rank** -- building a dask graph is cheap metadata
 work regardless of the size it describes, since no data moves until
 something calls `.load()`/`.compute()` -- and hand the *lazy* result to
-`mpi.xarray.redistribute`, not `to_netcdf`, directly:
+`mpi.xarray.repartition`, not `to_netcdf`, directly:
 
 ```python
 import xarray as xr
@@ -636,9 +681,9 @@ from climtools import mpi
 lazy = xr.open_mfdataset(paths, chunks={"time": 100}, parallel=True)
 transformed = some_expensive_transform(lazy)  # still lazy: no data read yet
 
-# redistribute() is itself pure metadata/slicing -- it never calls .load()
+# repartition() is itself pure metadata/slicing -- it never calls .load()
 # or .compute(). Only this rank's own bounds along "time" are kept.
-local = mpi.xarray.redistribute(transformed, dim="time")
+local = mpi.xarray.repartition(transformed, dim="time")
 
 # .load() is the only point anything is computed, and it computes only
 # this rank's own slice -- not the full 200 GiB, on any rank, ever.
@@ -647,13 +692,13 @@ local = local.load()
 local.xgeo.to_netcdf("output.nc", partition_dim="time", parallel=True)
 ```
 
-This works because `redistribute` assumes its input is already the *same*
+This works because `repartition` assumes its input is already the *same*
 object on every rank (see [`xarray/mpi.py`](xarray/mpi.py)) and slices it
 locally with no MPI communication for the data itself -- which is exactly a
 lazy scatter when the input is dask-backed, and needs no special support to
 be one.
 
-**Data that can only be produced by one rank.** `redistribute` needs every
+**Data that can only be produced by one rank.** `repartition` needs every
 rank to be able to rebuild `value` identically -- a resource only one rank
 has credentials for, or a computation depending on rank-local state, breaks
 that assumption. `mpi.xarray.distribute` is for exactly that case: `value`
@@ -693,7 +738,7 @@ anywhere. For an eager source headed straight to `to_netcdf`, just calling
 simpler and faster: it already takes the scatter path this describes.
 
 **Data with no existing source at all -- you are generating it.**
-`redistribute` needs an identical recipe every rank can already build;
+`repartition` needs an identical recipe every rank can already build;
 `distribute` needs a source that exists on one rank. Neither fits synthetic
 or procedurally generated data -- a mock dataset for testing, a per-rank RNG
 stream, one file per rank -- where there is no array or file to slice in the
@@ -789,7 +834,7 @@ independently in [`xarray/chunks.py`](xarray/chunks.py):
 
 - **distribution_chunks** -- how much of the partition dimension each MPI
   rank holds *in memory*. This is what `mpi.xarray.open_dataset`/
-  `redistribute`/`distribute` decide, and it is recorded in
+  `repartition`/`distribute` decide, and it is recorded in
   `mpi_meta["chunk_info"]`. This is a single scalar chunk length per
   dimension throughout -- not an irregular, multiple-block-per-dimension
   structure like a raw Dask chunk tuple (`(1000, 1000, 240)`); see the
@@ -801,7 +846,7 @@ independently in [`xarray/chunks.py`](xarray/chunks.py):
   materialized to decide this), capped to HDF5's 4 GiB per-chunk limit.
 
 Along the partition dimension specifically, that dask-proposed,
-HDF5-capped length is not used as-is: `mpi.xarray.redistribute`'s
+HDF5-capped length is not used as-is: `mpi.xarray.repartition`'s
 `get_chunk_bounds` normally splits the partition dimension into whole
 `chunk_info[dim]`-sized chunks dealt round-robin across ranks, so a save
 chunk that evenly divides `chunk_info[dim]` is guaranteed to sit inside
@@ -901,8 +946,8 @@ launcher:
 | File | Demonstrates |
 | --- | --- |
 | [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`, and `RedirectStreams`/`RedirectFd` -- fd-level and Python-level redirection, shared-target merging, truncate/append, and re-entry rejection), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
-| [`test_mpi.py`](tests/test_mpi.py) | Entry point: imports and runs every `test_mpi_*.py` module below in one process, then reports one pass/fail summary. Covers `mpi.xarray`'s `IOMixin` (`redistribute`/`create_dataarray`/`create_dataset`), `IndexingMixin` (`isel`/`sel`, scalar and slice, global coordinates), `ReductionMixin` (`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`, against a serial xarray reference, with NaNs including an all-missing column), `StatisticsMixin` (`std`/`var`, both `ddof`), and `GroupbyMixin` (`groupby_reduce`/`resample_reduce`, including group boundaries that cross MPI rank boundaries) -- both `DataArray` and `Dataset`, and both the case where the target dimension is the active MPI partition dimension and the case where it isn't. Does not cover `mpi.reduce`, `ArithmeticMixin` (`apply`/`align`/`evaluate`), or the parallel NetCDF writer; those need separate coverage. |
-| [`test_mpi_io.py`](tests/test_mpi_io.py), [`test_mpi_indexing.py`](tests/test_mpi_indexing.py), [`test_mpi_reductions.py`](tests/test_mpi_reductions.py), [`test_mpi_statistics.py`](tests/test_mpi_statistics.py), [`test_mpi_groupby.py`](tests/test_mpi_groupby.py) | One file per `xarray/mpi.py` sibling module (see [Package layout](#package-layout)); each is runnable standalone (`mpirun -n N python -m mpi4py tests/test_mpi_io.py`, etc.) or together via `test_mpi.py`. Shared deterministic fixtures and the pass/fail aggregator live in [`mpi_fixtures.py`](tests/mpi_fixtures.py) (not itself a test module). |
+| [`test_mpi.py`](tests/test_mpi.py) | Entry point: imports and runs every `test_mpi_*.py` module below in one process, then reports one pass/fail summary. Covers `mpi.xarray`'s `IOMixin` (`repartition`/`create_dataarray`/`create_dataset`), `IndexingMixin` (`isel`/`sel`, scalar and slice, global coordinates, including `partition_dim` scatter-repartitioning a singleton slice), `ReductionMixin` (`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`, against a serial xarray reference, with NaNs including an all-missing column), `StatisticsMixin` (`std`/`var`, both `ddof`), `GroupbyMixin` (`groupby_reduce`/`resample_reduce`, including group boundaries that cross MPI rank boundaries), and `ArithmeticMixin` (`align`/`apply`/`evaluate`/`matmul`/`halo_exchange`/`rolling_reduce`, against a serial xarray reference) -- both `DataArray` and `Dataset`, and both the case where the target dimension is the active MPI partition dimension and the case where it isn't. Does not cover `mpi.reduce` or the parallel NetCDF writer; those need separate coverage. |
+| [`test_mpi_io.py`](tests/test_mpi_io.py), [`test_mpi_indexing.py`](tests/test_mpi_indexing.py), [`test_mpi_reductions.py`](tests/test_mpi_reductions.py), [`test_mpi_statistics.py`](tests/test_mpi_statistics.py), [`test_mpi_groupby.py`](tests/test_mpi_groupby.py), [`test_mpi_operator.py`](tests/test_mpi_operator.py) | One file per `xarray/mpi.py` sibling module (see [Package layout](#package-layout)); each is runnable standalone (`mpirun -n N python -m mpi4py tests/test_mpi_io.py`, etc.) or together via `test_mpi.py`. Shared deterministic fixtures and the pass/fail aggregator live in [`mpi_fixtures.py`](tests/mpi_fixtures.py) (not itself a test module). |
 | [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running `test_general.py` once, then `test_mpi.py` across the full `{8,16,32 tasks} x {0.5,0.25,0.1 deg} x {24,168,720,8760,43800 time steps}` matrix -- the same coverage that first surfaced the HDF file-locking bug fixed by `HDF5_USE_FILE_LOCKING=FALSE` (set unconditionally at import time in [`__init__.py`](__init__.py); see below). Every configuration runs regardless of earlier failures, and the script exits nonzero if any did. |
 
 ```bash

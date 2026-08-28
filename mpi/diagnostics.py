@@ -196,6 +196,27 @@ class MPIDiagnostics:
 
         raise MPIError(f"Rank {rank} failed during {phase} with {name}: {message}")
 
+    @staticmethod
+    def _format_ranks(ranks: list[int]) -> str:
+        """Compress a sorted rank list into comma-joined contiguous spans."""
+        spans: list[tuple[int, int]] = []
+        start = prev = ranks[0]
+
+        for r in ranks[1:]:
+            if r == prev + 1:
+                prev = r
+                continue
+
+            spans.append((start, prev))
+            start = prev = r
+
+        spans.append((start, prev))
+
+        parts = [f"{a}" if a == b else f"{a}-{b}" for a, b in spans]
+        noun = "Rank" if len(ranks) == 1 else "Ranks"
+
+        return f"{noun} " + ", ".join(parts)
+
     def _install_abort_hook(self) -> bool:
         """Install deduplicated reporting for uncaught MPI exceptions."""
         if getattr(sys.excepthook, "_climtools_mpi_abort", False):
@@ -277,12 +298,9 @@ class MPIDiagnostics:
                 for (name, _), (ranks, traceback_text) in groups.items():
                     ranks.sort()
 
-                    if len(ranks) == 1:
-                        label = f"Rank {ranks[0]}"
-                    else:
-                        label = "Ranks " + ", ".join(map(str, ranks))
+                    label = self._format_ranks(ranks)
 
-                    sys.stderr.write(f"\n{label} got {name}\n")
+                    sys.stderr.write(f"\n({label}) got {name}\n")
                     sys.stderr.write(traceback_text)
 
                 sys.stderr.flush()

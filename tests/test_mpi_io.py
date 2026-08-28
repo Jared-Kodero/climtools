@@ -13,46 +13,46 @@ from climtools.xarray.meta import get_mpi_meta
 from mpi_fixtures import RANK, check, finish, make_dataset, make_field
 
 
-def test_redistribute_dataarray() -> None:
+def test_repartition_dataarray() -> None:
     """Each rank's local slice matches the source at the same coordinates,
     and partition sizes sum back to the global size."""
     full = make_field(n=37)  # deliberately awkward w.r.t. common rank counts
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
     meta = get_mpi_meta(distributed)
-    check("redistribute: attaches mpi_meta", meta is not None)
-    check("redistribute: partition dim is t", meta["dim"] == "t")
+    check("repartition: attaches mpi_meta", meta is not None)
+    check("repartition: partition dim is t", meta["dim"] == "t")
 
     local_ref = full.sel(t=distributed["t"])
     check(
-        "redistribute: local shard matches source at the same coordinates",
+        "repartition: local shard matches source at the same coordinates",
         bool((distributed == local_ref).all()),
     )
     total = mpi.comm.allreduce(distributed.sizes["t"])
-    check("redistribute: partition sizes sum to global size", total == full.sizes["t"])
+    check("repartition: partition sizes sum to global size", total == full.sizes["t"])
 
 
-def test_redistribute_rejects_already_distributed() -> None:
+def test_repartition_rejects_already_distributed() -> None:
     full = make_field(n=20)
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
     try:
-        mpi.xarray.redistribute(distributed, "t")
+        mpi.xarray.repartition(distributed, "t")
         raised = False
     except ValueError:
         raised = True
-    check("redistribute: rejects an already-distributed object", raised)
+    check("repartition: rejects an already-distributed object", raised)
 
 
-def test_redistribute_dataset() -> None:
-    """A static (non-partitioned) variable survives redistribute unchanged."""
+def test_repartition_dataset() -> None:
+    """A static (non-partitioned) variable survives repartition unchanged."""
     ds = make_dataset(n=25)
-    distributed = mpi.xarray.redistribute(ds, "t")
+    distributed = mpi.xarray.repartition(ds, "t")
     local_ref = ds["v"].sel(t=distributed["t"])
     check(
-        "redistribute dataset: time-varying variable matches source",
+        "repartition dataset: time-varying variable matches source",
         bool((distributed["v"] == local_ref).all()),
     )
     check(
-        "redistribute dataset: static variable is untouched",
+        "repartition dataset: static variable is untouched",
         bool((distributed["s"] == ds["s"]).all()),
     )
 
@@ -96,9 +96,9 @@ def test_create_dataset_multiple_variables() -> None:
 
 
 if __name__ == "__main__":
-    test_redistribute_dataarray()
-    test_redistribute_rejects_already_distributed()
-    test_redistribute_dataset()
+    test_repartition_dataarray()
+    test_repartition_rejects_already_distributed()
+    test_repartition_dataset()
     test_create_dataarray_fill_receives_global_bounds()
     test_create_dataset_multiple_variables()
     finish()

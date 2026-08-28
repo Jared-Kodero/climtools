@@ -2,19 +2,29 @@
 
 ``isel``/``sel`` on the active partition dimension use global (not per-rank
 local) coordinates, resolving to a local slice or a single-rank scalar
-broadcast to every rank.
+broadcast to every rank. A slice that leaves exactly one global element on
+the partition dimension can optionally be handed off to
+``partition_dim``, which scatters that one rank's local data onto a
+surviving dimension instead of leaving it stranded on a single rank -- see
+:meth:`Indexing._repartition_singleton`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import xarray as xr
 
-from .chunks import prune_chunk_info
-from .meta import get_mpi_meta, indexer_is_scalar, set_mpi_meta, strip_mpi_meta
+from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
+from .meta import (
+    choose_partition_dim,
+    get_mpi_meta,
+    indexer_is_scalar,
+    set_mpi_meta,
+    strip_mpi_meta,
+)
 
 if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
@@ -32,6 +42,8 @@ class Indexing:
         self,
         value: xr.Dataset | xr.DataArray,
         indexers: Mapping[Any, Any] | None = None,
+        *,
+        partition_dim: Hashable | Literal["auto"] | None = None,
         **indexers_kwargs: Any,
     ) -> xr.Dataset | xr.DataArray:
         """Index a distributed object with global integer coordinates.
@@ -42,6 +54,19 @@ class Indexing:
             Object to index.
         indexers : mapping, optional
             Integer indexers using global coordinates on the partition dimension.
+        partition_dim : Hashable or {"auto"} or None, optional
+            Only consulted when a *slice* on the partition dimension leaves a
+            single global element behind (a scalar indexer already collapses
+            the dimension entirely and broadcasts, so this does not apply
+            there). Left at the default ``None``, that single element stays
+            where it landed: one rank holds it, every other rank holds a
+            length-0 slice on that dimension. Passing a dimension name (or
+            ``"auto"`` to pick the largest remaining dimension) instead
+            scatters that one rank's local data across all ranks along
+            ``partition_dim``, so the object stays evenly spread out rather
+            than parked on a single rank. ``"auto"`` is a no-op if no other
+            dimension has more than one element. See
+            :meth:`Indexing._repartition_singleton`.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
 
@@ -86,9 +111,12 @@ class Indexing:
         output = value.isel(local_indexers)
 
         counts = self._runtime.comm.allgather(int(output.sizes[dim]))
+        new_global_size = sum(counts)
+        if new_global_size == 1 and partition_dim is not None:
+            return self._repartition_singleton(output, dim, counts, partition_dim)
+
         new_start = sum(counts[: self._runtime.comm.rank])
         new_stop = new_start + counts[self._runtime.comm.rank]
-        new_global_size = sum(counts)
         chunk_info = prune_chunk_info(meta["chunk_info"], output)
         set_mpi_meta(
             output,
@@ -165,6 +193,8 @@ class Indexing:
         method: str | None = None,
         tolerance: Any = None,
         drop: bool = False,
+        *,
+        partition_dim: Hashable | Literal["auto"] | None = None,
         **indexers_kwargs: Any,
     ) -> xr.Dataset | xr.DataArray:
         """Index a distributed object with global coordinate labels.
@@ -181,6 +211,12 @@ class Indexing:
             Maximum distance for inexact matches.
         drop : bool, optional
             Drop selected coordinate variables. Default is False.
+        partition_dim : Hashable or {"auto"} or None, optional
+            Only consulted when a label *slice* on the partition dimension
+            leaves a single global element behind (a scalar label already
+            collapses the dimension entirely and broadcasts, so this does
+            not apply there). See :meth:`isel` and
+            :meth:`Indexing._repartition_singleton` for the exact semantics.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
 
@@ -222,13 +258,17 @@ class Indexing:
             local_indexers, method=method, tolerance=tolerance, drop=drop
         )
         counts = self._runtime.comm.allgather(int(output.sizes[dim]))
+        new_global_size = sum(counts)
+        if new_global_size == 1 and partition_dim is not None:
+            return self._repartition_singleton(output, dim, counts, partition_dim)
+
         new_start = sum(counts[: self._runtime.comm.rank])
         new_stop = new_start + counts[self._runtime.comm.rank]
         chunk_info = prune_chunk_info(meta["chunk_info"], output)
         set_mpi_meta(
             output,
             dim=dim,
-            global_size=sum(counts),
+            global_size=new_global_size,
             start=new_start,
             stop=new_stop,
             chunk_info=chunk_info,
@@ -353,3 +393,138 @@ class Indexing:
         return cast(
             "xr.Dataset | xr.DataArray", self._runtime.broadcast(payload, root=owner)
         )
+
+    def _repartition_singleton(
+        self,
+        output: xr.Dataset | xr.DataArray,
+        old_dim: Hashable,
+        counts: list[int],
+        partition_dim: Hashable | Literal["auto"],
+    ) -> xr.Dataset | xr.DataArray:
+        """Scatter a slice-``isel``/``sel`` result stranded on one rank.
+
+        Called only when a *slice* selection on the partition dimension
+        leaves exactly one global element behind: ``counts`` (each rank's
+        local size on ``old_dim`` after the local ``isel``/``sel``) then
+        has a single ``1`` and the rest ``0`` -- every other dimension's
+        full local extent still sits on that one rank alongside it.
+        Rather than leaving the object that lopsided, this picks a
+        surviving dimension and scatters the owning rank's data across
+        every rank along it with one point-to-point transfer per rank (via
+        :meth:`~..mpi.runtime.MPIRuntime.scatter`), which is the least
+        data movement a redistribution of that single owned chunk can do:
+        each rank receives exactly the slice it ends up keeping, nothing
+        more.
+
+        Parameters
+        ----------
+        output : xarray.Dataset or xarray.DataArray
+            Local slice result; ``mpi_meta`` is stripped before use.
+        old_dim : Hashable
+            The now globally length-1 former partition dimension.
+        counts : list of int
+            Each rank's local size on ``old_dim``, from ``allgather``.
+        partition_dim : Hashable or {"auto"}
+            Dimension to distribute across ranks. ``"auto"`` selects the
+            largest remaining dimension; if none has more than one
+            element there is nothing to spread out, and the existing
+            single-owner layout on ``old_dim`` is kept unchanged.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            Rank-local slice carrying fresh ``mpi_meta`` on the chosen
+            dimension, or on ``old_dim`` if there was nothing to
+            repartition onto.
+
+        Raises
+        ------
+        ValueError
+            If ``partition_dim`` names a dimension that is not present in
+            the result, or is ``old_dim`` itself (already collapsed to one
+            element, so it cannot be reused as the new partition
+            dimension)."""
+        owner = counts.index(1)
+        stripped = strip_mpi_meta(output)
+        comm = self._runtime.comm
+
+        def _keep_single_owner() -> xr.Dataset | xr.DataArray:
+            new_start = sum(counts[: comm.rank])
+            new_stop = new_start + counts[comm.rank]
+            chunk_info = prune_chunk_info({str(old_dim): 1}, output)
+            set_mpi_meta(
+                output,
+                dim=old_dim,
+                global_size=1,
+                start=new_start,
+                stop=new_stop,
+                chunk_info=chunk_info,
+            )
+            return output
+
+        candidates = {
+            name: int(length)
+            for name, length in stripped.sizes.items()
+            if name != old_dim
+        }
+        target = partition_dim
+        if target == "auto":
+            if not candidates or not any(n > 1 for n in candidates.values()):
+                return _keep_single_owner()
+            target = choose_partition_dim(candidates, comm.size, rank=comm.rank)
+        elif target not in candidates:
+            raise ValueError(
+                f"partition_dim={target!r} is not a surviving dimension of "
+                + f"the selection result (old partition dimension {old_dim!r} "
+                + "has already collapsed to a single global element and "
+                + "cannot be reused)."
+            )
+
+        target_length = candidates[target]
+        chunk_size = get_effective_chunk_size(target_length, None, comm.size)
+
+        # Only the owner rank does any real work here (slicing its local
+        # data into comm.size pieces); every other rank just receives.
+        # Guard the owner's slicing so a failure there can't strand every
+        # other rank blocked forever inside scatter() waiting on a root
+        # that already raised and never called it -- the same hazard
+        # IOMixin.distribute() guards against for its own root-side prep.
+        error: BaseException | None = None
+        parts: list[xr.Dataset | xr.DataArray] | None = None
+        if comm.rank == owner:
+            try:
+                parts = [
+                    stripped.isel(
+                        {
+                            target: slice(
+                                *get_chunk_bounds(
+                                    target_length, chunk_size, r, comm.size
+                                )
+                            )
+                        }
+                    )
+                    for r in range(comm.size)
+                ]
+            except BaseException as exc:
+                error = exc
+        self._runtime.raise_if_error(error, "mpi.xarray.isel/sel partition_dim scatter")
+
+        local = self._runtime.scatter(parts if comm.rank == owner else None, root=owner)
+
+        start, stop = get_chunk_bounds(target_length, chunk_size, comm.rank, comm.size)
+        info = {str(target): chunk_size}
+        info = prune_chunk_info(info, local)
+        for other_dim, other_length in local.sizes.items():
+            info.setdefault(
+                str(other_dim),
+                get_effective_chunk_size(int(other_length), None, comm.size),
+            )
+        set_mpi_meta(
+            local,
+            dim=target,
+            global_size=target_length,
+            start=start,
+            stop=stop,
+            chunk_info=info,
+        )
+        return cast("xr.Dataset | xr.DataArray", local)

@@ -5,7 +5,7 @@ Concrete numerical/logical reductions built on
 the reduction once, runs a rank-local partial, combines partials with one
 ``Allreduce`` (two for ``first``/``last``), and hands the result to
 :meth:`~.engine.ReductionPlanningMixin._finish` for metadata
-restoration and optional redistribution.
+restoration and optional repartition.
 """
 
 from __future__ import annotations
@@ -236,7 +236,7 @@ class Reduction(ReductionPlanningMixin):
         skipna: bool | None = None,
         min_count: int | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Sum a distributed xarray object over one or more dimensions.
 
@@ -252,7 +252,7 @@ class Reduction(ReductionPlanningMixin):
             Minimum number of valid values required.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             ``"auto"`` selects a surviving dimension; None leaves the result
             replicated. Default is ``"auto"``.
@@ -274,7 +274,7 @@ class Reduction(ReductionPlanningMixin):
             skipna=skipna,
             min_count=min_count,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def prod(
@@ -285,7 +285,7 @@ class Reduction(ReductionPlanningMixin):
         skipna: bool | None = None,
         min_count: int | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Multiply a distributed xarray object over one or more dimensions.
 
@@ -301,7 +301,7 @@ class Reduction(ReductionPlanningMixin):
             Minimum number of valid values required.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             ``"auto"`` selects a surviving dimension; None leaves the result
             replicated. Default is ``"auto"``.
@@ -323,7 +323,7 @@ class Reduction(ReductionPlanningMixin):
             skipna=skipna,
             min_count=min_count,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def _sum_prod(
@@ -336,14 +336,14 @@ class Reduction(ReductionPlanningMixin):
         skipna: bool | None,
         min_count: int | None,
         keep_attrs: bool | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
         """Implement distributed sum and product reductions."""
         operation = "prod" if product else "sum"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
         if local_meta is not None:
             method = value.prod if product else value.sum
@@ -377,8 +377,8 @@ class Reduction(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -411,8 +411,8 @@ class Reduction(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            redistribute_on=redistribute_on,
-            auto_candidates=self._redistribution_candidates(plan),
+            partition_dim=partition_dim,
+            auto_candidates=self._repartition_candidates(plan),
         )
 
     def mean(
@@ -422,7 +422,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Compute the mean of a distributed xarray object.
 
@@ -436,7 +436,7 @@ class Reduction(ReductionPlanningMixin):
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -452,7 +452,7 @@ class Reduction(ReductionPlanningMixin):
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
         if local_meta is not None:
             local_result = value.mean(
@@ -479,8 +479,8 @@ class Reduction(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -506,8 +506,8 @@ class Reduction(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            redistribute_on=redistribute_on,
-            auto_candidates=self._redistribution_candidates(plan),
+            partition_dim=partition_dim,
+            auto_candidates=self._repartition_candidates(plan),
         )
 
     def min(
@@ -517,7 +517,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Compute the minimum of a distributed xarray object.
 
@@ -531,7 +531,7 @@ class Reduction(ReductionPlanningMixin):
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -545,7 +545,7 @@ class Reduction(ReductionPlanningMixin):
             minimum=True,
             skipna=skipna,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def max(
@@ -555,7 +555,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Compute the maximum of a distributed xarray object.
 
@@ -569,7 +569,7 @@ class Reduction(ReductionPlanningMixin):
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -583,7 +583,7 @@ class Reduction(ReductionPlanningMixin):
             minimum=False,
             skipna=skipna,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def _min_max(
@@ -594,14 +594,14 @@ class Reduction(ReductionPlanningMixin):
         minimum: bool,
         skipna: bool | None,
         keep_attrs: bool | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
         """Implement distributed minimum and maximum reductions."""
         operation = "min" if minimum else "max"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
         if local_meta is not None:
             method = value.min if minimum else value.max
@@ -635,8 +635,8 @@ class Reduction(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -672,8 +672,8 @@ class Reduction(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            redistribute_on=redistribute_on,
-            auto_candidates=self._redistribution_candidates(plan),
+            partition_dim=partition_dim,
+            auto_candidates=self._repartition_candidates(plan),
         )
 
     def any(
@@ -682,7 +682,7 @@ class Reduction(ReductionPlanningMixin):
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
         *,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Return whether any value is true over the requested dimensions.
 
@@ -694,7 +694,7 @@ class Reduction(ReductionPlanningMixin):
             Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -708,7 +708,7 @@ class Reduction(ReductionPlanningMixin):
             op=MPI.LOR,
             all_values=False,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def all(
@@ -717,7 +717,7 @@ class Reduction(ReductionPlanningMixin):
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
         *,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Return whether all values are true over the requested dimensions.
 
@@ -729,7 +729,7 @@ class Reduction(ReductionPlanningMixin):
             Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -743,7 +743,7 @@ class Reduction(ReductionPlanningMixin):
             op=MPI.LAND,
             all_values=True,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
         )
 
     def _logical(
@@ -754,14 +754,14 @@ class Reduction(ReductionPlanningMixin):
         op: MPI.Op,
         all_values: bool,
         keep_attrs: bool | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
     ) -> xr.Dataset | xr.DataArray:
         """Implement distributed logical reductions."""
         operation = "all" if all_values else "any"
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
         if local_meta is not None:
             method = value.all if all_values else value.any
@@ -789,8 +789,8 @@ class Reduction(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -821,8 +821,8 @@ class Reduction(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            auto_candidates=self._redistribution_candidates(plan),
-            redistribute_on=redistribute_on,
+            auto_candidates=self._repartition_candidates(plan),
+            partition_dim=partition_dim,
         )
 
     # -- first/last -------------------------------------------------------
@@ -932,7 +932,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Select the first valid value along one dimension.
 
@@ -946,7 +946,7 @@ class Reduction(ReductionPlanningMixin):
             dim,
             skipna=skipna,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
             want_first=True,
         )
 
@@ -957,7 +957,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Select the last valid value along one dimension. See :meth:`first`."""
         return self._first_or_last(
@@ -965,7 +965,7 @@ class Reduction(ReductionPlanningMixin):
             dim,
             skipna=skipna,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
             want_first=False,
         )
 
@@ -976,7 +976,7 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None,
         keep_attrs: bool | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
         want_first: bool,
     ) -> xr.Dataset | xr.DataArray:
         """Shared implementation for :meth:`first` and :meth:`last`."""
@@ -985,7 +985,7 @@ class Reduction(ReductionPlanningMixin):
         dims = (dim,)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
 
         if local_meta is not None:
@@ -1018,8 +1018,8 @@ class Reduction(ReductionPlanningMixin):
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         variables: dict[Hashable, xr.DataArray] = {}
@@ -1042,6 +1042,6 @@ class Reduction(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            auto_candidates=self._redistribution_candidates(plan),
-            redistribute_on=redistribute_on,
+            auto_candidates=self._repartition_candidates(plan),
+            partition_dim=partition_dim,
         )

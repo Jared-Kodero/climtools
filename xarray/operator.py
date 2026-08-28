@@ -79,7 +79,7 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
 class Arithmetic:
     """Alignment and arithmetic methods mixed into ``XarrayMPI``.
 
-    Assumes the host class provides ``self.redistribute`` (used by
+    Assumes the host class provides ``self.repartition`` (used by
     :meth:`align`), ``self._agree`` (used by :meth:`apply`, :meth:`matmul`,
     and :meth:`halo_exchange`), and ``self._comm_reduce`` (used by
     :meth:`matmul`, an ``Allreduce`` helper defined on
@@ -95,7 +95,7 @@ class Arithmetic:
     # evaluate() with zero MPI traffic. Two cases resolve without any
     # communication and are handled here: a replicated operand sliced down
     # onto an already-distributed partner's exact bounds, and two
-    # replicated operands independently redistributed along the same
+    # replicated operands independently repartitioned along the same
     # dimension (which is deterministic given (length, chunk size, rank,
     # size), so both land on identical bounds without needing to compare
     # notes). Two operands already distributed on genuinely different
@@ -196,7 +196,7 @@ class Arithmetic:
 
         - Neither operand is distributed: returned unchanged, unless
           ``dim`` is given, in which case both are distributed along
-          ``dim`` via ``redistribute``. Redistribution is a deterministic
+          ``dim`` via ``repartition``. Repartition is a deterministic
           function of (length, chunk size, rank, size), so two operands of
           the same length along ``dim`` land on identical per-rank bounds
           without any coordination between them.
@@ -218,10 +218,10 @@ class Arithmetic:
             otherwise, since an already-distributed operand's dimension
             takes precedence.
         chunk_info : mapping, optional
-            Forwarded to ``redistribute`` when neither operand is yet
+            Forwarded to ``repartition`` when neither operand is yet
             distributed.
         log_partitions : bool, optional
-            Forwarded to ``redistribute`` when neither operand is yet
+            Forwarded to ``repartition`` when neither operand is yet
             distributed.
 
         Returns
@@ -260,7 +260,7 @@ class Arithmetic:
                 + "Reconciling different existing partitions requires "
                 + "moving data between ranks, which align() does not do; "
                 + "rebuild one operand from a replicated source with "
-                + "mpi.xarray.redistribute using the other's dimension and "
+                + "mpi.xarray.repartition using the other's dimension and "
                 + "chunk_info instead."
             )
 
@@ -290,10 +290,10 @@ class Arithmetic:
                 ) from exc
 
         return (
-            self.redistribute(
+            self.repartition(
                 left, dim, chunk_info=chunk_info, log_partitions=log_partitions
             ),
-            self.redistribute(
+            self.repartition(
                 right, dim, chunk_info=chunk_info, log_partitions=log_partitions
             ),
         )
@@ -733,7 +733,7 @@ class Arithmetic:
         if meta is None:
             raise ValueError(
                 "halo_exchange() requires a distributed xarray object; "
-                + "call mpi.xarray.redistribute(...) first."
+                + "call mpi.xarray.repartition(...) first."
             )
         partition_dim = meta["dim"]
         if dim is not None and dim != partition_dim:
@@ -757,7 +757,7 @@ class Arithmetic:
                 f"halo_exchange(): rank {rank}'s local partition along "
                 + f"{partition_dim!r} has length {local_len}, shorter than "
                 + f"the requested halo (before={before}, after={after}). "
-                + "Each rank can only forward data it owns; redistribute "
+                + "Each rank can only forward data it owns; repartition "
                 + "with fewer, larger chunks (or a coarser process grid) "
                 + "before requesting this wide a halo."
             )
@@ -784,7 +784,21 @@ class Arithmetic:
         pieces = [
             piece for piece in (before_block, value, after_block) if piece is not None
         ]
-        padded = xr.concat(pieces, dim=partition_dim) if len(pieces) > 1 else value
+        if len(pieces) <= 1:
+            padded = value
+        elif isinstance(value, xr.Dataset):
+            # data_vars="minimal": only concatenate variables that actually
+            # vary along partition_dim. The default ("all") broadcasts every
+            # *other* variable along it too, silently turning a static
+            # (y, x) variable into a bogus (partition_dim, y, x) one
+            # duplicated across before_block/value/after_block -- those three
+            # pieces already agree exactly on any variable that lacks
+            # partition_dim (each is this rank's or a neighbor's full,
+            # untouched copy), so "minimal" is not just faster but the only
+            # option that leaves such variables unchanged.
+            padded = xr.concat(pieces, dim=partition_dim, data_vars="minimal")
+        else:
+            padded = xr.concat(pieces, dim=partition_dim)
         return (
             strip_mpi_meta(padded),
             before if before_block is not None else 0,
@@ -854,7 +868,7 @@ class Arithmetic:
         before = (window - 1) // 2 if center else window - 1
         after = (window - 1) - before if center else 0
 
-        padded, left_pad, right_pad = self.halo_exchange(
+        padded, left_pad, _right_pad = self.halo_exchange(
             value, dim, before=before, after=after
         )
         rolled = padded.rolling({dim: window}, center=center, min_periods=min_periods)

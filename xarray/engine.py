@@ -15,9 +15,8 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
+from mpi4py import MPI
 
 from .chunks import prune_chunk_info
 from .common import (
@@ -96,14 +95,14 @@ class ReductionPlanningMixin:
         meta: Mapping[str, Any] | None,
         dims: tuple[Hashable, ...],
         *,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
     ) -> Mapping[str, Any] | None:
         """Return metadata when a reduction remains rank-local."""
         if meta is None or meta["dim"] in dims:
             return None
-        if redistribute_on not in (None, "auto"):
+        if partition_dim not in (None, "auto"):
             raise ValueError(
-                "redistribute_on can name a new dimension only after the active "
+                "partition_dim can name a new dimension only after the active "
                 + "partition dimension has been reduced away."
             )
         return meta
@@ -284,8 +283,8 @@ class ReductionPlanningMixin:
         return xr.Dataset(dict(variables), coords=coords, attrs=dict(value.attrs))
 
     @staticmethod
-    def _redistribution_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
-        """Return dimensions eligible for post-reduction redistribution."""
+    def _repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
+        """Return dimensions eligible for post-reduction repartition."""
         return frozenset(
             dim for entry in plan if entry.distributed for dim, _ in entry.shape
         )
@@ -295,18 +294,18 @@ class ReductionPlanningMixin:
         result: xr.Dataset | xr.DataArray,
         *,
         old_meta: Mapping[str, Any] | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
         auto_candidates: frozenset[Hashable],
     ) -> xr.Dataset | xr.DataArray:
-        """Finalize metadata and optional redistribution after a reduction."""
+        """Finalize metadata and optional repartition after a reduction."""
         result = strip_mpi_meta(result)
         partition_removed = old_meta is not None and old_meta["dim"] not in result.dims
 
-        if redistribute_on is None:
+        if partition_dim is None:
             return result
 
-        target = redistribute_on
-        if redistribute_on == "auto":
+        target = partition_dim
+        if partition_dim == "auto":
             if not partition_removed:
                 return result
             sizes = {
@@ -319,9 +318,9 @@ class ReductionPlanningMixin:
             target = choose_partition_dim(
                 sizes, self._runtime.comm.size, rank=self._runtime.comm.rank
             )
-        elif redistribute_on not in auto_candidates:
+        elif partition_dim not in auto_candidates:
             raise ValueError(
-                f"redistribute_on={redistribute_on!r} is not a dimension of any "
+                f"partition_dim={partition_dim!r} is not a dimension of any "
                 + "variable that required an MPI collective in this reduction; "
                 + "an untouched, replicated variable's own dimension cannot be "
                 + "used as the new partition dimension."
@@ -332,4 +331,4 @@ class ReductionPlanningMixin:
             if old_meta is not None
             else {}
         )
-        return self.redistribute(result, target, chunk_info=chunk_info)
+        return self.repartition(result, target, chunk_info=chunk_info)

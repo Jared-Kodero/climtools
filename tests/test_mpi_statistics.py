@@ -15,12 +15,12 @@ from climtools import mpi
 
 def test_var_std_ddof0() -> None:
     full = make_field(n=23, ny=2, nx=3, nan_at=((2, 0, 0),))
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
     got_var = mpi.xarray.var(
-        distributed, dim="t", skipna=True, ddof=0, redistribute_on=None
+        distributed, dim="t", skipna=True, ddof=0, partition_dim=None
     )
     got_std = mpi.xarray.std(
-        distributed, dim="t", skipna=True, ddof=0, redistribute_on=None
+        distributed, dim="t", skipna=True, ddof=0, partition_dim=None
     )
     ref_var = full.var(dim="t", skipna=True, ddof=0)
     ref_std = full.std(dim="t", skipna=True, ddof=0)
@@ -37,9 +37,9 @@ def test_var_std_ddof0() -> None:
 
 def test_var_std_ddof1() -> None:
     full = make_field(n=17, ny=2, nx=2, seed=5)
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
     got_var = mpi.xarray.var(
-        distributed, dim="t", skipna=True, ddof=1, redistribute_on=None
+        distributed, dim="t", skipna=True, ddof=1, partition_dim=None
     )
     ref_var = full.var(dim="t", skipna=True, ddof=1)
     check(
@@ -50,8 +50,8 @@ def test_var_std_ddof1() -> None:
 
 def test_var_on_non_partition_dim() -> None:
     full = make_field(n=14, ny=3, nx=2, seed=9)
-    distributed = mpi.xarray.redistribute(full, "t")
-    got = mpi.xarray.var(distributed, dim="y", skipna=True, redistribute_on=None)
+    distributed = mpi.xarray.repartition(full, "t")
+    got = mpi.xarray.var(distributed, dim="y", skipna=True, partition_dim=None)
     ref = distributed.var(dim="y", skipna=True)
     check(
         "var over non-partition dim: matches plain xarray on the local shard",
@@ -61,10 +61,8 @@ def test_var_on_non_partition_dim() -> None:
 
 def test_dataset_var() -> None:
     ds = make_dataset(n=20, ny=2, nx=3, seed=2)
-    distributed = mpi.xarray.redistribute(ds, "t")
-    got = mpi.xarray.var(
-        distributed, dim="t", skipna=True, ddof=1, redistribute_on=None
-    )
+    distributed = mpi.xarray.repartition(ds, "t")
+    got = mpi.xarray.var(distributed, dim="t", skipna=True, ddof=1, partition_dim=None)
     ref = ds["v"].var(dim="t", skipna=True, ddof=1)
     check(
         "dataset var: time-varying variable matches serial reference",

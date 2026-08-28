@@ -881,7 +881,7 @@ def to_netcdf_parallel(
                 + f"{_format_bytes(total_bytes)} before scatter, "
                 + f"~{_format_bytes(total_bytes / mpi.comm.size)}/rank after. "
                 + "An already-distributed input (mpi.xarray.open_dataset/"
-                + "redistribute) avoids this rank-0 peak entirely -- see the "
+                + "repartition) avoids this rank-0 peak entirely -- see the "
                 + "README's Parallel NetCDF output section.",
             )
         except BaseException as exc:

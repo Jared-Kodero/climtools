@@ -45,14 +45,14 @@ class Statistics(ReductionPlanningMixin):
         skipna: bool | None,
         ddof: int,
         keep_attrs: bool | None,
-        redistribute_on: Hashable | Literal["auto"] | None,
+        partition_dim: Hashable | Literal["auto"] | None,
         root: bool,
     ) -> xr.Dataset | xr.DataArray:
         """Shared implementation for :meth:`var` and :meth:`std`."""
         local_dim, dims = self._normalize_dim(value, dim)
         old_meta = get_mpi_meta(value)
         local_meta = self._local_reduction_meta(
-            old_meta, dims, redistribute_on=redistribute_on
+            old_meta, dims, partition_dim=partition_dim
         )
         if local_meta is not None:
             method = value.std if root else value.var
@@ -108,18 +108,18 @@ class Statistics(ReductionPlanningMixin):
                     dim=local_dim, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
                 )
             mean = self.mean(  # type: ignore[attr-defined]
-                value, dim, skipna=skipna, keep_attrs=False, redistribute_on=None
+                value, dim, skipna=skipna, keep_attrs=False, partition_dim=None
             )
             result = combine(value, dims, mean)
             return self._finish(
                 result,
                 old_meta=old_meta,
-                redistribute_on=redistribute_on,
-                auto_candidates=self._redistribution_candidates(plan),
+                partition_dim=partition_dim,
+                auto_candidates=self._repartition_candidates(plan),
             )
 
         mean_ds = self.mean(  # type: ignore[attr-defined]
-            value, dim, skipna=skipna, keep_attrs=False, redistribute_on=None
+            value, dim, skipna=skipna, keep_attrs=False, partition_dim=None
         )
         variables: dict[Hashable, xr.DataArray] = {}
         for entry in plan:
@@ -137,8 +137,8 @@ class Statistics(ReductionPlanningMixin):
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,
-            redistribute_on=redistribute_on,
-            auto_candidates=self._redistribution_candidates(plan),
+            partition_dim=partition_dim,
+            auto_candidates=self._repartition_candidates(plan),
         )
 
     def var(
@@ -149,7 +149,7 @@ class Statistics(ReductionPlanningMixin):
         skipna: bool | None = None,
         ddof: int = 0,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Compute the variance of a distributed xarray object.
 
@@ -165,7 +165,7 @@ class Statistics(ReductionPlanningMixin):
             Delta degrees of freedom; the divisor is ``N - ddof``. Default 0.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -185,7 +185,7 @@ class Statistics(ReductionPlanningMixin):
             skipna=skipna,
             ddof=ddof,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
             root=False,
         )
 
@@ -197,7 +197,7 @@ class Statistics(ReductionPlanningMixin):
         skipna: bool | None = None,
         ddof: int = 0,
         keep_attrs: bool | None = None,
-        redistribute_on: Hashable | Literal["auto"] | None = "auto",
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
     ) -> xr.Dataset | xr.DataArray:
         """Compute the standard deviation of a distributed xarray object.
 
@@ -213,7 +213,7 @@ class Statistics(ReductionPlanningMixin):
             Delta degrees of freedom; the divisor is ``N - ddof``. Default 0.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-        redistribute_on : Hashable or {"auto"} or None, optional
+        partition_dim : Hashable or {"auto"} or None, optional
             Partition placement after reducing the active partition dimension.
             Default is ``"auto"``.
 
@@ -233,6 +233,6 @@ class Statistics(ReductionPlanningMixin):
             skipna=skipna,
             ddof=ddof,
             keep_attrs=keep_attrs,
-            redistribute_on=redistribute_on,
+            partition_dim=partition_dim,
             root=True,
         )

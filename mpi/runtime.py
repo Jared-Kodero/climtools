@@ -273,7 +273,7 @@ class MPIRuntime(MPIDiagnostics):
 
     @property
     def xarray(self) -> MPIXarray:
-        """XarrayMPI: MPI-aware xarray indexing, redistribution, reductions."""
+        """XarrayMPI: MPI-aware xarray indexing, repartition, reductions."""
         return self._xarray
 
     @property

@@ -7,7 +7,7 @@ implementation is split by concern across sibling modules in this package:
 - :mod:`.common`      Communicator-free constants and dtype helpers.
 - :mod:`.engine`      Rank-independent reduction planning and MPI collective
   primitives shared by every reduction .
-- :mod:`.io`          Dataset/DataArray open, distribute, redistribute,
+- :mod:`.io`          Dataset/DataArray open, distribute, repartition,
   create, and save-chunk attachment.
 - :mod:`.indexing`    Global-coordinate ``isel``/``sel``.
 - :mod:`.reductions`  ``sum``/``prod``/``mean``/``min``/``max``/``first``/
@@ -75,7 +75,7 @@ class MPIXarray(IO, Indexing, Reduction, Statistics, Groupby, Arithmetic):
 
     Composes, by concern:
 
-    - :class:`~.io.IO` -- open, distribute, redistribute, create.
+    - :class:`~.io.IO` -- open, distribute, repartition, create.
     - :class:`~.indexing.Indexing` -- global-coordinate ``isel``/``sel``.
     - :class:`~.reductions.Reduction` -- ``sum``/``prod``/``mean``/
       ``min``/``max``/``first``/``last``/``any``/``all``.
@@ -91,8 +91,18 @@ class MPIXarray(IO, Indexing, Reduction, Statistics, Groupby, Arithmetic):
 
     ``Reduction``, ``Statistics``, and ``Groupby`` all build on
     :class:`~.engine.ReductionPlanning` for collective planning;
-    ``Arithmetic`` uses ``self.redistribute`` (from ``IO``) and
+    ``Arithmetic`` uses ``self.repartition`` (from ``IO``) and
     ``self._agree`` (from ``ReductionPlanning``).
+
+    The names below are the exact same bound methods the base classes
+    already provide through normal Python method resolution -- listing them
+    here does not wrap, re-dispatch, or copy them (``MPIXarray.isel is
+    Indexing.isel`` holds), so there is no extra call frame, no duplicated
+    docstring/signature to drift out of sync, and no runtime cost versus
+    plain inheritance. They are assigned explicitly only so the full public
+    surface is visible directly on this class -- in ``help(MPIXarray)``,
+    ``vars(MPIXarray)``, and a plain read of this file -- rather than only
+    discoverable by walking the MRO through six base classes.
 
     Parameters
     ----------

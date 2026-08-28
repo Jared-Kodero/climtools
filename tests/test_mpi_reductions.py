@@ -18,11 +18,11 @@ def test_numeric_reductions() -> None:
     full = make_field(n=19, ny=2, nx=4, nan_at=((0, 0, 0), (1, 0, 0), (18, 1, 1)))
     full = full.copy()
     full.values[:, :, 2] = np.nan  # one fully missing column
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
 
     for op in ("sum", "prod", "mean", "min", "max"):
         got = getattr(mpi.xarray, op)(
-            distributed, dim="t", skipna=True, redistribute_on=None
+            distributed, dim="t", skipna=True, partition_dim=None
         )
         ref = getattr(full, op)(dim="t", skipna=True)
         check(
@@ -33,9 +33,9 @@ def test_numeric_reductions() -> None:
 
 def test_any_all() -> None:
     full = make_field(n=15, ny=2, nx=2) > 0
-    distributed = mpi.xarray.redistribute(full, "t")
-    got_any = mpi.xarray.any(distributed, dim="t", redistribute_on=None)
-    got_all = mpi.xarray.all(distributed, dim="t", redistribute_on=None)
+    distributed = mpi.xarray.repartition(full, "t")
+    got_any = mpi.xarray.any(distributed, dim="t", partition_dim=None)
+    got_all = mpi.xarray.all(distributed, dim="t", partition_dim=None)
     check(
         "any: matches serial reference",
         bool((got_any.values == full.any(dim="t").values).all()),
@@ -50,10 +50,10 @@ def test_first_last() -> None:
     full = make_field(n=21, ny=2, nx=3, nan_at=((0, 0, 0), (1, 0, 0), (-1, 1, 2)))
     full = full.copy()
     full.values[:, 0, 1] = np.nan  # one fully missing column
-    distributed = mpi.xarray.redistribute(full, "t")
+    distributed = mpi.xarray.repartition(full, "t")
 
-    got_first = mpi.xarray.first(distributed, "t", skipna=True, redistribute_on=None)
-    got_last = mpi.xarray.last(distributed, "t", skipna=True, redistribute_on=None)
+    got_first = mpi.xarray.first(distributed, "t", skipna=True, partition_dim=None)
+    got_last = mpi.xarray.last(distributed, "t", skipna=True, partition_dim=None)
     ref_first = full.bfill("t").isel(t=0)
     ref_last = full.ffill("t").isel(t=-1)
     check(
@@ -70,8 +70,8 @@ def test_reduction_on_non_partition_dim() -> None:
     """Reducing a dimension other than the active partition dimension stays
     a local, per-rank computation and still returns a correct result."""
     full = make_field(n=16, ny=2, nx=5)
-    distributed = mpi.xarray.redistribute(full, "t")
-    got = mpi.xarray.mean(distributed, dim="x", skipna=True, redistribute_on=None)
+    distributed = mpi.xarray.repartition(full, "t")
+    got = mpi.xarray.mean(distributed, dim="x", skipna=True, partition_dim=None)
     ref = distributed.mean(dim="x", skipna=True)
     check(
         "mean over non-partition dim: matches plain xarray on the local shard",
@@ -81,8 +81,8 @@ def test_reduction_on_non_partition_dim() -> None:
 
 def test_dataset_reduction_with_static_variable() -> None:
     ds = make_dataset(n=18, ny=2, nx=3)
-    distributed = mpi.xarray.redistribute(ds, "t")
-    got = mpi.xarray.mean(distributed, dim="t", skipna=True, redistribute_on=None)
+    distributed = mpi.xarray.repartition(ds, "t")
+    got = mpi.xarray.mean(distributed, dim="t", skipna=True, partition_dim=None)
     ref = ds["v"].mean(dim="t", skipna=True)
     check(
         "dataset mean: time-varying variable matches serial reference",
