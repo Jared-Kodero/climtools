@@ -76,7 +76,15 @@ Documentation = "https://github.com/Jared-Kodero/climtools#readme"
 # of the package works without it. Its ESMF dependency is far more reliable
 # from conda-forge than from pip; see env/environment.yml.
 regrid = ["xesmf"]
-dev = ["typing_extensions", "build", "twine"]
+# pytest: not used by tests/test_mpi*.py directly (those are plain scripts
+# run under `mpirun ... python -m mpi4py`), but needed to run this project's
+# own unit tests, if any are added under pytest collection later.
+# bottleneck: tests/test_mpi_reductions.py builds its serial reference for
+# first()/last() with xarray's DataArray.bfill()/.ffill(), which xarray
+# routes through `bottleneck.push` (core/duck_array_ops.py::_push) and raises
+# ModuleNotFoundError without. Not a runtime dependency of climtools itself
+# (mpi.xarray.first/last never calls bfill/ffill), only of this test file.
+dev = ["typing_extensions", "build", "twine", "pytest", "bottleneck"]
 
 [tool.setuptools]
 # This repository's root *is* the "climtools" package: __init__.py sits
