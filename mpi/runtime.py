@@ -261,7 +261,7 @@ class MPIRuntime(MPIDiagnostics):
 
     def __init__(self, comm: Intracomm | None = None) -> None:
         self.comm: Intracomm = comm if comm is not None else MPI.COMM_WORLD
-        self._xarray: MPIXarray = MPIXarray(self)
+        # self._xarray: MPIXarray = MPIXarray(self)
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIRuntime | None = None
         self._to_children = ToChildrenRuntime(self)

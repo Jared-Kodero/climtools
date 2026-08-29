@@ -518,7 +518,9 @@ another rank's data and is routed through the same partition-preserving
 path as any other `apply` call, keeping its partition metadata as usual.
 
 ```python
-c = mpi.xarray.evaluate("a @ b", a=a_distributed, b=b_distributed)  # == mpi.xarray.matmul(a, b)
+c = mpi.xarray.evaluate(
+    "a @ b", a=a_distributed, b=b_distributed
+)  # == mpi.xarray.matmul(a, b)
 ```
 
 `apply` itself is MPI-aware for this the same way `evaluate` is: it
@@ -938,24 +940,7 @@ reduction over one rank. `mpi4py` is a hard dependency of `climtools.mpi`
 and of the NetCDF writer, so it must be installed (see
 [Installation](#installation)) even for single-rank runs.
 
-## Testing
 
-[`tests/`](tests/) holds the test suite, split by whether a test needs an MPI
-launcher:
-
-| File | Demonstrates |
-| --- | --- |
-| [`test_general.py`](tests/test_general.py) | Every non-MPI component: `plot.geo` (rendering, the `.xgeo` accessor form, `.add.*` overlay chaining), `calc` (`trends` -- both Mann-Kendall and `polyfit` -- `corr`, `pvalues`), `cmaps` (every registered name resolves, `create`/`concat`/`add`/`get_colors`), `xgeo`/`xr_utils` (`to_lon180`, `add_local_solar_time`, `sel_transect`, `get_spatial_dims`), the serial NetCDF writer (`xgeo.to_netcdf` and `append`, round-tripped through `xr.open_dataset`), `core.tools` (`n_cpus`, `LockFile`, `AttrDict`, and `RedirectStreams`/`RedirectFd` -- fd-level and Python-level redirection, shared-target merging, truncate/append, and re-entry rejection), and `cdo` (skipped cleanly when the `cdo` binary is not on `PATH`). Plain `python`, one process, no MPI launcher, no network access required. |
-| [`test_mpi.py`](tests/test_mpi.py) | Entry point: imports and runs every `test_mpi_*.py` module below in one process, then reports one pass/fail summary. Covers `mpi.xarray`'s `IOMixin` (`repartition`/`create_dataarray`/`create_dataset`), `IndexingMixin` (`isel`/`sel`, scalar and slice, global coordinates, including `partition_dim` scatter-repartitioning a singleton slice), `ReductionMixin` (`sum`/`prod`/`mean`/`min`/`max`/`first`/`last`/`any`/`all`, against a serial xarray reference, with NaNs including an all-missing column), `StatisticsMixin` (`std`/`var`, both `ddof`), `GroupbyMixin` (`groupby_reduce`/`resample_reduce`, including group boundaries that cross MPI rank boundaries), and `ArithmeticMixin` (`align`/`apply`/`evaluate`/`matmul`/`halo_exchange`/`rolling_reduce`, against a serial xarray reference) -- both `DataArray` and `Dataset`, and both the case where the target dimension is the active MPI partition dimension and the case where it isn't. Does not cover `mpi.reduce` or the parallel NetCDF writer; those need separate coverage. |
-| [`test_mpi_io.py`](tests/test_mpi_io.py), [`test_mpi_indexing.py`](tests/test_mpi_indexing.py), [`test_mpi_reductions.py`](tests/test_mpi_reductions.py), [`test_mpi_statistics.py`](tests/test_mpi_statistics.py), [`test_mpi_groupby.py`](tests/test_mpi_groupby.py), [`test_mpi_operator.py`](tests/test_mpi_operator.py) | One file per `xarray/mpi.py` sibling module (see [Package layout](#package-layout)); each is runnable standalone (`mpirun -n N python -m mpi4py tests/test_mpi_io.py`, etc.) or together via `test_mpi.py`. Shared deterministic fixtures and the pass/fail aggregator live in [`mpi_fixtures.py`](tests/mpi_fixtures.py) (not itself a test module). |
-| [`test.sh`](tests/test.sh) | Slurm batch script (`sbatch tests/test.sh`) running `test_general.py` once, then `test_mpi.py` across the full `{8,16,32 tasks} x {0.5,0.25,0.1 deg} x {24,168,720,8760,43800 time steps}` matrix -- the same coverage that first surfaced the HDF file-locking bug fixed by `HDF5_USE_FILE_LOCKING=FALSE` (set unconditionally at import time in [`__init__.py`](__init__.py); see below). Every configuration runs regardless of earlier failures, and the script exits nonzero if any did. |
-
-```bash
-python tests/test_general.py
-
-python -m mpi4py tests/test_mpi.py
-mpirun -n 8 python -m mpi4py tests/test_mpi.py --time-steps 7200 --resolution 0.25
-```
 
 Every timed check in `test_mpi.py` is tagged in the summary with a
 plain-language verdict -- `MPI (faster)`, `Xarray (faster)`, or `tie` (within
