@@ -261,11 +261,11 @@ class MPIDiagnostics:
 
                 if not reporter:
                     while not finished_file.exists():
-                        time.sleep(1)
+                        time.sleep(5)
 
                     return
 
-                time.sleep(1)
+                time.sleep(5)
 
                 records: list[dict[str, Any]] = []
 
