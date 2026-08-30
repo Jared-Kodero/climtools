@@ -21,7 +21,7 @@ from collections.abc import Callable
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
 # evaluate() is: apply(operator.matmul, a, b) computes the same correct,
-# MPI-reduced result as evaluate("a @ b", a=a, b=b) and mpi.xarray.matmul(a, b),
+# MPI-reduced result as evaluate("a @ b", a=a, b=b) and matmul(a, b),
 # instead of running the plain rank-local matmul and failing the post-call
 # partition check whenever the distributed dimension gets contracted away.
 _MATMUL_CALLABLES: frozenset[Callable[..., Any]] = frozenset(
@@ -290,15 +290,15 @@ class Arithmetic:
 
         Examples
         --------
-        >>> left, right = mpi.xarray.align(local_field, full_climatology)
-        >>> anomaly = mpi.xarray.apply(operator.sub, left, right)
+        >>> left, right = align(local_field, full_climatology)
+        >>> anomaly = apply(operator.sub, left, right)
 
-        >>> left, right = mpi.xarray.align(a_full, b_full, dim="time")
-        >>> combined = mpi.xarray.apply(operator.add, left, right)
+        >>> left, right = align(a_full, b_full, dim="time")
+        >>> combined = apply(operator.add, left, right)
 
         >>> # both already distributed, but on different dimensions
-        >>> left, right = mpi.xarray.align(a_by_time, b_by_space)
-        >>> combined = mpi.xarray.apply(operator.add, left, right)
+        >>> left, right = align(a_by_time, b_by_space)
+        >>> combined = apply(operator.add, left, right)
         """
         left_meta = self._operand_meta(left)
         right_meta = self._operand_meta(right)
@@ -457,7 +457,7 @@ class Arithmetic:
                         + f"range=[{meta['start']}:{meta['stop']}) vs "
                         + f"dim={other_meta['dim']!r} "
                         + f"range=[{other_meta['start']}:{other_meta['stop']}). "
-                        + "Call mpi.xarray.align(...) first."
+                        + "Call align(...) first."
                     )
                 continue
 
@@ -470,7 +470,7 @@ class Arithmetic:
                         f"Operand carries dimension {dim!r} at length "
                         + f"{local}, which does not match this rank's "
                         + f"owned partition length {owned}. Call "
-                        + "mpi.xarray.align(...) first."
+                        + "align(...) first."
                     )
                 reference_indexed = dim in getattr(reference, "indexes", {})
                 other_indexed = dim in getattr(other, "indexes", {})
@@ -484,7 +484,7 @@ class Arithmetic:
                             + "coordinate labels do not match the "
                             + "distributed partition's labels for this "
                             + "rank's slice; equal length does not imply "
-                            + "equal coordinates. Call mpi.xarray.align(...) "
+                            + "equal coordinates. Call align(...) "
                             + "first. xarray.align(..., join='exact') "
                             + f"reports: {exc}"
                         ) from exc
@@ -659,10 +659,10 @@ class Arithmetic:
 
         Examples
         --------
-        >>> mpi.xarray.apply(operator.add, a, b)
-        >>> mpi.xarray.apply(xr.where, cond, a, b)
-        >>> mpi.xarray.apply(lambda x, *, factor: x * factor, a, factor=2.0)
-        >>> mpi.xarray.apply(operator.matmul, a, b)  # redirected to matmul(), see below
+        >>> apply(operator.add, a, b)
+        >>> apply(xr.where, cond, a, b)
+        >>> apply(lambda x, *, factor: x * factor, a, factor=2.0)
+        >>> apply(operator.matmul, a, b)  # redirected to matmul(), see below
         """
         if func in _MATMUL_CALLABLES and not kwargs and len(args) == 2:
             return self.matmul(*args)
@@ -751,7 +751,7 @@ class Arithmetic:
 
         Examples
         --------
-        >>> mpi.xarray.matmul(a, b)  # same as mpi.xarray.evaluate("a @ b", a=a, b=b)
+        >>> matmul(a, b)  # same as evaluate("a @ b", a=a, b=b)
         """
         meta, _reference = self._check_operands_distribution((left, right))
         if meta is None:
@@ -836,7 +836,7 @@ class Arithmetic:
         if meta is None:
             raise ValueError(
                 "halo_exchange() requires a distributed xarray object; "
-                + "call mpi.xarray.repartition(...) first."
+                + "call repartition(...) first."
             )
         partition_dim = meta["dim"]
         if dim is not None and dim != partition_dim:
@@ -1121,9 +1121,9 @@ class Arithmetic:
 
         Examples
         --------
-        >>> mpi.xarray.evaluate("a + b - c", a=ds1, b=ds2, c=ds3)
-        >>> mpi.xarray.evaluate("(a + b) * c", a=ds1, b=ds2, c=ds3)
-        >>> mpi.xarray.evaluate("anomaly / std", anomaly=a, std=s)
+        >>> evaluate("a + b - c", a=ds1, b=ds2, c=ds3)
+        >>> evaluate("(a + b) * c", a=ds1, b=ds2, c=ds3)
+        >>> evaluate("anomaly / std", anomaly=a, std=s)
         """
         try:
             tree = ast.parse(expression, mode="eval")

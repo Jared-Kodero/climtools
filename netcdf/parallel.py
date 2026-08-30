@@ -25,12 +25,17 @@ import xarray as xr
 
 from ..mpi.runtime import mpi
 from ..xarray.chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
+from ..xarray.constructors import _MPIXarrayOps, mpi_partition_data
 from ..xarray.meta import MPI_META, _format_bytes, get_mpi_meta
 from .encoding import encode_time, is_time_like
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
+
+    from mpi4py.MPI import Intracomm
+
+    from ..mpi.runtime import MPIRuntime
 
 
 class NetCDFWriteError(mpi.MPIError):
@@ -421,6 +426,7 @@ def write_partitioned(
 
 
 def to_netcdf_parallel(
+    mpi_runtime: MPIRuntime | Intracomm,
     data: xr.Dataset | xr.DataArray | None,
     path: str | PathLike[str],
     partition_dim: str | None = None,
@@ -438,7 +444,7 @@ def to_netcdf_parallel(
     rank contributes its existing local slab directly and no data gather or
     scatter is performed. For an ordinary object, rank 0 owns the complete
     data; if that data is dask-backed, it is distributed lazily first (see
-    ``mpi.xarray.distribute``), so no rank -- including rank 0 -- ever
+    ``distribute``), so no rank -- including rank 0 -- ever
     materializes more than its own share. An eager (already in-memory,
     non-dask) object instead uses the legacy scatter path unchanged: rank 0
     materializes the array (it already had to, to be eager) and every
@@ -550,8 +556,9 @@ def to_netcdf_parallel(
         is_dask_backed = mpi.comm.bcast(is_dask_backed, root=0)
 
         if is_dask_backed:
-            local_ds = mpi.xarray.distribute(
+            local_ds = mpi_partition_data(
                 local_ds if mpi.comm.rank == 0 else None,
+                mpi_runtime,
                 dim=partition_dim if partition_dim is not None else "auto",
                 root=0,
             )
@@ -583,7 +590,7 @@ def to_netcdf_parallel(
         # chunks to honor below, since every rank sees the same `chunks`
         # argument and can decide this identically without communication.
         if chunks is None:
-            mpi.xarray.attach_save_chunks(local_ds)
+            _MPIXarrayOps(mpi_runtime).attach_save_chunks(local_ds)  # this is a bug
             local_meta = get_mpi_meta(local_ds)
             if local_meta is None:
                 raise AssertionError(
@@ -880,7 +887,7 @@ def to_netcdf_parallel(
                 "xgeo.to_netcdf (rank-0 source): rank 0 holds "
                 + f"{_format_bytes(total_bytes)} before scatter, "
                 + f"~{_format_bytes(total_bytes / mpi.comm.size)}/rank after. "
-                + "An already-distributed input (mpi.xarray.open_dataset/"
+                + "An already-distributed input (open_dataset/"
                 + "repartition) avoids this rank-0 peak entirely -- see the "
                 + "README's Parallel NetCDF output section.",
             )

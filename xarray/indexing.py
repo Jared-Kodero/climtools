@@ -508,7 +508,7 @@ class Indexing:
                 ]
             except BaseException as exc:
                 error = exc
-        self._runtime.raise_if_error(error, "mpi.xarray.isel/sel partition_dim scatter")
+        self._runtime.raise_if_error(error, "isel/sel partition_dim scatter")
 
         local = self._runtime.scatter(parts if comm.rank == owner else None, root=owner)
 

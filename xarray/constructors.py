@@ -273,7 +273,7 @@ def mpi_partition_data(
     MPIXarray
         Rank-local slice with ``.meta`` set.
     """
-    data = _MPIXarrayOps(runtime).distribute(
+    data = _MPIXarrayOps(runtime).partition(
         unwrap(value),
         dim,
         root=root,

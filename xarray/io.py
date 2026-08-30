@@ -166,7 +166,7 @@ class IO:
                 error = exc
 
         # Synchronize rank-0 planning failures before broadcasting the plan.
-        self._runtime.raise_if_error(error, "mpi.xarray.open_dataset planning")
+        self._runtime.raise_if_error(error, "open_dataset planning")
 
         # Broadcast the plan.
         plan = self._runtime.broadcast(plan, root=0)
@@ -204,7 +204,7 @@ class IO:
                 self._runtime,
                 data,
                 partition_dim,
-                origin="mpi.xarray.open_dataset",
+                origin="open_dataset",
                 global_size=global_size,
                 start=start,
                 stop=stop,
@@ -217,7 +217,7 @@ class IO:
     # this call is expecting.
     _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
 
-    def distribute(
+    def partition(
         self,
         value: xr.Dataset | xr.DataArray | None,
         dim: Hashable | Literal["auto"] = "auto",
@@ -345,7 +345,7 @@ class IO:
                 )
         except BaseException as exc:
             error = exc
-        self._runtime.raise_if_error(error, "mpi.xarray.distribute")
+        self._runtime.raise_if_error(error, "distribute")
 
         # Broadcast which transfer path root prepared.
         dimensionless = self._runtime.broadcast(
@@ -378,7 +378,7 @@ class IO:
                     self._runtime,
                     output,
                     meta["dim"],
-                    origin="mpi.xarray.distribute",
+                    origin="distribute",
                     global_size=meta["global_size"],
                     start=meta["start"],
                     stop=meta["stop"],
@@ -478,7 +478,7 @@ class IO:
                 self._runtime,
                 da,
                 dim_name,
-                origin="mpi.xarray.create_dataarray",
+                origin="create_dataarray",
                 global_size=global_size,
                 start=start,
                 stop=stop,
@@ -599,7 +599,7 @@ class IO:
                 self._runtime,
                 ds,
                 dim,
-                origin="mpi.xarray.create_dataset",
+                origin="create_dataset",
                 global_size=global_size,
                 start=start,
                 stop=stop,
@@ -688,7 +688,7 @@ class IO:
                 self._runtime,
                 output,
                 dim,
-                origin="mpi.xarray.repartition",
+                origin="repartition",
                 global_size=length,
                 start=start,
                 stop=stop,
@@ -730,7 +730,7 @@ class IO:
                 save_chunks = compute_save_chunks(value, meta, self._runtime.comm.size)
             except BaseException as exc:
                 error = exc
-        self._runtime.raise_if_error(error, "mpi.xarray.attach_save_chunks planning")
+        self._runtime.raise_if_error(error, "attach_save_chunks planning")
 
         save_chunks = self._runtime.broadcast(save_chunks, root=0)
         set_save_chunks(value, cast("dict[str, tuple[int, ...]]", save_chunks))

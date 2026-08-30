@@ -3,9 +3,11 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+from mpi4py.MPI import Intracomm
+
 import xarray as xr
 
-from ..mpi.runtime import MPIRuntime, mpi
+from ..mpi.runtime import MPIRuntime
 from ..xarray.meta import get_mpi_meta
 from .parallel import to_netcdf_parallel
 from .serial import append, to_netcdf_serial
@@ -45,7 +47,7 @@ def dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
 def to_netcdf(
     data: xr.Dataset | xr.DataArray,
     file: str | PathLike[str],
-    mpi_runtime: MPIRuntime = mpi,
+    mpi_runtime: MPIRuntime | Intracomm = None,
     unlimited_dim: str | Iterable[str] | None = None,
     partition_dim: str | None = None,
     *,
@@ -114,6 +116,11 @@ def to_netcdf(
 
     target_path = Path(file)
 
+    if not mpi_runtime:
+        from ..mpi.runtime import mpi
+
+        mpi_runtime = mpi
+
     if parallel:
         mpi_meta = get_mpi_meta(data)
         distributed = mpi_meta is not None
@@ -144,6 +151,7 @@ def to_netcdf(
             data = empty_dataset()
 
         to_netcdf_parallel(
+            mpi_runtime,
             data,
             target_path,
             partition_dim=partition_dim,

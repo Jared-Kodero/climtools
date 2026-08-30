@@ -83,7 +83,7 @@ regrid = ["xesmf"]
 # first()/last() with xarray's DataArray.bfill()/.ffill(), which xarray
 # routes through `bottleneck.push` (core/duck_array_ops.py::_push) and raises
 # ModuleNotFoundError without. Not a runtime dependency of climtools itself
-# (mpi.xarray.first/last never calls bfill/ffill), only of this test file.
+# (first/last never calls bfill/ffill), only of this test file.
 dev = ["typing_extensions", "build", "twine", "pytest", "bottleneck"]
 
 [tool.setuptools]

@@ -204,7 +204,7 @@ def set_save_chunks(
     if meta is None:
         raise ValueError(
             "value carries no MPI distribution metadata; call set_mpi_meta "
-            + "(e.g. via mpi.xarray.repartition/open_dataset) before "
+            + "(e.g. via repartition/open_dataset) before "
             + "attaching save_chunks."
         )
     updated = dict(meta)
