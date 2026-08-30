@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any
 
-    from ..netcdf.io import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..viz import cmaps
     from ..viz import plotting as plot
     from ..xarray.constructors import (
@@ -15,6 +14,7 @@ if TYPE_CHECKING:
         mpi_open_dataset,
         mpi_partition_data,
     )
+    from ..xarray.io import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..xarray.utils import (
         SetupDask,
         add_local_solar_time,
@@ -57,9 +57,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": (".xr_utils", "SetupDask"),
     "add_local_solar_time": (".xr_utils", "add_local_solar_time"),
-    "append": ("..netcdf.netcdf", "append"),
-    "empty_dataset": ("..netcdf.netcdf", "empty_dataset"),
-    "dataset_is_empty": ("..netcdf.netcdf", "dataset_is_empty"),
+    "append": ("..xarray.io", "append"),
+    "empty_dataset": ("..xarray.io", "empty_dataset"),
+    "dataset_is_empty": ("..xarray.io", "dataset_is_empty"),
     "calc": (".calc_stats", None),
     "cmaps": ("..viz.cmaps", None),
     "mask": (".xr_utils", "mask"),
@@ -69,7 +69,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "remap": (".xr_utils", "remap"),
     "sel_transect": (".xr_utils", "sel_transect"),
     "to_lon180": (".xr_utils", "to_lon180"),
-    "to_netcdf": ("..netcdf.netcdf", "to_netcdf"),
+    "to_netcdf": ("..xarray.io", "to_netcdf"),
     "mpi_open_dataset": ("..xarray.constructors", "mpi_open_dataset"),
     "mpi_create_dataarray": ("..xarray.constructors", "mpi_create_dataarray"),
     "mpi_create_dataset": ("..xarray.constructors", "mpi_create_dataset"),

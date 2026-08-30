@@ -7,23 +7,25 @@ operations to :class:`~.ops._MPIXarrayOps`.
 from __future__ import annotations
 
 import operator as _operator
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from .compat import install_binary_op_compatibility, register_mpixarray_type
 from .handles import MPIGroupBy, MPIResample, MPIRolling
 from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
-from .ops import _MPIXarrayOps
+from .ops import MPIXarrayOps
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
+    from os import PathLike
     from types import EllipsisType
     from typing import Literal
 
     import numpy as np
 
     from ..mpi.runtime import MPIRuntime
+
 
 #: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
 #: stamps onto ``MPIXarray.data`` (and, for a Dataset, every distributed
@@ -119,6 +121,11 @@ _SAFE_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
 )
 
 
+# store this we will monkey patch to all ds/da binary op on MPIXarray instance
+dataarray_binary_op = xr.DataArray._binary_op
+dataset_binary_op = xr.Dataset._binary_op
+
+
 class MPIXarray:
     """Wrap rank-local xarray data with MPI distribution state.
 
@@ -182,7 +189,7 @@ class MPIXarray:
         self.data = data
         self.meta = meta
         self._runtime = runtime
-        self._ops = _MPIXarrayOps(runtime)
+        self._ops = MPIXarrayOps(runtime)
 
         if self.meta is None and auto_partition:
             partitioned = self._ops.repartition(
@@ -576,6 +583,108 @@ class MPIXarray:
         """
         method = getattr(self._ops, name)
         return finalize(method(self._prepare(), *args, **kwargs), self._runtime)
+
+    # -- IO --------------------------------------------------------------------
+
+    def to_netcdf(
+        self,
+        file: str | PathLike[str],
+        unlimited_dim: str | Iterable[str] | None = None,
+        partition_dim: str | None = None,
+        *,
+        parallel: bool = False,
+        batch_size: int = 24,
+        format: str = "NETCDF4",
+        shuffle: bool = True,
+        zlib: bool = True,
+        complevel: int = 4,
+        show_progress: bool = True,
+        stdout: Any = None,
+        chunks: Mapping[str, Iterable[int]] | None = None,
+        hints: str | None = None,
+        nofill: bool = True,
+        allow_serial: bool = False,
+    ) -> None:
+        """Write this xarray object to NetCDF.
+
+        Parameters
+        ----------
+        file : str or os.PathLike
+            Output path.
+        unlimited_dim : str or iterable of str, optional
+            Unlimited dimension names.
+        partition_dim : str, optional
+            Dimension used for MPI partitioning.
+        parallel : bool, default False
+            Use MPI-parallel NetCDF output.
+        batch_size : int, default 24
+            Number of slices per serial append.
+        format : str, default "NETCDF4"
+            NetCDF format used for serial output.
+        shuffle : bool, default True
+            Enable the HDF5 shuffle filter.
+        zlib : bool, default True
+            Enable zlib compression.
+        complevel : int, default 4
+            zlib compression level.
+        show_progress : bool, default True
+            Show serial write progress.
+        stdout : Any, optional
+            Stream used for progress output.
+        chunks : mapping, optional
+            Explicit NetCDF variable chunk shapes.
+        hints : str, optional
+            Semicolon-separated MPI-IO hints.
+        nofill : bool, default True
+            Disable NetCDF pre-filling for parallel output.
+        allow_serial : bool, default False
+            Allow the parallel writer to run with one MPI rank.
+
+        Raises
+        ------
+        ValueError
+            If distributed data are passed to the serial writer.
+        """
+        from ..netcdf import io as netcdf_io
+
+        if not parallel and self.meta is not None:
+            raise ValueError(
+                "MPIXarray.to_netcdf(): data is distributed but parallel=False "
+                + "(the default). Serial NetCDF output is not rank-aware and "
+                + "expects the complete object already assembled on the calling "
+                + "rank; writing a distributed object this way would silently "
+                + "write only this rank's local slice as the whole file. Pass "
+                + "parallel=True to write the distributed object correctly, or "
+                + "gather/replicate it to a single rank first if serial output "
+                + "is what you want."
+            )
+
+        prepared = self._prepare()
+        if parallel:
+            prepared = self._ops.attach_save_chunks(prepared)
+        if self.meta is not None and get_mpi_meta(prepared) is None:
+            prepared = prepared.copy(deep=False)
+            _assign_meta(prepared, self.meta)
+
+        netcdf_io.to_netcdf(
+            prepared,
+            file,
+            self._runtime,
+            unlimited_dim,
+            partition_dim,
+            parallel=parallel,
+            batch_size=batch_size,
+            format=format,
+            shuffle=shuffle,
+            zlib=zlib,
+            complevel=complevel,
+            show_progress=show_progress,
+            stdout=stdout,
+            chunks=chunks,
+            hints=hints,
+            nofill=nofill,
+            allow_serial=allow_serial,
+        )
 
     # -- IO: (re)distribution of an existing object --------------------------
 
@@ -1602,5 +1711,29 @@ def unwrap(value: Any) -> Any:
     return value._prepare() if isinstance(value, MPIXarray) else value
 
 
-register_mpixarray_type(MPIXarray)
-install_binary_op_compatibility()
+@wraps(dataarray_binary_op)
+def _da_binary_op(
+    self: xr.DataArray, other: Any, f: Any, reflexive: bool = False
+) -> Any:
+    """Defer mixed binary operations to ``MPIXarray``."""
+    if isinstance(other, MPIXarray):
+        return NotImplemented
+    return dataarray_binary_op(self, other, f, reflexive)
+
+
+@wraps(dataset_binary_op)
+def _ds_binary_op(
+    self: xr.Dataset,
+    other: Any,
+    f: Any,
+    reflexive: bool = False,
+    join: Any = None,
+) -> Any:
+    """Defer mixed binary operations to ``MPIXarray``."""
+    if isinstance(other, MPIXarray):
+        return NotImplemented
+    return dataset_binary_op(self, other, f, reflexive, join)
+
+
+xr.DataArray._binary_op = _da_binary_op
+xr.Dataset._binary_op = _ds_binary_op

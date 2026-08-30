@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.runtime import MPIRuntime
 from .core import MPIXarray, unwrap
-from .ops import _MPIXarrayOps
+from .ops import MPIXarrayOps
 from .serialization import to_netcdf as to_netcdf
 
 # ``to_netcdf`` remains available from this module for compatibility.
@@ -57,7 +58,7 @@ def mpi_open_dataset(
     """
     if not isinstance(mpi_runtime, MPIRuntime):
         mpi_runtime = MPIRuntime(mpi_runtime)
-    data = _MPIXarrayOps(mpi_runtime).open_xr_dataset(
+    data = MPIXarrayOps(mpi_runtime).open_xr_dataset(
         filename_or_obj,
         partition_dim=partition_dim,
         chunks=chunks,
@@ -110,7 +111,7 @@ def mpi_create_dataarray(
     MPIXarray
         Lazy rank-local DataArray with ``.meta`` set.
     """
-    data = _MPIXarrayOps(runtime).create_dataarray(
+    data = MPIXarrayOps(runtime).create_dataarray(
         fill,
         dims,
         shape=shape,
@@ -164,7 +165,7 @@ def mpi_create_dataset(
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
     """
-    data = _MPIXarrayOps(runtime).create_dataset(
+    data = MPIXarrayOps(runtime).create_dataset(
         data_vars,
         sizes,
         dim=dim,
@@ -207,7 +208,7 @@ def mpi_partition_data(
     MPIXarray
         Rank-local slice with ``.meta`` set.
     """
-    data = _MPIXarrayOps(runtime).partition(
+    data = MPIXarrayOps(runtime).partition(
         unwrap(value),
         dim,
         root=root,

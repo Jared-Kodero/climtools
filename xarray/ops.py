@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
 
 
-class _MPIXarrayOps(
+class MPIXarrayOps(
     IO, Indexing, Reduction, Statistics, Groupby, Arithmetic, Elementwise
 ):
     """Bind MPI-aware xarray operations to a runtime.
