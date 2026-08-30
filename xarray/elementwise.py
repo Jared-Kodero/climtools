@@ -201,6 +201,57 @@ class Elementwise:
 
         self._agree(("cumsum", str(dim), int(meta["global_size"])))
 
+        if isinstance(value, xr.Dataset):
+            # Only data variables that actually carry `dim` may enter the
+            # cross-rank prefix scan below. xarray's own `.sum(dim)` (and
+            # `.cumsum(dim)`) silently leave a variable lacking `dim`
+            # completely unchanged rather than reducing it to a scalar --
+            # every rank's "total" for such a variable is really just its
+            # own already-identical, unreduced, replicated array. Feeding
+            # that into the same gather/scatter prefix machinery as the
+            # genuinely-reduced variables would silently add rank_index
+            # extra copies of that array onto itself (rank r's exclusive
+            # prefix becomes the sum of r copies of the same array, not the
+            # additive identity 0 it needs to be for a variable with
+            # nothing to accumulate), corrupting a variable that `dim`
+            # never touched at all.
+            touched = [name for name, var in value.data_vars.items() if dim in var.dims]
+            if not touched:
+                return strip_mpi_meta(value.copy(deep=False))
+            untouched = [name for name in value.data_vars if name not in touched]
+            scanned = self._cumsum_scan(
+                value[touched], dim, skipna=skipna, keep_attrs=keep_attrs
+            )
+            result = (
+                xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
+                if untouched
+                else scanned
+            )
+            result.attrs = dict(value.attrs)
+            return self._reattach_meta(result, meta)
+
+        return self._reattach_meta(
+            self._cumsum_scan(value, dim, skipna=skipna, keep_attrs=keep_attrs), meta
+        )
+
+    def _cumsum_scan(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        dim: Hashable,
+        *,
+        skipna: bool | None,
+        keep_attrs: bool | None,
+    ) -> xr.Dataset | xr.DataArray:
+        """Cross-rank prefix-sum core of :meth:`cumsum`.
+
+        Every variable in ``value`` (a DataArray, or a Dataset already
+        filtered to only the variables that carry ``dim``) is assumed to
+        actually contain ``dim``, so ``value.sum(dim)`` genuinely reduces
+        every one of them to a same-shaped, rank-local total -- the
+        precondition the gather/scatter exclusive-prefix computation below
+        requires.
+        """
+
         def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
             local_cumsum = value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
             local_total = value.sum(dim, skipna=skipna)
@@ -222,8 +273,7 @@ class Elementwise:
                 running = running + total
         exclusive_prefix = self._runtime.scatter(prefixes, root=0)
 
-        result = local_cumsum + exclusive_prefix
-        return self._reattach_meta(result, meta)
+        return local_cumsum + exclusive_prefix
 
     def median(
         self,

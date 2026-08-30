@@ -126,7 +126,7 @@ def create_dataset(
     if mpi.comm.rank == 0:
         if path.parent.exists():
             shutil.rmtree(path.parent)
-            path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         # we need to broadcaste the constanst
         build_dataset(path, n_time, resolution_deg, plev_step)

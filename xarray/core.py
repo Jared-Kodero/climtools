@@ -27,7 +27,6 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from .constructors import _MPIXarrayOps
 from .handles import *
 from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
 
@@ -254,6 +253,15 @@ class MPIXarray:
             meta = get_mpi_meta(data)
             if meta is not None:
                 data = strip_mpi_meta(data)
+        # Imported lazily (rather than at module level) to break the
+        # circular import between this module and .constructors: .constructors
+        # itself needs MPIXarray/unwrap from here at import time, so a
+        # top-level `from .constructors import _MPIXarrayOps` here would
+        # deadlock whichever of the two modules is imported first against
+        # the other's not-yet-defined names. By the time this constructor
+        # actually runs, both modules are always fully initialized.
+        from .constructors import _MPIXarrayOps
+
         self.data = data
         self.meta = meta
         self._runtime = runtime
@@ -553,6 +561,46 @@ class MPIXarray:
                 + "local truthiness is genuinely what you want."
             )
         return bool(self.data)
+
+    def __getitem__(self, key: Any) -> Any:
+        """Select a Dataset variable by name; mirrors ``xarray.Dataset[key]``.
+
+        Only a string key is supported, which selects a data variable and
+        is always partition-preserving -- it never touches dimension
+        lengths or ordering, so (like the entries in
+        :data:`_SAFE_PASSTHROUGH_METHODS`) it is safe to route through
+        :meth:`apply`. Any other key (integer/slice/boolean positional
+        indexing, as ``xarray.DataArray.__getitem__`` supports) has no
+        dedicated MPI-aware handling here -- it can touch the partition
+        dimension the same way a raw, unvalidated ``isel`` could -- so it
+        raises rather than silently doing something dimension-unsafe. Use
+        :meth:`isel`/:meth:`sel` for that, or ``.data[key]`` directly for
+        xarray's plain, rank-local indexing.
+
+        Parameters
+        ----------
+        key : Any
+            Variable name (str) to select.
+
+        Returns
+        -------
+        MPIXarray
+            The selected variable, with ``.meta`` unchanged.
+
+        Raises
+        ------
+        TypeError
+            If ``key`` is not a string.
+        """
+        if isinstance(key, str):
+            return self.apply(lambda d, k: d[k], self, key)
+        raise TypeError(
+            "MPIXarray.__getitem__ only supports selecting a Dataset "
+            + f"variable by name (a str key); got {key!r} "
+            + f"({type(key).__name__}). Use .isel(...)/.sel(...) for "
+            + "label/position-based indexing, or .data[key] for xarray's "
+            + "plain, rank-local indexing."
+        )
 
     def __matmul__(self, other: Any) -> MPIXarray:
         """Matrix multiplication (``self @ other``); redirects to :meth:`matmul`.

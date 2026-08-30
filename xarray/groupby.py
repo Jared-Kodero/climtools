@@ -20,6 +20,7 @@ resampling, categorical groupby), not for high-cardinality grouping."""
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Hashable
 from typing import TYPE_CHECKING, Literal
 
@@ -31,7 +32,7 @@ import xarray as xr
 
 from .common import _extreme_identity, _partial_dtype
 from .engine import ReductionPlanningMixin
-from .meta import get_mpi_meta
+from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
 
 if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
@@ -256,13 +257,37 @@ class Groupby(ReductionPlanningMixin):
     ) -> xr.Dataset | xr.DataArray:
         """Resample a datetime dimension to ``freq``, then reduce.
 
-        A thin wrapper over :meth:`groupby_reduce`: group labels are the
-        pandas period start for ``freq`` (e.g. ``"D"``, ``"MS"``, ``"YS"``)
-        computed from this rank's local ``dim`` coordinate, so ranks agree on
-        bin boundaries without any extra communication. See
-        :meth:`groupby_reduce` for parameters and MPI cost."""
-        labels = pd.DatetimeIndex(value[dim].values).to_period(freq).to_timestamp()
-        return self.groupby_reduce(
+        A thin wrapper over :meth:`groupby_reduce`: group labels are each
+        timestamp's resampled bin-start, computed from this rank's local
+        ``dim`` coordinate against a fixed, data-independent grid anchored
+        at the Unix epoch (``origin="epoch"``) -- not the rank's own local
+        min/max -- so every rank agrees on identical bin edges without any
+        extra communication, exactly reproducing ``xarray``'s own
+        ``.resample(freq)`` bins (e.g. ``"D"``, ``"MS"``, ``"YS"``, and,
+        unlike an earlier ``DatetimeIndex.to_period(freq)``-based
+        implementation, frequency multiples such as ``"12h"``/``"6min"``/
+        ``"3D"`` too -- ``to_period`` silently mis-bins those, since pandas
+        ``Period`` arithmetic with a multiple does not snap to a shared
+        grid the way ``resample``/``Grouper`` does, instead giving nearly
+        every timestamp its own singleton period). See :meth:`groupby_reduce`
+        for parameters and MPI cost."""
+        timestamps = pd.DatetimeIndex(value[dim].values)
+        with warnings.catch_warnings():
+            # pandas warns that `origin` has no effect for calendar
+            # (non-Tick-like, e.g. "MS"/"YS") frequencies -- expected and
+            # harmless here: those frequencies are already anchored to an
+            # absolute calendar grid regardless of origin, which is exactly
+            # the rank-independent property this needs.
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            edges = (
+                pd.Series(0, index=timestamps)
+                .resample(freq, origin="epoch")
+                .count()
+                .index
+            )
+        positions = edges.searchsorted(timestamps, side="right") - 1
+        labels = edges[positions]
+        result = self.groupby_reduce(
             value,
             dim,
             labels,
@@ -271,3 +296,25 @@ class Groupby(ReductionPlanningMixin):
             keep_attrs=keep_attrs,
             partition_dim=partition_dim,
         )
+
+        # groupby_reduce() always names its new dimension _GROUP_DIM
+        # ("_mpi_group"), an internal convention appropriate for an
+        # arbitrary label array. resample() groups by intervals of `dim`
+        # itself, so -- mirroring plain xarray's own
+        # `Dataset.resample(**{dim: freq}).mean()`, which keeps the
+        # dimension named "time" (or whatever `dim` was), not some generic
+        # group name -- the result is renamed back to `dim` here.
+        if _GROUP_DIM not in getattr(result, "dims", ()):
+            return result
+        meta = get_mpi_meta(result)
+        renamed = strip_mpi_meta(result).rename({_GROUP_DIM: dim})
+        if meta is not None:
+            set_mpi_meta(
+                renamed,
+                dim=dim,
+                global_size=meta["global_size"],
+                start=meta["start"],
+                stop=meta["stop"],
+                chunk_info=meta["chunk_info"],
+            )
+        return renamed

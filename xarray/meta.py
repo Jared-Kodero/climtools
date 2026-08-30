@@ -7,6 +7,7 @@ from collections.abc import Hashable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+from mpi4py import MPI
 
 import xarray as xr
 
@@ -257,6 +258,37 @@ def _format_bytes(count: float) -> str:
             return f"{count:.0f}{unit}" if unit == "B" else f"{count:.1f}{unit}"
         count /= 1024.0
     return f"{count:.1f}TiB"
+
+
+def should_log_partitions(runtime: MPIRuntime, log_partitions: bool) -> bool:
+    """Collectively resolve whether to call :func:`log_partition_report`.
+
+    ``log_partition_report`` itself calls ``comm.gather`` unconditionally
+    to assemble its table -- every rank must call it together or the
+    ranks that do call it block forever waiting for the ones that don't.
+    But the natural, expected way to request the report is exactly the
+    one thing that breaks that requirement: ``log_partitions=(rank == 0)``
+    ("only print from rank 0"), which passes a *different* boolean on
+    different ranks. Resolving the decision through one cheap
+    ``Allreduce``/``LOR`` here first -- report if *any* rank asked, a
+    result every rank computes identically -- makes that idiom safe
+    without changing behavior for the common case where every rank
+    already agrees (all True, or all False).
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        Runtime whose communicator backs the collective.
+    log_partitions : bool
+        This rank's own request.
+
+    Returns
+    -------
+    bool
+        Identical on every rank: whether to call
+        :func:`log_partition_report`.
+    """
+    return bool(runtime.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
 
 def log_partition_report(

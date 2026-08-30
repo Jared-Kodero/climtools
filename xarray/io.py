@@ -33,6 +33,7 @@ from .meta import (
     log_partition_report,
     set_mpi_meta,
     set_save_chunks,
+    should_log_partitions,
     strip_mpi_meta,
 )
 
@@ -198,7 +199,7 @@ class IO:
             stop=stop,
             chunk_info=chunk_info,
         )
-        if log_partitions:
+        if should_log_partitions(self._runtime, log_partitions):
             log_partition_report(
                 self._runtime,
                 data,
@@ -370,7 +371,7 @@ class IO:
         else:
             output = self._runtime.receive(source=root, tag=self._DISTRIBUTE_TAG)
 
-        if log_partitions:
+        if should_log_partitions(self._runtime, log_partitions):
             meta = get_mpi_meta(output)
             if meta is not None:
                 log_partition_report(
@@ -472,7 +473,7 @@ class IO:
             stop=stop,
             chunk_info={str(dim_name): stop - start},
         )
-        if log_partitions:
+        if should_log_partitions(self._runtime, log_partitions):
             log_partition_report(
                 self._runtime,
                 da,
@@ -593,7 +594,7 @@ class IO:
             stop=stop,
             chunk_info={str(dim): stop - start},
         )
-        if log_partitions:
+        if should_log_partitions(self._runtime, log_partitions):
             log_partition_report(
                 self._runtime,
                 ds,
@@ -682,7 +683,7 @@ class IO:
         set_mpi_meta(
             output, dim=dim, global_size=length, start=start, stop=stop, chunk_info=info
         )
-        if log_partitions:
+        if should_log_partitions(self._runtime, log_partitions):
             log_partition_report(
                 self._runtime,
                 output,
