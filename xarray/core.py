@@ -1,23 +1,7 @@
-"""``MPIXarray``: a rank-local xarray object bound to its MPI distribution.
+"""Provide the MPI-distributed xarray wrapper.
 
-:class:`MPIXarray` is the public interface: a wrapper around one rank-local
-``xarray.Dataset``/``xarray.DataArray`` (``.data``) and its MPI distribution
-metadata (``.meta``), bound to an :class:`~..mpi.runtime.MPIRuntime`. It is
-built by :func:`~.constructors.open_dataset`,
-:func:`~.constructors.create_dataset`,
-:func:`~.constructors.create_dataarray`, or
-:func:`~.constructors.distribute` -- never directly from raw input --
-and every method on it runs on ``self.data`` and returns a new, re-wrapped
-:class:`MPIXarray`. Attribute access not defined on the wrapper (``.values``,
-``.dims``, ``.sizes``, ``.coords``, ...) passes through to ``self.data``.
-
-``mpi_meta`` (the dict :mod:`.meta` uses to track which global slice of a
-dimension this rank owns) only ever lives in ``xarray`` ``.attrs`` while a
-call is in flight through the underlying engine (:class:`~.ops._MPIXarrayOps`),
-which is the only thing that reads/writes it there; the moment a call
-returns, it is popped out of ``.attrs`` and kept solely on
-``MPIXarray.meta``, so ``self.data`` a caller holds is always plain,
-unannotated xarray data.
+``MPIXarray`` stores rank-local xarray data and delegates distributed
+operations to :class:`~.ops._MPIXarrayOps`.
 """
 
 from __future__ import annotations
@@ -27,8 +11,10 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from .handles import *
+from .compat import install_binary_op_compatibility, register_mpixarray_type
+from .handles import MPIGroupBy, MPIResample, MPIRolling
 from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
+from .ops import _MPIXarrayOps
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -39,7 +25,7 @@ if TYPE_CHECKING:
 
     from ..mpi.runtime import MPIRuntime
 
-#: Attrs key for the lightweight boolean flag :func:`_mark_partitioned`
+#: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
 #: stamps onto ``MPIXarray.data`` (and, for a Dataset, every distributed
 #: variable) after the full ``mpi_meta`` dict is popped into ``.meta``. Not
 #: read by anything in this package -- ``.meta`` (or, inside the engine,
@@ -134,91 +120,31 @@ _SAFE_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
 
 
 class MPIXarray:
-    """A distributed xarray object bound to an MPI runtime.
-
-    Wraps a rank-local ``xarray.Dataset``/``xarray.DataArray`` (``.data``)
-    together with its MPI distribution metadata (``.meta``). ``.data`` never
-    carries the full ``mpi_meta`` dict in its ``.attrs``: metadata is
-    reattached only for the duration of one call into the underlying engine
-    and popped back out into ``.meta`` immediately on return (see
-    :meth:`_prepare`). ``.data`` (and, for a Dataset, every variable sharing
-    the partition dimension) does keep one cheap boolean afterward --
-    ``.attrs["mpi_partitioned"]`` -- so code that only ever sees ``.data``
-    on its own can still tell it was part of an MPI partition without the
-    full metadata dict; ``.meta`` (not this flag) remains the source of
-    truth (see :func:`_mark_partitioned`).
-
-    Every method below runs the corresponding :class:`~.ops._MPIXarrayOps`
-    implementation on ``self.data`` and returns a new :class:`MPIXarray`
-    with ``.meta`` updated. Attribute access not defined here passes
-    through to ``self.data`` via ``__getattr__`` *only* for the names in
-    :data:`_SAFE_PASSTHROUGH_ATTRS` (``.values``, ``.dims``, ``.sizes``,
-    ``.coords``, ``.attrs``, ...): a fixed, explicit allowlist of
-    read-only xarray properties, not a heuristic. Any other name -- in
-    particular a plain xarray *method* we have not wrapped, such as
-    ``.median()``, ``.where()``, ``.rolling()`` -- raises
-    ``AttributeError`` rather than silently running xarray's plain,
-    rank-local implementation; use ``.data.<name>(...)`` explicitly for
-    that. ``repr()`` is ``repr(self.data)``.
-
-    Constructing directly on data that is not yet distributed --
-    ``MPIXarray(ds, runtime)`` where ``ds`` is a plain
-    ``xarray.Dataset``/``DataArray`` with no ``mpi_meta``, present
-    identically on every rank (e.g. every rank independently opened the
-    same file) -- automatically partitions it via :meth:`repartition`
-    (``dim="auto"`` by default; see ``dim``/``chunk_info``/``log_partitions``
-    below to control that). This assumes *replicated* input, the same
-    assumption :meth:`repartition` itself makes: if instead only rank 0
-    owns the data and the rest genuinely have nothing, use
-    :func:`~.constructors.distribute` instead, which scatters it.
-    Constructing on data that already carries ``mpi_meta``, or on an
-    already-distributed object returned by one of the factories below,
-    is unaffected -- ``.meta`` is simply adopted, nothing is re-partitioned.
-
-    Constructing on an existing :class:`MPIXarray` (``data`` is itself an
-    :class:`MPIXarray`) adopts its ``.data``/``.meta``/runtime/engine
-    binding as-is; it is not re-inspected, re-partitioned, or re-bound to
-    a different runtime even if a different ``runtime`` argument is given.
-
-    Prefer :func:`~.constructors.open_dataset`,
-    :func:`~.constructors.create_dataset`,
-    :func:`~.constructors.create_dataarray`, or
-    :func:`~.constructors.distribute` when you have one of those specific
-    situations (opening a file, building from scratch, or scattering a
-    root-owned object) -- they call the right underlying engine operation
-    directly instead of going through the replicated-data assumption above.
+    """Wrap rank-local xarray data with MPI distribution state.
 
     Parameters
     ----------
-    data : MPIXarray, xarray.Dataset, or xarray.DataArray
-        Rank-local object. If it is already an :class:`MPIXarray`, it is
-        adopted as-is (see above). If it carries ``mpi_meta`` (e.g.
-        straight off the underlying engine), that metadata is popped into
-        ``.meta`` and stripped from ``.attrs`` immediately. Otherwise, and
-        only when ``auto_partition`` is True, it is partitioned via
-        :meth:`repartition`.
+    data : MPIXarray or xarray.Dataset or xarray.DataArray
+        Rank-local data. Existing ``MPIXarray`` instances are adopted unchanged.
     runtime : MPIRuntime
-        Runtime whose communicator backs every distributed operation.
-        Ignored if ``data`` is already an :class:`MPIXarray`.
-    meta : dict or None, optional
-        Distribution metadata to use as-is, bypassing the ``.attrs`` pop
-        above. Internal callers that already computed ``meta`` pass it here;
-        leave as None otherwise.
-    auto_partition : bool, optional
-        Whether to call :meth:`repartition` when ``data`` turns out not to
-        be distributed. Default True. Internally set to False by
-        :func:`_finalize` when re-wrapping an engine result that is
-        *intentionally* replicated (``.meta`` is None on purpose -- e.g. a
-        scalar selection, or a reduction that contracted away the
-        partition dimension) rather than merely not-yet-partitioned; it is
-        not meant to be set to False by other callers.
-    dim : Hashable or {"auto"}, optional
-        Forwarded to :meth:`repartition` when auto-partitioning. Default
-        "auto".
+        Runtime used by distributed operations.
+    meta : dict, optional
+        Explicit distribution metadata. If omitted, metadata is read from ``data``.
+    auto_partition : bool, default True
+        Partition replicated input that has no distribution metadata.
+    dim : Hashable or {"auto"}, default "auto"
+        Dimension used when auto-partitioning.
     chunk_info : mapping of str to int, optional
-        Forwarded to :meth:`repartition` when auto-partitioning.
-    log_partitions : bool, optional
-        Forwarded to :meth:`repartition` when auto-partitioning.
+        Chunk-size hints used when auto-partitioning.
+    log_partitions : bool, default False
+        Log the partition layout when auto-partitioning.
+
+    Notes
+    -----
+    Distribution metadata is stored on ``.meta`` and attached to xarray attributes
+    only while an engine operation is executing. Replicated input is assumed to be
+    present on every rank; use :func:`~.constructors.mpi_partition_data` for
+    root-owned input.
     """
 
     #: Tells NumPy (and anything that follows its convention, including
@@ -253,15 +179,6 @@ class MPIXarray:
             meta = get_mpi_meta(data)
             if meta is not None:
                 data = strip_mpi_meta(data)
-        # Imported lazily (rather than at module level) to break the
-        # circular import between this module and .constructors: .constructors
-        # itself needs MPIXarray/unwrap from here at import time, so a
-        # top-level `from .constructors import _MPIXarrayOps` here would
-        # deadlock whichever of the two modules is imported first against
-        # the other's not-yet-defined names. By the time this constructor
-        # actually runs, both modules are always fully initialized.
-        from .constructors import _MPIXarrayOps
-
         self.data = data
         self.meta = meta
         self._runtime = runtime
@@ -655,7 +572,7 @@ class MPIXarray:
         Returns
         -------
         MPIXarray or Any
-            The method's result, wrapped by :func:`_finalize`.
+            The method's result, wrapped by :func:`finalize`.
         """
         method = getattr(self._ops, name)
         return finalize(method(self._prepare(), *args, **kwargs), self._runtime)
@@ -1264,8 +1181,7 @@ class MPIXarray:
         return MPIGroupBy(self, dim, labels)
 
     def resample(self, dim: Hashable, freq: str) -> MPIResample:
-        """Resample a datetime dimension to ``freq``, mirroring ``xarray``'s
-        ``.resample(...)``.
+        """Resample a datetime dimension using xarray semantics.
 
         Parameters
         ----------
@@ -1327,7 +1243,7 @@ class MPIXarray:
         Any :class:`MPIXarray` found in ``args``/``kwargs`` is unwrapped to
         its underlying data (with ``.meta`` reattached) before the call.
         ``func`` must be partition-preserving; see
-        :meth:`.operator.Arithmetic.apply` for the exact contract.
+        :meth:`.arithmetic.Arithmetic.apply` for the exact contract.
 
         Parameters
         ----------
@@ -1618,33 +1534,19 @@ class MPIXarray:
 def mark_partitioned(
     data: xr.Dataset | xr.DataArray, meta: dict[str, Any] | None
 ) -> xr.Dataset | xr.DataArray:
-    """Return a copy of ``data`` with the ``mpi_partitioned`` flag matching ``meta``.
-
-    Recomputed from ``meta`` on every :class:`MPIXarray` construction --
-    stamped True (on ``data`` and, for a Dataset, every variable carrying
-    ``meta["dim"]``) when ``meta`` is not None, cleared everywhere
-    otherwise -- rather than trusted to survive intermediate xarray
-    operations correctly on its own. That is deliberate: a flag left to
-    persist passively through arbitrary ``.attrs``-preserving operations
-    (as it would if only ever set once, the way ``mpi_meta`` itself is
-    popped once and never touched again by this class) can go stale the
-    moment an operation makes the object replicated again without
-    knowing the flag exists to clear it. Recomputing it fresh here every
-    time means it can never disagree with ``.meta``.
+    """Set the lightweight partition marker from MPI metadata.
 
     Parameters
     ----------
     data : xarray.Dataset or xarray.DataArray
-        Object to mark. Always shallow-copied first and never mutated in
-        place, since a caller on an alternate construction path (e.g. the
-        explicit ``meta=`` parameter) may not own ``data``'s ``.attrs`` dict.
+        Object to copy and mark.
     meta : dict or None
-        The distribution metadata this flag should reflect.
+        Distribution metadata, or None for replicated data.
 
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        A shallow copy of ``data`` with the flag set or cleared to match.
+        Shallow copy whose partition marker matches ``meta``.
     """
     marked = data.copy(deep=False)
     if meta is None:
@@ -1665,29 +1567,19 @@ def mark_partitioned(
 
 
 def finalize(result: Any, runtime: MPIRuntime) -> Any:
-    """Wrap an ``_MPIXarrayOps`` result in :class:`MPIXarray`.
-
-    ``MPIXarray.__init__`` does the actual popping of ``mpi_meta`` out of
-    ``.attrs`` and into ``.meta``, with ``auto_partition=False`` here: a
-    None ``.meta`` on an engine result means that result is *intentionally*
-    replicated (a scalar selection, a reduction that contracted away the
-    partition dimension, ...), not merely not-yet-partitioned, and must not
-    be silently re-partitioned. A result that is not an xarray
-    Dataset/DataArray (e.g. a plain scalar from :meth:`MPIXarray.apply`/
-    :meth:`MPIXarray.evaluate`) passes through unchanged.
+    """Wrap an engine result when it is an xarray object.
 
     Parameters
     ----------
     result : Any
-        Return value of an :class:`~.ops._MPIXarrayOps` method.
+        Result returned by ``_MPIXarrayOps``.
     runtime : MPIRuntime
-        Runtime the new :class:`MPIXarray` is bound to.
+        Runtime bound to the wrapped result.
 
     Returns
     -------
     MPIXarray or Any
-        ``result`` wrapped in :class:`MPIXarray` if it is an xarray
-        Dataset/DataArray, otherwise ``result`` itself.
+        Wrapped xarray result, or the original non-xarray value.
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
         return MPIXarray(result, runtime, auto_partition=False)
@@ -1695,22 +1587,20 @@ def finalize(result: Any, runtime: MPIRuntime) -> Any:
 
 
 def unwrap(value: Any) -> Any:
-    """Return an :class:`MPIXarray` operand ready for ``_MPIXarrayOps``.
-
-    ``value.meta`` is reattached to ``value.data`` (via
-    :meth:`MPIXarray._prepare`) so the underlying engine sees the same
-    ``.attrs``-embedded metadata it always has. Anything that is not an
-    :class:`MPIXarray` passes through unchanged.
+    """Prepare an ``MPIXarray`` operand for engine use.
 
     Parameters
     ----------
     value : Any
-        Candidate operand, possibly an :class:`MPIXarray`.
+        Candidate operand.
 
     Returns
     -------
     Any
-        ``value._prepare()`` if ``value`` is an :class:`MPIXarray`,
-        otherwise ``value``.
+        Prepared xarray data for ``MPIXarray`` input, otherwise ``value``.
     """
     return value._prepare() if isinstance(value, MPIXarray) else value
+
+
+register_mpixarray_type(MPIXarray)
+install_binary_op_compatibility()

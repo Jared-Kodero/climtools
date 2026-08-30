@@ -1,67 +1,4 @@
-"""MPI-aware elementwise, scan, and order-statistic operations.
-
-New primitives that do not fit either existing shape in :mod:`.operator`:
-
-- :meth:`Elementwise.where` is strictly partition-preserving and
-  elementwise, so it is implemented the same way
-  :meth:`~.operator.Arithmetic.apply` would run it, with one extra check
-  ``apply`` cannot express: ``drop=True`` is refused on distributed data,
-  since it can remove a different number of positions on different ranks.
-- :meth:`Elementwise.cumsum` is partition-preserving in *length* (every
-  rank keeps its own local length) but is not partition-preserving in
-  *value*: each rank's running total must start from every earlier rank's
-  total. That needs a rank-ordered prefix, which this builds the same way
-  :func:`~.io.IO.attach_save_chunks` builds its save-chunk plan: rank 0
-  gathers every rank's local total (:meth:`~..mpi.runtime.MPIRuntime.gather`),
-  computes each rank's exclusive prefix locally, and scatters one prefix
-  back to each rank (:meth:`~..mpi.runtime.MPIRuntime.scatter`) -- no new
-  MPI collective, just the ``gather``/``scatter`` pair
-  :class:`~..mpi.runtime.MPIRuntime` already provides.
-- :meth:`Elementwise.median` genuinely reduces the partition dimension
-  away, like :mod:`.reductions`, but has no associative MPI reduction
-  operator the way sum/min/max do. It gathers every rank's slice onto
-  rank 0 (:meth:`~..mpi.runtime.MPIRuntime.gather`), which alone
-  reconstructs the full dimension and takes xarray's own median, then
-  broadcasts the (already-reduced, small) result back
-  (:meth:`~..mpi.runtime.MPIRuntime.broadcast`) -- correct, and only rank 0
-  ever materializes the full dimension, unlike an ``Allgather`` that would
-  replicate it onto every rank.
-- :meth:`Elementwise.diff` along the active partition dimension borrows
-  ``n`` boundary elements from the one neighbor that matters --
-  :meth:`~.operator.Arithmetic.halo_exchange` (before-only for
-  ``label="upper"``, which drops the global *first* ``n`` elements and so
-  only leaves rank 0 short; after-only for ``label="lower"``, which drops
-  the global *last* ``n`` and only leaves the last rank short) -- then
-  recomputes every rank's ``start``/``stop``/``global_size`` the same way
-  :meth:`~.indexing.Indexing.isel` already does for its own
-  length-changing slice case: an ``allgather`` of each rank's new local
-  length, then a running sum. Every rank keeps its original local length
-  except the one at the affected edge, which is ``n`` shorter -- exactly
-  matching where the global array actually lost those ``n`` elements.
-
-Mixed into :class:`~.ops._MPIXarrayOps` alongside
-:class:`~.operator.Arithmetic`; requires the ``self._runtime`` attribute
-(and its ``gather``/``scatter``/``broadcast``/``is_root`` methods) and the
-``self._check_operands_distribution``/``self._check_partition_preserved``/
-``self._reattach_meta``/``self._agree`` helpers :class:`~.operator.Arithmetic`
-and :class:`~.engine.ReductionPlanningMixin` define.
-
-Collective error-safety note
------------------------------
-:mod:`.engine`'s ``Allreduce``-based reductions guard the risky local step
-before every collective with ``_guarded``/``raise_if_error`` so one rank's
-local exception cannot leave the others blocked in a collective they will
-now never receive. :meth:`Elementwise.cumsum` and :meth:`Elementwise.median`
-do the same around their own risky local step (the local
-cumsum/total computation for the former; the rank-0-only ``xr.concat`` +
-reduce for the latter, the more dangerous of the two since every other rank
-is already waiting at the final ``broadcast`` when it runs).
-:class:`~..mpi.runtime.MPIRuntime`'s ``gather``/``scatter``/``broadcast``
-themselves remain thin, unguarded wrappers around ``mpi4py``'s pickle-based
-collectives -- a failure *inside* mpi4py's own collective call (as opposed
-to the local xarray computation surrounding it, which is what is guarded)
-is not covered by this and is a known, narrower follow-up.
-"""
+"""Provide MPI-aware elementwise, scan, and order-statistic operations."""
 
 from __future__ import annotations
 
@@ -87,7 +24,7 @@ class Elementwise:
     methods) and the ``self._check_operands_distribution``,
     ``self._check_partition_preserved``, ``self._reattach_meta``,
     ``self._agree``, ``self._guarded`` helpers defined on
-    :class:`~.operator.Arithmetic`/:class:`~.engine.ReductionPlanningMixin`;
+    :class:`~.arithmetic.Arithmetic`/:class:`~.reduction_planning.ReductionPlanningMixin`;
     provided by :class:`~.ops._MPIXarrayOps`.
     """
 
@@ -123,7 +60,7 @@ class Elementwise:
         ValueError
             If ``drop=True`` is requested on a distributed object, or the
             operands are distributed over incompatible partitions (see
-            :meth:`~.operator.Arithmetic.apply`).
+            :meth:`~.arithmetic.Arithmetic.apply`).
         """
         operands = (value, cond) if other is _UNSET else (value, cond, other)
         meta, reference = self._check_operands_distribution(operands)
@@ -168,7 +105,7 @@ class Elementwise:
 
         The rank-local cumulative-sum/total computation happens on every
         rank independently before the first collective; it is guarded the
-        same way :meth:`~.engine.ReductionPlanningMixin._comm_reduce` guards
+        same way :meth:`~.reduction_planning.ReductionPlanningMixin._comm_reduce` guards
         its own local step, so a local failure on one rank (e.g. an
         unsupported dtype) is reported consistently on every rank via
         ``raise_if_error`` instead of leaving the other ranks blocked
@@ -363,7 +300,7 @@ class Elementwise:
         difference with the later/"upper" of the two positions it came
         from), so every rank except rank 0 can compute its output at full
         local length by borrowing ``n`` elements from its left neighbor
-        (:meth:`~.operator.Arithmetic.halo_exchange`); rank 0 has no left
+        (:meth:`~.arithmetic.Arithmetic.halo_exchange`); rank 0 has no left
         neighbor and is genuinely ``n`` shorter, which is exactly where the
         global array actually lost those ``n`` elements. ``label="lower"``
         is the mirror image: drops the global *last* ``n``, borrows from
@@ -401,7 +338,7 @@ class Elementwise:
         ValueError
             If ``n`` is negative, ``label`` is not "upper"/"lower", or any
             rank's local length along ``dim`` is shorter than ``n`` (this
-            last case is caught by :meth:`~.operator.Arithmetic.halo_exchange`
+            last case is caught by :meth:`~.arithmetic.Arithmetic.halo_exchange`
             itself, which checks every rank's local length together via a
             synchronized ``allgather`` before raising, so the error is
             consistent and every rank raises together rather than some

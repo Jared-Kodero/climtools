@@ -1,90 +1,24 @@
-"""Module-level constructors for :class:`~.core.MPIXarray`.
-
-No :class:`~.core.MPIXarray` exists yet for these to be a method on: each
-builds data from scratch (or from a root-owned/external value) and returns
-the first wrapped :class:`~.core.MPIXarray`. All take the runtime explicitly
-rather than relying on any ambient/bound runtime.
-"""
+"""Construct distributed xarray objects."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-
 import xarray as xr
 
-from ..mpi.runtime import MPIRuntime, mpi
-from ..netcdf import io as netcdf_io
+from ..mpi.runtime import MPIRuntime
 from .core import MPIXarray, unwrap
-from .elementwise import Elementwise
-from .groupby import Groupby
-from .indexing import Indexing
-from .io import IO
-from .meta import get_mpi_meta
-from .operator import Arithmetic
-from .reductions import Reduction
-from .statistics import Statistics
+from .ops import _MPIXarrayOps
+from .serialization import to_netcdf as to_netcdf
+
+# ``to_netcdf`` remains available from this module for compatibility.
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
-    from os import PathLike
+    from collections.abc import Callable, Hashable, Mapping, Sequence
     from typing import Literal
 
     from mpi4py.MPI import Intracomm
-
-
-# Make `raw_dataset + mpixarray` (and -/*//etc.) defer correctly: xarray's
-# own Dataset.__add__/DataArray.__add__ only return NotImplemented (which
-# is what lets Python fall through to MPIXarray's own __radd__/etc.) for a
-# closed list of xarray-internal types. MPIXarray isn't on that list, so
-# without this it fails inside xarray's own arithmetic instead of ever
-# reaching MPIXarray's code. `mpixarray + raw_dataset` (operand order
-# reversed) already works without this -- Python always tries the left
-# operand's __add__ first.
-_da_binary_op = xr.DataArray._binary_op
-_ds_binary_op = xr.Dataset._binary_op
-
-
-def _da_binary_op_patched(
-    self: xr.DataArray, other: Any, f: Any, reflexive: bool = False
-) -> Any:
-    if isinstance(other, MPIXarray):
-        return NotImplemented
-    return _da_binary_op(self, other, f, reflexive)
-
-
-def _ds_binary_op_patched(
-    self: xr.Dataset, other: Any, f: Any, reflexive: bool = False, join: Any = None
-) -> Any:
-    if isinstance(other, MPIXarray):
-        return NotImplemented
-    return _ds_binary_op(self, other, f, reflexive, join)
-
-
-xr.DataArray._binary_op = _da_binary_op_patched
-xr.Dataset._binary_op = _ds_binary_op_patched
-
-
-class _MPIXarrayOps(
-    IO, Indexing, Reduction, Statistics, Groupby, Arithmetic, Elementwise
-):
-    """Internal MPI-aware xarray engine bound to an MPI runtime.
-
-    Composes, by concern, the same seven mixins :class:`~.core.MPIXarray`
-    delegates to: :class:`~.io.IO`, :class:`~.indexing.Indexing`,
-    :class:`~.reductions.Reduction`, :class:`~.statistics.Statistics`,
-    :class:`~.groupby.Groupby`, :class:`~.operator.Arithmetic`,
-    :class:`~.elementwise.Elementwise`.
-
-    Parameters
-    ----------
-    runtime : MPIRuntime
-        Runtime whose communicator is used for distributed operations.
-    """
-
-    def __init__(self, runtime: MPIRuntime) -> None:
-        self._runtime = runtime
 
 
 def mpi_open_dataset(
@@ -281,137 +215,3 @@ def mpi_partition_data(
         log_partitions=log_partitions,
     )
     return MPIXarray(data, runtime)
-
-
-def to_netcdf(
-    data: MPIXarray | xr.Dataset | xr.DataArray,
-    file: str | PathLike[str],
-    mpi_runtime: MPIRuntime | Intracomm = mpi,
-    unlimited_dim: str | Iterable[str] | None = None,
-    partition_dim: str | None = None,
-    *,
-    parallel: bool = False,
-    batch_size: int = 24,
-    format: str = "NETCDF4",
-    shuffle: bool = True,
-    zlib: bool = True,
-    complevel: int = 4,
-    show_progress: bool = True,
-    stdout: Any = None,
-    chunks: Mapping[str, Iterable[int]] | None = None,
-    hints: str | None = None,
-    nofill: bool = True,
-    allow_serial: bool = False,
-) -> None:
-    """Write a Dataset or DataArray to NetCDF.
-
-    Serial output (``parallel=False``, the default) is written
-    incrementally along an unlimited dimension by whichever rank calls
-    this; it is not rank-aware and expects ``data`` to already be the
-    complete object -- typically called by rank 0 alone with a
-    non-distributed (replicated, ``.meta`` is None) object. In parallel
-    mode, an object carrying ``mpi_meta`` is already distributed and every
-    rank writes its existing local slab directly; otherwise rank 0 owns
-    the complete object and the parallel writer distributes it.
-
-    A distributed ``data`` written with ``parallel=True`` first has
-    write-time chunk metadata attached internally (the engine's
-    ``attach_save_chunks`` step -- computed on rank 0 from distribution
-    metadata and broadcast, no data materialized; a no-op for a
-    non-distributed object). This is no longer a separate method to call
-    beforehand: it is purely an implementation detail of writing, not
-    something callers need to reason about.
-
-    Parameters
-    ----------
-    data : MPIXarray, xarray.Dataset, or xarray.DataArray
-        Object to write. An :class:`MPIXarray` is unwrapped so
-        :func:`~.netcdf.io.to_netcdf` sees its ``mpi_meta`` in ``.attrs``
-        when writing with ``parallel=True``.
-    file : str or os.PathLike
-        Output path.
-    mpi_runtime : MPIRuntime, optional
-        Runtime whose communicator backs a parallel write. Defaults to the
-        package-wide :data:`~..mpi.runtime.mpi` instance.
-    unlimited_dim : str or iterable of str, optional
-        Dimension or dimensions made unlimited.
-    partition_dim : str, optional
-        MPI partition dimension. For an already distributed object this must
-        agree with ``mpi_meta["dim"]``.
-    parallel : bool, default False
-        Use MPI-parallel NetCDF-4 output. Required if ``data`` is
-        distributed -- see ``Raises`` below.
-    batch_size : int, default 24
-        Number of slices written per serial append.
-    format : str, default "NETCDF4"
-        NetCDF format for serial output.
-    shuffle : bool, default True
-        Apply the HDF5 shuffle filter.
-    zlib : bool, default True
-        Apply zlib compression.
-    complevel : int, default 4
-        Compression level from 0 through 9.
-    show_progress : bool, default True
-        Display serial write progress.
-    stdout : Any, optional
-        Serial progress output stream.
-    chunks : mapping of str to iterable of int, optional
-        Explicit NetCDF variable chunk shapes.
-    hints : str, optional
-        Semicolon-separated MPI-IO hints in ``key=value`` form.
-    nofill : bool, default True
-        Disable NetCDF pre-filling during parallel initialization.
-    allow_serial : bool, default False
-        Permit the parallel writer with one MPI rank.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    ValueError
-        If ``data`` is distributed (has ``mpi_meta``) and ``parallel`` is
-        False. The serial writer is not rank-aware: it would otherwise
-        write only the calling rank's own local slice as if it were the
-        complete file, silently producing an incomplete, wrong result
-        rather than raising.
-    """
-    runtime = (
-        mpi_runtime if isinstance(mpi_runtime, MPIRuntime) else MPIRuntime(mpi_runtime)
-    )
-    unwrapped = unwrap(data)
-    if not parallel and get_mpi_meta(unwrapped) is not None:
-        raise ValueError(
-            "to_netcdf(): data is distributed (carries mpi_meta) but "
-            + "parallel=False (the default). Serial NetCDF output is not "
-            + "rank-aware and expects the complete object already assembled "
-            + "on the calling rank -- writing a distributed object this way "
-            + "would silently write only this rank's own local slice as the "
-            + "whole file. Pass parallel=True to write a distributed object "
-            + "correctly, or gather/replicate it to a single rank first "
-            + "(e.g. an MPIXarray reduction that returns a replicated "
-            + "result) if serial output is what you actually want."
-        )
-    prepared = (
-        _MPIXarrayOps(runtime).attach_save_chunks(unwrapped) if parallel else unwrapped
-    )
-    netcdf_io.to_netcdf(
-        prepared,
-        file,
-        runtime,
-        unlimited_dim,
-        partition_dim,
-        parallel=parallel,
-        batch_size=batch_size,
-        format=format,
-        shuffle=shuffle,
-        zlib=zlib,
-        complevel=complevel,
-        show_progress=show_progress,
-        stdout=stdout,
-        chunks=chunks,
-        hints=hints,
-        nofill=nofill,
-        allow_serial=allow_serial,
-    )

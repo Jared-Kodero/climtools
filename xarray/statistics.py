@@ -1,14 +1,7 @@
-"""Distributed standard deviation and variance.
+"""Compute distributed variance and standard deviation.
 
-Two-collective algorithm: first an ``Allreduce`` computes the exact global
-mean (via :meth:`~.reductions.ReductionMixin.mean`, replicated on every
-rank), then a second ``Allreduce`` sums each rank's local squared deviation
-from that mean. This is simpler and easier to audit than a single-pass
-parallel (Chan et al. 1979) combiner built on a custom commutative
-``MPI.Op``, at the cost of one extra collective per call; for the partition
-sizes this package targets, the collective's latency floor is negligible
-next to the two local ``.sum()`` passes over the data. Note ``skipna``
-selects the mean over valid values only.
+The implementation uses one collective for the mean and one for squared
+deviations.
 """
 
 from __future__ import annotations
@@ -23,17 +16,17 @@ from mpi4py import MPI
 import xarray as xr
 
 from .common import _partial_dtype
-from .engine import ReductionPlanningMixin
 from .meta import get_mpi_meta
+from .planning import ReductionPlanningMixin
 
 if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
 
 
 class Statistics(ReductionPlanningMixin):
-    """Distributed ``std``/``var``.
+    """Provide distributed variance and standard-deviation reductions.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
+    The host class must provide ``self._runtime``.
     """
 
     _runtime: MPIRuntime

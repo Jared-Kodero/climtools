@@ -1,4 +1,4 @@
-"""Chunk calculations for saving and partitioning of NECDF4/HDF5 files"""
+"""Calculate chunks for MPI partitioning and NetCDF4/HDF5 output."""
 
 from __future__ import annotations
 

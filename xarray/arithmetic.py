@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import operator
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -14,9 +15,7 @@ import xarray as xr
 from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable, Iterable, Mapping
-
-from collections.abc import Callable
+    from collections.abc import Hashable, Iterable, Mapping
 
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
@@ -77,14 +76,10 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
 
 
 class Arithmetic:
-    """Alignment and arithmetic methods mixed into ``XarrayMPI``.
+    """Provide MPI-aware alignment and arithmetic operations.
 
-    Assumes the host class provides ``self.repartition`` (used by
-    :meth:`align`), ``self._agree`` (used by :meth:`apply`, :meth:`matmul`,
-    and :meth:`halo_exchange`), and ``self._comm_reduce`` (used by
-    :meth:`matmul`, an ``Allreduce`` helper defined on
-    :class:`~.engine.ReductionPlanningMixin`); all are provided by
-    :class:`~climtools.core.xarray_mpi.XarrayMPI`.
+    The host class must provide the reduction-planning methods inherited by
+    :class:`~.ops._MPIXarrayOps`.
     """
 
     # -- alignment ----------------------------------------------------------
@@ -672,10 +667,10 @@ class Arithmetic:
     def _apply_generic(
         self, func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
-        """The partition-preserving-callable path shared by :meth:`apply` and
-        the "not actually contracted" fallback in :meth:`matmul`.
+        """Run the shared partition-preserving callable path.
 
-        Split out from :meth:`apply` so that fallback can invoke this
+        Split out from :meth:`apply` so the non-contracted matmul fallback can
+        invoke this
         validated generic path directly instead of calling
         ``self.apply(operator.matmul, ...)``, which would recurse straight
         back into :meth:`matmul` via the redirect above.
@@ -718,7 +713,8 @@ class Arithmetic:
         simply routed through :meth:`apply`. When ``d`` is contracted, the
         sum splits additively over ``d``:
 
-        ``C_ij = sum_k A_ik * B_kj = sum_r (sum_{k in rank r} A_ik * B_kj) = sum_r C_ij^(r)``
+        ``C_ij = sum_k A_ik * B_kj = sum_r (sum_{k in rank r} A_ik * B_kj)``
+        followed by ``sum_r C_ij^(r)``.
 
         so each rank computes its local partial contraction over its own
         owned slice of ``d`` (an ordinary rank-local ``dot``), and one
@@ -927,7 +923,8 @@ class Arithmetic:
         """Windowed reduction along ``dim``, correct when ``dim`` is distributed.
 
         Equivalent to
-        ``value.rolling({dim: window}, center=center, min_periods=min_periods).<reduce>()``,
+        ``value.rolling({dim: window}, center=center,
+        min_periods=min_periods).<reduce>()``,
         but safe to call when ``dim`` is the active MPI partition
         dimension: plain ``xarray`` rolling only ever sees this rank's own
         local slice, so a window that spans a partition edge silently

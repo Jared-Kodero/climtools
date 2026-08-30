@@ -1,12 +1,4 @@
-"""Distributed sum, product, mean, min, max, first, last, any, and all.
-
-Concrete numerical/logical reductions built on
-:class:`~.engine.ReductionPlanningMixin`. Each public method plans
-the reduction once, runs a rank-local partial, combines partials with one
-``Allreduce`` (two for ``first``/``last``), and hands the result to
-:meth:`~.engine.ReductionPlanningMixin._finish` for metadata
-restoration and optional repartition.
-"""
+"""Provide distributed numerical and logical reductions."""
 
 from __future__ import annotations
 
@@ -20,18 +12,17 @@ from mpi4py import MPI
 import xarray as xr
 
 from .common import _extreme_identity, _op_name, _partial_dtype
-from .engine import ReductionPlanningMixin
 from .meta import get_mpi_meta
+from .planning import ReductionPlanningMixin
 
 if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
 
 
 class Reduction(ReductionPlanningMixin):
-    """Distributed ``sum``/``prod``/``mean``/``min``/``max``/``first``/
-    ``last``/``any``/``all``.
+    """Provide distributed numerical and logical reductions.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
+    The host class must provide ``self._runtime``.
     """
 
     _runtime: MPIRuntime

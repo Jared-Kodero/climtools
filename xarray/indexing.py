@@ -1,13 +1,4 @@
-"""Global-coordinate indexing for MPI-backed xarray objects.
-
-``isel``/``sel`` on the active partition dimension use global (not per-rank
-local) coordinates, resolving to a local slice or a single-rank scalar
-broadcast to every rank. A slice that leaves exactly one global element on
-the partition dimension can optionally be handed off to
-``partition_dim``, which scatters that one rank's local data onto a
-surviving dimension instead of leaving it stranded on a single rank -- see
-:meth:`Indexing._repartition_singleton`.
-"""
+"""Provide global-coordinate indexing for distributed xarray objects."""
 
 from __future__ import annotations
 
@@ -32,9 +23,9 @@ if TYPE_CHECKING:
 
 
 class Indexing:
-    """Global-coordinate ``isel``/``sel`` for distributed xarray objects.
+    """Provide global-coordinate indexing for distributed xarray objects.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
+    The host class must provide ``self._runtime``.
     """
 
     _runtime: MPIRuntime

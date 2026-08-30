@@ -1,4 +1,4 @@
-"""Shared MPI metadata helpers for distributed xarray objects."""
+"""Manage MPI distribution metadata for xarray objects."""
 
 from __future__ import annotations
 
@@ -426,7 +426,7 @@ def _resolve_sizes(
     ``sizes`` (checked first, so it always wins) or the length of a
     matching full-length coordinate in ``coords`` -- reading that length
     never forces any computation, since coordinates passed to
-    :meth:`XarrayMPI.create_dataarray`/``create_dataset`` are always plain,
+    :meth:`~.io.IO.create_dataarray`/``create_dataset`` are always plain,
     eager arrays, never lazy ``fill`` functions. Any dimension with
     neither is reported together, in one error, rather than one at a time.
     """
@@ -478,8 +478,8 @@ def _delayed_local(
 ) -> Any:
     """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
 
-    Shared by :meth:`XarrayMPI.create_dataarray` and
-    :meth:`XarrayMPI.create_dataset`: every call site passes a *different*
+    Shared by :meth:`~.io.IO.create_dataarray` and
+    :meth:`~.io.IO.create_dataset`: every call site passes a *different*
     ``fn``/``args`` (this rank's own ``fill`` and its own bounds, or none
     for a non-partitioned variable), computed independently with no
     communication -- this helper only avoids repeating the

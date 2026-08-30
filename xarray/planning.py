@@ -1,11 +1,4 @@
-"""Reduction planning and MPI collective primitives.
-
-Shared machinery used by every reduction mixin (:mod:`.reductions`,
-:mod:`.statistics`, :mod:`.groupby`): building a rank-independent
-:class:`~.common.PlanEntry` plan per variable, verifying every rank agrees
-on that plan before posting a collective, running the low-level ``Allreduce``
-exchange, and restoring ``mpi_meta`` once a reduction finishes.
-"""
+"""Plan distributed reductions and execute MPI collectives."""
 
 from __future__ import annotations
 
@@ -35,12 +28,10 @@ if TYPE_CHECKING:
 
 
 class ReductionPlanningMixin:
-    """Rank-independent reduction planning and MPI collective primitives.
+    """Plan distributed reductions and execute MPI collectives.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
-    Concrete reductions (:class:`~.reductions.ReductionMixin`,
-    :class:`~.statistics.StatisticsMixin`, ...) build on these methods; this
-    class performs no reduction itself.
+    The host class must provide ``self._runtime``. Concrete reduction mixins
+    use these helpers for collective agreement, exchange, and metadata repair.
     """
 
     _runtime: MPIRuntime

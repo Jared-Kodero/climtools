@@ -1,9 +1,4 @@
-"""Distribution and I/O for MPI-backed xarray objects.
-
-Opening, distributing, repartitioning, and creating datasets/data arrays
-across ranks: everything that establishes or changes ``mpi_meta`` without
-performing a numerical reduction.
-"""
+"""Provide xarray I/O and redistribution across MPI ranks."""
 
 from __future__ import annotations
 
@@ -44,9 +39,9 @@ if TYPE_CHECKING:
 
 
 class IO:
-    """Dataset/DataArray I/O and (re)distribution across MPI ranks.
+    """Provide xarray I/O and redistribution across MPI ranks.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
+    The host class must provide ``self._runtime``.
     """
 
     _runtime: MPIRuntime

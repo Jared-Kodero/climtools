@@ -1,22 +1,4 @@
-"""Distributed ``groupby``/``resample`` reductions.
-
-Supports ``sum``, ``mean``, ``count``, ``min``, ``max`` grouped by an
-arbitrary label array, including the case where the group boundaries cross
-MPI rank boundaries (e.g. resampling a time dimension that is itself the
-active partition dimension).
-
-Algorithm: every rank reduces its own partition locally per group, then all
-ranks ``allgather`` their (small) set of distinct group labels and agree on
-one global, sorted label axis. Each rank reindexes its local per-group
-partial onto that shared axis (missing groups filled with the operation's
-identity element), and the reindexed partials -- now identically shaped on
-every rank -- are combined with the same ``Allreduce`` primitive
-(:meth:`~.engine.ReductionPlanningMixin._comm_reduce`) the rest of this
-package uses. This reuses the existing collective machinery and needs no new
-communication pattern, but its cost scales with ``n_groups`` times the size
-of the non-grouped dimensions, gathered onto every rank -- appropriate for
-coarsening reductions with a modest number of groups (daily/monthly/yearly
-resampling, categorical groupby), not for high-cardinality grouping."""
+"""Provide distributed groupby and resample reductions."""
 
 from __future__ import annotations
 
@@ -31,8 +13,8 @@ from mpi4py import MPI
 import xarray as xr
 
 from .common import _extreme_identity, _partial_dtype
-from .engine import ReductionPlanningMixin
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
+from .planning import ReductionPlanningMixin
 
 if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
@@ -42,9 +24,9 @@ _GROUP_OPS = ("sum", "mean", "count", "min", "max")
 
 
 class Groupby(ReductionPlanningMixin):
-    """Distributed ``groupby_reduce``/``resample_reduce``.
+    """Provide distributed groupby and resample reductions.
 
-    Requires a ``self._runtime`` attribute set by :class:`~.mpi.XarrayMPI`.
+    The host class must provide ``self._runtime``.
     """
 
     _runtime: MPIRuntime

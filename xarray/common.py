@@ -1,9 +1,4 @@
-"""Shared constants and dtype helpers for the ``xarray`` MPI interface.
-
-Nothing here touches an MPI communicator; these are pure, cacheable helpers
-reused by :mod:`.io`, :mod:`.indexing`, :mod:`.engine`,
-:mod:`.reductions`, :mod:`.statistics`, and :mod:`.groupby`.
-"""
+"""Provide shared reduction constants and dtype helpers."""
 
 from __future__ import annotations
 
