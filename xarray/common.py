@@ -12,9 +12,10 @@ from functools import cache
 from typing import Any, NamedTuple, cast
 
 import numpy as np
-import xarray as xr
 from mpi4py import MPI
 from mpi4py.util import dtlib as _dtlib
+
+import xarray as xr
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (
     (MPI.SUM, "SUM"),

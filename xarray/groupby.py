@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
-import xarray as xr
 from mpi4py import MPI
+
+import xarray as xr
 
 from .common import _extreme_identity, _partial_dtype
 from .engine import ReductionPlanningMixin

@@ -5,6 +5,7 @@ from typing import Any
 
 import xarray as xr
 
+from ..mpi.runtime import MPIRuntime, mpi
 from ..xarray.meta import get_mpi_meta
 from .parallel import to_netcdf_parallel
 from .serial import append, to_netcdf_serial
@@ -44,6 +45,7 @@ def dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
 def to_netcdf(
     data: xr.Dataset | xr.DataArray,
     file: str | PathLike[str],
+    mpi_runtime: MPIRuntime = mpi,
     unlimited_dim: str | Iterable[str] | None = None,
     partition_dim: str | None = None,
     *,
@@ -110,8 +112,6 @@ def to_netcdf(
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
-    from ..mpi.runtime import mpi
-
     target_path = Path(file)
 
     if parallel:
@@ -121,12 +121,12 @@ def to_netcdf(
         # Ranks must agree on the write path. If one rank saw valid mpi_meta
         # and another did not, the two paths post different collectives and
         # the writer would block instead of reporting the inconsistency.
-        agreed = mpi.comm.allgather(distributed)
+        agreed = mpi_runtime.comm.allgather(distributed)
         if any(agreed) and not all(agreed):
             disagreeing = [
                 rank for rank, state in enumerate(agreed) if state != agreed[0]
             ]
-            raise mpi.MPIError(
+            raise mpi_runtime.MPIError(
                 "MPI ranks disagree about whether the object is distributed; "
                 + f"ranks {disagreeing} differ from rank 0. Parallel NetCDF "
                 + "output requires the same distribution state on every rank."
@@ -140,7 +140,7 @@ def to_netcdf(
                     + f"distributed dimension {distributed_dim!r}."
                 )
             partition_dim = distributed_dim
-        elif mpi.comm.rank != 0:
+        elif mpi_runtime.comm.rank != 0:
             data = empty_dataset()
 
         to_netcdf_parallel(

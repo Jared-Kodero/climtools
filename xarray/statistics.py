@@ -18,8 +18,9 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-import xarray as xr
 from mpi4py import MPI
+
+import xarray as xr
 
 from .common import _partial_dtype
 from .engine import ReductionPlanningMixin

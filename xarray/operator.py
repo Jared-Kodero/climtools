@@ -92,15 +92,54 @@ class Arithmetic:
     # A convenience counterpart to xarray's own align(): instead of
     # reconciling coordinate labels/indexes, this reconciles which rank
     # owns which slice, so left and right end up combinable by apply()/
-    # evaluate() with zero MPI traffic. Two cases resolve without any
-    # communication and are handled here: a replicated operand sliced down
-    # onto an already-distributed partner's exact bounds, and two
-    # replicated operands independently repartitioned along the same
-    # dimension (which is deterministic given (length, chunk size, rank,
-    # size), so both land on identical bounds without needing to compare
-    # notes). Two operands already distributed on genuinely different
-    # partitions are a data-movement problem (Alltoallv), which this
-    # function does not attempt; it raises instead of guessing.
+    # evaluate() with zero further MPI traffic. Two cases resolve without
+    # any communication: a replicated operand sliced down onto an
+    # already-distributed partner's exact bounds, and two replicated
+    # operands independently repartitioned along the same dimension (which
+    # is deterministic given (length, chunk size, rank, size), so both
+    # land on identical bounds without needing to compare notes). Two
+    # operands already distributed on genuinely different partitions do
+    # need data movement to reconcile -- handled by gathering each back to
+    # its full extent on every rank and repartitioning both onto a shared
+    # scheme (see :meth:`align`/:meth:`_gather_full`); simple and correct,
+    # though not memory-scalable, rather than a true personalized
+    # Alltoallv that would avoid ever fully materializing either operand.
+
+    def _gather_full(
+        self, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
+    ) -> xr.Dataset | xr.DataArray:
+        """Reconstruct ``value``'s full, replicated extent on every rank.
+
+        Used by :meth:`align` to reconcile two operands distributed on
+        genuinely different partitions: :meth:`repartition` (which
+        :meth:`align` then calls on the result) requires a replicated
+        input present on every rank, not just rank 0, so this uses
+        ``MPI_Allgather`` rather than the gather-to-root-then-broadcast
+        pattern :meth:`~.elementwise.Elementwise.median` uses for its
+        (much smaller) reduced result -- every rank ends up holding the
+        complete array, which is correct but not memory-scalable for a
+        large distributed dimension.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            This rank's own local slice.
+        meta : mapping
+            ``value``'s distribution metadata.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The full, replicated object (no ``mpi_meta`` attached).
+        """
+        dim = meta["dim"]
+        pieces = self._runtime.comm.allgather(value)
+        full = (
+            xr.concat(pieces, dim=dim, data_vars="minimal")
+            if isinstance(value, xr.Dataset)
+            else xr.concat(pieces, dim=dim)
+        )
+        return strip_mpi_meta(full)
 
     def _align_replicated(
         self,
@@ -192,19 +231,34 @@ class Arithmetic:
         guaranteed combinable by :meth:`apply`/:meth:`evaluate` without
         raising and without any further MPI communication.
 
-        Three cases are handled, all without moving data between ranks:
+        Four cases are handled:
 
         - Neither operand is distributed: returned unchanged, unless
           ``dim`` is given, in which case both are distributed along
           ``dim`` via ``repartition``. Repartition is a deterministic
           function of (length, chunk size, rank, size), so two operands of
           the same length along ``dim`` land on identical per-rank bounds
-          without any coordination between them.
+          without any coordination between them. No data moves between
+          ranks.
         - One operand is already distributed, the other is replicated at
           the full length of the distributed dimension (or does not carry
           that dimension at all): the replicated operand is sliced down to
-          the distributed operand's exact bounds.
+          the distributed operand's exact bounds. No data moves between
+          ranks -- the replicated side already has the full array present
+          on every rank, so this is a purely local slice.
         - Both are already distributed identically: returned unchanged.
+        - Both are already distributed, but *differently* (different
+          dimension, global size, or per-rank bounds): unlike the other
+          three cases, this genuinely requires moving data between ranks.
+          Each operand is gathered back to its full extent on every rank
+          (``MPI_Allgather`` plus ``xr.concat`` -- the same mechanism as
+          :meth:`~.elementwise.Elementwise.median`'s gather, but onto
+          every rank rather than just rank 0, since ``repartition``
+          requires a replicated input present everywhere), then both are
+          repartitioned onto a shared scheme (``dim`` if given, else
+          ``left``'s own dimension). Correct, but -- like ``median`` --
+          not memory-scalable: every rank briefly holds the complete data
+          for both operands.
 
         Parameters
         ----------
@@ -214,15 +268,14 @@ class Arithmetic:
             Right operand to align.
         dim : hashable or {"auto"}, optional
             Dimension to distribute both operands along when neither is
-            currently distributed. Required in that case; ignored
-            otherwise, since an already-distributed operand's dimension
-            takes precedence.
+            currently distributed, or the shared dimension to reconcile
+            onto when both are already distributed differently. Required
+            when neither operand is distributed; defaults to ``left``'s
+            own dimension when both are already distributed differently.
         chunk_info : mapping, optional
-            Forwarded to ``repartition`` when neither operand is yet
-            distributed.
+            Forwarded to ``repartition``.
         log_partitions : bool, optional
-            Forwarded to ``repartition`` when neither operand is yet
-            distributed.
+            Forwarded to ``repartition``.
 
         Returns
         -------
@@ -233,9 +286,7 @@ class Arithmetic:
         Raises
         ------
         ValueError
-            If both operands are already distributed but on different
-            partitions (different dimension, global size, or per-rank
-            bounds), or if neither is distributed and ``dim`` is omitted.
+            If neither operand is distributed and ``dim`` is omitted.
 
         Examples
         --------
@@ -244,6 +295,10 @@ class Arithmetic:
 
         >>> left, right = mpi.xarray.align(a_full, b_full, dim="time")
         >>> combined = mpi.xarray.apply(operator.add, left, right)
+
+        >>> # both already distributed, but on different dimensions
+        >>> left, right = mpi.xarray.align(a_by_time, b_by_space)
+        >>> combined = mpi.xarray.apply(operator.add, left, right)
         """
         left_meta = self._operand_meta(left)
         right_meta = self._operand_meta(right)
@@ -251,17 +306,22 @@ class Arithmetic:
         if left_meta is not None and right_meta is not None:
             if _partitions_match(left_meta, right_meta):
                 return left, right
-            raise ValueError(
-                "Cannot align operands already distributed over different "
-                + f"partitions: left dim={left_meta['dim']!r} "
-                + f"range=[{left_meta['start']}:{left_meta['stop']}) "
-                + f"vs right dim={right_meta['dim']!r} "
-                + f"range=[{right_meta['start']}:{right_meta['stop']}). "
-                + "Reconciling different existing partitions requires "
-                + "moving data between ranks, which align() does not do; "
-                + "rebuild one operand from a replicated source with "
-                + "mpi.xarray.repartition using the other's dimension and "
-                + "chunk_info instead."
+            target_dim = dim if dim is not None else left_meta["dim"]
+            full_left = self._gather_full(left, left_meta)
+            full_right = self._gather_full(right, right_meta)
+            return (
+                self.repartition(
+                    full_left,
+                    target_dim,
+                    chunk_info=chunk_info,
+                    log_partitions=log_partitions,
+                ),
+                self.repartition(
+                    full_right,
+                    target_dim,
+                    chunk_info=chunk_info,
+                    log_partitions=log_partitions,
+                ),
             )
 
         if left_meta is not None:
@@ -369,10 +429,15 @@ class Arithmetic:
         ValueError
             If two operands are distributed over different partitions, if a
             replicated operand carries the distributed dimension at a
-            different length than the partition owns, or if a replicated
+            different length than the partition owns, if a replicated
             operand's coordinate labels along the distributed dimension do
             not match the distributed partition's labels for this rank's
-            slice (equal length alone does not imply equal coordinates).
+            slice (equal length alone does not imply equal coordinates), or
+            (on more than one rank) if that coordinate check cannot even
+            run because either side has no coordinate for the distributed
+            dimension -- equal length alone is not enough evidence the
+            operand is genuinely this rank's own data rather than another
+            rank's same-length slice by coincidence.
         """
         operands = list(operands)
         metas = [self._operand_meta(item) for item in operands]
@@ -407,9 +472,9 @@ class Arithmetic:
                         + f"owned partition length {owned}. Call "
                         + "mpi.xarray.align(...) first."
                     )
-                if dim in getattr(reference, "indexes", {}) and dim in getattr(
-                    other, "indexes", {}
-                ):
+                reference_indexed = dim in getattr(reference, "indexes", {})
+                other_indexed = dim in getattr(other, "indexes", {})
+                if reference_indexed and other_indexed:
                     try:
                         xr.align(reference, other, join="exact")
                     except (ValueError, KeyError) as exc:
@@ -423,6 +488,38 @@ class Arithmetic:
                             + "first. xarray.align(..., join='exact') "
                             + f"reports: {exc}"
                         ) from exc
+                elif self._runtime.comm.size > 1:
+                    # Equal length is necessary but not sufficient: without a
+                    # coordinate on dim to check exactly (the branch above),
+                    # there is no way to tell this rank's own correctly
+                    # aligned slice apart from, say, a different rank's
+                    # slice of the same length -- a silently wrong answer
+                    # that would otherwise pass unnoticed. Refuse rather
+                    # than trust length alone once more than one rank makes
+                    # that ambiguity possible.
+                    missing = [
+                        name
+                        for name, indexed in (
+                            ("the distributed side", reference_indexed),
+                            ("the operand", other_indexed),
+                        )
+                        if not indexed
+                    ]
+                    raise ValueError(
+                        f"Operand carries dimension {dim!r} at the "
+                        + f"expected local length ({owned}), but its "
+                        + "alignment with this rank's own owned slice "
+                        + f"cannot be verified: {' and '.join(missing)} "
+                        + f"has no coordinate for {dim!r}, so equal length "
+                        + "alone is not enough evidence this is actually "
+                        + "this rank's own data rather than, say, another "
+                        + "rank's same-length slice by coincidence. Add a "
+                        + f"coordinate for {dim!r} to both sides so it can "
+                        + "be checked exactly, or build the operand from "
+                        + "the distributed side directly (e.g. via "
+                        + "isel()/apply() on it) instead of a separately "
+                        + "constructed array."
+                    )
         return meta, reference
 
     @staticmethod
@@ -726,8 +823,14 @@ class Arithmetic:
         ------
         ValueError
             If ``value`` is not distributed, ``dim`` disagrees with its
-            partition dimension, ``before``/``after`` are negative, or this
+            partition dimension, ``before``/``after`` are negative, or any
             rank's local partition is shorter than ``before``/``after``.
+            That last check is a synchronized ``allgather`` of every
+            rank's local length, so the error (if any) is raised
+            consistently, together, on every rank -- not just the
+            deficient one, which would otherwise leave the other ranks
+            blocked in the point-to-point exchange below, waiting on a
+            rank that already raised and will never reach it.
         """
         meta = self._operand_meta(value)
         if meta is None:
@@ -752,11 +855,17 @@ class Arithmetic:
         self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
 
         local_len = int(value.sizes[partition_dim])
-        if local_len < before or local_len < after:
+        lengths = comm.allgather(local_len)
+        deficient = [
+            (r, length)
+            for r, length in enumerate(lengths)
+            if length < before or length < after
+        ]
+        if deficient:
             raise ValueError(
-                f"halo_exchange(): rank {rank}'s local partition along "
-                + f"{partition_dim!r} has length {local_len}, shorter than "
-                + f"the requested halo (before={before}, after={after}). "
+                f"halo_exchange(): rank(s) {deficient} ([rank, local_length]) "
+                + f"have a local partition along {partition_dim!r} shorter "
+                + f"than the requested halo (before={before}, after={after}). "
                 + "Each rank can only forward data it owns; repartition "
                 + "with fewer, larger chunks (or a coarser process grid) "
                 + "before requesting this wide a halo."

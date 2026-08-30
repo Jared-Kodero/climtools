@@ -9,6 +9,12 @@ if TYPE_CHECKING:
     from ..netcdf.io import append, dataset_is_empty, empty_dataset, to_netcdf
     from ..viz import cmaps
     from ..viz import plotting as plot
+    from ..xarray.constructors import (
+        mpi_create_dataarray,
+        mpi_create_dataset,
+        mpi_open_dataset,
+        mpi_partition_data,
+    )
     from ..xarray.utils import (
         SetupDask,
         add_local_solar_time,
@@ -31,6 +37,10 @@ __all__ = [
     "dataset_is_empty",
     "empty_dataset",
     "mask",
+    "mpi_create_dataarray",
+    "mpi_create_dataset",
+    "mpi_open_dataset",
+    "mpi_partition_data",
     "n_cpus",
     "plot",
     "preprocess",
@@ -60,6 +70,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "sel_transect": (".xr_utils", "sel_transect"),
     "to_lon180": (".xr_utils", "to_lon180"),
     "to_netcdf": ("..netcdf.netcdf", "to_netcdf"),
+    "mpi_open_dataset": ("..xarray.constructors", "mpi_open_dataset"),
+    "mpi_create_dataarray": ("..xarray.constructors", "mpi_create_dataarray"),
+    "mpi_create_dataset": ("..xarray.constructors", "mpi_create_dataset"),
+    "mpi_partition_data": ("..xarray.constructors", "mpi_partition_data"),
 }
 
 

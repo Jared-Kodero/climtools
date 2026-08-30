@@ -15,6 +15,7 @@ from collections.abc import Hashable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+
 import xarray as xr
 
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info

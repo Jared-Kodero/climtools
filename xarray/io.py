@@ -50,7 +50,7 @@ class IO:
 
     _runtime: MPIRuntime
 
-    def open_dataset(
+    def open_xr_dataset(
         self,
         filename_or_obj: Any,
         *,
