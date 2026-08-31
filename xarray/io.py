@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral
 from os import PathLike
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from mpi4py.MPI import Intracomm
@@ -25,7 +25,6 @@ from .chunks import (
     get_effective_chunk_size,
     prune_chunk_info,
 )
-from .core import MPIXarray, unwrap
 from .elementwise import Elementwise
 from .groupby import Groupby
 from .indexing import Indexing
@@ -46,6 +45,13 @@ from .netcdf import append, to_netcdf_parallel, to_netcdf_serial
 from .reductions import Reduction
 from .statistics import Statistics
 
+if TYPE_CHECKING:
+    # `.core` imports `MPIXarrayOps` from this module, so importing `MPIXarray`
+    # and `unwrap` back from `.core` at module scope would be circular. Typing
+    # positions are safe (evaluated only under `from __future__ import
+    # annotations`); call sites that need them at runtime import locally.
+    from .core import MPIXarray, unwrap
+
 __all__ = ["append", "dataset_is_empty", "empty_dataset", "to_netcdf"]
 
 _NO_DATA_ATTR = "_climtools_no_data"
@@ -63,12 +69,12 @@ class IO:
         self,
         filename_or_obj: Any,
         *,
-        partition_dim: Hashable | Literal["auto"] = "auto",
+        partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
         chunks: Any = None,
         log_partitions: bool = True,
         **kwargs: Any,
     ) -> xr.Dataset:
-        """Open a Dataset lazily and distribute one dimension across ranks.
+        """Open a Dataset lazily and distribute it across MPI ranks.
 
         Parameters
         ----------
@@ -76,10 +82,20 @@ class IO:
             Input accepted by :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset`.
             Strings containing a wildcard ("*") or sequences (e.g., list, tuple) will
             automatically trigger multi-file loading.
-        partition_dim : Hashable or {"auto"}, optional
-            Dimension to distribute. ``"auto"`` selects the longest dimension,
-            which is the choice that leaves the fewest ranks idle. Selection is
-            deterministic and identical on every rank. Default is "auto".
+        partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
+            Dimension(s) to distribute. ``"auto"`` selects the longest
+            dimension, which is the choice that leaves the fewest ranks
+            idle (unchanged, single-dimension only -- ``"auto"`` does not
+            extend to choosing more than one dimension automatically, as
+            in :meth:`partition`). A single dimension, given directly
+            (``"lat"``) or as a length-one sequence (``("lat",)``), takes
+            the same one-dimensional path either way. A sequence of two
+            or more dimensions (e.g. ``("lat", "lon")``) lays ranks out
+            on an MPI Cartesian process grid and opens every rank's own
+            slice along every listed dimension simultaneously, exactly
+            like :meth:`partition`'s own multi-dimensional path -- see
+            :mod:`.cartesian`. Selection is deterministic and identical
+            on every rank.
         chunks : int, dict, "auto" or None, optional
             Passed unchanged to xarray. ``None`` keeps single-file reads
             backend-lazy without Dask; explicit chunking enables Dask
@@ -124,6 +140,21 @@ class IO:
 
         open_dataset: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
 
+        requested_dims = self._as_partition_dims(partition_dim)
+        if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
+            return self._open_dataset_nd(
+                filename_or_obj,
+                requested_dims,
+                open_dataset,
+                chunks,
+                log_partitions,
+                **kwargs,
+            )
+        # Single dimension (given directly, as a length-one sequence, or
+        # "auto") -- exactly the original, unchanged one-dimensional path.
+        partition_dim = (
+            requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
+        )
         automatic = partition_dim == "auto"
 
         # Build the metadata plan on rank 0.
@@ -217,6 +248,131 @@ class IO:
                 start=start,
                 stop=stop,
                 automatic=automatic,
+            )
+        return data
+
+    def _open_dataset_nd(
+        self,
+        filename_or_obj: Any,
+        dims: tuple[Hashable, ...],
+        open_fn: Callable,
+        chunks: Any,
+        log_partitions: bool,
+        **kwargs: Any,
+    ) -> xr.Dataset:
+        """Open a Dataset lazily on an MPI Cartesian process grid.
+
+        The multi-dimensional counterpart of :meth:`open_dataset`'s
+        single-dimension path above, mirroring :meth:`partition`'s own
+        multi-dimensional path (:meth:`_partition_pieces_nd`) but for a
+        lazy on-disk open rather than an in-memory root-owned object:
+        every rank opens ``filename_or_obj`` itself and computes its own
+        bounds from :func:`~.cartesian.compute_layout` and
+        :func:`~.chunks.get_balanced_bounds` -- the same deterministic,
+        rank-invariant computation :meth:`_partition_pieces_nd` performs
+        once per rank on root's behalf -- so no root-side slicing or
+        point-to-point transfer of the data itself is needed here either;
+        only the small metadata plan (each requested dimension's global
+        length) needs the same single rank-0-computed, broadcast round
+        trip the one-dimensional path above already does.
+
+        Parameters
+        ----------
+        filename_or_obj : str, path-like, file-like, or list of these
+            As in :meth:`open_dataset`.
+        dims : tuple of Hashable
+            Two or more partition dimensions, already validated non-empty
+            by :meth:`_as_partition_dims`.
+        open_fn : callable
+            ``xarray.open_dataset`` or ``xarray.open_mfdataset``, chosen
+            by :meth:`open_dataset` from ``filename_or_obj``'s shape.
+        chunks : Any
+            As in :meth:`open_dataset`.
+        log_partitions : bool
+            As in :meth:`open_dataset`.
+        **kwargs : Any
+            Forwarded to ``open_fn``.
+
+        Returns
+        -------
+        xarray.Dataset
+            Lazy rank-local Dataset carrying Cartesian ``mpi_meta``.
+
+        Raises
+        ------
+        ValueError
+            If any of ``dims`` is not a dimension of the opened dataset.
+        """
+        comm = self._runtime.comm
+
+        plan: dict[str, Any] | None = None
+        error: BaseException | None = None
+        if self._runtime.is_root():
+            try:
+                with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
+                    for d in dims:
+                        if d not in metadata.dims:
+                            raise ValueError(
+                                f"partition_dim {d!r} is not in "
+                                + f"{list(metadata.dims)!r}."
+                            )
+                    plan = {"extents": tuple(int(metadata.sizes[d]) for d in dims)}
+            except BaseException as exc:
+                error = exc
+
+        # Synchronize rank-0 planning failures before broadcasting the plan.
+        self._runtime.raise_if_error(error, "open_dataset planning")
+
+        # Broadcast the plan (just the per-dimension global lengths).
+        plan = self._runtime.broadcast(plan, root=0)
+        extents = plan["extents"]
+
+        # Every rank derives its own Cartesian coordinates and per-axis
+        # bounds from `extents` and `comm.size` alone -- identical on
+        # every rank, no further communication needed to agree on it.
+        grid_shape = compute_layout(extents, comm.size)
+        coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
+        bounds = {
+            d: get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
+            for axis, d in enumerate(dims)
+        }
+
+        # Synchronize before opening the dataset (mirrors the
+        # single-dimension path's own barrier here).
+        comm.Barrier()
+
+        # Open this rank's lazy slice.
+        data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
+        data = data.isel({d: slice(*bounds[d]) for d in dims})
+
+        chunk_info = {
+            str(other_dim): get_effective_chunk_size(int(other_length), None, comm.size)
+            for other_dim, other_length in data.sizes.items()
+        }
+        set_mpi_meta(
+            data,
+            dim=dims,
+            global_size=dict(zip(dims, extents, strict=True)),
+            start={d: bounds[d][0] for d in dims},
+            stop={d: bounds[d][1] for d in dims},
+            chunk_info=chunk_info,
+            cart={
+                "grid_shape": grid_shape,
+                "coords": coords,
+                "periods": (False,) * len(dims),
+            },
+        )
+        if should_log_partitions(self._runtime, log_partitions):
+            log_partition_report_cartesian(
+                self._runtime,
+                data,
+                dims,
+                origin="open_dataset",
+                global_sizes=dict(zip(dims, extents, strict=True)),
+                starts={d: bounds[d][0] for d in dims},
+                stops={d: bounds[d][1] for d in dims},
+                grid_shape=grid_shape,
+                coords=coords,
             )
         return data
 
@@ -905,12 +1061,12 @@ def mpi_open_dataset(
     filename_or_obj: Any,
     mpi_runtime: MPIRuntime | Intracomm,
     *,
-    partition_dim: Hashable | Literal["auto"] = "auto",
+    partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
     chunks: Any = None,
     log_partitions: bool = True,
     **kwargs: Any,
 ) -> MPIXarray:
-    """Open a Dataset lazily and distribute one dimension across MPI ranks.
+    """Open a Dataset lazily and distribute it across MPI ranks.
 
     Parameters
     ----------
@@ -919,8 +1075,13 @@ def mpi_open_dataset(
         A wildcard string or a list/tuple triggers multi-file loading.
     mpi_runtime : MPIRuntime or mpi4py.MPI.Intracomm
         Runtime whose communicator the result is bound to.
-    partition_dim : Hashable or {"auto"}, optional
-        Dimension to distribute. "auto" selects the longest dimension.
+    partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
+        Dimension(s) to distribute. "auto" selects the longest dimension
+        (single-dimension only). A sequence of two or more dimensions
+        (e.g. ``("lat", "lon")``) lays ranks out on an MPI Cartesian
+        process grid and distributes every listed dimension at once,
+        exactly like ``mpi_partition_data``'s own multi-dimensional
+        support -- see ``IO.open_dataset``.
     chunks : int, dict, "auto" or None, optional
         Passed unchanged to xarray.
     log_partitions : bool, optional
@@ -936,6 +1097,7 @@ def mpi_open_dataset(
         Lazy rank-local Dataset with ``.meta`` set.
     """
     from ..mpi.runtime import MPIRuntime
+    from .core import MPIXarray
 
     if not isinstance(mpi_runtime, MPIRuntime):
         mpi_runtime = MPIRuntime(mpi_runtime)
@@ -993,6 +1155,8 @@ def mpi_create_dataarray(
     MPIXarray
         Lazy rank-local DataArray with ``.meta`` set.
     """
+    from .core import MPIXarray
+
     data = MPIXarrayOps(runtime).create_dataarray(
         fill,
         dims,
@@ -1047,6 +1211,8 @@ def mpi_create_dataset(
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
     """
+    from .core import MPIXarray
+
     data = MPIXarrayOps(runtime).create_dataset(
         data_vars,
         sizes,
@@ -1094,6 +1260,8 @@ def mpi_partition_data(
     MPIXarray
         Rank-local slice with ``.meta`` set.
     """
+    from .core import MPIXarray, unwrap
+
     data = MPIXarrayOps(runtime).partition(
         unwrap(value),
         dim,

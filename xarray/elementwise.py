@@ -402,3 +402,128 @@ class Elementwise:
             cart=meta.get("cart"),
         )
         return diffed
+
+    def shift(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        dim: Hashable,
+        periods: int = 1,
+        *,
+        fill_value: Any = _UNSET,
+    ) -> xr.Dataset | xr.DataArray:
+        """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is distributed.
+
+        A stencil operation: shifting by ``periods`` moves each position's
+        value ``periods`` slots along ``dim`` without changing length, so a
+        rank whose local window would otherwise pull in a neighbor's data
+        (any rank except the one at the true edge the shift moves away
+        from) needs ``|periods|`` boundary elements from that neighbor
+        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) before shifting
+        locally. ``xarray.shift``'s own fill-value semantics fall out for
+        free: shifting the *padded* array only introduces ``fill_value``
+        at the padded array's own edges, and ``halo_exchange`` only leaves
+        an edge unpadded (0 elements) at the true global boundary -- so a
+        fill value appears exactly where the global array actually runs
+        out of data, and nowhere else.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Object to shift.
+        dim : Hashable
+            Dimension to shift along.
+        periods : int, optional
+            Number of positions to shift by; positive shifts values toward
+            higher indices (as in ``xarray.DataArray.shift``). Its
+            magnitude must not exceed any rank's local length along
+            ``dim`` when ``dim`` is the partition dimension (see
+            ``halo_exchange``'s own limit).
+        fill_value : Any, optional
+            As in ``xarray.DataArray.shift``; defaults to xarray's own
+            dtype-aware NA fill when omitted.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The shifted object, same shape and distribution as the input.
+        """
+        meta = get_mpi_meta(value)
+        if meta is None or dim not in meta["dims"]:
+            kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
+            return value.shift({dim: periods}, **kwargs)
+        if periods == 0:
+            return value
+
+        before, after = (periods, 0) if periods > 0 else (0, -periods)
+        padded, left_pad, _right_pad = self.halo_exchange(
+            value, dim, before=before, after=after
+        )
+        kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
+        shifted = padded.shift({dim: periods}, **kwargs)
+
+        local_len = int(value.sizes[dim])
+        trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
+        return self._reattach_meta(trimmed, meta)
+
+    def differentiate(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        coord: Hashable,
+        edge_order: Literal[1, 2] = 1,
+        datetime_unit: Any = None,
+    ) -> xr.Dataset | xr.DataArray:
+        """Differentiate ``value`` along ``coord``, correct when ``coord`` is distributed.
+
+        A stencil operation: every interior point's derivative is a
+        centered difference needing exactly one neighbor on each side
+        regardless of ``edge_order`` (``edge_order`` only changes the
+        one-sided formula used at the *true* global first/last position,
+        which never needs another rank's data -- it is computed from
+        this rank's own later/earlier local points exactly as plain
+        ``xarray`` would). So a fixed one-element halo
+        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) on each side
+        suffices for any ``edge_order``: it supplies genuine neighbor
+        values at every rank boundary and, at the true global edge (where
+        ``halo_exchange`` returns 0 padding), differentiating the
+        unpadded-there array reproduces xarray's own edge-order-specific
+        boundary stencil unchanged.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Object to differentiate.
+        coord : Hashable
+            Coordinate to differentiate along.
+        edge_order : {1, 2}, optional
+            As in ``xarray.DataArray.differentiate``. Default 1.
+        datetime_unit : Any, optional
+            As in ``xarray.DataArray.differentiate``.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The derivative, same shape and distribution as the input.
+
+        Raises
+        ------
+        ValueError
+            If any rank's local length along ``coord`` is shorter than 1
+            (see ``halo_exchange``'s own synchronized length check) or
+            too short overall for ``edge_order`` (raised by xarray itself).
+        """
+        meta = get_mpi_meta(value)
+        if meta is None or coord not in meta["dims"]:
+            return value.differentiate(
+                coord, edge_order=edge_order, datetime_unit=datetime_unit
+            )
+
+        padded, left_pad, _right_pad = self.halo_exchange(
+            value, coord, before=1, after=1
+        )
+        derivative = padded.differentiate(
+            coord, edge_order=edge_order, datetime_unit=datetime_unit
+        )
+
+        local_len = int(value.sizes[coord])
+        trimmed = derivative.isel({coord: slice(left_pad, left_pad + local_len)})
+        return self._reattach_meta(trimmed, meta)

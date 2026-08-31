@@ -22,12 +22,17 @@ from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
-from .io import MPIXarrayOps, mpi_partition_data
 from .meta import MPI_META, _format_bytes, get_mpi_meta
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
+
+    # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
+    # module, so importing `MPIXarrayOps`/`mpi_partition_data` back from `.io`
+    # at module scope would be circular. Call sites that need them at runtime
+    # import locally.
+    from .io import MPIXarrayOps, mpi_partition_data
     from typing import Any, Literal
 
     from mpi4py.MPI import Intracomm

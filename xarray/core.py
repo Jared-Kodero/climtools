@@ -43,6 +43,10 @@ _PARTITIONED_ATTR = "mpi_partitioned"
 #: in :meth:`MPIXarray.where`.
 _WHERE_UNSET = object()
 
+#: Sentinel distinguishing "fill_value not given" (defer to the engine's own
+#: ``NaN`` default) from a genuine ``fill_value=None`` in :meth:`MPIXarray.reindex`.
+_FILL_VALUE_UNSET = object()
+
 #: Explicit allowlist of read-only xarray properties ``MPIXarray.__getattr__``
 #: forwards to ``self.data``. Deliberately a fixed list, not a
 #: ``callable(...)`` check: a heuristic based on callability would pass
@@ -1346,6 +1350,97 @@ class MPIXarray:
         )
         return finalize(left, self._runtime), finalize(right, self._runtime)
 
+    def reindex(
+        self,
+        indexers: Mapping[Hashable, Any] | None = None,
+        *,
+        method: str | None = None,
+        tolerance: float | Iterable[float] | None = None,
+        fill_value: Any = _FILL_VALUE_UNSET,
+        chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
+        **indexers_kwargs: Any,
+    ) -> MPIXarray:
+        """Reindex onto new coordinate labels, redistributing if needed.
+
+        MPI-aware counterpart to ``xarray.Dataset.reindex``/``DataArray.reindex``.
+        Rank-local (no communication) when the reindexed dimension(s) are not
+        the active partition dimension; otherwise gathers, reindexes, and
+        repartitions. See :meth:`~.arithmetic.Arithmetic.reindex`.
+
+        Parameters
+        ----------
+        indexers : mapping, optional
+            New coordinate labels per dimension. Every rank must pass
+            identical values for any currently partitioned dimension.
+        method : str, optional
+            Forwarded to xarray's ``reindex``.
+        tolerance : float or iterable of float, optional
+            Forwarded to xarray's ``reindex``.
+        fill_value : Any, optional
+            Value used for labels with no match. Defaults to xarray's own
+            ``reindex`` default (``NaN``) when omitted.
+        chunk_info : mapping, optional
+            Forwarded to ``repartition`` when a partition dimension is reindexed.
+        log_partitions : bool, optional
+            Forwarded to ``repartition`` when a partition dimension is reindexed.
+        **indexers_kwargs : Any
+            Additional indexers given as keywords.
+
+        Returns
+        -------
+        MPIXarray
+            The reindexed object.
+        """
+        kwargs: dict[str, Any] = {
+            "method": method,
+            "tolerance": tolerance,
+            "chunk_info": chunk_info,
+            "log_partitions": log_partitions,
+        }
+        if fill_value is not _FILL_VALUE_UNSET:
+            kwargs["fill_value"] = fill_value
+        return self._dispatch("reindex", indexers, **kwargs, **indexers_kwargs)
+
+    def sortby(
+        self,
+        by: Hashable | Any | Iterable[Hashable | Any],
+        *,
+        ascending: bool = True,
+        chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
+    ) -> MPIXarray:
+        """Sort by one or more keys, redistributing if needed.
+
+        MPI-aware counterpart to ``xarray.Dataset.sortby``/``DataArray.sortby``.
+        Rank-local (no communication) when no sort key varies along the
+        active partition dimension; otherwise gathers, sorts, and
+        repartitions. See :meth:`~.arithmetic.Arithmetic.sortby`.
+
+        Parameters
+        ----------
+        by : Hashable, DataArray, or sequence of these
+            Sort key(s): variable/coordinate name(s) or explicit DataArray(s).
+        ascending : bool, optional
+            Sort order. Default True.
+        chunk_info : mapping, optional
+            Forwarded to ``repartition`` when a partition dimension is sorted.
+        log_partitions : bool, optional
+            Forwarded to ``repartition`` when a partition dimension is sorted.
+
+        Returns
+        -------
+        MPIXarray
+            The sorted object.
+        """
+        return self._dispatch(
+            "sortby",
+            by,
+            ascending=ascending,
+            chunk_info=chunk_info,
+            log_partitions=log_partitions,
+        )
+
     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
@@ -1638,6 +1733,75 @@ class MPIXarray:
             globally, with ``.meta`` updated to match.
         """
         return self._dispatch("diff", dim, n, label=label)
+
+    def shift(
+        self,
+        dim: Hashable,
+        periods: int = 1,
+        *,
+        fill_value: Any = _FILL_VALUE_UNSET,
+    ) -> MPIXarray:
+        """Shift by ``periods`` along ``dim``, correct when ``dim`` is distributed.
+
+        Borrows ``|periods|`` boundary values from the relevant neighbor
+        (:meth:`halo_exchange`) so a shift across a partition boundary
+        sees the same values a non-distributed shift would -- see
+        :meth:`~.elementwise.Elementwise.shift` for the exact mechanism.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to shift along.
+        periods : int, optional
+            Number of positions to shift by. Its magnitude must be less
+            than every rank's local length along ``dim`` when ``dim`` is
+            the partition dimension.
+        fill_value : Any, optional
+            As in ``xarray.DataArray.shift``; defaults to xarray's own
+            dtype-aware NA fill when omitted.
+
+        Returns
+        -------
+        MPIXarray
+            The shifted object, same shape and distribution as ``self``.
+        """
+        kwargs: dict[str, Any] = {}
+        if fill_value is not _FILL_VALUE_UNSET:
+            kwargs["fill_value"] = fill_value
+        return self._dispatch("shift", dim, periods, **kwargs)
+
+    def differentiate(
+        self,
+        coord: Hashable,
+        edge_order: Literal[1, 2] = 1,
+        datetime_unit: Any = None,
+    ) -> MPIXarray:
+        """Differentiate along ``coord``, correct when ``coord`` is distributed.
+
+        Borrows a one-element halo from each neighbor
+        (:meth:`halo_exchange`) so the interior centered-difference
+        stencil sees the same values a non-distributed differentiate
+        would at every rank boundary -- see
+        :meth:`~.elementwise.Elementwise.differentiate` for the exact
+        mechanism.
+
+        Parameters
+        ----------
+        coord : Hashable
+            Coordinate to differentiate along.
+        edge_order : {1, 2}, optional
+            As in ``xarray.DataArray.differentiate``. Default 1.
+        datetime_unit : Any, optional
+            As in ``xarray.DataArray.differentiate``.
+
+        Returns
+        -------
+        MPIXarray
+            The derivative, same shape and distribution as ``self``.
+        """
+        return self._dispatch(
+            "differentiate", coord, edge_order=edge_order, datetime_unit=datetime_unit
+        )
 
 
 def mark_partitioned(

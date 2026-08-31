@@ -13,7 +13,7 @@ from typing import ParamSpec, TypeVar, cast
 from mpi4py import MPI
 from mpi4py.MPI import Intracomm
 
-from ..xarray.core import _LAUNCH_ENV, LockFile, tmp
+from ..core.utils import _LAUNCH_ENV, LockFile, tmp
 from .diagnostics import MPIDiagnostics, MPIError
 
 P = ParamSpec("P")

@@ -23,6 +23,99 @@ _GROUP_DIM = "_mpi_group"
 _GROUP_OPS = ("sum", "mean", "count", "min", "max")
 
 
+def _resample_bin_labels(
+    timestamps: pd.DatetimeIndex, freq: str, comm: MPI.Comm
+) -> pd.DatetimeIndex:
+    """Rank-consistent resample bin-start label per element of ``timestamps``.
+
+    Dispatches on whether ``freq`` is a fixed-duration (pandas ``Tick``)
+    offset -- ``"h"``, ``"6min"``, ``"D"``, ``"7D"``, and similar -- or a
+    calendar-anchored one -- ``"MS"``, ``"YS"``, ``"W"``, ``"QS"``, and
+    similar. See :meth:`Groupby.resample_reduce` for why these need
+    different treatment: a calendar frequency's bins are already
+    absolute and rank-independent, but a Tick frequency's are not
+    unless every rank anchors to the same shared origin, which pandas'
+    own ``origin=`` argument cannot be relied on to provide for
+    day-or-coarser Tick frequencies.
+
+    Parameters
+    ----------
+    timestamps : pandas.DatetimeIndex
+        This rank's own local timestamps along the resampled dimension;
+        may be empty on some ranks.
+    freq : str
+        Pandas frequency string, exactly as ``xarray.Dataset.resample``
+        accepts.
+    comm : mpi4py.MPI.Comm
+        Communicator spanning every rank that holds a piece of the
+        resampled dimension; used for exactly one scalar ``Allreduce``
+        when ``freq`` is Tick-based, and not at all otherwise.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        One bin-start label per element of ``timestamps``, identical in
+        meaning (though each rank only sees its own labels) to what a
+        single-process ``pandas.Series(...).resample(freq).mean()``
+        would assign that same timestamp.
+    """
+    offset = pd.tseries.frequencies.to_offset(freq)
+
+    # Fixed-duration ("Tick"-like) frequencies expose a working `.nanos`
+    # property; note that pandas' own `Tick` base class is, confusingly,
+    # NOT the right classifier here -- `pandas.tseries.offsets.Day` (so
+    # `"D"`/`"7D"`) has a perfectly well-defined, always-24h `.nanos` but
+    # is NOT a `Tick` subclass in this pandas version (only sub-day
+    # units -- h/min/s/ms/us/ns -- are). Checking `.nanos` directly
+    # covers both correctly instead of misclassifying `"D"`-and-coarser
+    # Tick-equivalents as calendar-anchored.
+    try:
+        delta_ns = int(offset.nanos)
+        fixed_duration = True
+    except (ValueError, AttributeError):
+        fixed_duration = False
+
+    if not fixed_duration:
+        # Calendar-anchored: absolute regardless of which timestamps
+        # this rank happens to hold, so no shared origin is needed.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            edges = pd.Series(0, index=timestamps).resample(freq).count().index
+        positions = edges.searchsorted(timestamps, side="right") - 1
+        return edges[positions]
+
+    # Tick-based: reproduce xarray/pandas' own default `origin="start_day"`
+    # -- midnight of the day containing the *global* first timestamp --
+    # via a single MPI.MIN reduction of every rank's local minimum, so
+    # every rank bins against the identical anchor without gathering the
+    # coordinate itself. A rank with no local timestamps contributes the
+    # int64 maximum as a no-op sentinel rather than skewing the MIN.
+    #
+    # pandas (>=2.0) DatetimeIndex can carry any of several time
+    # resolutions ("ns"/"us"/"ms"/"s"; `pd.date_range`'s own default
+    # changed to "us" in pandas 3.0), and `.asi8` counts in *that*
+    # index's own unit, not always nanoseconds -- normalize to "ns"
+    # first so the raw-integer arithmetic below has an unambiguous,
+    # fixed-width unit regardless of the caller's input resolution.
+    timestamps_ns = timestamps.as_unit("ns")
+    local_min_ns = (
+        int(timestamps_ns.asi8.min()) if len(timestamps_ns) else np.iinfo(np.int64).max
+    )
+    global_min_ns = comm.allreduce(local_min_ns, op=MPI.MIN)
+    if global_min_ns == np.iinfo(np.int64).max:
+        # No rank holds any timestamps at all; nothing to label.
+        return timestamps
+    anchor = pd.Timestamp(global_min_ns, unit="ns").normalize()
+
+    if delta_ns <= 0:
+        raise ValueError(f"resample(): non-positive Tick frequency {freq!r}.")
+
+    offsets_ns = timestamps_ns.asi8 - anchor.value
+    bin_index = offsets_ns // delta_ns  # floor division: works for negatives too
+    label_ns = anchor.value + bin_index.astype(np.int64) * delta_ns
+    return pd.DatetimeIndex(label_ns.astype("datetime64[ns]")).as_unit(timestamps.unit)
+
+
 class Groupby(ReductionPlanningMixin):
     """Provide distributed groupby and resample reductions.
 
@@ -272,35 +365,61 @@ class Groupby(ReductionPlanningMixin):
         """Resample a datetime dimension to ``freq``, then reduce.
 
         A thin wrapper over :meth:`groupby_reduce`: group labels are each
-        timestamp's resampled bin-start, computed from this rank's local
-        ``dim`` coordinate against a fixed, data-independent grid anchored
-        at the Unix epoch (``origin="epoch"``) -- not the rank's own local
-        min/max -- so every rank agrees on identical bin edges without any
-        extra communication, exactly reproducing ``xarray``'s own
-        ``.resample(freq)`` bins (e.g. ``"D"``, ``"MS"``, ``"YS"``, and,
-        unlike an earlier ``DatetimeIndex.to_period(freq)``-based
-        implementation, frequency multiples such as ``"12h"``/``"6min"``/
-        ``"3D"`` too -- ``to_period`` silently mis-bins those, since pandas
-        ``Period`` arithmetic with a multiple does not snap to a shared
-        grid the way ``resample``/``Grouper`` does, instead giving nearly
-        every timestamp its own singleton period). See :meth:`groupby_reduce`
-        for parameters and MPI cost."""
+        timestamp's resampled bin-start. Every rank must agree on
+        identical bin edges without gathering the full coordinate, so
+        this splits on frequency kind (see :func:`_resample_bin_labels`):
+
+        - **Fixed-duration (Tick) frequencies** (``"h"``, ``"6min"``,
+          ``"D"``, ``"7D"``, ...): bin edges are computed by direct
+          integer-nanosecond arithmetic against a single shared anchor
+          (an ``MPI.MIN`` reduction of every rank's local minimum
+          timestamp -- one ``int64``, negligible cost), reproducing
+          ``xarray``'s own default ``origin="start_day"`` resample
+          anchor exactly. This is required, not just an optimization:
+          pandas' own ``Series.resample(freq, origin=...)`` silently
+          ignores ``origin`` for any frequency of a day or coarser (its
+          own warning names the frequencies where ``origin`` *does*
+          apply: ``h``, ``m``, ``s``, ``ms``, ``us``, ``ns`` -- ``D`` is
+          not among them), always falling back to anchoring on
+          whatever local slice of timestamps it was called with. Doing
+          the previous, simpler thing -- calling ``.resample(freq)`` on
+          each rank's own local timestamps -- would then silently
+          anchor every rank's bin grid on that rank's own first local
+          timestamp instead of the true global one, so ranks would
+          disagree about where a bin starts. That is not a rounding
+          difference: it fragments what should be one bin into two
+          separate (wrong) labels at every rank boundary that does not
+          already fall on a bin edge -- the common case, not an edge
+          case -- silently corrupting the result with no error raised.
+        - **Calendar-anchored frequencies** (``"MS"``, ``"YS"``,
+          ``"W"``, ``"QS"``, ...): every rank's local
+          ``.resample(freq).count().index`` already agrees, since these
+          bin on the absolute calendar (month/year/week/quarter
+          boundaries) independent of which subset of timestamps a rank
+          happens to hold, so no shared anchor is needed.
+
+        See :meth:`groupby_reduce` for parameters and MPI cost.
+
+        Limitation
+        ----------
+        Pre-existing, not addressed by this pass: this is built on
+        :meth:`groupby_reduce`, which -- like any group-by -- only
+        returns a bin for a label that actually occurs in the data. It
+        cannot materialize an empty bin. Native ``xarray``'s own
+        ``.resample(freq).mean()`` always returns a *complete*, regular
+        grid from the data's first to last timestamp, inserting ``NaN``
+        for any bin with no observations -- e.g. resampling daily data
+        to ``"6h"`` (a target frequency *finer* than the data's own
+        spacing) yields three ``NaN`` bins between every pair of real
+        days in native ``xarray``, and yields nothing at all for those
+        gaps here. This does not affect the ordinary downsampling case
+        (target frequency coarser than or equal to the data's own
+        spacing, e.g. daily -> weekly/monthly), which is unaffected and
+        is what :func:`_resample_bin_labels`'s fix targets; it only
+        matters when upsampling to a finer grid than the source data.
+        """
         timestamps = pd.DatetimeIndex(value[dim].values)
-        with warnings.catch_warnings():
-            # pandas warns that `origin` has no effect for calendar
-            # (non-Tick-like, e.g. "MS"/"YS") frequencies -- expected and
-            # harmless here: those frequencies are already anchored to an
-            # absolute calendar grid regardless of origin, which is exactly
-            # the rank-independent property this needs.
-            warnings.filterwarnings("ignore", category=RuntimeWarning)
-            edges = (
-                pd.Series(0, index=timestamps)
-                .resample(freq, origin="epoch")
-                .count()
-                .index
-            )
-        positions = edges.searchsorted(timestamps, side="right") - 1
-        labels = edges[positions]
+        labels = _resample_bin_labels(timestamps, freq, self._runtime.comm)
         result = self.groupby_reduce(
             value,
             dim,

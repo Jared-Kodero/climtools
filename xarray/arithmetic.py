@@ -8,15 +8,17 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import pandas as pd
 from mpi4py import MPI
 
 import xarray as xr
 
 from .cartesian import get_cartesian_topology
+from .chunks import get_balanced_bounds, prune_chunk_info
 from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, Iterable, Mapping
+    from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
@@ -74,6 +76,65 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
     ast.And: lambda values: all(values),
     ast.Or: lambda values: any(values),
 }
+
+
+def _fill_chunk(
+    template: xr.Dataset | xr.DataArray, dim: str, n: int, fill_value: Any
+) -> xr.Dataset | xr.DataArray:
+    """Build an ``n``-long, all-``fill_value`` chunk along ``dim``.
+
+    Used by ``Arithmetic._shuffle_by_position`` for new positions with no
+    source data. Variables that don't carry ``dim`` at all (e.g. a static
+    ``(lat,)`` mask under a ``(time,)`` partition) are taken unchanged from
+    ``template`` rather than filled -- such a variable is already this
+    rank's own correct, complete copy regardless of how ``dim`` is
+    redistributed, so overwriting it with ``fill_value`` would corrupt it
+    for no reason.
+
+    Parameters
+    ----------
+    template : xarray.Dataset or xarray.DataArray
+        Any local slice with the right non-``dim`` shape/dtype/coords to
+        copy structure from (only its first element along ``dim`` is used).
+    dim : str
+        The dimension the fill chunk is ``n`` long.
+    n : int
+        Length of the fill chunk along ``dim``.
+    fill_value : Any
+        Value to fill dim-carrying variables/values with.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        An ``n``-long chunk, structurally consistent with ``template``.
+    """
+    shaped = template.isel({dim: [0] * n})
+    if isinstance(shaped, xr.Dataset):
+        filled = shaped.copy(deep=False)
+        for name, var in shaped.data_vars.items():
+            if dim in var.dims:
+                filled[name] = xr.full_like(
+                    var,
+                    fill_value,
+                    # Pass fill_value itself (not np.asarray(fill_value).dtype)
+                    # so NumPy's value-based scalar promotion applies: a
+                    # Python-float nan against float32 stays float32 (nan is
+                    # representable), matching native xr.Dataset.reindex.
+                    # np.asarray(nan).dtype is float64, which would force
+                    # every float32 variable up to float64 regardless of
+                    # whether the fill value actually needs the extra
+                    # precision/range -- exactly the promotion this
+                    # implementation must not introduce.
+                    dtype=np.result_type(var.dtype, fill_value),
+                )
+        return filled
+    return xr.full_like(
+        shaped,
+        fill_value,
+        # See the matching comment in the Dataset branch above: use
+        # fill_value's value-based promotion, not its array dtype.
+        dtype=np.result_type(shaped.dtype, fill_value),
+    )
 
 
 class Arithmetic:
@@ -376,6 +437,450 @@ class Arithmetic:
             self.repartition(
                 right, dim, chunk_info=chunk_info, log_partitions=log_partitions
             ),
+        )
+
+    # -- structural redistribution -------------------------------------------
+    #
+    # reindex() and sortby() are xarray's own coordinate-label operations
+    # (unlike align() above, which reconciles rank *ownership* rather than
+    # labels) -- either can move an element to a different rank whenever the
+    # partition dimension itself is reindexed/reordered. Routing follows the
+    # same "local unless communication is structurally required" rule as
+    # everywhere else in this module: if none of the touched dimensions are
+    # currently partitioned, native xarray runs rank-locally and ownership
+    # is provably unaffected (see _local_reduction_meta's identical
+    # reasoning for reductions).
+    #
+    # When the partition dimension itself IS touched, this does a genuine
+    # personalized shuffle (see _shuffle_by_position below), not a full
+    # MPI_Allgather: only the (small) coordinate/key values along `dim` are
+    # ever gathered onto every rank -- ~O(global_size(dim)) numbers, the
+    # same order of magnitude bookkeeping already costs elsewhere in this
+    # package -- never the bulk data. Every rank then redundantly computes
+    # the identical global new-position -> old-position mapping from those
+    # small gathered arrays (cheap, no further communication needed to
+    # agree on it), and the bulk payload moves rank-to-rank with
+    # point-to-point, non-blocking sends: exactly one message per (source,
+    # destination) pair that actually has data to move, receives posted
+    # before sends (the same order FMS's mpp_do_update_ posts them in),
+    # and no message at all for a rank's own self-contribution or for
+    # newly-filled positions. Peak memory on any one rank is its own old
+    # local slice plus its own new local slice -- never the global array --
+    # so this scales to a partition dimension far larger than any single
+    # rank could hold, unlike a full gather.
+
+    def _shuffle_by_position(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        meta: Mapping[str, Any],
+        dim: str,
+        *,
+        new_coord: np.ndarray[Any, Any],
+        old_pos: np.ndarray[Any, Any],
+        fill_value: Any,
+    ) -> xr.Dataset | xr.DataArray:
+        """Redistribute ``value`` along ``dim`` to match ``old_pos``.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            This rank's own current local slice along ``dim``.
+        meta : mapping
+            ``value``'s current (single-dimension) distribution metadata.
+        dim : str
+            The partition dimension being redistributed.
+        new_coord : numpy.ndarray
+            The full, global new coordinate values for ``dim`` (length
+            ``M``), identical on every rank.
+        old_pos : numpy.ndarray of int64
+            Length-``M`` array: ``old_pos[p]`` is the *old* global position
+            along ``dim`` that new global position ``p`` should take its
+            value from, or ``-1`` if ``p`` has no source (filled with
+            ``fill_value`` instead). Identical on every rank.
+        fill_value : Any
+            Value used for any position with no source.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            This rank's new local slice: ``new_coord`` sliced to this
+            rank's fresh balanced bounds, with fresh ``mpi_meta`` set.
+        """
+        comm = self._runtime.comm
+        rank, size = comm.rank, comm.size
+
+        old_start = int(meta["starts"][dim])
+        old_stop = int(meta["stops"][dim])
+        old_starts, _old_stops = zip(
+            *comm.allgather((old_start, old_stop)), strict=True
+        )
+        old_starts_arr = np.asarray(old_starts, dtype=np.int64)
+
+        new_length = int(new_coord.shape[0])
+        new_starts_all = np.fromiter(
+            (get_balanced_bounds(new_length, r, size)[0] for r in range(size)),
+            dtype=np.int64,
+            count=size,
+        )
+        new_start, new_stop = get_balanced_bounds(new_length, rank, size)
+
+        def _owner_of(
+            global_positions: np.ndarray[Any, Any], starts: np.ndarray[Any, Any]
+        ) -> np.ndarray[Any, Any]:
+            return np.searchsorted(starts, global_positions, side="right") - 1
+
+        # -- what MY own old data must be sent out as a source -------------
+        owned_mask = (old_pos >= old_start) & (old_pos < old_stop)
+        p_owned = np.nonzero(owned_mask)[0]  # ascending new positions I feed
+        g_owned = old_pos[p_owned]  # corresponding old global positions (mine)
+        dest_of_p_owned = _owner_of(p_owned, new_starts_all)
+
+        self_payload: xr.Dataset | xr.DataArray | None = None
+        send_requests: list[MPI.Request] = []
+
+        # What I must receive, computed independently but symmetrically
+        # with every source's own view of the same global mapping above --
+        # see the module note: both sides iterate the same predicate over
+        # the same universe in the same ascending order, so no metadata
+        # about position/order needs to travel alongside the payload.
+        my_local_p = np.arange(new_start, new_stop, dtype=np.int64)
+        my_local_g = old_pos[new_start:new_stop] if new_length > 0 else my_local_p
+        my_is_fill = my_local_g == -1
+        my_owner = np.full(my_local_p.shape, -1, dtype=np.int64)
+        if (~my_is_fill).any():
+            my_owner[~my_is_fill] = _owner_of(my_local_g[~my_is_fill], old_starts_arr)
+
+        incoming_sources = sorted(
+            {int(s) for s in np.unique(my_owner) if s >= 0 and s != rank}
+        )
+
+        for dest in range(size):
+            mask = dest_of_p_owned == dest
+            if not mask.any():
+                continue
+            local_old_idx = g_owned[mask] - old_start
+            payload = value.isel({dim: local_old_idx})
+            if dest == rank:
+                self_payload = payload
+            else:
+                send_requests.append(comm.isend(payload, dest=dest))
+
+        # Blocking recv, not irecv: mpi4py's pickle irecv needs an accurate
+        # buffer-size guess up front and can silently corrupt memory once
+        # a payload exceeds it (exactly the risk a genuinely large,
+        # OOM-motivated shuffle would hit). recv() self-sizes via an
+        # internal probe first, so it stays correct at any payload size;
+        # the isend side above needs no such guess, since the sender
+        # already knows its own pickled size exactly. This trades away
+        # "receives posted before sends" latency-hiding for that
+        # correctness guarantee -- sends are still posted non-blocking so
+        # this rank's own sends never stall waiting on a slow receiver.
+        received = {source: comm.recv(source=source) for source in incoming_sources}
+        MPI.Request.Waitall(send_requests)
+
+        if new_stop <= new_start:
+            empty = value.isel({dim: slice(0, 0)})
+            result = empty.assign_coords({dim: new_coord[new_start:new_stop]})
+        else:
+            pieces: list[xr.Dataset | xr.DataArray] = []
+            slot_pieces: list[np.ndarray[Any, Any]] = []
+
+            self_mask = my_owner == rank
+            if self_mask.any():
+                if self_payload is None:
+                    raise AssertionError(
+                        "Shuffle planning mismatch: expected a "
+                        + "self-contribution that was never built."
+                    )
+                pieces.append(self_payload)
+                slot_pieces.append(np.nonzero(self_mask)[0])
+
+            if my_is_fill.any():
+                n_fill = int(my_is_fill.sum())
+                pieces.append(_fill_chunk(value, dim, n_fill, fill_value))
+                slot_pieces.append(np.nonzero(my_is_fill)[0])
+
+            for source in incoming_sources:
+                mask = my_owner == source
+                pieces.append(received[source])
+                slot_pieces.append(np.nonzero(mask)[0])
+
+            combined = (
+                xr.concat(pieces, dim=dim, data_vars="minimal")
+                if isinstance(value, xr.Dataset)
+                else xr.concat(pieces, dim=dim)
+            )
+            slots = np.concatenate(slot_pieces)
+            final_order = np.argsort(slots, kind="stable")
+            result = combined.isel({dim: final_order})
+            result = result.assign_coords({dim: new_coord[new_start:new_stop]})
+
+        result = strip_mpi_meta(result)
+        chunk_info = prune_chunk_info(meta["chunk_info"], result)
+        set_mpi_meta(
+            result,
+            dim=dim,
+            global_size=new_length,
+            start=new_start,
+            stop=new_stop,
+            chunk_info=chunk_info,
+        )
+        return result
+
+    def reindex(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        indexers: Mapping[Hashable, Any] | None = None,
+        *,
+        method: str | None = None,
+        tolerance: float | Iterable[float] | None = None,
+        fill_value: Any = np.nan,
+        chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
+        **indexers_kwargs: Any,
+    ) -> xr.Dataset | xr.DataArray:
+        """Reindex ``value`` onto new coordinate labels, redistributing if needed.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Object to reindex; distributed or replicated.
+        indexers : mapping, optional
+            New coordinate labels per dimension, exactly as
+            ``xarray.Dataset.reindex``/``DataArray.reindex`` accepts. Every
+            rank must pass the identical indexer values for any dimension
+            that is currently partitioned.
+        method : str, optional
+            Forwarded to ``pandas.Index.get_indexer`` when the partition
+            dimension is reindexed (``None``, ``"nearest"``, ``"ffill"``/
+            ``"pad"``, ``"bfill"``/``"backfill"``); forwarded to xarray's
+            own ``reindex`` otherwise.
+        tolerance : float or iterable of float, optional
+            Forwarded to ``pandas.Index.get_indexer``/xarray's ``reindex``.
+        fill_value : Any, optional
+            Value used for labels with no match in ``value``. Default ``NaN``.
+        chunk_info : mapping, optional
+            Reserved for parity with ``repartition``'s signature; not
+            consulted by the redistributing path, which always balances.
+        log_partitions : bool, optional
+            Currently unused by the redistributing path.
+        **indexers_kwargs : Any
+            Additional indexers given as keywords, merged with ``indexers``.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The reindexed object: rank-local (metadata preserved) if no
+            partitioned dimension was touched; freshly, memory-scalably
+            redistributed (new bounds, possibly a new global length)
+            otherwise -- see ``_shuffle_by_position``.
+
+        Raises
+        ------
+        ValueError
+            If no indexers are given.
+        NotImplementedError
+            If a partitioned dimension is reindexed under a
+            multi-dimensional (Cartesian) partition, or with a non-1D
+            coordinate along that dimension.
+        """
+        indexers = {**(indexers or {}), **indexers_kwargs}
+        if not indexers:
+            raise ValueError("reindex() requires at least one indexer.")
+
+        meta = get_mpi_meta(value)
+        if meta is None:
+            return value.reindex(
+                indexers, method=method, tolerance=tolerance, fill_value=fill_value
+            )
+
+        partition_dims = meta["dims"]
+        touched = tuple(str(d) for d in partition_dims if d in indexers)
+
+        if not touched:
+            result = strip_mpi_meta(value).reindex(
+                indexers, method=method, tolerance=tolerance, fill_value=fill_value
+            )
+            set_mpi_meta(
+                result,
+                dim=meta["dims"],
+                global_size=meta["global_sizes"],
+                start=meta["starts"],
+                stop=meta["stops"],
+                chunk_info=prune_chunk_info(meta["chunk_info"], result),
+                cart=meta.get("cart"),
+            )
+            return result
+
+        if len(partition_dims) > 1:
+            raise NotImplementedError(
+                "reindex() cannot yet redistribute a multi-dimensionally "
+                + f"partitioned object (dims={partition_dims!r}) when the "
+                + f"reindexed dimension(s) {touched!r} include an active "
+                + "partition axis. Reindexing a dimension that is NOT "
+                + "currently partitioned is unaffected by this and already "
+                + "works."
+            )
+
+        dim = touched[0]
+        new_labels = np.asarray(indexers[dim])
+        if new_labels.ndim != 1:
+            raise NotImplementedError(
+                f"reindex(): the new {dim!r} labels must be one-dimensional "
+                + f"to redistribute; got shape {new_labels.shape!r}."
+            )
+        self._agree(
+            (
+                "reindex",
+                dim,
+                int(new_labels.shape[0]),
+                str(method),
+                str(tolerance),
+            )
+        )
+
+        comm = self._runtime.comm
+        old_coord_local = np.asarray(value[dim].values)
+        old_full_coord = np.concatenate(comm.allgather(old_coord_local))
+        old_index = pd.Index(old_full_coord)
+        old_pos = old_index.get_indexer(new_labels, method=method, tolerance=tolerance)
+        old_pos = old_pos.astype(np.int64)
+
+        return self._shuffle_by_position(
+            value,
+            meta,
+            dim,
+            new_coord=new_labels,
+            old_pos=old_pos,
+            fill_value=fill_value,
+        )
+
+    def sortby(
+        self,
+        value: xr.Dataset | xr.DataArray,
+        by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
+        *,
+        ascending: bool = True,
+        chunk_info: Mapping[str, int] | None = None,
+        log_partitions: bool = False,
+    ) -> xr.Dataset | xr.DataArray:
+        """Sort ``value`` by one or more keys, redistributing if needed.
+
+        Parameters
+        ----------
+        value : xarray.Dataset or xarray.DataArray
+            Object to sort; distributed or replicated.
+        by : Hashable, DataArray, or sequence of these
+            Sort key(s): variable/coordinate name(s) or explicit
+            DataArray(s), exactly as ``xarray.Dataset.sortby``/
+            ``DataArray.sortby`` accepts. When redistribution is needed,
+            each key must be one-dimensional along the partition dimension
+            (a multi-dimensional sort key would need a different global
+            ordering per position along another axis, which this does not
+            support).
+        ascending : bool, optional
+            Sort order. Default True.
+        chunk_info : mapping, optional
+            Reserved for parity with ``repartition``'s signature; not
+            consulted by the redistributing path, which always balances.
+        log_partitions : bool, optional
+            Currently unused by the redistributing path.
+
+        Returns
+        -------
+        xarray.Dataset or xarray.DataArray
+            The sorted object: rank-local (metadata preserved) if no sort
+            key varies along a partitioned dimension; freshly,
+            memory-scalably redistributed otherwise -- see
+            ``_shuffle_by_position``.
+
+        Raises
+        ------
+        NotImplementedError
+            If a sort key varies along a partitioned dimension under a
+            multi-dimensional (Cartesian) partition, or is not
+            one-dimensional along that dimension.
+        """
+        meta = get_mpi_meta(value)
+        if meta is None:
+            return value.sortby(by, ascending=ascending)
+
+        keys = list(by) if isinstance(by, (list, tuple)) else [by]
+        touched_dims: set[str] = set()
+        for key in keys:
+            if isinstance(key, xr.DataArray):
+                touched_dims.update(str(d) for d in key.dims)
+                continue
+            try:
+                touched_dims.update(str(d) for d in value[key].dims)
+            except (KeyError, TypeError):
+                continue
+
+        partition_dims = meta["dims"]
+        touched = tuple(str(d) for d in partition_dims if d in touched_dims)
+
+        if not touched:
+            result = strip_mpi_meta(value).sortby(by, ascending=ascending)
+            set_mpi_meta(
+                result,
+                dim=meta["dims"],
+                global_size=meta["global_sizes"],
+                start=meta["starts"],
+                stop=meta["stops"],
+                chunk_info=prune_chunk_info(meta["chunk_info"], result),
+                cart=meta.get("cart"),
+            )
+            return result
+
+        if len(partition_dims) > 1:
+            raise NotImplementedError(
+                "sortby() cannot yet redistribute a multi-dimensionally "
+                + f"partitioned object (dims={partition_dims!r}) when a sort "
+                + f"key varies along an active partition axis {touched!r}. "
+                + "Sorting by a key that does not vary along any partition "
+                + "dimension is unaffected by this and already works."
+            )
+
+        dim = touched[0]
+        local_len = int(value.sizes[dim])
+        key_arrays_local: list[np.ndarray[Any, Any]] = []
+        for key in keys:
+            arr = np.asarray(
+                key.values if isinstance(key, xr.DataArray) else value[key].values
+            )
+            if arr.ndim != 1 or arr.shape[0] != local_len:
+                raise NotImplementedError(
+                    f"sortby(): key {key!r} is not one-dimensional along the "
+                    + f"partition dimension {dim!r} (shape {arr.shape!r} vs. "
+                    + f"local length {local_len!r}); redistribution needs "
+                    + "every key to give exactly one sort value per element "
+                    + "along the partition dimension."
+                )
+            key_arrays_local.append(arr)
+
+        key_signature = tuple(
+            "<dataarray>" if isinstance(key, xr.DataArray) else str(key) for key in keys
+        )
+        self._agree(("sortby", dim, key_signature, bool(ascending)))
+
+        comm = self._runtime.comm
+        full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
+        old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
+        # np.lexsort sorts by the *last* array primarily; reverse so the
+        # first key in `by` is primary, matching xarray.sortby's own order.
+        order = np.lexsort(tuple(reversed(full_keys)))
+        if not ascending:
+            order = order[::-1]
+        old_pos = order.astype(np.int64)
+        new_coord = old_full_coord[order]
+
+        return self._shuffle_by_position(
+            value,
+            meta,
+            dim,
+            new_coord=new_coord,
+            old_pos=old_pos,
+            fill_value=np.nan,
         )
 
     # -- arithmetic -----------------------------------------------------------
@@ -942,6 +1447,22 @@ class Arithmetic:
         if before < 0 or after < 0:
             raise ValueError("halo_exchange(): before and after must be >= 0.")
 
+        self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
+
+        if before == 0 and after == 0:
+            # No boundary data requested on either side: every rank's own
+            # local slice is already the complete answer, so this is a
+            # local operation and should communicate nothing at all (the
+            # same "no MPI traffic when no communication is structurally
+            # required" rule the routing model applies everywhere else) --
+            # skip the length allgather and every point-to-point call
+            # below, which would otherwise still post/complete 2-4 messages
+            # per rank carrying zero-length payloads for no benefit. Callers
+            # that pass before=after=0 unconditionally (e.g. diff()/shift()
+            # with n=0/periods=0, or an edge_order that needs no interior
+            # halo) get correct output at zero communication cost instead.
+            return value, 0, 0
+
         comm = self._runtime.comm
         rank = comm.rank
         if len(partition_dims) > 1:
@@ -961,8 +1482,6 @@ class Arithmetic:
             size = comm.size
             left_rank = rank - 1 if rank > 0 else None
             right_rank = rank + 1 if rank < size - 1 else None
-
-        self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
 
         local_len = int(value.sizes[partition_dim])
         lengths = comm.allgather(local_len)

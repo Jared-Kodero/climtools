@@ -14,7 +14,7 @@ from typing import Any
 
 from mpi4py import MPI
 
-from ..xarray.core import LockFile, tmp
+from ..core.utils import LockFile, tmp
 
 
 class MPIError(Exception):
@@ -158,11 +158,33 @@ class MPIDiagnostics:
         error: BaseException | None,
         phase: str,
         signature: Any = None,
+        *,
+        comm: MPI.Comm | None = None,
     ) -> None:
-        """Raise consistently if any MPI rank reports an error."""
+        """Raise consistently if any MPI rank reports an error.
+
+        Parameters
+        ----------
+        error : BaseException or None
+            This rank's own error, if any.
+        phase : str
+            Human-readable label for the operation being validated,
+            used in the raised message.
+        signature : Any, optional
+            Rank-independent description of the collective call being
+            made; every rank must agree on it (see ``_agree`` callers) or
+            an ``MPIError`` is raised describing the mismatch.
+        comm : mpi4py.MPI.Comm, optional
+            Communicator whose ranks must agree, e.g. a Cartesian
+            sub-communicator under a multi-dimensional partition (see
+            :meth:`~.planning.ReductionPlanningMixin._resolve_comm`).
+            Defaults to ``self.comm``, the full runtime communicator --
+            unchanged behavior for every single-partition-dimension caller.
+        """
+        active_comm = self.comm if comm is None else comm
         detail = None if error is None else (type(error).__name__, str(error))
 
-        states = self.comm.allgather((detail, signature))
+        states = active_comm.allgather((detail, signature))
 
         failures = [
             (rank, item) for rank, (item, _) in enumerate(states) if item is not None
@@ -188,7 +210,7 @@ class MPIDiagnostics:
 
             return
 
-        if len(failures) == self.comm.size and error is not None:
+        if len(failures) == active_comm.size and error is not None:
             raise error
 
         rank, detail = failures[0]
