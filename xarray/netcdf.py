@@ -21,8 +21,8 @@ import xarray as xr
 from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
-from .constructors import MPIXarrayOps, mpi_partition_data
 from .encoding import encode_dataset_time, encode_time, is_time_like
+from .io import MPIXarrayOps, mpi_partition_data
 from .meta import MPI_META, _format_bytes, get_mpi_meta
 
 if TYPE_CHECKING:
@@ -317,14 +317,26 @@ def write_distributed(
         Rank-local dataset.
     meta : Mapping[str, Any]
         MPI partition metadata.
+
+    Notes
+    -----
+    Generalizes to any number of active partition dimensions with no
+    change to the underlying mechanism: each rank still writes exactly
+    one hyperslab per variable (its own local slice) directly into the
+    shared file via netCDF4's parallel/collective I/O, with no gather to
+    a single rank at any point -- only the ``index`` tuple below grows
+    from checking membership in one partition dimension to checking
+    membership in a set of them, one independent ``slice(start, stop)``
+    per active axis a variable happens to carry.
     """
 
-    partition_dim = str(meta["dim"])
-    start = int(meta["start"])
-    stop = int(meta["stop"])
+    partition_dims = set(meta["dims"])
+    starts = meta["starts"]
+    stops = meta["stops"]
+    has_data = all(stops[dim] > starts[dim] for dim in partition_dims)
     prewritten = set(schema.get("prewritten", ()))
 
-    comm = writer_comm(mpi_runtime, stop > start)
+    comm = writer_comm(mpi_runtime, has_data)
     nc: netCDF4.Dataset | None = None
     try:
         if comm == MPI.COMM_NULL:
@@ -332,7 +344,8 @@ def write_distributed(
         nc = open_in_parallel(path, schema, comm)
         for name, spec in schema["variables"].items():
             dims = tuple(spec["dims"])
-            if partition_dim not in dims or name in prewritten:
+            written_dims = partition_dims & set(dims)
+            if not written_dims or name in prewritten:
                 continue
             if spec["dtype"] == "str":
                 raise NetCDFWriteError(
@@ -345,7 +358,7 @@ def write_distributed(
             if comm.size > 1:
                 ncvar.set_collective(True)
             index = tuple(
-                slice(start, stop) if dim == partition_dim else slice(None)
+                slice(starts[dim], stops[dim]) if dim in written_dims else slice(None)
                 for dim in dims
             )
             with quiet_netcdf4_writes():
@@ -617,7 +630,17 @@ def to_netcdf_parallel(
             raise AssertionError("Distributed data and metadata are missing.")
 
         distributed_dim = str(local_meta["dim"])
-        if partition_dim is not None and partition_dim != distributed_dim:
+        if len(local_meta["dims"]) > 1:
+            error = NotImplementedError(
+                "to_netcdf()'s dask-aware schema/chunk-alignment orchestration "
+                + "does not yet support a multi-dimensional partition (dims="
+                + f"{local_meta['dims']!r}). The lower-level hyperslab writer "
+                + "(write_distributed) is generalized and works for any number "
+                + "of partition dimensions; reaching it directly (e.g. by "
+                + "giving explicit `chunks=` so no dask auto-chunking/schema "
+                + "inference is needed) is the supported path for now."
+            )
+        elif partition_dim is not None and partition_dim != distributed_dim:
             error = ValueError(
                 f"partition_dim {partition_dim!r} does not match "
                 + f"distributed dimension {distributed_dim!r}."

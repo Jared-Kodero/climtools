@@ -12,6 +12,7 @@ from mpi4py import MPI
 
 import xarray as xr
 
+from .cartesian import get_cartesian_topology
 from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
 
 if TYPE_CHECKING:
@@ -128,6 +129,16 @@ class Arithmetic:
             The full, replicated object (no ``mpi_meta`` attached).
         """
         dim = meta["dim"]
+        if len(meta["dims"]) > 1:
+            raise NotImplementedError(
+                "align() cannot yet gather a multi-dimensionally partitioned "
+                + f"object onto every rank (dims={meta['dims']!r}); this is a "
+                + "genuine structural redistribution across a Cartesian "
+                + "process grid, not yet implemented. Reduce or reconcile "
+                + "one of the partition dimensions first, or align operands "
+                + "sharing an identical partition (see _partitions_match), "
+                + "which needs no data movement and is unaffected by this."
+            )
         pieces = self._runtime.comm.allgather(value)
         full = (
             xr.concat(pieces, dim=dim, data_vars="minimal")
@@ -148,16 +159,22 @@ class Arithmetic:
         ----------
         other : Any
             Replicated operand to slice. Returned unchanged if it is not an
-            xarray object or does not carry ``meta["dim"]``.
+            xarray object or carries none of ``meta["dims"]``. Under a
+            multi-dimensional partition, ``other`` need not carry every
+            one of ``meta["dims"]`` -- it is sliced along whichever it
+            does carry (exactly the one-dimensional behavior, applied
+            independently per axis; an operand missing an axis entirely
+            is, as before, replicated along that axis and untouched
+            there).
         meta : dict[str, Any]
             Distribution metadata of the already-distributed partner.
         partner : xarray.Dataset or xarray.DataArray, optional
             The already-distributed partner itself. When given and both
-            objects carry an index along ``dim``, :func:`xarray.align` with
-            ``join="exact"`` cross-checks the coordinate *labels* of the
-            slice against the partner's own labels. This is a local,
+            objects carry an index along a shared axis, :func:`xarray.align`
+            with ``join="exact"`` cross-checks the coordinate *labels* of
+            the slice against the partner's own labels. This is a local,
             communication-free check: ``partner`` already holds only this
-            rank's slice, so it catches a replicated operand whose ``dim``
+            rank's slice, so it catches a replicated operand whose
             coordinate does not correspond label-for-label to the
             partner's (reordered, offset, or otherwise not simply "the same
             index sliced the same way"), which same-length position-based
@@ -167,46 +184,54 @@ class Arithmetic:
         -------
         Any
             The sliced xarray object with distribution metadata attached, or
-            ``other`` unchanged if it is not an xarray object.
+            ``other`` unchanged if it is not an xarray object or carries
+            none of the partition dimensions.
 
         Raises
         ------
         ValueError
-            If the operand length does not match the global size, or if
-            coordinate labels fail the ``join="exact"`` validation check.
+            If an operand length does not match the corresponding global
+            size, or if coordinate labels fail the ``join="exact"``
+            validation check.
         """
-        dim = meta["dim"]
-        if not isinstance(other, (xr.Dataset, xr.DataArray)) or dim not in other.dims:
+        if not isinstance(other, (xr.Dataset, xr.DataArray)):
+            return other
+        shared_dims = tuple(dim for dim in meta["dims"] if dim in other.dims)
+        if not shared_dims:
             return other
 
-        length = int(other.sizes[dim])
-        global_size = int(meta["global_size"])
-        if length != global_size:
-            raise ValueError(
-                f"Cannot align: operand carries dimension {dim!r} at length "
-                + f"{length}, but the distributed partner's global size "
-                + f"along {dim!r} is {global_size}. align() only slices a "
-                + "replicated (full-length) operand onto an existing "
-                + "partition; lengths must match the whole distributed "
-                + "dimension."
-            )
-        sliced = other.isel({dim: slice(meta["start"], meta["stop"])})
-
-        if (
-            partner is not None
-            and dim in getattr(partner, "indexes", {})
-            and dim in getattr(sliced, "indexes", {})
-        ):
-            try:
-                xr.align(partner, sliced, join="exact")
-            except (ValueError, KeyError) as exc:
+        indexers: dict[Hashable, slice] = {}
+        for dim in shared_dims:
+            length = int(other.sizes[dim])
+            global_size = int(meta["global_sizes"][dim])
+            if length != global_size:
                 raise ValueError(
-                    f"Cannot align: the replicated operand's {dim!r} labels "
-                    + "do not match the distributed partner's labels for "
-                    + "this rank's slice, even though both have length "
-                    + f"{meta['stop'] - meta['start']}. xarray.align(..., "
-                    + f"join='exact') reports: {exc}"
-                ) from exc
+                    f"Cannot align: operand carries dimension {dim!r} at length "
+                    + f"{length}, but the distributed partner's global size "
+                    + f"along {dim!r} is {global_size}. align() only slices a "
+                    + "replicated (full-length) operand onto an existing "
+                    + "partition; lengths must match the whole distributed "
+                    + "dimension."
+                )
+            indexers[dim] = slice(meta["starts"][dim], meta["stops"][dim])
+        sliced = other.isel(indexers)
+
+        if partner is not None:
+            for dim in shared_dims:
+                if dim not in getattr(partner, "indexes", {}) or dim not in getattr(
+                    sliced, "indexes", {}
+                ):
+                    continue
+                try:
+                    xr.align(partner, sliced, join="exact")
+                except (ValueError, KeyError) as exc:
+                    raise ValueError(
+                        f"Cannot align: the replicated operand's {dim!r} labels "
+                        + "do not match the distributed partner's labels for "
+                        + "this rank's slice, even though both have length "
+                        + f"{meta['stops'][dim] - meta['starts'][dim]}. "
+                        + f"xarray.align(..., join='exact') reports: {exc}"
+                    ) from exc
 
         return self._reattach_meta(sliced, meta)
 
@@ -393,11 +418,12 @@ class Arithmetic:
         if isinstance(result, (xr.Dataset, xr.DataArray)):
             set_mpi_meta(
                 result,
-                dim=meta["dim"],
-                global_size=meta["global_size"],
-                start=meta["start"],
-                stop=meta["stop"],
+                dim=meta["dims"],
+                global_size=meta["global_sizes"],
+                start=meta["starts"],
+                stop=meta["stops"],
                 chunk_info=meta["chunk_info"],
+                cart=meta.get("cart"),
             )
         return result
 
@@ -448,17 +474,20 @@ class Arithmetic:
                 if not _partitions_match(meta, other_meta):
                     raise ValueError(
                         "Cannot combine operands distributed over "
-                        + f"different partitions: dim={meta['dim']!r} "
-                        + f"range=[{meta['start']}:{meta['stop']}) vs "
-                        + f"dim={other_meta['dim']!r} "
-                        + f"range=[{other_meta['start']}:{other_meta['stop']}). "
+                        + f"different partitions: dims={meta['dims']!r} "
+                        + f"bounds={ {d: (meta['starts'][d], meta['stops'][d]) for d in meta['dims']} } vs "
+                        + f"dims={other_meta['dims']!r} "
+                        + f"bounds={ {d: (other_meta['starts'][d], other_meta['stops'][d]) for d in other_meta['dims']} }. "
                         + "Call align(...) first."
                     )
                 continue
 
-            dim = meta["dim"]
-            if isinstance(other, (xr.Dataset, xr.DataArray)) and dim in other.dims:
-                owned = meta["stop"] - meta["start"]
+            for dim in meta["dims"]:
+                if not (
+                    isinstance(other, (xr.Dataset, xr.DataArray)) and dim in other.dims
+                ):
+                    continue
+                owned = meta["stops"][dim] - meta["starts"][dim]
                 local = int(other.sizes[dim])
                 if local != owned:
                     raise ValueError(
@@ -551,48 +580,48 @@ class Arithmetic:
         if not isinstance(result, (xr.Dataset, xr.DataArray)):
             return
 
-        dim = meta["dim"]
-        owned = meta["stop"] - meta["start"]
+        for dim in meta["dims"]:
+            owned = meta["stops"][dim] - meta["starts"][dim]
 
-        if dim not in result.dims:
-            raise ValueError(
-                "apply(): the callable removed or renamed the distributed "
-                + f"dimension {dim!r} (result dims: {tuple(result.dims)!r}). "
-                + "apply() only supports partition-preserving rank-local "
-                + "callables; use the corresponding mpi.xarray reduction, "
-                + "indexing, or groupby method for operations that change "
-                + "the partition dimension."
-            )
-
-        local = int(result.sizes[dim])
-        if local != owned:
-            raise ValueError(
-                "apply(): the callable changed the local length of the "
-                + f"distributed dimension {dim!r} from {owned} to {local} "
-                + "on this rank. apply() only supports partition-preserving "
-                + "rank-local callables that leave every rank's owned "
-                + "slice the same length; operations such as slicing, "
-                + "dropping, or windowed reductions along the partition "
-                + "dimension require values from neighboring ranks and "
-                + "must not be done inside apply()."
-            )
-
-        if (
-            isinstance(reference, (xr.Dataset, xr.DataArray))
-            and dim in getattr(reference, "indexes", {})
-            and dim in getattr(result, "indexes", {})
-        ):
-            try:
-                xr.align(reference, result, join="exact")
-            except (ValueError, KeyError) as exc:
+            if dim not in result.dims:
                 raise ValueError(
-                    f"apply(): the callable changed the {dim!r} coordinate "
-                    + "labels on this rank, even though the local length "
-                    + f"({local}) is unchanged. apply() only supports "
-                    + "partition-preserving rank-local callables that leave "
-                    + f"each rank's owned {dim!r} interval untouched. "
-                    + f"xarray.align(..., join='exact') reports: {exc}"
-                ) from exc
+                    "apply(): the callable removed or renamed the distributed "
+                    + f"dimension {dim!r} (result dims: {tuple(result.dims)!r}). "
+                    + "apply() only supports partition-preserving rank-local "
+                    + "callables; use the corresponding mpi.xarray reduction, "
+                    + "indexing, or groupby method for operations that change "
+                    + "the partition dimension."
+                )
+
+            local = int(result.sizes[dim])
+            if local != owned:
+                raise ValueError(
+                    "apply(): the callable changed the local length of the "
+                    + f"distributed dimension {dim!r} from {owned} to {local} "
+                    + "on this rank. apply() only supports partition-preserving "
+                    + "rank-local callables that leave every rank's owned "
+                    + "slice the same length; operations such as slicing, "
+                    + "dropping, or windowed reductions along the partition "
+                    + "dimension require values from neighboring ranks and "
+                    + "must not be done inside apply()."
+                )
+
+            if (
+                isinstance(reference, (xr.Dataset, xr.DataArray))
+                and dim in getattr(reference, "indexes", {})
+                and dim in getattr(result, "indexes", {})
+            ):
+                try:
+                    xr.align(reference, result, join="exact")
+                except (ValueError, KeyError) as exc:
+                    raise ValueError(
+                        f"apply(): the callable changed the {dim!r} coordinate "
+                        + "labels on this rank, even though the local length "
+                        + f"({local}) is unchanged. apply() only supports "
+                        + "partition-preserving rank-local callables that leave "
+                        + f"each rank's owned {dim!r} interval untouched. "
+                        + f"xarray.align(..., join='exact') reports: {exc}"
+                    ) from exc
 
     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
@@ -681,7 +710,12 @@ class Arithmetic:
             (
                 "apply",
                 getattr(func, "__name__", repr(func)),
-                None if meta is None else (str(meta["dim"]), int(meta["global_size"])),
+                None
+                if meta is None
+                else (
+                    tuple(str(d) for d in meta["dims"]),
+                    tuple(int(meta["global_sizes"][d]) for d in meta["dims"]),
+                ),
             )
         )
 
@@ -753,18 +787,52 @@ class Arithmetic:
         if meta is None:
             return self._apply_generic(operator.matmul, (left, right), {})
 
-        dim = meta["dim"]
-        if not (dim in getattr(left, "dims", ()) and dim in getattr(right, "dims", ())):
-            # `dim` is not one of the dot product's common dimensions, so it
-            # is never contracted: the operation only reads this rank's own
-            # owned slice and apply()'s post-call check confirms it.
+        contracted = tuple(
+            d
+            for d in meta["dims"]
+            if d in getattr(left, "dims", ()) and d in getattr(right, "dims", ())
+        )
+        if not contracted:
+            # None of the partition dimensions are among the dot product's
+            # common dimensions, so none are ever contracted: the operation
+            # only reads this rank's own owned slice and apply()'s post-call
+            # check confirms it.
             return self._apply_generic(operator.matmul, (left, right), {})
+        if len(contracted) > 1:
+            raise NotImplementedError(
+                "matmul() cannot yet contract more than one partition "
+                + f"dimension at once (both {contracted!r} are common to "
+                + "left and right under this multi-dimensional partition). "
+                + "Reduce one of them first (e.g. via a prior matmul/sum "
+                + "restricted to a single-dimension partition), or restructure "
+                + "the contraction to touch only one partition axis."
+            )
+        dim = contracted[0]
+        other_axes = tuple(d for d in meta["dims"] if d != dim)
+        replicated = tuple(
+            d
+            for d in other_axes
+            if not (d in getattr(left, "dims", ()) and d in getattr(right, "dims", ()))
+        )
+        if replicated:
+            raise NotImplementedError(
+                "matmul() cannot yet contract dimension "
+                + f"{dim!r} while an operand is replicated along "
+                + f"{replicated!r} under this multi-dimensional partition "
+                + "(the contraction sum would need to be de-duplicated "
+                + "across that replicated axis, which is not yet "
+                + "implemented for matmul -- see sum()/mean(), which do "
+                + "handle this)."
+            )
 
-        self._agree(("matmul", str(dim), int(meta["global_size"])))
+        self._agree(("matmul", str(dim), int(meta["global_sizes"][dim])))
 
         partial = operator.matmul(left, right)
         total = self._comm_reduce(
-            partial, MPI.SUM, phase="MPI xarray distributed matrix multiplication"
+            partial,
+            MPI.SUM,
+            phase="MPI xarray distributed matrix multiplication",
+            comm=self._resolve_comm(meta, (dim,)),
         )
         return strip_mpi_meta(total)
 
@@ -779,14 +847,29 @@ class Arithmetic:
         """Pad ``value`` with boundary slices from the adjacent ranks.
 
         The dedicated primitive for operations that need values owned by a
-        neighboring rank along the partition dimension -- exactly what
+        neighboring rank along one partition dimension -- exactly what
         :meth:`apply` refuses to let a callable do internally, because it
         cannot verify the callable stayed rank-local. Fetches
-        ``before``/``after`` elements from rank ``r - 1``/``r + 1`` with
-        non-blocking point-to-point communication (no collective), and
-        concatenates them onto this rank's own slice.
+        ``before``/``after`` elements from the rank below/above along
+        ``dim`` with non-blocking point-to-point communication (no
+        collective), and concatenates them onto this rank's own slice.
 
-        At a global edge (rank 0 for ``before``, the last rank for
+        Exchanges exactly one axis at a time by design, even under a
+        multi-dimensional partition: a multi-axis stencil is built by
+        calling this once per axis, in sequence, feeding each call's
+        padded result into the next. That sequencing is not just
+        convenient but sufficient on its own to correctly fill a width-1
+        corner/edge ghost cell after two such calls, without this method
+        ever needing to talk to a diagonal neighbor directly -- the same
+        "update overlap" ordering trick NOAA-GFDL's FMS relies on for its
+        own single-width halos (see ``mpp_update_domains``), adopted here
+        instead of FMS's explicit diagonal ``NORTH_EAST``/``SOUTH_WEST``/
+        ... neighbor lookups (``mpp_get_neighbor_pe_2d``) because it needs
+        no extra communication pattern at all: whichever axis is
+        exchanged second simply carries along whatever the first axis's
+        exchange already received.
+
+        At a global edge (no neighbor below for ``before``, none above for
         ``after``) there is no neighbor to ask, so that side is padded
         with 0 elements rather than a value invented from nothing; a
         windowed computation built on the result naturally reports
@@ -798,14 +881,19 @@ class Arithmetic:
         value : xarray.Dataset or xarray.DataArray
             Distributed object to pad. Must carry MPI metadata.
         dim : Hashable, optional
-            Must equal ``value``'s active partition dimension if given;
-            defaults to it.
+            The partition axis to exchange along. Required (no default)
+            once ``value`` has more than one active partition dimension,
+            since there is no longer a single implicit "the" partition
+            dimension to fall back to; for the one-dimensional case it
+            still defaults to that sole dimension, and must equal it if
+            given.
         before, after : int
-            Number of elements requested from the left/right neighbor.
-            Must not exceed this rank's own local length, since a rank can
-            only ever forward data it owns -- fetching a window wider than
-            one rank's partition would need a multi-hop relay, which this
-            primitive does not perform.
+            Number of elements requested from the neighbor below/above
+            along ``dim``. Must not exceed this rank's own local length
+            along ``dim``, since a rank can only ever forward data it
+            owns -- fetching a window wider than one rank's partition
+            would need a multi-hop relay, which this primitive does not
+            perform.
 
         Returns
         -------
@@ -818,9 +906,10 @@ class Arithmetic:
         Raises
         ------
         ValueError
-            If ``value`` is not distributed, ``dim`` disagrees with its
-            partition dimension, ``before``/``after`` are negative, or any
-            rank's local partition is shorter than ``before``/``after``.
+            If ``value`` is not distributed, ``dim`` is missing or
+            disagrees with an active partition dimension,
+            ``before``/``after`` are negative, or any rank's local
+            partition along ``dim`` is shorter than ``before``/``after``.
             That last check is a synchronized ``allgather`` of every
             rank's local length, so the error (if any) is raised
             consistently, together, on every rank -- not just the
@@ -834,19 +923,44 @@ class Arithmetic:
                 "halo_exchange() requires a distributed xarray object; "
                 + "call repartition(...) first."
             )
-        partition_dim = meta["dim"]
-        if dim is not None and dim != partition_dim:
+        partition_dims = meta["dims"]
+        if dim is None:
+            if len(partition_dims) > 1:
+                raise ValueError(
+                    "halo_exchange(): dim is required (no default) once more "
+                    + "than one dimension is partitioned; pick one of "
+                    + f"{tuple(str(d) for d in partition_dims)!r}."
+                )
+            partition_dim = partition_dims[0]
+        elif dim not in partition_dims:
             raise ValueError(
-                f"halo_exchange(): dim={dim!r} does not match the object's "
-                + f"active partition dimension {partition_dim!r}."
+                f"halo_exchange(): dim={dim!r} is not one of the object's "
+                + f"active partition dimensions {tuple(str(d) for d in partition_dims)!r}."
             )
+        else:
+            partition_dim = dim
         if before < 0 or after < 0:
             raise ValueError("halo_exchange(): before and after must be >= 0.")
 
         comm = self._runtime.comm
-        rank, size = comm.rank, comm.size
-        left_rank = rank - 1 if rank > 0 else None
-        right_rank = rank + 1 if rank < size - 1 else None
+        rank = comm.rank
+        if len(partition_dims) > 1:
+            # Multi-dimensional partition: the rank below/above along
+            # `partition_dim` is not `rank - 1`/`rank + 1` (that is a
+            # neighbor in the flattened Cartesian rank numbering, which
+            # only coincides with a neighbor along one particular axis
+            # when every other axis has exactly one division). Look it up
+            # from the Cartesian topology's `Cartcomm.Shift`-derived face
+            # neighbors instead -- built once and cached, not repeated
+            # per call; see `get_cartesian_topology`.
+            topology = get_cartesian_topology(
+                comm, partition_dims, meta["global_sizes"]
+            )
+            left_rank, right_rank = topology.neighbors[partition_dim]
+        else:
+            size = comm.size
+            left_rank = rank - 1 if rank > 0 else None
+            right_rank = rank + 1 if rank < size - 1 else None
 
         self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
 
@@ -965,7 +1079,7 @@ class Arithmetic:
             partition dimension.
         """
         meta = self._operand_meta(value)
-        if meta is None or meta["dim"] != dim:
+        if meta is None or dim not in meta["dims"]:
             rolled = value.rolling(
                 {dim: window}, center=center, min_periods=min_periods
             )

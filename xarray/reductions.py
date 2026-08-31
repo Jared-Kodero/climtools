@@ -39,6 +39,8 @@ class Reduction(ReductionPlanningMixin):
         skipna: bool | None,
         min_count: int | None,
         error: BaseException | None = None,
+        comm: MPI.Comm | None = None,
+        replica_count: int = 1,
     ) -> xr.DataArray:
         """Combine rank-local sum or product partials."""
         result = self._comm_reduce(
@@ -49,10 +51,14 @@ class Reduction(ReductionPlanningMixin):
             ),
             error=error,
             phase="MPI xarray sum/prod reduction",
+            comm=comm,
+            replica_count=replica_count,
         )
         global_count = None
         if min_count is not None and self._skipna_enabled(value.dtype, skipna):
-            global_count = self._count(value, dims)
+            global_count = self._count(
+                value, dims, comm=comm, replica_count=replica_count
+            )
         if global_count is not None:
             # where() introduces NaN, which requires a floating result. Restore
             # the partial's own dtype so a float32 field stays float32.
@@ -72,6 +78,8 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None = None,
         error: BaseException | None = None,
+        comm: MPI.Comm | None = None,
+        replica_count: int = 1,
     ) -> xr.DataArray:
         """Combine rank-local sums and counts into a global mean."""
         global_sum = self._comm_reduce(
@@ -80,8 +88,10 @@ class Reduction(ReductionPlanningMixin):
             expect_dtype=_partial_dtype(value.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray mean reduction",
+            comm=comm,
+            replica_count=replica_count,
         )
-        global_count = self._count(value, dims)
+        global_count = self._count(value, dims, comm=comm, replica_count=replica_count)
         # Divide in the dtype numpy.mean would produce for this input. Dividing
         # the float32 sum by the int64 count directly would promote the whole
         # array to float64 and then cast it back, costing two full-width
@@ -128,8 +138,16 @@ class Reduction(ReductionPlanningMixin):
         minimum: bool,
         skipna: bool | None,
         error: BaseException | None = None,
+        comm: MPI.Comm | None = None,
     ) -> xr.DataArray:
-        """Combine rank-local min/max partials across ranks."""
+        """Combine rank-local min/max partials across ranks.
+
+        No ``replica_count`` parameter: unlike a sum, MIN/MAX/LAND/LOR are
+        idempotent under duplication, so a rank redundantly holding the
+        same value as another rank in ``comm`` (a variable replicated
+        along one axis of a multi-dimensional partition) needs no
+        correction here.
+        """
         # Use the agreed variable dtype, not a rank-local partial dtype. Empty
         # partitions follow a different local path, and dtype-dependent branching
         # could desynchronize collectives. Min/max also require no promotion; using
@@ -144,6 +162,7 @@ class Reduction(ReductionPlanningMixin):
                 expect_dtype=expect_dtype,
                 error=error,
                 phase=f"MPI xarray {operation} reduction",
+                comm=comm,
             )
 
         op = MPI.MIN if minimum else MPI.MAX
@@ -154,6 +173,7 @@ class Reduction(ReductionPlanningMixin):
                 expect_dtype=expect_dtype,
                 error=error,
                 phase=f"MPI xarray {operation} reduction",
+                comm=comm,
             )
 
         # Floating reductions carry validity beside the extreme so empty or all-NaN
@@ -204,12 +224,12 @@ class Reduction(ReductionPlanningMixin):
             )
         )
         self._runtime.raise_if_error(
-            error, f"MPI xarray {operation} reduction", signature
+            error, f"MPI xarray {operation} reduction", signature, comm=comm
         )
         if send is None or template is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
-        recv = self._exchange(send, op)
+        recv = self._exchange(send, op, comm=comm)
 
         shape = tuple(int(length) for length in template.shape)
         combined = np.asarray(recv[0]).reshape(shape)
@@ -364,6 +384,8 @@ class Reduction(ReductionPlanningMixin):
                 skipna=skipna,
                 min_count=min_count,
                 error=local_error,
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
+                replica_count=plan[0].replica_count,
             )
             return self._finish(
                 result,
@@ -397,6 +419,8 @@ class Reduction(ReductionPlanningMixin):
                 skipna=skipna,
                 min_count=min_count,
                 error=local_error,
+                comm=self._resolve_comm(old_meta, entry.comm_axes),
+                replica_count=entry.replica_count,
             )
             variables[entry.name] = result
         return self._finish(
@@ -465,7 +489,13 @@ class Reduction(ReductionPlanningMixin):
                 )
             )
             result = self._combine_mean(
-                value, local_sum, dims, skipna=skipna, error=local_error
+                value,
+                local_sum,
+                dims,
+                skipna=skipna,
+                error=local_error,
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
+                replica_count=plan[0].replica_count,
             )
             return self._finish(
                 result,
@@ -491,7 +521,13 @@ class Reduction(ReductionPlanningMixin):
                 )
             )
             result = self._combine_mean(
-                variable, local_sum, entry.dims, skipna=skipna, error=local_error
+                variable,
+                local_sum,
+                entry.dims,
+                skipna=skipna,
+                error=local_error,
+                comm=self._resolve_comm(old_meta, entry.comm_axes),
+                replica_count=entry.replica_count,
             )
             variables[entry.name] = result
         return self._finish(
@@ -600,11 +636,22 @@ class Reduction(ReductionPlanningMixin):
             return self._finish_local_reduction(local_result, old_meta=local_meta)
 
         plan = self._plan(value, dims, old_meta, operation=operation)
-        empty_partition = (
-            old_meta is not None
-            and old_meta["dim"] in value.dims
-            and (int(value.sizes[old_meta["dim"]]) == 0)
-        )
+
+        def locally_empty(variable: xr.DataArray) -> bool:
+            """Return whether this rank's local slice of ``variable`` is
+            empty along any partition dimension it owns -- generalizes the
+            single-dimension ``old_meta["dim"] in value.dims and size==0``
+            check to look at every one of ``meta["dims"]`` a given
+            variable actually varies over, since under a multi-dimensional
+            partition different variables can own different subsets of
+            the partition dimensions.
+            """
+            if old_meta is None:
+                return False
+            return any(
+                dim in variable.dims and int(variable.sizes[dim]) == 0
+                for dim in old_meta["dims"]
+            )
 
         if isinstance(value, xr.DataArray):
             if not dims:
@@ -614,14 +661,20 @@ class Reduction(ReductionPlanningMixin):
                 lambda: self._local_extreme(
                     value,
                     dims,
-                    empty=empty_partition,
+                    empty=locally_empty(value),
                     minimum=minimum,
                     skipna=skipna,
                     keep_attrs=keep_attrs,
                 )
             )
             result = self._combine_extreme(
-                value, local, dims, minimum=minimum, skipna=skipna, error=local_error
+                value,
+                local,
+                dims,
+                minimum=minimum,
+                skipna=skipna,
+                error=local_error,
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
             )
             return self._finish(
                 result,
@@ -640,7 +693,7 @@ class Reduction(ReductionPlanningMixin):
                 lambda variable=variable, entry=entry: self._local_extreme(
                     variable,
                     entry.dims,
-                    empty=empty_partition and entry.distributed,
+                    empty=locally_empty(variable) and entry.distributed,
                     minimum=minimum,
                     skipna=skipna,
                     keep_attrs=keep_attrs,
@@ -658,6 +711,7 @@ class Reduction(ReductionPlanningMixin):
                 minimum=minimum,
                 skipna=skipna,
                 error=local_error,
+                comm=self._resolve_comm(old_meta, entry.comm_axes),
             )
             variables[entry.name] = result
         return self._finish(
@@ -776,6 +830,7 @@ class Reduction(ReductionPlanningMixin):
                 expect_dtype=_partial_dtype(value.dtype.str, operation, None),
                 error=local_error,
                 phase=f"MPI xarray {operation} reduction",
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
             )
             return self._finish(
                 result,
@@ -807,6 +862,7 @@ class Reduction(ReductionPlanningMixin):
                 expect_dtype=_partial_dtype(variable.dtype.str, operation, None),
                 error=local_error,
                 phase=f"MPI xarray {operation} reduction",
+                comm=self._resolve_comm(old_meta, entry.comm_axes),
             )
             variables[entry.name] = result
         return self._finish(
@@ -870,12 +926,14 @@ class Reduction(ReductionPlanningMixin):
         *,
         skipna: bool | None,
         want_first: bool,
+        comm: MPI.Comm | None = None,
     ) -> xr.DataArray:
         """Combine rank-local first/last candidates into a global result.
 
-        Ranks are ordered along ``dim`` by construction (rank 0 owns the
-        lowest global indices), so "first/last valid" reduces to "lowest/
-        highest rank with any valid data", via two ``Allreduce`` calls:
+        Ranks are ordered along ``dim`` by construction (the lowest-ranked
+        member of ``comm`` owns the lowest global indices along ``dim``),
+        so "first/last valid" reduces to "lowest/highest rank with any
+        valid data", via two ``Allreduce`` calls:
 
         1. ``MIN``/``MAX`` elects, per element, the owning rank (a rank
            without valid data reports a sentinel that always loses).
@@ -884,13 +942,35 @@ class Reduction(ReductionPlanningMixin):
            combines the masked candidates, recovering the one nonzero
            contribution per element exactly.
 
+        ``comm`` matters here in a way it does not for the other
+        reductions in this module: unlike a sum or an extreme, "first/
+        last" is order-dependent, and rank order along ``dim`` is only
+        meaningful within a communicator that varies *exclusively* along
+        ``dim``. The caller therefore always passes (via
+        :meth:`ReductionPlanningMixin._resolve_comm`) the sub-communicator
+        for ``{dim}`` alone -- deliberately *not* unioned with any
+        replicated axis the way an additive reduction's group is. That is
+        still correct for a replicated axis: every rank replicated along
+        it holds identical local data, so each such rank's own ``{dim}``-
+        only sub-communicator independently computes the identical
+        answer, with no cross-replica communication needed at all. It
+        also does not need :attr:`~.common.PlanEntry.replica_count`
+        correction the way an additive reduction does: the elected
+        ``owner`` is a single rank per element (``MIN``/``MAX`` over a
+        strictly unique rank id cannot tie), so exactly one rank's value
+        ever contributes a nonzero term to the following ``SUM``,
+        regardless of how many duplicate copies of the same data exist
+        elsewhere.
+
         Elements with no valid data anywhere become NaN for float/complex
         dtypes; other dtypes keep their neutral placeholder, matching how
-        :meth:`_combine_extreme` handles the same edge case for min/max."""
+        :meth:`_combine_extreme` handles the same edge case for min/max.
+        """
         candidate, any_valid = self._first_last_local(
             variable, dim, skipna=skipna, want_first=want_first
         )
-        rank, size = self._runtime.comm.rank, self._runtime.comm.size
+        active_comm = self._runtime.comm if comm is None else comm
+        rank, size = active_comm.rank, active_comm.size
         sentinel = size if want_first else -1
         owner, error = self._guarded(
             lambda: xr.where(any_valid, rank, sentinel).astype(np.int32)
@@ -901,6 +981,7 @@ class Reduction(ReductionPlanningMixin):
             expect_dtype=np.dtype(np.int32),
             error=error,
             phase="MPI xarray first/last owner election",
+            comm=comm,
         )
         is_owner = owner == rank
 
@@ -913,6 +994,7 @@ class Reduction(ReductionPlanningMixin):
             expect_dtype=variable.dtype,
             error=error,
             phase="MPI xarray first/last value reduction",
+            comm=comm,
         )
         return combined.where(owner != sentinel) if kind in "fc" else combined
 
@@ -1002,7 +1084,11 @@ class Reduction(ReductionPlanningMixin):
 
         if isinstance(value, xr.DataArray):
             result = self._first_last_combine(
-                value, dim, skipna=skipna, want_first=want_first
+                value,
+                dim,
+                skipna=skipna,
+                want_first=want_first,
+                comm=self._resolve_comm(old_meta, (dim,)),
             )
             if keep_attrs:
                 result.attrs.update(value.attrs)
@@ -1021,7 +1107,11 @@ class Reduction(ReductionPlanningMixin):
                 continue
             if entry.distributed:
                 result = self._first_last_combine(
-                    variable, dim, skipna=skipna, want_first=want_first
+                    variable,
+                    dim,
+                    skipna=skipna,
+                    want_first=want_first,
+                    comm=self._resolve_comm(old_meta, (dim,)),
                 )
             else:
                 result = self._first_last_pick(

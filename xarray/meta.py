@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -22,14 +22,80 @@ MPI_META = "mpi_meta"
 # deliberately excluded: they record how the split/write was computed for
 # the benefit of a later repartition(..., chunk_info=...) or a NetCDF
 # write, not the ownership itself, so two partitions with different (or
-# absent) chunk_info/save_chunks but identical dim/global_size/start/stop
+# absent) chunk_info/save_chunks but identical dims/global_sizes/starts/stops
 # still own the exact same data and are still equal.
-_PARTITION_KEYS: tuple[str, ...] = ("dim", "global_size", "start", "stop")
+#
+# ``meta`` always carries both a plural, canonical description of every
+# partition dimension (``dims``/``global_sizes``/``starts``/``stops``) and,
+# mirroring ``dims[0]``, the original singular keys (``dim``/``global_size``/
+# ``start``/``stop``). The singular keys exist purely so every pre-existing
+# single-dimension consumer of ``meta["dim"]`` etc. keeps working unmodified;
+# they are correct in full for the (default, most common) one-dimensional
+# case, and describe only the first partition axis when more than one
+# dimension is partitioned. Any code that must be correct for a
+# multi-dimensional partition reads ``dims``/``starts``/``stops``/
+# ``global_sizes`` instead. A dict carrying only the legacy singular keys
+# (as attached by an older climtools version, e.g. read back from a
+# previously written NetCDF file's attrs) is still recognized: see
+# :func:`_canonicalize_meta`.
+
+
+def _canonicalize_meta(meta: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return ``meta`` with both plural and singular partition keys present.
+
+    Accepts either the canonical multi-dimensional form (``dims`` present)
+    or the legacy single-dimension-only form (``dim`` present, no ``dims``),
+    and returns a dict carrying both. Returns None if neither form's
+    required keys are all present.
+    """
+    if "dims" in meta:
+        required = {"dims", "global_sizes", "starts", "stops", "chunk_info"}
+        if not required <= meta.keys():
+            return None
+        dims = tuple(meta["dims"])
+        global_sizes, starts, stops = (
+            meta["global_sizes"],
+            meta["starts"],
+            meta["stops"],
+        )
+        if not dims or not all(
+            d in global_sizes and d in starts and d in stops for d in dims
+        ):
+            return None
+        out = dict(meta)
+        out["dims"] = dims
+        out.setdefault("dim", dims[0])
+        out.setdefault("global_size", global_sizes[dims[0]])
+        out.setdefault("start", starts[dims[0]])
+        out.setdefault("stop", stops[dims[0]])
+        return out
+
+    required = {"dim", "global_size", "start", "stop", "chunk_info"}
+    if not required <= meta.keys():
+        return None
+    dim = meta["dim"]
+    out = dict(meta)
+    out["dims"] = (dim,)
+    out["global_sizes"] = {dim: meta["global_size"]}
+    out["starts"] = {dim: meta["start"]}
+    out["stops"] = {dim: meta["stop"]}
+    return out
 
 
 def _partitions_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     """Return whether two partition metadata mappings own the same slice."""
-    return all(left.get(key) == right.get(key) for key in _PARTITION_KEYS)
+    left_c = _canonicalize_meta(left)
+    right_c = _canonicalize_meta(right)
+    if left_c is None or right_c is None:
+        return False
+    if set(left_c["dims"]) != set(right_c["dims"]):
+        return False
+    return all(
+        left_c["starts"].get(dim) == right_c["starts"].get(dim)
+        and left_c["stops"].get(dim) == right_c["stops"].get(dim)
+        and left_c["global_sizes"].get(dim) == right_c["global_sizes"].get(dim)
+        for dim in left_c["dims"]
+    )
 
 
 def _validate_mpi_meta(
@@ -39,26 +105,28 @@ def _validate_mpi_meta(
     if not isinstance(meta, dict):
         return None
 
-    required = {"dim", "global_size", "start", "stop", "chunk_info"}
-    if not required <= meta.keys():
+    canonical = _canonicalize_meta(meta)
+    if canonical is None:
         return None
 
-    dim = meta["dim"]
-    if dim not in value.dims:
+    dims = canonical["dims"]
+    present = [dim for dim in dims if dim in value.dims]
+    if not present:
         return None
 
-    start = int(meta["start"])
-    stop = int(meta["stop"])
-    global_size = int(meta["global_size"])
-    if start < 0 or stop < start or stop > global_size:
-        return None
-    if int(value.sizes[dim]) != stop - start:
+    for dim in present:
+        start = int(canonical["starts"][dim])
+        stop = int(canonical["stops"][dim])
+        global_size = int(canonical["global_sizes"][dim])
+        if start < 0 or stop < start or stop > global_size:
+            return None
+        if int(value.sizes[dim]) != stop - start:
+            return None
+
+    if not isinstance(canonical["chunk_info"], dict):
         return None
 
-    if not isinstance(meta["chunk_info"], dict):
-        return None
-
-    return cast("dict[str, Any]", meta)
+    return cast("dict[str, Any]", canonical)
 
 
 def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
@@ -120,53 +188,108 @@ def _assign_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> N
     Shared by :func:`set_mpi_meta` (building ``meta`` from scratch) and
     :func:`set_save_chunks` (adding one key to an existing ``meta``): both
     need the identical propagation rule -- set on the object itself, and
-    on every variable that carries ``meta["dim"]``, clearing any stale
-    metadata on variables that do not.
+    on every variable that carries at least one of ``meta["dims"]``,
+    clearing any stale metadata on variables that do not.
     """
-    dim = meta["dim"]
+    dims = meta["dims"]
     value.attrs[MPI_META] = dict(meta)
     if isinstance(value, xr.Dataset):
         for variable in value.variables.values():
             variable.attrs.pop(MPI_META, None)
-            if dim in variable.dims:
+            if any(dim in variable.dims for dim in dims):
                 variable.attrs[MPI_META] = dict(meta)
+
+
+def _as_dims(dim: Hashable | Iterable[Hashable]) -> tuple[str, ...]:
+    """Normalize a ``dim`` argument (one dim, or a sequence of dims) to a tuple."""
+    dims = tuple(dim) if isinstance(dim, (list, tuple)) else (dim,)
+    if not dims:
+        raise ValueError("At least one partition dimension is required.")
+    if len(set(dims)) != len(dims):
+        raise ValueError(f"Partition dimensions must be unique; got {dims!r}.")
+    return tuple(str(d) for d in dims)
+
+
+def _as_dim_map(
+    dims: tuple[str, ...], value: int | Mapping[Hashable, int], name: str
+) -> dict[str, int]:
+    """Normalize a per-dimension argument to a ``{dim: value}`` mapping.
+
+    A bare scalar is only accepted for a single partition dimension --
+    with more than one, which dimension it describes is ambiguous, so a
+    mapping is required.
+    """
+    if isinstance(value, Mapping):
+        resolved = {str(k): int(v) for k, v in value.items()}
+        missing = [dim for dim in dims if dim not in resolved]
+        if missing:
+            raise ValueError(f"{name} is missing an entry for {missing!r}.")
+        return resolved
+    if len(dims) != 1:
+        raise ValueError(
+            f"{name} must be a mapping of dim -> value when more than one "
+            + f"partition dimension is given; got dims={dims!r}."
+        )
+    return {dims[0]: int(cast("int", value))}
 
 
 def set_mpi_meta(
     value: xr.Dataset | xr.DataArray,
     *,
-    dim: Hashable,
-    global_size: int,
-    start: int,
-    stop: int,
+    dim: Hashable | Sequence[Hashable],
+    global_size: int | Mapping[Hashable, int],
+    start: int | Mapping[Hashable, int],
+    stop: int | Mapping[Hashable, int],
     chunk_info: Mapping[Hashable, int],
+    cart: Mapping[str, Any] | None = None,
 ) -> None:
-    """Attach MPI distribution metadata.
+    """Attach MPI distribution metadata for one or more partition dimensions.
 
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
         Rank-local xarray object.
-    dim : hashable
-        Distributed dimension.
-    global_size : int
-        Global length of ``dim``.
-    start, stop : int
-        Global half-open interval owned by this rank.
+    dim : hashable or sequence of hashable
+        Distributed dimension(s). A single dimension is the default,
+        backward-compatible case; a sequence of two or more dimensions
+        describes a Cartesian-topology partition.
+    global_size : int or mapping
+        Global length of ``dim``. A bare int is only valid when ``dim`` is
+        a single dimension; otherwise pass a ``{dim: length}`` mapping.
+    start, stop : int or mapping
+        Global half-open interval owned by this rank, per dimension. Same
+        scalar-vs-mapping rule as ``global_size``.
     chunk_info : mapping
         Effective climtools chunk size for every retained dimension.
+    cart : mapping, optional
+        Cartesian topology descriptor (``grid_shape``, ``coords``,
+        ``periods``), attached only for a multi-dimensional partition. See
+        :mod:`climtools.mpi.cartesian`.
     """
-    meta = {
-        "dim": str(dim),
-        "global_size": int(global_size),
-        "start": int(start),
-        "stop": int(stop),
+    dims = _as_dims(dim)
+    global_sizes = _as_dim_map(dims, global_size, "global_size")
+    starts = _as_dim_map(dims, start, "start")
+    stops = _as_dim_map(dims, stop, "stop")
+
+    meta: dict[str, Any] = {
+        "dims": dims,
+        "global_sizes": {d: global_sizes[d] for d in dims},
+        "starts": {d: starts[d] for d in dims},
+        "stops": {d: stops[d] for d in dims},
+        # Backward-compatible singular aliases; see the module-level note
+        # above _canonicalize_meta.
+        "dim": dims[0],
+        "global_size": global_sizes[dims[0]],
+        "start": starts[dims[0]],
+        "stop": stops[dims[0]],
         "chunk_info": {
             str(name): int(size)
             for name, size in chunk_info.items()
             if name in value.dims and int(size) > 0
         },
     }
+    if cart is not None:
+        meta["cart"] = dict(cart)
     _assign_meta(value, meta)
 
 
@@ -384,6 +507,69 @@ def log_partition_report(
     runtime.log("", prefix=False)
 
 
+def log_partition_report_cartesian(
+    runtime: MPIRuntime,
+    data: xr.Dataset | xr.DataArray,
+    dims: tuple[Hashable, ...],
+    *,
+    origin: str,
+    global_sizes: Mapping[Hashable, int],
+    starts: Mapping[Hashable, int],
+    stops: Mapping[Hashable, int],
+    grid_shape: tuple[int, ...],
+    coords: tuple[int, ...],
+    automatic: bool = False,
+) -> None:
+    """Print a compact per-axis summary of a Cartesian-topology partition.
+
+    The multi-dimensional counterpart of :func:`log_partition_report`. Kept
+    as a separate function, rather than folding a variable-arity case into
+    :func:`log_partition_report`, so the existing one-dimensional report's
+    exact output is not put at risk by a multi-dimensional generalization;
+    the one-dimensional path continues to call the original function
+    unchanged.
+    """
+    comm = runtime.comm
+    local = (
+        int(comm.rank),
+        tuple(int(c) for c in coords),
+        tuple(int(starts[d]) for d in dims),
+        tuple(int(stops[d]) for d in dims),
+        int(data.nbytes),
+    )
+    rows = comm.gather(local, root=0)
+    if comm.rank != 0 or rows is None:
+        return
+
+    total = sum(row[4] for row in rows)
+    peak_bytes = max(row[4] for row in rows)
+    dims_str = ", ".join(f"{str(d)!r}{' (auto)' if automatic else ''}" for d in dims)
+    grid_str = "x".join(str(n) for n in grid_shape)
+
+    border = "=" * 80
+    lines = [
+        border,
+        f" MPI CARTESIAN PARTITION REPORT: {origin}",
+        border,
+        f" \U0001f539 Dimensions   : {dims_str}",
+        f" \U0001f539 Process grid : {grid_str} ({comm.size} ranks)",
+        " \U0001f539 Global sizes : "
+        + ", ".join(f"{str(d)!s}={int(global_sizes[d])}" for d in dims),
+        f" \U0001f539 Memory       : {_format_bytes(total)} total "
+        + f"(Peak/Rank: {_format_bytes(peak_bytes)})",
+        "-" * 80,
+    ]
+    for rank_id, rank_coords, rank_starts, rank_stops, nbytes in sorted(rows):
+        slab = ", ".join(
+            f"{str(d)!s}[{s}:{e}]" for d, s, e in zip(dims, rank_starts, rank_stops)
+        )
+        lines.append(f"   rank {rank_id:>4}  coords={rank_coords}  {slab}")
+    lines.append(border)
+    runtime.log("")
+    runtime.log("\n".join(lines), flush=True, prefix=False)
+    runtime.log("", prefix=False)
+
+
 def indexer_is_scalar(indexer: Any) -> bool:
     """Return whether an isel/sel indexer selects a single position.
 
@@ -582,3 +768,61 @@ def choose_partition_dim(
                 stacklevel=3,
             )
     return dim
+
+
+def choose_partition_dims(
+    sizes: Mapping[Hashable, int],
+    ndims: int,
+    mpi_size: int,
+    *,
+    exclude: Iterable[Hashable] = (),
+    rank: int | None = None,
+) -> tuple[Hashable, ...]:
+    """Select ``ndims`` partition dimensions automatically.
+
+    Repeatedly applies :func:`choose_partition_dim`, excluding each
+    dimension already chosen, so an N-dimensional automatic choice is
+    exactly the same greedy, rank-invariant, longest-dimension-first rule
+    the existing one-dimensional ``"auto"`` path already uses -- applied
+    ``ndims`` times instead of once. Ties are broken identically (dataset
+    declaration order), so ``choose_partition_dims(sizes, 1, mpi_size)``
+    returns the same single dimension ``choose_partition_dim`` would.
+
+    Parameters
+    ----------
+    sizes : mapping
+        Dimension name to global length.
+    ndims : int
+        Number of partition dimensions to choose. Must be at least 1 and
+        at most the number of available (non-excluded) dimensions.
+    mpi_size : int
+        Number of ranks the data will be spread over. Passed through to
+        :func:`choose_partition_dim` unchanged (used only for its
+        short-partition warning heuristic); the process-grid shape across
+        the chosen dimensions is decided separately by the Cartesian
+        topology, not by this function.
+    exclude : iterable of hashable, optional
+        Dimensions that must not be chosen.
+    rank : int, optional
+        Forwarded to :func:`choose_partition_dim`.
+
+    Returns
+    -------
+    tuple of hashable
+        Chosen dimensions, longest first (ties broken by declaration order).
+
+    Raises
+    ------
+    ValueError
+        If ``ndims`` is less than 1 or exceeds the number of available
+        dimensions.
+    """
+    if ndims < 1:
+        raise ValueError(f"ndims must be at least 1; got {ndims}.")
+    blocked = set(exclude)
+    chosen: list[Hashable] = []
+    for _ in range(ndims):
+        dim = choose_partition_dim(sizes, mpi_size, exclude=blocked, rank=rank)
+        chosen.append(dim)
+        blocked.add(dim)
+    return tuple(chosen)

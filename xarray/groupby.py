@@ -60,11 +60,23 @@ class Groupby(ReductionPlanningMixin):
         *,
         op: str,
         skipna: bool | None,
+        comm: MPI.Comm | None = None,
+        replica_count: int = 1,
     ) -> xr.DataArray:
         """Combine rank-local per-group partials into a global result.
 
         ``mean`` costs two ``Allreduce`` calls (a sum and a count, divided
-        afterward); every other supported op costs one."""
+        afterward); every other supported op costs one. ``comm``/
+        ``replica_count`` follow the same convention as
+        :meth:`ReductionPlanningMixin._comm_reduce`: default to the full
+        runtime communicator with no correction (the one-dimensional
+        path, unchanged), or a Cartesian sub-communicator plus its
+        duplication count under a multi-dimensional partition -- see
+        :meth:`ReductionPlanningMixin._resolve_comm`. The min/max branch
+        needs no ``replica_count`` correction, exactly as in
+        :meth:`.reductions.Reduction._combine_extreme`: MIN/MAX are
+        idempotent under duplication.
+        """
         if op == "mean":
             local_sum = self._group_reduce_local(
                 variable, dim, group, op="sum", skipna=skipna
@@ -79,12 +91,16 @@ class Groupby(ReductionPlanningMixin):
                 MPI.SUM,
                 expect_dtype=_partial_dtype(variable.dtype.str, "sum", skipna),
                 phase="MPI xarray groupby sum reduction",
+                comm=comm,
+                replica_count=replica_count,
             )
             global_count = self._comm_reduce(
                 local_count,
                 MPI.SUM,
                 expect_dtype=_partial_dtype(variable.dtype.str, "count", None),
                 phase="MPI xarray groupby count reduction",
+                comm=comm,
+                replica_count=replica_count,
             )
             with np.errstate(divide="ignore", invalid="ignore"):
                 return (global_sum / global_count).where(global_count > 0)
@@ -97,6 +113,8 @@ class Groupby(ReductionPlanningMixin):
                 MPI.SUM,
                 expect_dtype=_partial_dtype(variable.dtype.str, op, skipna),
                 phase=f"MPI xarray groupby {op} reduction",
+                comm=comm,
+                replica_count=replica_count,
             )
 
         minimum = op == "min"
@@ -108,6 +126,7 @@ class Groupby(ReductionPlanningMixin):
             MPI.MIN if minimum else MPI.MAX,
             expect_dtype=variable.dtype,
             phase=f"MPI xarray groupby {op} reduction",
+            comm=comm,
         )
 
     def groupby_reduce(
@@ -185,13 +204,19 @@ class Groupby(ReductionPlanningMixin):
 
         plan = self._plan(value, dims, old_meta, operation=op)
         local_labels = np.unique(group.values)
-        global_labels = np.unique(
-            np.concatenate(self._runtime.comm.allgather(local_labels))
-        )
+        labels_comm = self._resolve_comm(old_meta, (dim,))
+        global_labels = np.unique(np.concatenate(labels_comm.allgather(local_labels)))
 
         if isinstance(value, xr.DataArray):
             result = self._group_combine(
-                value, dim, group, global_labels, op=op, skipna=skipna
+                value,
+                dim,
+                group,
+                global_labels,
+                op=op,
+                skipna=skipna,
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
+                replica_count=plan[0].replica_count,
             )
             if keep_attrs:
                 result.attrs.update(value.attrs)
@@ -210,7 +235,14 @@ class Groupby(ReductionPlanningMixin):
                 continue
             if entry.distributed:
                 result = self._group_combine(
-                    variable, dim, group, global_labels, op=op, skipna=skipna
+                    variable,
+                    dim,
+                    group,
+                    global_labels,
+                    op=op,
+                    skipna=skipna,
+                    comm=self._resolve_comm(old_meta, entry.comm_axes),
+                    replica_count=entry.replica_count,
                 )
             else:
                 result = self._group_reduce_local(

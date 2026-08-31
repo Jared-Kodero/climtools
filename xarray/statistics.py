@@ -61,6 +61,9 @@ class Statistics(ReductionPlanningMixin):
             variable: xr.DataArray,
             variable_dims: tuple[Hashable, ...],
             mean: xr.DataArray,
+            *,
+            comm: MPI.Comm | None = None,
+            replica_count: int = 1,
         ) -> xr.DataArray:
             """Combine rank-local sums of squared deviation into variance
             (``std`` when ``root``), via one ``Allreduce``."""
@@ -76,8 +79,15 @@ class Statistics(ReductionPlanningMixin):
                 expect_dtype=_partial_dtype(variable.dtype.str, "sum", skipna),
                 error=error,
                 phase="MPI xarray variance reduction",
+                comm=comm,
+                replica_count=replica_count,
             )
-            denominator = self._count(variable, variable_dims) - ddof
+            denominator = (
+                self._count(
+                    variable, variable_dims, comm=comm, replica_count=replica_count
+                )
+                - ddof
+            )
             target = np.asarray(np.var(np.zeros(1, dtype=variable.dtype))).dtype
             divisor = (
                 denominator.astype(target, keep_attrs=False)
@@ -104,7 +114,13 @@ class Statistics(ReductionPlanningMixin):
             mean = self.mean(  # type: ignore[attr-defined]
                 value, dim, skipna=skipna, keep_attrs=False, partition_dim=None
             )
-            result = combine(value, dims, mean)
+            result = combine(
+                value,
+                dims,
+                mean,
+                comm=self._resolve_comm(old_meta, plan[0].comm_axes),
+                replica_count=plan[0].replica_count,
+            )
             return self._finish(
                 result,
                 old_meta=old_meta,
@@ -127,7 +143,13 @@ class Statistics(ReductionPlanningMixin):
                     dim=entry.dims, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
                 )
                 continue
-            variables[entry.name] = combine(variable, entry.dims, mean_ds[entry.name])
+            variables[entry.name] = combine(
+                variable,
+                entry.dims,
+                mean_ds[entry.name],
+                comm=self._resolve_comm(old_meta, entry.comm_axes),
+                replica_count=entry.replica_count,
+            )
         return self._finish(
             self._dataset_result(value, dims, variables),
             old_meta=old_meta,

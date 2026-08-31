@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import xarray as xr
 
+from .cartesian import dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
 
@@ -133,8 +134,17 @@ class Elementwise:
             ``value``.
         """
         meta = get_mpi_meta(value)
-        if meta is None or meta["dim"] != dim:
+        if meta is None or dim not in meta["dims"]:
             return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
+        if len(meta["dims"]) > 1:
+            raise NotImplementedError(
+                "cumsum() cannot yet scan along a partition dimension "
+                + f"({dim!r}) under a multi-dimensional partition "
+                + f"(dims={meta['dims']!r}); its cross-rank prefix-sum "
+                + "gather/scatter needs the same dimension-scoped "
+                + "communicator generalization diff()/isel() already have, "
+                + "not yet done here."
+            )
 
         self._agree(("cumsum", str(dim), int(meta["global_size"])))
 
@@ -262,8 +272,16 @@ class Elementwise:
             preserved unchanged.
         """
         meta = get_mpi_meta(value)
-        if meta is None or meta["dim"] != dim:
+        if meta is None or dim not in meta["dims"]:
             return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
+        if len(meta["dims"]) > 1:
+            raise NotImplementedError(
+                "median() cannot yet gather along a partition dimension "
+                + f"({dim!r}) under a multi-dimensional partition "
+                + f"(dims={meta['dims']!r}); its gather-to-root needs the "
+                + "same dimension-scoped communicator generalization "
+                + "diff()/isel() already have, not yet done here."
+            )
 
         self._agree(("median", str(dim), int(meta["global_size"])))
         pieces = self._runtime.gather(value, root=0)
@@ -345,7 +363,7 @@ class Elementwise:
             hanging).
         """
         meta = get_mpi_meta(value)
-        if meta is None or meta["dim"] != dim:
+        if meta is None or dim not in meta["dims"]:
             return value.diff(dim, n=n, label=label)
         if n < 0:
             raise ValueError(f"diff(): n must be >= 0, got {n!r}.")
@@ -362,18 +380,25 @@ class Elementwise:
         )
         diffed = padded.diff(dim, n=n, label=label)
 
-        comm = self._runtime.comm
+        comm = _dim_comm(self._runtime, meta, dim)
         counts = comm.allgather(int(diffed.sizes[dim]))
         new_global_size = sum(counts)
         new_start = sum(counts[: comm.rank])
         new_stop = new_start + counts[comm.rank]
         chunk_info = prune_chunk_info(meta["chunk_info"], diffed)
+        global_sizes = dict(meta["global_sizes"])
+        starts = dict(meta["starts"])
+        stops = dict(meta["stops"])
+        global_sizes[dim] = new_global_size
+        starts[dim] = new_start
+        stops[dim] = new_stop
         set_mpi_meta(
             diffed,
-            dim=dim,
-            global_size=new_global_size,
-            start=new_start,
-            stop=new_stop,
+            dim=meta["dims"],
+            global_size=global_sizes,
+            start=starts,
+            stop=stops,
             chunk_info=chunk_info,
+            cart=meta.get("cart"),
         )
         return diffed

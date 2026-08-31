@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Hashable, Iterable, Mapping
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +13,7 @@ from mpi4py import MPI
 
 import xarray as xr
 
+from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
 from .common import (
     _MPI_REDUCIBLE_KINDS,
@@ -89,8 +91,14 @@ class ReductionPlanningMixin:
         *,
         partition_dim: Hashable | Literal["auto"] | None,
     ) -> Mapping[str, Any] | None:
-        """Return metadata when a reduction remains rank-local."""
-        if meta is None or meta["dim"] in dims:
+        """Return metadata when a reduction remains rank-local.
+
+        A multi-dimensional partition stays local only when *none* of its
+        partition dimensions are being reduced -- reducing away just one
+        of several partition axes still requires a (sub-)communicator
+        collective for any variable that owns that axis.
+        """
+        if meta is None or any(dim in dims for dim in meta["dims"]):
             return None
         if partition_dim not in (None, "auto"):
             raise ValueError(
@@ -104,16 +112,17 @@ class ReductionPlanningMixin:
         result: xr.Dataset | xr.DataArray, *, old_meta: Mapping[str, Any]
     ) -> xr.Dataset | xr.DataArray:
         """Restore metadata after a rank-local reduction."""
-        partition_dim = old_meta["dim"]
-        if partition_dim not in result.dims:
+        dims = tuple(dim for dim in old_meta["dims"] if dim in result.dims)
+        if not dims:
             return strip_mpi_meta(result)
         set_mpi_meta(
             result,
-            dim=partition_dim,
-            global_size=int(old_meta["global_size"]),
-            start=int(old_meta["start"]),
-            stop=int(old_meta["stop"]),
+            dim=dims,
+            global_size={dim: int(old_meta["global_sizes"][dim]) for dim in dims},
+            start={dim: int(old_meta["starts"][dim]) for dim in dims},
+            stop={dim: int(old_meta["stops"][dim]) for dim in dims},
             chunk_info=prune_chunk_info(old_meta["chunk_info"], result),
+            cart=old_meta.get("cart"),
         )
         return result
 
@@ -136,28 +145,106 @@ class ReductionPlanningMixin:
         *,
         operation: str,
     ) -> tuple[PlanEntry, ...]:
-        """Build and validate the rank-independent reduction plan."""
+        """Build and validate the rank-independent reduction plan.
+
+        For each variable, classifies the active partition dimensions
+        (``meta["dims"]``) into those the variable *owns* (present in its
+        own dims) and those it is merely *replicated* along (a partition
+        dimension of the object as a whole that this particular variable
+        does not vary over -- e.g. a ``(lat,)`` mask under a ``(lat, lon)``
+        partition). ``comm_axes`` is the set of partition dimensions this
+        variable's reduction must communicate over: the owned dimensions
+        actually being reduced, plus every replicated dimension (whose
+        duplicate copies must be merged into the collective group so they
+        are not silently omitted, and whose count is recorded in
+        ``replica_count`` so :meth:`_comm_reduce` can undo the resulting
+        over-counting of an ``MPI.SUM``). A variable with no active
+        partition dimensions at all (the one-dimensional case when it
+        lacks the sole partition dim, exactly as before) gets an empty
+        ``comm_axes`` and is untouched by this generalization.
+        """
         if isinstance(value, xr.DataArray):
             items: tuple[tuple[Hashable, xr.DataArray], ...] = ((value.name, value),)
         else:
             items = tuple((name, value[name]) for name in value.data_vars)
+
+        partition_dims: tuple[Hashable, ...] = () if meta is None else meta["dims"]
+        grid_shape_by_dim: dict[Hashable, int] = {}
+        if meta is not None and "cart" in meta:
+            grid_shape_by_dim = dict(
+                zip(meta["dims"], meta["cart"]["grid_shape"], strict=True)
+            )
 
         entries = []
         for name, variable in items:
             variable_dims = tuple(dim for dim in dims if dim in variable.dims)
             if variable_dims:
                 self._check_reducible(variable.dtype, operation)
+
+            owned = tuple(dim for dim in partition_dims if dim in variable.dims)
+            replicated = tuple(
+                dim for dim in partition_dims if dim not in variable.dims
+            )
+            reduced = tuple(dim for dim in variable_dims if dim in owned)
+            comm_axes = (
+                frozenset(reduced) | frozenset(replicated) if reduced else frozenset()
+            )
+            replica_count = (
+                math.prod(grid_shape_by_dim.get(dim, 1) for dim in replicated)
+                if reduced and replicated
+                else 1
+            )
+            if replica_count != 1 and operation == "prod":
+                # A duplicated contribution inflates a sum by an exact,
+                # exactly-undoable integer factor (divide it back out); it
+                # inflates a product by raising it to the replica_count-th
+                # power instead, which has no numerically reliable general
+                # inverse (an n-th root is ill-defined for negative or
+                # complex values and imprecise for float ones). Rather than
+                # silently return a wrong answer, this combination is
+                # explicitly unsupported for now.
+                raise NotImplementedError(
+                    f"prod() cannot yet reduce variable {name!r}: it is "
+                    + f"replicated along {tuple(str(d) for d in replicated)!r} "
+                    + "under this multi-dimensional partition, and undoing a "
+                    + "product's duplication has no exact general inverse "
+                    + "(unlike sum/count/mean, which divide it back out "
+                    + "exactly). Reduce the replicated dimension(s) first, or "
+                    + "use sum()/mean() instead."
+                )
+
             entries.append(
                 PlanEntry(
                     name=name,
                     dims=variable_dims,
-                    distributed=meta is not None and meta["dim"] in variable.dims,
+                    distributed=bool(comm_axes),
                     dtype=variable.dtype,
                     shape=tuple(
-                        (str(dim), int(value.sizes[dim]))
+                        (
+                            str(dim),
+                            # A surviving dimension's *local* size is only
+                            # rank-invariant (and therefore safe for the
+                            # cross-rank agreement hash below) when it is
+                            # not itself a partition dimension. Once more
+                            # than one dimension can be partitioned, a
+                            # surviving dimension can easily be a different
+                            # partition axis than the one being reduced
+                            # right now (e.g. reducing "lat" while "lon" is
+                            # also partitioned) -- every rank then legally
+                            # owns a different local "lon" extent, so its
+                            # *global* size (identical everywhere) must be
+                            # used instead.
+                            int(
+                                meta["global_sizes"][dim]
+                                if meta is not None and dim in partition_dims
+                                else value.sizes[dim]
+                            ),
+                        )
                         for dim in variable.dims
                         if dim not in variable_dims
                     ),
+                    comm_axes=comm_axes,
+                    replica_count=int(replica_count),
                 )
             )
 
@@ -173,12 +260,34 @@ class ReductionPlanningMixin:
                         entry.distributed,
                         str(entry.dtype),
                         entry.shape,
+                        tuple(sorted(str(d) for d in entry.comm_axes)),
+                        entry.replica_count,
                     )
                     for entry in plan
                 ),
             )
         )
         return plan
+
+    def _resolve_comm(
+        self, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
+    ) -> MPI.Comm:
+        """Return the communicator a plan entry's collective should use.
+
+        The full communicator for the default one-dimensional case (no
+        ``meta["cart"]``, or only one active partition dimension) --
+        identical to every collective call before this generalization, so
+        that path pays no extra cost. Otherwise, the cached
+        :class:`~.cartesian.CartesianTopology` sub-communicator that spans
+        exactly ``comm_axes`` (see :meth:`.cartesian.CartesianTopology.sub_comm`).
+        """
+        axes = frozenset(comm_axes)
+        if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
+            return self._runtime.comm
+        topology = get_cartesian_topology(
+            self._runtime.comm, meta["dims"], meta["global_sizes"]
+        )
+        return topology.sub_comm(axes)
 
     @staticmethod
     def _guarded(function: Any) -> tuple[Any, BaseException | None]:
@@ -198,8 +307,28 @@ class ReductionPlanningMixin:
         expect_dtype: np.dtype[Any] | None = None,
         error: BaseException | None = None,
         phase: str = "MPI xarray reduction buffer preparation",
+        comm: MPI.Comm | None = None,
+        replica_count: int = 1,
     ) -> xr.DataArray:
-        """Combine a validated DataArray buffer across ranks."""
+        """Combine a validated DataArray buffer across ranks.
+
+        Parameters
+        ----------
+        comm : mpi4py.MPI.Comm, optional
+            Communicator to reduce over. Defaults to the full runtime
+            communicator, exactly as before this parameter existed --
+            pass a :meth:`ReductionPlanningMixin._resolve_comm` result for
+            a partial (sub-communicator) collective under a
+            multi-dimensional partition.
+        replica_count : int, optional
+            Size of a replicated-axis subgroup folded into ``comm`` (see
+            :attr:`~.common.PlanEntry.replica_count`). Only meaningful for
+            ``op=MPI.SUM``: the raw Allreduce total then counts each
+            logical contribution ``replica_count`` times over, so it is
+            divided back out here, exactly, before returning. Ignored
+            (default 1) for every other op, since MIN/MAX/LAND/LOR are
+            idempotent under duplication and need no correction.
+        """
         send: np.ndarray[Any, Any] | None = None
         if error is None:
             try:
@@ -230,20 +359,47 @@ class ReductionPlanningMixin:
                 tuple(int(length) for length in send.shape),
             )
         )
-        self._runtime.raise_if_error(error, phase, signature)
+        self._runtime.raise_if_error(error, phase, signature, comm=comm)
         if send is None or value is None:
             raise AssertionError("MPI xarray reduction buffer is missing.")
 
-        recv = self._exchange(send, op)
-        return value.copy(data=recv)
+        recv = self._exchange(send, op, comm=comm)
+        result = value.copy(data=recv)
+        if replica_count != 1 and op == MPI.SUM:
+            # Every one of the replica_count duplicate copies contributed to
+            # the raw sum above, so it is exactly replica_count times too
+            # large. Integer dtypes divide exactly (each duplicate is a
+            # bit-identical copy, so the raw sum is an exact multiple);
+            # floating dtypes use true division for the same reason plain
+            # division, not floor division, is correct for a value that
+            # need not itself be an integer multiple of anything.
+            if result.dtype.kind in "iu":
+                result = result // replica_count
+            else:
+                result = result / replica_count
+        return result
 
-    def _exchange(self, send: np.ndarray[Any, Any], op: MPI.Op) -> np.ndarray[Any, Any]:
-        """All-reduce a validated contiguous NumPy buffer."""
+    def _exchange(
+        self, send: np.ndarray[Any, Any], op: MPI.Op, *, comm: MPI.Comm | None = None
+    ) -> np.ndarray[Any, Any]:
+        """All-reduce a validated contiguous NumPy buffer over ``comm``.
+
+        ``comm`` defaults to the full runtime communicator, unchanged from
+        before this parameter existed.
+        """
         recv = np.empty(send.shape, dtype=send.dtype)
-        self._runtime.comm.Allreduce(send, recv, op=op)
+        active_comm = self._runtime.comm if comm is None else comm
+        active_comm.Allreduce(send, recv, op=op)
         return recv
 
-    def _count(self, value: xr.DataArray, dims: tuple[Hashable, ...]) -> xr.DataArray:
+    def _count(
+        self,
+        value: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        *,
+        comm: MPI.Comm | None = None,
+        replica_count: int = 1,
+    ) -> xr.DataArray:
         """Count valid values globally across the requested dimensions."""
         count: xr.DataArray | None = None
         error: BaseException | None = None
@@ -257,6 +413,8 @@ class ReductionPlanningMixin:
             expect_dtype=_partial_dtype(value.dtype.str, "count", None),
             error=error,
             phase="MPI xarray count reduction",
+            comm=comm,
+            replica_count=replica_count,
         )
 
     @staticmethod
@@ -291,9 +449,42 @@ class ReductionPlanningMixin:
     ) -> xr.Dataset | xr.DataArray:
         """Finalize metadata and optional repartition after a reduction."""
         result = strip_mpi_meta(result)
-        partition_removed = old_meta is not None and old_meta["dim"] not in result.dims
+        old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
+        remaining_dims = tuple(dim for dim in old_dims if dim in result.dims)
+        partition_removed = old_meta is not None and not remaining_dims
 
         if partition_dim is None:
+            return result
+
+        if partition_dim == "auto" and remaining_dims:
+            # At least one, but not every, previous partition dimension
+            # survived the reduction (only possible with more than one
+            # partition dimension to begin with -- with exactly one, this
+            # is unreachable, since removing "the" partition dimension is
+            # exactly what made this call require MPI communication in the
+            # first place). Every rank already owns a valid, unmoved,
+            # contiguous slice along whatever survived, so reattach
+            # metadata for that surviving subset directly instead of
+            # scattering through repartition() below. The Cartesian
+            # topology descriptor is only carried forward when every one
+            # of its axes survived unchanged; otherwise a fresh, smaller
+            # topology (for just the surviving axes) is built lazily, on
+            # demand, the next time a multi-axis collective needs one.
+            assert old_meta is not None  # remaining_dims is empty otherwise
+            cart = (
+                old_meta.get("cart") if len(remaining_dims) == len(old_dims) else None
+            )
+            set_mpi_meta(
+                result,
+                dim=remaining_dims,
+                global_size={
+                    dim: int(old_meta["global_sizes"][dim]) for dim in remaining_dims
+                },
+                start={dim: int(old_meta["starts"][dim]) for dim in remaining_dims},
+                stop={dim: int(old_meta["stops"][dim]) for dim in remaining_dims},
+                chunk_info=prune_chunk_info(old_meta["chunk_info"], result),
+                cart=cart,
+            )
             return result
 
         target = partition_dim

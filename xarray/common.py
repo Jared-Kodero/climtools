@@ -112,14 +112,37 @@ class PlanEntry(NamedTuple):
     dims : tuple of Hashable
         Reduced dimensions present on the variable.
     distributed : bool
-        Whether the variable spans the active MPI partition dimension.
+        Whether this variable's reduction requires any MPI communication
+        at all -- equivalent to ``bool(comm_axes)``.
     dtype : numpy.dtype
         Variable dtype.
     shape : tuple of tuple of (str, int)
-        Global dimensions and lengths that survive the reduction."""
+        Global dimensions and lengths that survive the reduction.
+    comm_axes : frozenset of str
+        Partition dimensions this variable's reduction must communicate
+        over: the partition dimensions actually being reduced away
+        (``dim`` names on this variable that are also active partition
+        dimensions), plus any partition dimension this variable is
+        replicated along (present in the object's partition dimensions
+        but absent from this variable's own dims). Empty when the
+        reduction is entirely rank-local. See
+        :meth:`ReductionPlanningMixin._resolve_comm`.
+    replica_count : int
+        Size of the replicated-axis process subgroup this variable is
+        duplicated across (the product of the process-grid extent along
+        every dimension in ``comm_axes`` that is *not* actually being
+        reduced on this variable, i.e. a dimension the variable is merely
+        replicated along). 1 for the common case of no replicated axes
+        (including every one-dimensional partition). A collective SUM
+        over ``comm_axes`` counts each replica ``replica_count`` times,
+        so :meth:`ReductionPlanningMixin._comm_reduce` divides a
+        ``MPI.SUM`` result by it to undo the duplication.
+    """
 
     name: Hashable
     dims: tuple[Hashable, ...]
     distributed: bool
     dtype: np.dtype[Any]
     shape: tuple[tuple[str, int], ...]
+    comm_axes: frozenset[str] = frozenset()
+    replica_count: int = 1

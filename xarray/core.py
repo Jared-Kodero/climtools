@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 import xarray as xr
 
 from .handles import MPIGroupBy, MPIResample, MPIRolling
+from .io import MPIXarrayOps
 from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
-from .ops import MPIXarrayOps
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -645,7 +645,7 @@ class MPIXarray:
         ValueError
             If distributed data are passed to the serial writer.
         """
-        from ..netcdf import io as netcdf_io
+        from .io import to_netcdf
 
         if not parallel and self.meta is not None:
             raise ValueError(
@@ -666,7 +666,7 @@ class MPIXarray:
             prepared = prepared.copy(deep=False)
             _assign_meta(prepared, self.meta)
 
-        netcdf_io.to_netcdf(
+        to_netcdf(
             prepared,
             file,
             self._runtime,
@@ -1665,12 +1665,12 @@ def mark_partitioned(
                 variable.attrs.pop(_PARTITIONED_ATTR, None)
         return marked
 
-    dim = meta["dim"]
+    dims = meta["dims"]
     marked.attrs[_PARTITIONED_ATTR] = True
     if isinstance(marked, xr.Dataset):
         for variable in marked.variables.values():
             variable.attrs.pop(_PARTITIONED_ATTR, None)
-            if dim in variable.dims:
+            if any(dim in variable.dims for dim in dims):
                 variable.attrs[_PARTITIONED_ATTR] = True
     return marked
 
