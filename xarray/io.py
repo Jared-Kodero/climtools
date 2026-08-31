@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     # and `unwrap` back from `.core` at module scope would be circular. Typing
     # positions are safe (evaluated only under `from __future__ import
     # annotations`); call sites that need them at runtime import locally.
-    from .core import MPIXarray, unwrap
+    from .core import MPIXarray
 
 __all__ = ["append", "dataset_is_empty", "empty_dataset", "to_netcdf"]
 
