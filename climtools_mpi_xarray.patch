@@ -1,0 +1,2764 @@
+diff --git a/mpi/diagnostics.py b/mpi/diagnostics.py
+index a5b8671..62960a7 100644
+--- a/mpi/diagnostics.py
++++ b/mpi/diagnostics.py
+@@ -14,7 +14,7 @@ from typing import Any
+ 
+ from mpi4py import MPI
+ 
+-from ..xarray.core import LockFile, tmp
++from ..core.utils import LockFile, tmp
+ 
+ 
+ class MPIError(Exception):
+@@ -158,11 +158,33 @@ class MPIDiagnostics:
+         error: BaseException | None,
+         phase: str,
+         signature: Any = None,
++        *,
++        comm: MPI.Comm | None = None,
+     ) -> None:
+-        """Raise consistently if any MPI rank reports an error."""
++        """Raise consistently if any MPI rank reports an error.
++
++        Parameters
++        ----------
++        error : BaseException or None
++            This rank's own error, if any.
++        phase : str
++            Human-readable label for the operation being validated,
++            used in the raised message.
++        signature : Any, optional
++            Rank-independent description of the collective call being
++            made; every rank must agree on it (see ``_agree`` callers) or
++            an ``MPIError`` is raised describing the mismatch.
++        comm : mpi4py.MPI.Comm, optional
++            Communicator whose ranks must agree, e.g. a Cartesian
++            sub-communicator under a multi-dimensional partition (see
++            :meth:`~.planning.ReductionPlanningMixin._resolve_comm`).
++            Defaults to ``self.comm``, the full runtime communicator --
++            unchanged behavior for every single-partition-dimension caller.
++        """
++        active_comm = self.comm if comm is None else comm
+         detail = None if error is None else (type(error).__name__, str(error))
+ 
+-        states = self.comm.allgather((detail, signature))
++        states = active_comm.allgather((detail, signature))
+ 
+         failures = [
+             (rank, item) for rank, (item, _) in enumerate(states) if item is not None
+@@ -188,7 +210,7 @@ class MPIDiagnostics:
+ 
+             return
+ 
+-        if len(failures) == self.comm.size and error is not None:
++        if len(failures) == active_comm.size and error is not None:
+             raise error
+ 
+         rank, detail = failures[0]
+diff --git a/mpi/runtime.py b/mpi/runtime.py
+index c1a2981..381f060 100644
+--- a/mpi/runtime.py
++++ b/mpi/runtime.py
+@@ -13,7 +13,7 @@ from typing import ParamSpec, TypeVar, cast
+ from mpi4py import MPI
+ from mpi4py.MPI import Intracomm
+ 
+-from ..xarray.core import _LAUNCH_ENV, LockFile, tmp
++from ..core.utils import _LAUNCH_ENV, LockFile, tmp
+ from .diagnostics import MPIDiagnostics, MPIError
+ 
+ P = ParamSpec("P")
+diff --git a/tests/bench_mpi_suite.py b/tests/bench_mpi_suite.py
+new file mode 100644
+index 0000000..d8d87d1
+--- /dev/null
++++ b/tests/bench_mpi_suite.py
+@@ -0,0 +1,143 @@
++"""Benchmark suite: native xarray vs MPI-Xarray, several operations.
++
++    mpirun -np <N> --oversubscribe python3 tests/bench_mpi_suite.py
++
++Uses ``mock_dataset.create_bench_dataset`` (rank 0 writes one NetCDF
++file, every rank barriers, then opens it -- via ``mpi_open_dataset`` for
++the distributed object and plain ``xarray.open_dataset`` for the native
++reference) rather than an in-memory array broadcast from rank 0.
++
++Follows the task's protocol: warm-up runs, several timed repetitions,
++a barrier before each timed region, slowest-rank wall time via
++``MPI.MAX``, and a native-vs-MPI comparison per operation. Prints a
++markdown table row per operation plus a PASS/FAIL accuracy/dtype check
++against the native result.
++
++IMPORTANT: see STATUS.md. This sandbox has exactly one physical CPU
++core, so every multi-rank run here oversubscribes that one core --
++ranks time-share rather than run in parallel. The wall-clock numbers
++below are only a correctness/harness smoke test, not a performance
++finding; rerun on real multi-core/multi-node hardware for a number
++that means anything.
++"""
++
++from __future__ import annotations
++
++import time
++
++import numpy as np
++import xarray as xr
++from mock_dataset import OUTPUT_DIR, create_bench_dataset
++from mpi4py import MPI
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++
++N_TIME = 400_000
++N_LAT = 20
++REPS = 5
++WARMUP = 2
++
++path = OUTPUT_DIR / "bench.nc"
++create_bench_dataset(path, n_time=N_TIME, n_lat=N_LAT, seed=0)
++
++native_da = xr.open_dataset(path)["v"]
++mda = mpi_open_dataset(str(path), mpi, partition_dim="time", log_partitions=False)["v"]
++
++rows: list[str] = []
++
++
++def time_native(fn):
++    times = []
++    if rank == 0:
++        for i in range(WARMUP + REPS):
++            t0 = time.perf_counter()
++            result = fn()
++            t1 = time.perf_counter()
++            if i >= WARMUP:
++                times.append(t1 - t0)
++    else:
++        result = None
++    times = comm.bcast(times, root=0)
++    result = comm.bcast(result, root=0)
++    return float(np.median(times)), result
++
++
++def time_mpi(fn):
++    times = []
++    result = None
++    for i in range(WARMUP + REPS):
++        comm.Barrier()
++        t0 = time.perf_counter()
++        result = fn()
++        comm.Barrier()
++        t1 = time.perf_counter()
++        slowest = comm.allreduce(t1 - t0, op=MPI.MAX)
++        if i >= WARMUP:
++            times.append(slowest)
++    return float(np.median(times)), result
++
++
++def gather(mpi_obj):
++    local = unwrap(mpi_obj)
++    meta = mpi_obj.meta
++    if meta is None:
++        return local
++    dim = meta["dims"] if isinstance(meta["dims"], str) else meta["dims"][0]
++    return xr.concat(comm.allgather(local), dim=dim).sortby(dim)
++
++
++def bench(label: str, native_fn, mpi_fn, native_result_fn=None):
++    native_t, native_result = time_native(native_fn)
++    mpi_t, mpi_result = time_mpi(mpi_fn)
++    gathered = gather(mpi_result)
++    ref = native_result_fn() if native_result_fn else native_result
++    # float32 reductions over 4e5 elements: MPI combines per-rank partial
++    # sums in a different order than NumPy's own (pairwise) summation, so
++    # the last few bits legitimately differ -- a relative tolerance is the
++    # right comparison here, not bitwise/absolute equality (see the task's
++    # own accuracy-tests guidance on reduction order).
++    accurate = bool(
++        np.allclose(gathered.values, ref.values, equal_nan=True, rtol=1e-3, atol=1e-3)
++    )
++    dtype_ok = gathered.dtype == ref.dtype
++    speedup = native_t / mpi_t if mpi_t > 0 else float("nan")
++    if rank == 0:
++        rows.append(
++            f"| {label} | {size} | {native_t * 1000:.2f} ms | {mpi_t * 1000:.2f} ms "
++            f"| {speedup:.2f}x | {'PASS' if accurate else 'FAIL'} "
++            f"| {'PASS' if dtype_ok else 'FAIL'} |"
++        )
++
++
++bench("sum", lambda: native_da.sum("time"), lambda: mda.sum("time"))
++bench("mean", lambda: native_da.mean("time"), lambda: mda.mean("time"))
++bench("std", lambda: native_da.std("time"), lambda: mda.std("time"))
++bench("min", lambda: native_da.min("time"), lambda: mda.min("time"))
++bench("max", lambda: native_da.max("time"), lambda: mda.max("time"))
++bench(
++    "isel",
++    lambda: native_da.isel(lat=slice(0, 5)),
++    lambda: mda.isel(lat=slice(0, 5)),
++)
++new_labels = np.arange(-1000, N_TIME + 1000)
++bench(
++    "reindex",
++    lambda: native_da.reindex(time=new_labels),
++    lambda: mda.reindex(time=new_labels),
++    native_result_fn=lambda: native_da.reindex(time=new_labels),
++)
++
++if rank == 0:
++    header = (
++        "| Method | Ranks | Native Xarray | MPI Xarray | Speedup | Accuracy | Dtype |\n"
++        "| ------ | ----: | ------------: | ---------: | ------: | -------- | ----- |"
++    )
++    print(header)
++    for row in rows:
++        print(row)
+diff --git a/tests/mock_dataset.py b/tests/mock_dataset.py
+index 6ea1795..2506bfd 100644
+--- a/tests/mock_dataset.py
++++ b/tests/mock_dataset.py
+@@ -7,6 +7,7 @@ import uuid
+ from pathlib import Path
+ 
+ import numpy as np
++import pandas as pd
+ from climtools import mpi
+ 
+ import xarray as xr
+@@ -131,3 +132,195 @@ def create_dataset(
+         # we need to broadcaste the constanst
+         build_dataset(path, n_time, resolution_deg, plev_step)
+     mpi.comm.barrier()
++
++
++# ---------------------------------------------------------------------------
++# Datetime-indexed mock dataset -- for resample()/groupby()-over-time tests.
++# Deliberately a real ``datetime64`` coordinate (unlike ``build_dataset``'s
++# numeric "hours since" time), an odd, non-bin-aligned start time, and a
++# length not evenly divisible by common rank counts, since all three are
++# exactly what previously exposed the resample() bin-alignment bug.
++# ---------------------------------------------------------------------------
++
++
++def build_timeseries_dataset(
++    path: Path,
++    n: int,
++    freq: str,
++    start: str,
++) -> None:
++    """Write a deterministic, datetime-indexed (time, station) mock file.
++
++    One float32 variable ("v") varying smoothly over time and station, plus
++    one static (per-station) float32 variable ("station_elev") that does not
++    carry the "time" dimension at all -- exercises the same "variable
++    doesn't carry the partitioned dim" case ``build_dataset``'s "t" does,
++    at a size small enough that tests build/open it in well under a second.
++    """
++    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
++        raise ValueError("n must be a positive integer.")
++
++    time = pd.date_range(start, periods=n, freq=freq)
++    n_station = 4
++    station = np.arange(n_station)
++
++    t = np.arange(n, dtype=np.float64)[:, None]
++    s = station.astype(np.float64)[None, :]
++    values = (np.sin(t / 5.0 + s) + 0.01 * t).astype(np.float32)
++    station_elev = (100.0 * (station + 1)).astype(np.float32)
++
++    ds = xr.Dataset(
++        data_vars={
++            "v": (
++                ("time", "station"),
++                values,
++                {"units": "1", "long_name": "mock time series"},
++            ),
++            "station_elev": (
++                ("station",),
++                station_elev,
++                {"units": "m", "long_name": "mock station elevation"},
++            ),
++        },
++        coords={"time": time, "station": station},
++        attrs={"title": "climtools MPI test suite mock timeseries"},
++    )
++    ds.to_netcdf(path, format="NETCDF4")
++
++
++def create_timeseries_dataset(
++    path: Path,
++    n: int = 40,
++    freq: str = "D",
++    start: str = "2020-01-01",
++) -> Path:
++    if mpi.comm.rank == 0:
++        # Deliberately no `shutil.rmtree(path.parent)` here (unlike
++        # `create_dataset` above): a single test process may build more
++        # than one mock file (e.g. a geophysical one and a timeseries
++        # one) sharing `OUTPUT_DIR`, and each file's name is already a
++        # fresh UUID, so wiping the whole directory on every call would
++        # delete a sibling mock file this same test still needs.
++        path.parent.mkdir(parents=True, exist_ok=True)
++        build_timeseries_dataset(path, n, freq, start)
++    mpi.comm.barrier()
++    return path
++
++
++# ---------------------------------------------------------------------------
++# Two-independent-dimension mock dataset -- for 2D Cartesian (multi-dim
++# partition) tests. Both dimensions are deliberately sized so they don't
++# divide evenly by common rank counts.
++# ---------------------------------------------------------------------------
++
++
++def build_grid_dataset(path: Path, n_a: int, n_b: int) -> None:
++    """Write a deterministic (a, b) mock file for multi-dim partition tests."""
++    if any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in (n_a, n_b)):
++        raise ValueError("n_a and n_b must be positive integers.")
++
++    a = np.arange(n_a)
++    b = np.arange(n_b)
++    values = (
++        np.sin(a.astype(np.float64)[:, None] / 3.0)
++        + np.cos(b.astype(np.float64)[None, :] / 5.0)
++    ).astype(np.float32)
++
++    ds = xr.Dataset(
++        data_vars={"v": (("a", "b"), values, {"units": "1"})},
++        coords={"a": a, "b": b},
++        attrs={"title": "climtools MPI test suite mock grid"},
++    )
++    ds.to_netcdf(path, format="NETCDF4")
++
++
++def create_grid_dataset(path: Path, n_a: int = 13, n_b: int = 9) -> Path:
++    if mpi.comm.rank == 0:
++        # See create_timeseries_dataset's comment: no directory wipe here,
++        # so this can coexist with other mock files under OUTPUT_DIR.
++        path.parent.mkdir(parents=True, exist_ok=True)
++        build_grid_dataset(path, n_a, n_b)
++    mpi.comm.barrier()
++    return path
++
++
++# ---------------------------------------------------------------------------
++# Multi-dtype 1D mock dataset -- for reindex()/sortby() dtype-preservation
++# regression tests. One dimension ("x"), three variables spanning the
++# dtypes that matter for the float32->float64 promotion regression
++# (float32, float64, int32), plus a deterministically shuffled "key"
++# coordinate for exercising sortby() as a genuine permutation.
++# ---------------------------------------------------------------------------
++
++
++def build_multitype_dataset(path: Path, n: int, seed: int = 0) -> None:
++    """Write a deterministic 1D mock file spanning float32/float64/int32."""
++    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
++        raise ValueError("n must be a positive integer.")
++
++    rng = np.random.default_rng(seed)
++    x = np.arange(n)
++    key = rng.permutation(n).astype(np.float32)
++    # Smooth and nonlinear (not just arange) so the same variable also
++    # serves shift()/differentiate() tests meaningfully -- a purely
++    # linear function can't distinguish edge_order=1 from edge_order=2.
++    var32 = (np.sin(x.astype(np.float64) / 4.0) + 0.02 * x).astype(np.float32)
++
++    ds = xr.Dataset(
++        data_vars={
++            "var32": ("x", var32, {"units": "1"}),
++            "var64": ("x", np.arange(n, dtype=np.float64), {"units": "1"}),
++            "varint": ("x", np.arange(n, dtype=np.int32), {"units": "1"}),
++        },
++        coords={"x": x, "key": ("x", key)},
++        attrs={"title": "climtools MPI test suite mock multitype dataset"},
++    )
++    ds.to_netcdf(path, format="NETCDF4")
++
++
++def create_multitype_dataset(path: Path, n: int = 17, seed: int = 0) -> Path:
++    if mpi.comm.rank == 0:
++        # See create_timeseries_dataset's comment: no directory wipe here.
++        path.parent.mkdir(parents=True, exist_ok=True)
++        build_multitype_dataset(path, n, seed)
++    mpi.comm.barrier()
++    return path
++
++
++# ---------------------------------------------------------------------------
++# Larger (time, lat) mock dataset -- for the benchmark suite, where sizes
++# need to be big enough that MPI startup and Python call overhead don't
++# dominate the measurement (see tests/bench_mpi_suite.py). Deliberately
++# plain 2D (unlike the geophysical dataset's (time, lat, lon)) so bench
++# results reflect one dominant operation's cost, not incidental grid size.
++# ---------------------------------------------------------------------------
++
++
++def build_bench_dataset(path: Path, n_time: int, n_lat: int, seed: int = 0) -> None:
++    """Write a deterministic (time, lat) float32 mock file for benchmarking."""
++    if any(
++        isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in (n_time, n_lat)
++    ):
++        raise ValueError("n_time and n_lat must be positive integers.")
++
++    rng = np.random.default_rng(seed)
++    values = rng.normal(size=(n_time, n_lat)).astype(np.float32)
++
++    ds = xr.Dataset(
++        data_vars={"v": (("time", "lat"), values, {"units": "1"})},
++        coords={"time": np.arange(n_time), "lat": np.arange(n_lat)},
++        attrs={"title": "climtools MPI test suite mock benchmark dataset"},
++    )
++    ds.to_netcdf(path, format="NETCDF4")
++
++
++def create_bench_dataset(
++    path: Path, n_time: int = 400_000, n_lat: int = 20, seed: int = 0
++) -> Path:
++    if mpi.comm.rank == 0:
++        # See create_timeseries_dataset's comment: no directory wipe here.
++        path.parent.mkdir(parents=True, exist_ok=True)
++        build_bench_dataset(path, n_time, n_lat, seed)
++    mpi.comm.barrier()
++    return path
++
+diff --git a/tests/test.sh b/tests/test.sh
+index d6352a4..7cee8c8 100755
+--- a/tests/test.sh
++++ b/tests/test.sh
+@@ -7,5 +7,78 @@
+ 
+ conda activate mother
+ 
+-module list  
++module list
++
++# ---------------------------------------------------------------------------
++# Run the correctness/regression suite at several rank counts, not just the
++# job's full allocation. Uneven partitions (an N that doesn't divide evenly
++# by the rank count) are exactly what has exposed real bugs in this package
++# before -- see STATUS.md -- so low, non-power-of-two counts (1, 3, 5) are
++# deliberately included alongside the usual powers of two, in addition to
++# the full allocation itself. Every count is capped at $SLURM_NTASKS (falls
++# back to the #SBATCH -n above if run outside SLURM) so this never
++# oversubscribes the job's own allocation.
++# ---------------------------------------------------------------------------
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++MAX_RANKS="${SLURM_NTASKS:-32}"
++
++RANK_COUNTS=()
++for candidate in 1 2 3 4 5 8 16 32; do
++    if [ "$candidate" -le "$MAX_RANKS" ]; then
++        RANK_COUNTS+=("$candidate")
++    fi
++done
++if [ "${RANK_COUNTS[-1]}" -ne "$MAX_RANKS" ]; then
++    RANK_COUNTS+=("$MAX_RANKS")
++fi
++
++TEST_FILES=("$SCRIPT_DIR"/test_mpi_*.py)
++
++FAILED=0
++echo "=========================================================================="
++echo " climtools MPI test suite -- ranks: ${RANK_COUNTS[*]}"
++echo "=========================================================================="
++
++for ranks in "${RANK_COUNTS[@]}"; do
++    for test_file in "${TEST_FILES[@]}"; do
++        name="$(basename "$test_file")"
++        echo "--- [$ranks ranks] $name ---"
++        if srun -n "$ranks" python3 "$test_file"; then
++            echo "[$ranks ranks] $name: PASSED"
++        else
++            echo "[$ranks ranks] $name: FAILED"
++            FAILED=1
++        fi
++    done
++done
++
++# ---------------------------------------------------------------------------
++# Benchmark suite: native xarray vs MPI-Xarray, at the job's full
++# allocation (the rank count actually worth benchmarking at) and, for
++# comparison, at a small count -- see bench_mpi_suite.py's own docstring
++# for what its Speedup column does and doesn't mean on a single node
++# with few physical cores relative to $MAX_RANKS.
++# ---------------------------------------------------------------------------
++
++echo "=========================================================================="
++echo " climtools MPI benchmark suite"
++echo "=========================================================================="
++
++for ranks in 4 "$MAX_RANKS"; do
++    if [ "$ranks" -le "$MAX_RANKS" ]; then
++        echo "--- [$ranks ranks] bench_mpi_suite.py ---"
++        srun -n "$ranks" python3 "$SCRIPT_DIR/bench_mpi_suite.py"
++    fi
++done
++
++echo "=========================================================================="
++if [ "$FAILED" -eq 0 ]; then
++    echo " RESULT: all correctness/regression tests passed."
++else
++    echo " RESULT: one or more correctness/regression tests FAILED (see above)."
++fi
++echo "=========================================================================="
++
++exit "$FAILED"
+ 
+diff --git a/tests/test_mpi_correctness_sweep.py b/tests/test_mpi_correctness_sweep.py
+new file mode 100644
+index 0000000..dbfbcf6
+--- /dev/null
++++ b/tests/test_mpi_correctness_sweep.py
+@@ -0,0 +1,290 @@
++"""Broad correctness sweep: MPI-Xarray public ops vs native xarray.
++
++    mpirun -np <N> --oversubscribe python3 tests/test_mpi_correctness_sweep.py
++
++Uses ``mock_dataset.create_dataset`` (rank 0 builds and writes one NetCDF
++file, every rank barriers, then every rank opens it -- via
++``mpi_open_dataset`` for the distributed object and plain
++``xarray.open_dataset`` for the native reference) rather than building an
++in-memory array and broadcasting it, matching how climtools is actually
++used and how ``tests/test.sh`` exercises it.
++
++Not exhaustive (see STATUS.md for what remains), but covers the
++highest-traffic public operations end to end on both DataArray and
++Dataset, with an uneven partition (``n_time=17`` across e.g. 3 or 4
++ranks), float32, and NaNs injected via ``.where()`` after opening (so the
++same coordinate-based mask applies identically to the native and the
++distributed object, with no in-memory array broadcast needed).
++"""
++
++from __future__ import annotations
++
++import sys
++
++import numpy as np
++import xarray as xr
++from mock_dataset import OUTPUT_DIR, create_dataset
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++
++failures: list[str] = []
++
++
++def check(name: str, condition: bool, detail: str = "") -> None:
++    if not condition:
++        failures.append(f"{name}: {detail}")
++
++
++def close(a, b, **kw):
++    return bool(np.allclose(np.asarray(a), np.asarray(b), equal_nan=True, **kw))
++
++
++def gather(mpi_obj):
++    local = unwrap(mpi_obj)
++    meta = mpi_obj.meta
++    if meta is None:
++        return local
++    dim = meta["dims"] if isinstance(meta["dims"], str) else meta["dims"][0]
++    pieces = comm.allgather(local)
++    combined = xr.concat(pieces, dim=dim)
++    return combined.sortby(dim) if dim in combined.coords else combined
++
++
++# --------------------------------------------------------------------------
++# Build (rank 0) and open (every rank) the shared mock dataset.
++# n_time=17 is deliberately uneven against common rank counts; a coarse
++# resolution keeps the grid (lat, lon, plev) tiny so tests run fast.
++# --------------------------------------------------------------------------
++path = OUTPUT_DIR / "correctness_sweep.nc"
++create_dataset(path, n_time=17, resolution_deg=60.0, plev_step=-400.0)
++
++mds = mpi_open_dataset(str(path), mpi, partition_dim="time", log_partitions=False)
++native_ds = xr.open_dataset(path)  # every rank opens the same small file directly
++
++# Inject NaNs at a couple of global "time" positions via a coordinate-based
++# `.where()` mask -- applies identically whether run against the full
++# native object or the distributed one (each rank masks its own local
++# slice against the same global condition), so no in-memory broadcast of
++# a NaN-holed array is needed.
++# Inject NaNs at a couple of global "time" positions into the "pr"
++# DataArray specifically -- via a coordinate-based `.where()` mask, so it
++# applies identically to the native and the distributed object. Applying
++# `.where()` to the whole *Dataset* instead would broadcast the
++# "time"-indexed condition against every variable, including the static
++# "t" (which doesn't carry "time" at all), silently adding a spurious
++# "time" dimension to it -- an xarray broadcasting quirk, not a
++# climtools one, but worth avoiding here since a later check relies on
++# "t" staying exactly as read.
++nan_times = native_ds["time"].isel(time=[2, 9]).values
++mda = mds["pr"].where(~mds["pr"].data["time"].isin(nan_times))
++native_da = native_ds["pr"].where(~native_ds["pr"]["time"].isin(nan_times))
++
++# --------------------------------------------------------------------------
++# Reductions: sum, mean, min, max, first, last, any, all, std, var, prod
++# --------------------------------------------------------------------------
++for skipna in (True, False):
++    tag = f"skipna={skipna}"
++
++    r = gather(mda.sum("time", skipna=skipna))
++    n = native_da.sum("time", skipna=skipna)
++    check(f"sum DataArray {tag} values", close(r.values, n.values))
++    check(f"sum DataArray {tag} dtype", r.dtype == n.dtype, f"{r.dtype} vs {n.dtype}")
++
++    r = gather(mds.sum("time", skipna=skipna))
++    n = native_ds["pr"].sum("time", skipna=skipna)
++    check(f"sum Dataset.pr {tag} values (no injected NaNs at Dataset level)", close(r["pr"].values, n.values))
++
++    r = gather(mda.mean("time", skipna=skipna))
++    n = native_da.mean("time", skipna=skipna)
++    check(f"mean DataArray {tag} values", close(r.values, n.values))
++    check(f"mean DataArray {tag} dtype", r.dtype == n.dtype, f"{r.dtype} vs {n.dtype}")
++
++    r = gather(mda.min("time", skipna=skipna))
++    n = native_da.min("time", skipna=skipna)
++    check(f"min DataArray {tag} values", close(r.values, n.values))
++
++    r = gather(mda.max("time", skipna=skipna))
++    n = native_da.max("time", skipna=skipna)
++    check(f"max DataArray {tag} values", close(r.values, n.values))
++
++    r = gather(mda.std("time", skipna=skipna))
++    n = native_da.std("time", skipna=skipna)
++    check(f"std DataArray {tag} values", close(r.values, n.values, atol=1e-4))
++
++    r = gather(mda.var("time", skipna=skipna))
++    n = native_da.var("time", skipna=skipna)
++    check(f"var DataArray {tag} values", close(r.values, n.values, atol=1e-4))
++
++# prod isn't wrapped on MPIXarray directly; call the engine the same way
++# core.py's other reduction wrappers do, then wrap the raw result back up
++# so it can go through the same gather() every other check uses (reducing
++# the sole partition dim can leave the result redistributed along a
++# remaining dim, e.g. "lon", rather than replicated -- same as sum/mean
++# above).
++from climtools.xarray.core import finalize  # noqa: E402
++
++prod_result = gather(finalize(mds._ops.prod(unwrap(mds), "time"), mpi))
++native_prod = native_ds.prod("time")
++check(
++    "prod Dataset.pr values",
++    close(prod_result["pr"].values, native_prod["pr"].values, rtol=1e-3),
++)
++
++r_first = gather(mda.first("time", skipna=True))
++n_first = native_da.reduce(
++    lambda a, axis: np.take_along_axis(
++        a, np.expand_dims(np.nanargmax(~np.isnan(a), axis=axis), axis=axis), axis=axis
++    ).squeeze(axis=axis),
++    dim="time",
++)
++check("first DataArray values", close(r_first.values, n_first.values))
++
++r_last = gather(mda.last("time", skipna=True))
++flipped = native_da.isel(time=slice(None, None, -1))
++n_last = flipped.reduce(
++    lambda a, axis: np.take_along_axis(
++        a, np.expand_dims(np.nanargmax(~np.isnan(a), axis=axis), axis=axis), axis=axis
++    ).squeeze(axis=axis),
++    dim="time",
++)
++check("last DataArray values", close(r_last.values, n_last.values))
++
++# any()/all() need a boolean-carrying, time-varying condition; derive one
++# from "pr" identically on both sides rather than requiring the mock
++# schema to carry a dedicated boolean variable.
++r_any = gather((mda > mda.mean()).any("time"))
++n_any = (native_da > native_da.mean()).any("time")
++check("any DataArray (pr > mean) matches native", bool((r_any == n_any).all().item()))
++
++r_all = gather((mda > mda.min() - 1).all("time"))
++n_all = (native_da > native_da.min() - 1).all("time")
++check("all DataArray matches native", bool((r_all == n_all).all().item()))
++
++# --------------------------------------------------------------------------
++# isel / sel
++# --------------------------------------------------------------------------
++r = gather(mda.isel(lat=slice(0, 2)))
++n = native_da.isel(lat=slice(0, 2))
++check("isel non-partition dim values", close(r.values, n.values))
++check("isel non-partition dim dtype", r.dtype == n.dtype)
++
++lat_vals = native_ds["lat"].values[:2].tolist()
++r = gather(mds.sel(lat=lat_vals))
++n = native_ds.sel(lat=lat_vals)
++check("sel non-partition dim values", close(r["pr"].values, n["pr"].values))
++
++# --------------------------------------------------------------------------
++# groupby (reduce) -- labels are rank-local, one per this rank's own local
++# "time" slice (see xarray/groupby.py::groupby_reduce's docstring).
++# --------------------------------------------------------------------------
++local_labels = unwrap(mda)["time"].values.astype(np.int64) % 3
++gb_mean = gather(mda.groupby("time", local_labels).mean())
++native_labels_full = native_ds["time"].values.astype(np.int64) % 3
++native_gb_mean = native_da.groupby(
++    xr.DataArray(native_labels_full, dims="time", name="grp")
++).mean()
++check(
++    "groupby mean matches native (sorted by group)",
++    close(
++        gb_mean.sortby(gb_mean.dims[0]).values,
++        native_gb_mean.sortby(native_gb_mean.dims[0]).values,
++    ),
++    f"shapes {gb_mean.shape} vs {native_gb_mean.shape}",
++)
++
++# --------------------------------------------------------------------------
++# rolling
++# --------------------------------------------------------------------------
++r = gather(mda.rolling_reduce("time", window=3, reduce="mean", center=True, min_periods=1))
++n = native_da.rolling(time=3, center=True, min_periods=1).mean()
++check(
++    "rolling mean values",
++    close(r.values, n.values),
++    f"maxdiff={np.nanmax(np.abs(np.asarray(r.values) - np.asarray(n.values)))}",
++)
++
++r = gather(mda.rolling(dim="time", window=3, center=True, min_periods=1).sum())
++n = native_da.rolling(time=3, center=True, min_periods=1).sum()
++check("rolling sum via handle values", close(r.values, n.values))
++
++# --------------------------------------------------------------------------
++# matmul -- a small in-memory coefficient matrix (not mock-dataset-scale
++# data in its own right, so built directly rather than via a NetCDF mock).
++# --------------------------------------------------------------------------
++n_lat = native_ds.sizes["lat"]
++coeff = None
++if rank == 0:
++    coeff = xr.DataArray(
++        np.random.default_rng(0).normal(size=(n_lat, 4)).astype(np.float32),
++        dims=("lat", "k"),
++    )
++native_coeff = comm.bcast(coeff if rank == 0 else None, root=0)
++r = gather(mda.matmul(native_coeff))
++n = xr.dot(native_da, native_coeff, dims="lat")
++check(
++    "matmul values",
++    close(r.transpose(*n.dims).values, n.values),
++    f"shapes {r.shape} vs {n.shape}",
++)
++
++# --------------------------------------------------------------------------
++# align -- rank-ownership reconciliation, not xarray's label-based join;
++# no direct native counterpart (see the module comment above
++# Arithmetic._shuffle_by_position in xarray/arithmetic.py), so this checks
++# self-consistency rather than an inapplicable native comparison, per the
++# task's own guidance for MPI-specific operations.
++# --------------------------------------------------------------------------
++mds_by_lat = mpi_open_dataset(str(path), mpi, partition_dim="lat", log_partitions=False)
++al_a, al_b = mda.align(mds_by_lat["t2m"])
++r_a, r_b = gather(al_a), gather(al_b)
++check(
++    "align: left values unchanged by ownership reconciliation",
++    close(r_a.values, native_da.values),
++)
++check(
++    "align: right values unchanged by ownership reconciliation",
++    close(r_b.values, native_ds["t2m"].values),
++)
++check(
++    "align: both operands share the same partition dimension afterward",
++    al_a.meta["dims"] == al_b.meta["dims"],
++    f"{al_a.meta['dims']} vs {al_b.meta['dims']}",
++)
++
++# --------------------------------------------------------------------------
++# static (non-partition-dim) variable survives reindex unchanged -- "t"
++# carries (plev, lat, lon), not "time", exactly like the dedicated
++# test_mpi_reindex_static_var.py case, exercised here against the shared
++# mock file's own static variable instead of a bespoke one.
++# --------------------------------------------------------------------------
++new_time = np.concatenate([native_ds["time"].values[:1] - 2, native_ds["time"].values])
++reind = mds.reindex(time=new_time)
++local_reind = unwrap(reind)
++check(
++    "reindex: static (non-time) variable 't' unchanged",
++    close(local_reind["t"].values, unwrap(mds)["t"].values),
++)
++
++# --------------------------------------------------------------------------
++# Report
++# --------------------------------------------------------------------------
++comm.Barrier()
++all_failures = comm.allgather(failures)
++flat = [f"[rank {r}] {msg}" for r, fs in enumerate(all_failures) for msg in fs]
++
++if rank == 0:
++    if flat:
++        print(f"FAILED ({len(flat)}):")
++        for msg in flat:
++            print(" -", msg)
++    else:
++        print(f"PASSED on {size} ranks")
++
++comm.Barrier()
++sys.exit(1 if flat else 0)
+diff --git a/tests/test_mpi_prod_resample_cartesian.py b/tests/test_mpi_prod_resample_cartesian.py
+new file mode 100644
+index 0000000..c524b5a
+--- /dev/null
++++ b/tests/test_mpi_prod_resample_cartesian.py
+@@ -0,0 +1,189 @@
++"""Correctness: prod(), resample(), and a 2D Cartesian (multi-dim) partition.
++
++    mpirun -np <N> --oversubscribe python3 tests/test_mpi_prod_resample_cartesian.py
++
++Uses three of the shared mock builders in ``mock_dataset.py``:
++``create_multitype_dataset`` (prod), ``create_timeseries_dataset``
++(resample -- a real ``datetime64`` coordinate, needed to exercise the
++resample bin-alignment fix), and ``create_grid_dataset`` (the 2D
++Cartesian partition). Each builds and writes its own small NetCDF file.
++The prod/resample cases open theirs directly via ``mpi_open_dataset``;
++the 2D case opens on rank 0 and distributes via ``mpi_partition_data``
++instead, since ``mpi_open_dataset``'s parallel-open path only supports a
++single ``partition_dim`` -- multi-dim Cartesian partitioning is only
++available on an already-loaded object.
++"""
++
++from __future__ import annotations
++
++import sys
++
++import numpy as np
++import xarray as xr
++from mock_dataset import (
++    OUTPUT_DIR,
++    create_grid_dataset,
++    create_multitype_dataset,
++    create_timeseries_dataset,
++)
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset, mpi_partition_data
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++failures: list[str] = []
++
++
++def check(name: str, condition: bool, detail: str = "") -> None:
++    if not condition:
++        failures.append(f"{name}: {detail}")
++
++
++def close(a, b, **kw):
++    return bool(np.allclose(np.asarray(a), np.asarray(b), equal_nan=True, **kw))
++
++
++def gather_1d(mpi_obj):
++    """Reconstruct the full array along a still-active 1D partition dim.
++
++    Robust to Cartesian replication: when only one of several partition
++    axes remains active (e.g. after reducing over another axis), more
++    than one rank can hold an identical replica of the same slice, so a
++    naive ``allgather`` + ``concat`` would double-count it. Deduplicating
++    by each rank's own ``(start, stop)`` bounds before concatenating
++    fixes that (replicas of the same slice are identical, so keeping
++    just one is correct).
++    """
++    local = unwrap(mpi_obj)
++    meta = mpi_obj.meta
++    if meta is None:
++        return local
++    dim = meta["dims"] if isinstance(meta["dims"], str) else meta["dims"][0]
++    start, stop = meta["starts"][dim], meta["stops"][dim]
++    pieces = comm.allgather((start, stop, local))
++    by_bounds = {(s0, s1): piece for s0, s1, piece in pieces}
++    ordered = [by_bounds[key] for key in sorted(by_bounds)]
++    return xr.concat(ordered, dim=dim)
++
++
++# --------------------------------------------------------------------------
++# prod -- values transformed to stay near 1 (identically on both the
++# distributed and native copies) so the product doesn't over/underflow
++# float32; "var32" itself (a signed, smooth-but-zero-crossing signal) is
++# unsuitable for a product directly.
++# --------------------------------------------------------------------------
++N = 11
++path = OUTPUT_DIR / "prod.nc"
++create_multitype_dataset(path, n=N, seed=3)
++
++mda = mpi_open_dataset(str(path), mpi, partition_dim="x", log_partitions=False)["var32"]
++native_da = xr.open_dataset(path)["var32"]
++
++
++def to_near_one(da):
++    return (0.9 + 0.2 / (1.0 + np.exp(-da))).astype(np.float32)
++
++
++mda = mda.apply(to_near_one, mda)
++native_da = to_near_one(native_da)
++
++# prod isn't wrapped on MPIXarray directly; call the engine the same way
++# core.py's other reduction wrappers do (reducing the sole dim here
++# collapses to a replicated scalar, so no gather is needed).
++prod_result = mda._ops.prod(unwrap(mda), "x")
++native_prod = native_da.prod("x")
++check("prod values", close(prod_result.values, native_prod.values, rtol=1e-3))
++check("prod dtype", prod_result.dtype == native_prod.dtype, f"{prod_result.dtype} vs {native_prod.dtype}")
++
++# --------------------------------------------------------------------------
++# resample -- a real datetime64 coordinate at an intentionally awkward,
++# non-bin-aligned start time, the exact shape of case that exposed the
++# resample() bin-alignment bug (see xarray/groupby.py::_resample_bin_labels).
++# --------------------------------------------------------------------------
++ts_path = OUTPUT_DIR / "resample.nc"
++create_timeseries_dataset(ts_path, n=40, freq="D", start="2020-01-01")
++
++mda_t = mpi_open_dataset(str(ts_path), mpi, partition_dim="time", log_partitions=False)["v"]
++native_da_t = xr.open_dataset(ts_path)["v"]
++
++for freq in ("7D", "3D", "MS"):
++    r = gather_1d(mda_t.resample("time", freq).mean())
++    n = native_da_t.resample(time=freq).mean()
++    check(
++        f"resample {freq} mean values",
++        close(r.values, n.values, rtol=1e-3),
++        f"shapes {r.shape} vs {n.shape}",
++    )
++    check(
++        f"resample {freq} bin count matches native "
++        "(regression: per-rank pandas.resample(origin=...) silently "
++        "ignores `origin` for Day-or-coarser frequencies and re-anchors "
++        "on each rank's own local first timestamp, fragmenting bins at "
++        "partition boundaries -- see _resample_bin_labels)",
++        r.shape == n.shape,
++        f"{r.shape} vs {n.shape}",
++    )
++
++# --------------------------------------------------------------------------
++# 2D Cartesian multi-dim partition
++# --------------------------------------------------------------------------
++grid_path = OUTPUT_DIR / "grid.nc"
++N_A, N_B = 13, 9  # both uneven against small rank counts
++create_grid_dataset(grid_path, n_a=N_A, n_b=N_B)
++
++# mpi_open_dataset's parallel-open path only supports a single partition_dim
++# ("Hashable or 'auto'", not a sequence); multi-dim Cartesian partitioning
++# is only available via mpi_partition_data on an already-loaded object, so
++# rank 0 opens the (small) mock file directly and distributes it from there.
++native_ds2 = xr.open_dataset(grid_path)
++grid_ds = native_ds2 if rank == 0 else None
++mds2 = mpi_partition_data(grid_ds, mpi, dim=["a", "b"], root=0)
++
++local2 = unwrap(mds2)
++meta2 = mds2.meta
++starts = meta2["starts"]
++stops = meta2["stops"]
++check(
++    "2D partition: local slab matches native slice at this rank's bounds",
++    close(
++        local2["v"].values,
++        native_ds2["v"].isel(a=slice(starts["a"], stops["a"]), b=slice(starts["b"], stops["b"])).values,
++    ),
++    f"a=[{starts['a']}:{stops['a']}) b=[{starts['b']}:{stops['b']})",
++)
++
++# every element covered exactly once across ranks
++counts = np.zeros((N_A, N_B), dtype=np.int64)
++all_bounds = comm.allgather((starts["a"], stops["a"], starts["b"], stops["b"]))
++for a0, a1, b0, b1 in all_bounds:
++    counts[a0:a1, b0:b1] += 1
++check(
++    "2D partition: every global element covered exactly once",
++    bool((counts == 1).all()),
++    f"min={counts.min()} max={counts.max()}",
++)
++
++# a 2D reduction over one Cartesian axis
++r2 = gather_1d(mds2.sum("a"))  # reduces the 'a' axis; 'b' remains partitioned
++n2 = native_ds2.sum("a")
++check(
++    "2D partition: sum over one Cartesian axis matches native",
++    close(r2["v"].values, n2["v"].values, rtol=1e-3),
++    f"shapes {r2['v'].shape} vs {n2['v'].shape}",
++)
++
++comm.Barrier()
++all_failures = comm.allgather(failures)
++flat = [f"[rank {r}] {msg}" for r, fs in enumerate(all_failures) for msg in fs]
++if rank == 0:
++    if flat:
++        print(f"FAILED ({len(flat)}):")
++        for msg in flat:
++            print(" -", msg)
++    else:
++        print(f"PASSED on {size} ranks")
++comm.Barrier()
++sys.exit(1 if flat else 0)
+diff --git a/tests/test_mpi_reindex_sortby_regression.py b/tests/test_mpi_reindex_sortby_regression.py
+new file mode 100644
+index 0000000..a97cb18
+--- /dev/null
++++ b/tests/test_mpi_reindex_sortby_regression.py
+@@ -0,0 +1,172 @@
++"""Regression tests for the reviewed patch.
++
++Run under MPI, e.g.::
++
++    mpirun -np 4 --oversubscribe python3 tests/test_mpi_reindex_sortby_regression.py
++
++Uses ``mock_dataset.create_multitype_dataset`` (rank 0 writes one small
++NetCDF file spanning float32/float64/int32 plus a shuffled sort key,
++every rank barriers, then opens it) rather than building the array in
++memory and broadcasting it.
++
++Covers:
++
++* the circular-import fix in ``mpi/runtime.py``, ``mpi/diagnostics.py``,
++  ``xarray/io.py`` and ``xarray/netcdf.py`` (this file's own successful
++  import is the test);
++* the float32-preservation fix in ``xarray/arithmetic.py::_fill_chunk``,
++  exercised through ``reindex`` (new, unmatched positions -> filled) and
++  ``sortby`` (existing positions only, no fill) under uneven partitions;
++* correctness of ``reindex``/``sortby`` against native xarray for both
++  ``DataArray`` and ``Dataset``, with a dimension not evenly divisible by
++  the rank count.
++"""
++
++from __future__ import annotations
++
++import sys
++
++import numpy as np
++import xarray as xr
++from mock_dataset import OUTPUT_DIR, create_multitype_dataset
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++
++failures: list[str] = []
++
++
++def check(name: str, condition: bool, detail: str = "") -> None:
++    if not condition:
++        failures.append(f"{name}: {detail}")
++
++
++def gather_full(mpi_obj) -> xr.Dataset | xr.DataArray:
++    """Gather a distributed object's dim back to a single-rank native object."""
++    local = unwrap(mpi_obj)
++    meta = mpi_obj.meta
++    dim = meta["dims"] if isinstance(meta["dims"], str) else meta["dims"][0]
++    pieces = comm.allgather(local)
++    return xr.concat(pieces, dim=dim)
++
++
++# --------------------------------------------------------------------------
++# 1. float32 preservation through reindex() with new (fill-requiring)
++#    positions -- this is exactly the case _fill_chunk handles, and the
++#    case the uploaded patch regressed (np.asarray(nan).dtype is float64,
++#    silently doubling memory for every float32 variable touched).
++# --------------------------------------------------------------------------
++
++N = 17  # deliberately not evenly divisible by common rank counts (2, 4, 8)
++
++path = OUTPUT_DIR / "reindex_sortby_regression.nc"
++create_multitype_dataset(path, n=N, seed=0)
++
++mds = mpi_open_dataset(str(path), mpi, partition_dim="x", log_partitions=False)
++mda = mds["var32"]
++native_ds = xr.open_dataset(path)
++da32 = native_ds["var32"]
++
++new_labels = np.arange(-3, N + 5)  # extends both ends -> guarantees fill positions
++
++reind_da = mda.reindex(x=new_labels)
++reind_ds = mds.reindex(x=new_labels)
++
++full_reind_da = gather_full(reind_da)
++full_reind_ds = gather_full(reind_ds)
++
++native_reind_da = da32.reindex(x=new_labels)
++native_reind_ds = native_ds.reindex(x=new_labels)
++
++check(
++    "reindex DataArray float32 dtype preserved",
++    full_reind_da.dtype == np.float32 == native_reind_da.dtype,
++    f"got {full_reind_da.dtype}, native {native_reind_da.dtype}",
++)
++check(
++    "reindex Dataset var32 dtype preserved",
++    full_reind_ds["var32"].dtype == np.float32 == native_reind_ds["var32"].dtype,
++    f"got {full_reind_ds['var32'].dtype}",
++)
++check(
++    "reindex Dataset var64 dtype preserved",
++    full_reind_ds["var64"].dtype == np.float64 == native_reind_ds["var64"].dtype,
++    f"got {full_reind_ds['var64'].dtype}",
++)
++check(
++    "reindex Dataset varint promotes to float64 under default NaN fill "
++    "(matches native: an int dtype cannot hold NaN)",
++    full_reind_ds["varint"].dtype == np.float64 == native_reind_ds["varint"].dtype,
++    f"got {full_reind_ds['varint'].dtype}",
++)
++check(
++    "reindex DataArray values match native (reordered to common coord order)",
++    bool(
++        np.allclose(
++            full_reind_da.sortby("x").values,
++            native_reind_da.sortby("x").values,
++            equal_nan=True,
++        )
++    ),
++    "",
++)
++
++# Non-default, integer fill_value: must also stay float32, not widen via
++# np.asarray(0).dtype (int64) either.
++reind_da_fill0 = gather_full(mda.reindex(x=new_labels, fill_value=0))
++native_reind_da_fill0 = da32.reindex(x=new_labels, fill_value=0)
++check(
++    "reindex with integer fill_value=0 keeps float32",
++    reind_da_fill0.dtype == np.float32 == native_reind_da_fill0.dtype,
++    f"got {reind_da_fill0.dtype}",
++)
++
++# --------------------------------------------------------------------------
++# 2. float32 preservation through sortby() -- a pure permutation, so it
++#    should never touch _fill_chunk at all, but is covered here as the
++#    sibling redistribution path added by the same patch. "key" is the
++#    mock file's own deterministically shuffled sort column.
++# --------------------------------------------------------------------------
++
++sorted_mda = mda.sortby("key")
++full_sorted = gather_full(sorted_mda)
++native_sorted = da32.sortby("key")
++
++check(
++    "sortby preserves float32",
++    full_sorted.dtype == np.float32 == native_sorted.dtype,
++    f"got {full_sorted.dtype}",
++)
++check(
++    "sortby values match native",
++    bool(
++        full_sorted.reset_coords(drop=True).equals(
++            native_sorted.reset_coords(drop=True)
++        )
++    ),
++    "",
++)
++
++# --------------------------------------------------------------------------
++# 3. Report
++# --------------------------------------------------------------------------
++
++comm.Barrier()
++all_failures = comm.allgather(failures)
++flat = [f"[rank {r}] {msg}" for r, fs in enumerate(all_failures) for msg in fs]
++
++if rank == 0:
++    if flat:
++        print(f"FAILED ({len(flat)}):")
++        for msg in flat:
++            print(" -", msg)
++    else:
++        print(f"PASSED on {size} ranks, N={N}")
++
++comm.Barrier()
++sys.exit(1 if flat else 0)
+diff --git a/tests/test_mpi_reindex_static_var.py b/tests/test_mpi_reindex_static_var.py
+new file mode 100644
+index 0000000..e171fb7
+--- /dev/null
++++ b/tests/test_mpi_reindex_static_var.py
+@@ -0,0 +1,68 @@
++"""Edge case: reindex() on a Dataset with a variable that doesn't carry the
++reindexed dimension at all (e.g. the mock dataset's "t", a static
++(plev, lat, lon) profile under a "time" partition) -- must come through as
++this rank's own unchanged local copy, not be overwritten by _fill_chunk.
++See its docstring in xarray/arithmetic.py. This is also exercised inline
++inside test_mpi_correctness_sweep.py; kept here too as a minimal, focused
++standalone reproduction of just this one case.
++
++    mpirun -np <N> --oversubscribe python3 tests/test_mpi_reindex_static_var.py
++
++Uses ``mock_dataset.create_dataset`` -- rank 0 builds and writes the
++shared mock NetCDF file, every rank barriers, then every rank opens it.
++"""
++
++from __future__ import annotations
++
++import sys
++
++import numpy as np
++from mock_dataset import OUTPUT_DIR, create_dataset
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++failures: list[str] = []
++
++
++def check(name: str, condition: bool, detail: str = "") -> None:
++    if not condition:
++        failures.append(f"{name}: {detail}")
++
++
++path = OUTPUT_DIR / "reindex_static_var.nc"
++create_dataset(path, n_time=13, resolution_deg=90.0, plev_step=-500.0)
++
++mds = mpi_open_dataset(str(path), mpi, partition_dim="time", log_partitions=False)
++before = unwrap(mds)["t"].values.copy()
++
++new_time = np.arange(-2, 20)
++result = mds.reindex(time=new_time)
++after = unwrap(result)["t"].values
++
++check(
++    "static (non-time) variable 't' unchanged on every rank",
++    bool(np.array_equal(after, before)),
++    f"max abs diff: {np.max(np.abs(after - before)) if after.shape == before.shape else 'shape mismatch'}",
++)
++check(
++    "static variable dtype unchanged",
++    unwrap(result)["t"].dtype == unwrap(mds)["t"].dtype,
++    f"got {unwrap(result)['t'].dtype}",
++)
++
++comm.Barrier()
++all_failures = comm.allgather(failures)
++flat = [f"[rank {r}] {msg}" for r, fs in enumerate(all_failures) for msg in fs]
++if rank == 0:
++    print(
++        (f"FAILED ({len(flat)}):\n" + "\n".join(" - " + m for m in flat))
++        if flat
++        else f"PASSED on {size} ranks"
++    )
++comm.Barrier()
++sys.exit(1 if flat else 0)
+diff --git a/tests/test_mpi_shift_differentiate.py b/tests/test_mpi_shift_differentiate.py
+new file mode 100644
+index 0000000..070f722
+--- /dev/null
++++ b/tests/test_mpi_shift_differentiate.py
+@@ -0,0 +1,97 @@
++"""Correctness sweep for shift() and differentiate() (added by the reviewed
++patch), against native xarray, across uneven partitions.
++
++    mpirun -np <N> --oversubscribe python3 tests/test_mpi_shift_differentiate.py
++
++Uses ``mock_dataset.create_multitype_dataset``'s "var32" -- a smooth,
++nonlinear float32 signal (not just a linear ramp, so edge_order=1 and
++edge_order=2 differentiate results actually differ) -- rather than
++building the array in memory and broadcasting it.
++"""
++
++from __future__ import annotations
++
++import sys
++
++import numpy as np
++import xarray as xr
++from mock_dataset import OUTPUT_DIR, create_multitype_dataset
++
++from climtools import mpi
++from climtools.xarray.core import unwrap
++from climtools.xarray.io import mpi_open_dataset
++
++comm = mpi.comm
++rank = comm.rank
++size = comm.size
++
++failures: list[str] = []
++
++
++def check(name: str, condition: bool, detail: str = "") -> None:
++    if not condition:
++        failures.append(f"{name}: {detail}")
++
++
++def close(a, b, **kw):
++    return bool(np.allclose(np.asarray(a), np.asarray(b), equal_nan=True, **kw))
++
++
++def gather(mpi_obj):
++    local = unwrap(mpi_obj)
++    meta = mpi_obj.meta
++    dim = meta["dims"] if isinstance(meta["dims"], str) else meta["dims"][0]
++    pieces = comm.allgather(local)
++    return xr.concat(pieces, dim=dim).sortby(dim)
++
++
++N = 23  # uneven across 2-6 ranks
++
++path = OUTPUT_DIR / "shift_differentiate.nc"
++create_multitype_dataset(path, n=N, seed=7)
++
++mds = mpi_open_dataset(str(path), mpi, partition_dim="x", log_partitions=False)
++mda = mds["var32"]
++native_da = xr.open_dataset(path)["var32"]
++
++# -- shift: several periods, default and explicit fill_value ---------------
++for periods in (1, -1, 2, -3):
++    r = gather(mda.shift("x", periods))
++    n = native_da.shift(x=periods)
++    check(
++        f"shift periods={periods} values",
++        close(r.values, n.values),
++        f"maxdiff (ignoring nan) = "
++        f"{np.nanmax(np.abs(np.asarray(r.values) - np.asarray(n.values))) if np.isfinite(np.asarray(r.values)).any() else 'n/a'}",
++    )
++    check(f"shift periods={periods} dtype", r.dtype == n.dtype, f"{r.dtype} vs {n.dtype}")
++
++r = gather(mda.shift("x", 2, fill_value=0.0))
++n = native_da.shift(x=2, fill_value=0.0)
++check("shift with explicit fill_value values", close(r.values, n.values))
++check("shift with explicit fill_value dtype (stays float32)", r.dtype == np.float32 == n.dtype, f"{r.dtype}")
++
++# -- differentiate: edge_order 1 and 2 --------------------------------------
++for edge_order in (1, 2):
++    r = gather(mda.differentiate("x", edge_order=edge_order))
++    n = native_da.differentiate("x", edge_order=edge_order)
++    check(
++        f"differentiate edge_order={edge_order} values",
++        close(r.values, n.values, atol=1e-4),
++        f"maxdiff={np.nanmax(np.abs(np.asarray(r.values) - np.asarray(n.values)))}",
++    )
++
++comm.Barrier()
++all_failures = comm.allgather(failures)
++flat = [f"[rank {r}] {msg}" for r, fs in enumerate(all_failures) for msg in fs]
++
++if rank == 0:
++    if flat:
++        print(f"FAILED ({len(flat)}):")
++        for msg in flat:
++            print(" -", msg)
++    else:
++        print(f"PASSED on {size} ranks, N={N}")
++
++comm.Barrier()
++sys.exit(1 if flat else 0)
+diff --git a/xarray/arithmetic.py b/xarray/arithmetic.py
+index 4f77a90..882eee4 100644
+--- a/xarray/arithmetic.py
++++ b/xarray/arithmetic.py
+@@ -8,15 +8,17 @@ from collections.abc import Callable
+ from typing import TYPE_CHECKING, Any, Literal
+ 
+ import numpy as np
++import pandas as pd
+ from mpi4py import MPI
+ 
+ import xarray as xr
+ 
+ from .cartesian import get_cartesian_topology
++from .chunks import get_balanced_bounds, prune_chunk_info
+ from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Hashable, Iterable, Mapping
++    from collections.abc import Hashable, Iterable, Mapping, Sequence
+ 
+ # Callables apply() recognizes and transparently redirects to their
+ # dedicated implementation, so apply() is MPI-aware for them the same way
+@@ -76,6 +78,65 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
+ }
+ 
+ 
++def _fill_chunk(
++    template: xr.Dataset | xr.DataArray, dim: str, n: int, fill_value: Any
++) -> xr.Dataset | xr.DataArray:
++    """Build an ``n``-long, all-``fill_value`` chunk along ``dim``.
++
++    Used by ``Arithmetic._shuffle_by_position`` for new positions with no
++    source data. Variables that don't carry ``dim`` at all (e.g. a static
++    ``(lat,)`` mask under a ``(time,)`` partition) are taken unchanged from
++    ``template`` rather than filled -- such a variable is already this
++    rank's own correct, complete copy regardless of how ``dim`` is
++    redistributed, so overwriting it with ``fill_value`` would corrupt it
++    for no reason.
++
++    Parameters
++    ----------
++    template : xarray.Dataset or xarray.DataArray
++        Any local slice with the right non-``dim`` shape/dtype/coords to
++        copy structure from (only its first element along ``dim`` is used).
++    dim : str
++        The dimension the fill chunk is ``n`` long.
++    n : int
++        Length of the fill chunk along ``dim``.
++    fill_value : Any
++        Value to fill dim-carrying variables/values with.
++
++    Returns
++    -------
++    xarray.Dataset or xarray.DataArray
++        An ``n``-long chunk, structurally consistent with ``template``.
++    """
++    shaped = template.isel({dim: [0] * n})
++    if isinstance(shaped, xr.Dataset):
++        filled = shaped.copy(deep=False)
++        for name, var in shaped.data_vars.items():
++            if dim in var.dims:
++                filled[name] = xr.full_like(
++                    var,
++                    fill_value,
++                    # Pass fill_value itself (not np.asarray(fill_value).dtype)
++                    # so NumPy's value-based scalar promotion applies: a
++                    # Python-float nan against float32 stays float32 (nan is
++                    # representable), matching native xr.Dataset.reindex.
++                    # np.asarray(nan).dtype is float64, which would force
++                    # every float32 variable up to float64 regardless of
++                    # whether the fill value actually needs the extra
++                    # precision/range -- exactly the promotion this
++                    # implementation must not introduce.
++                    dtype=np.result_type(var.dtype, fill_value),
++                )
++        return filled
++    return xr.full_like(
++        shaped,
++        fill_value,
++        # See the matching comment in the Dataset branch above: use
++        # fill_value's value-based promotion, not its array dtype.
++        dtype=np.result_type(shaped.dtype, fill_value),
++    )
++
++
+ class Arithmetic:
+     """Provide MPI-aware alignment and arithmetic operations.
+ 
+@@ -378,6 +439,450 @@ class Arithmetic:
+             ),
+         )
+ 
++    # -- structural redistribution -------------------------------------------
++    #
++    # reindex() and sortby() are xarray's own coordinate-label operations
++    # (unlike align() above, which reconciles rank *ownership* rather than
++    # labels) -- either can move an element to a different rank whenever the
++    # partition dimension itself is reindexed/reordered. Routing follows the
++    # same "local unless communication is structurally required" rule as
++    # everywhere else in this module: if none of the touched dimensions are
++    # currently partitioned, native xarray runs rank-locally and ownership
++    # is provably unaffected (see _local_reduction_meta's identical
++    # reasoning for reductions).
++    #
++    # When the partition dimension itself IS touched, this does a genuine
++    # personalized shuffle (see _shuffle_by_position below), not a full
++    # MPI_Allgather: only the (small) coordinate/key values along `dim` are
++    # ever gathered onto every rank -- ~O(global_size(dim)) numbers, the
++    # same order of magnitude bookkeeping already costs elsewhere in this
++    # package -- never the bulk data. Every rank then redundantly computes
++    # the identical global new-position -> old-position mapping from those
++    # small gathered arrays (cheap, no further communication needed to
++    # agree on it), and the bulk payload moves rank-to-rank with
++    # point-to-point, non-blocking sends: exactly one message per (source,
++    # destination) pair that actually has data to move, receives posted
++    # before sends (the same order FMS's mpp_do_update_ posts them in),
++    # and no message at all for a rank's own self-contribution or for
++    # newly-filled positions. Peak memory on any one rank is its own old
++    # local slice plus its own new local slice -- never the global array --
++    # so this scales to a partition dimension far larger than any single
++    # rank could hold, unlike a full gather.
++
++    def _shuffle_by_position(
++        self,
++        value: xr.Dataset | xr.DataArray,
++        meta: Mapping[str, Any],
++        dim: str,
++        *,
++        new_coord: np.ndarray[Any, Any],
++        old_pos: np.ndarray[Any, Any],
++        fill_value: Any,
++    ) -> xr.Dataset | xr.DataArray:
++        """Redistribute ``value`` along ``dim`` to match ``old_pos``.
++
++        Parameters
++        ----------
++        value : xarray.Dataset or xarray.DataArray
++            This rank's own current local slice along ``dim``.
++        meta : mapping
++            ``value``'s current (single-dimension) distribution metadata.
++        dim : str
++            The partition dimension being redistributed.
++        new_coord : numpy.ndarray
++            The full, global new coordinate values for ``dim`` (length
++            ``M``), identical on every rank.
++        old_pos : numpy.ndarray of int64
++            Length-``M`` array: ``old_pos[p]`` is the *old* global position
++            along ``dim`` that new global position ``p`` should take its
++            value from, or ``-1`` if ``p`` has no source (filled with
++            ``fill_value`` instead). Identical on every rank.
++        fill_value : Any
++            Value used for any position with no source.
++
++        Returns
++        -------
++        xarray.Dataset or xarray.DataArray
++            This rank's new local slice: ``new_coord`` sliced to this
++            rank's fresh balanced bounds, with fresh ``mpi_meta`` set.
++        """
++        comm = self._runtime.comm
++        rank, size = comm.rank, comm.size
++
++        old_start = int(meta["starts"][dim])
++        old_stop = int(meta["stops"][dim])
++        old_starts, _old_stops = zip(
++            *comm.allgather((old_start, old_stop)), strict=True
++        )
++        old_starts_arr = np.asarray(old_starts, dtype=np.int64)
++
++        new_length = int(new_coord.shape[0])
++        new_starts_all = np.fromiter(
++            (get_balanced_bounds(new_length, r, size)[0] for r in range(size)),
++            dtype=np.int64,
++            count=size,
++        )
++        new_start, new_stop = get_balanced_bounds(new_length, rank, size)
++
++        def _owner_of(
++            global_positions: np.ndarray[Any, Any], starts: np.ndarray[Any, Any]
++        ) -> np.ndarray[Any, Any]:
++            return np.searchsorted(starts, global_positions, side="right") - 1
++
++        # -- what MY own old data must be sent out as a source -------------
++        owned_mask = (old_pos >= old_start) & (old_pos < old_stop)
++        p_owned = np.nonzero(owned_mask)[0]  # ascending new positions I feed
++        g_owned = old_pos[p_owned]  # corresponding old global positions (mine)
++        dest_of_p_owned = _owner_of(p_owned, new_starts_all)
++
++        self_payload: xr.Dataset | xr.DataArray | None = None
++        send_requests: list[MPI.Request] = []
++
++        # What I must receive, computed independently but symmetrically
++        # with every source's own view of the same global mapping above --
++        # see the module note: both sides iterate the same predicate over
++        # the same universe in the same ascending order, so no metadata
++        # about position/order needs to travel alongside the payload.
++        my_local_p = np.arange(new_start, new_stop, dtype=np.int64)
++        my_local_g = old_pos[new_start:new_stop] if new_length > 0 else my_local_p
++        my_is_fill = my_local_g == -1
++        my_owner = np.full(my_local_p.shape, -1, dtype=np.int64)
++        if (~my_is_fill).any():
++            my_owner[~my_is_fill] = _owner_of(my_local_g[~my_is_fill], old_starts_arr)
++
++        incoming_sources = sorted(
++            {int(s) for s in np.unique(my_owner) if s >= 0 and s != rank}
++        )
++
++        for dest in range(size):
++            mask = dest_of_p_owned == dest
++            if not mask.any():
++                continue
++            local_old_idx = g_owned[mask] - old_start
++            payload = value.isel({dim: local_old_idx})
++            if dest == rank:
++                self_payload = payload
++            else:
++                send_requests.append(comm.isend(payload, dest=dest))
++
++        # Blocking recv, not irecv: mpi4py's pickle irecv needs an accurate
++        # buffer-size guess up front and can silently corrupt memory once
++        # a payload exceeds it (exactly the risk a genuinely large,
++        # OOM-motivated shuffle would hit). recv() self-sizes via an
++        # internal probe first, so it stays correct at any payload size;
++        # the isend side above needs no such guess, since the sender
++        # already knows its own pickled size exactly. This trades away
++        # "receives posted before sends" latency-hiding for that
++        # correctness guarantee -- sends are still posted non-blocking so
++        # this rank's own sends never stall waiting on a slow receiver.
++        received = {source: comm.recv(source=source) for source in incoming_sources}
++        MPI.Request.Waitall(send_requests)
++
++        if new_stop <= new_start:
++            empty = value.isel({dim: slice(0, 0)})
++            result = empty.assign_coords({dim: new_coord[new_start:new_stop]})
++        else:
++            pieces: list[xr.Dataset | xr.DataArray] = []
++            slot_pieces: list[np.ndarray[Any, Any]] = []
++
++            self_mask = my_owner == rank
++            if self_mask.any():
++                if self_payload is None:
++                    raise AssertionError(
++                        "Shuffle planning mismatch: expected a "
++                        + "self-contribution that was never built."
++                    )
++                pieces.append(self_payload)
++                slot_pieces.append(np.nonzero(self_mask)[0])
++
++            if my_is_fill.any():
++                n_fill = int(my_is_fill.sum())
++                pieces.append(_fill_chunk(value, dim, n_fill, fill_value))
++                slot_pieces.append(np.nonzero(my_is_fill)[0])
++
++            for source in incoming_sources:
++                mask = my_owner == source
++                pieces.append(received[source])
++                slot_pieces.append(np.nonzero(mask)[0])
++
++            combined = (
++                xr.concat(pieces, dim=dim, data_vars="minimal")
++                if isinstance(value, xr.Dataset)
++                else xr.concat(pieces, dim=dim)
++            )
++            slots = np.concatenate(slot_pieces)
++            final_order = np.argsort(slots, kind="stable")
++            result = combined.isel({dim: final_order})
++            result = result.assign_coords({dim: new_coord[new_start:new_stop]})
++
++        result = strip_mpi_meta(result)
++        chunk_info = prune_chunk_info(meta["chunk_info"], result)
++        set_mpi_meta(
++            result,
++            dim=dim,
++            global_size=new_length,
++            start=new_start,
++            stop=new_stop,
++            chunk_info=chunk_info,
++        )
++        return result
++
++    def reindex(
++        self,
++        value: xr.Dataset | xr.DataArray,
++        indexers: Mapping[Hashable, Any] | None = None,
++        *,
++        method: str | None = None,
++        tolerance: float | Iterable[float] | None = None,
++        fill_value: Any = np.nan,
++        chunk_info: Mapping[str, int] | None = None,
++        log_partitions: bool = False,
++        **indexers_kwargs: Any,
++    ) -> xr.Dataset | xr.DataArray:
++        """Reindex ``value`` onto new coordinate labels, redistributing if needed.
++
++        Parameters
++        ----------
++        value : xarray.Dataset or xarray.DataArray
++            Object to reindex; distributed or replicated.
++        indexers : mapping, optional
++            New coordinate labels per dimension, exactly as
++            ``xarray.Dataset.reindex``/``DataArray.reindex`` accepts. Every
++            rank must pass the identical indexer values for any dimension
++            that is currently partitioned.
++        method : str, optional
++            Forwarded to ``pandas.Index.get_indexer`` when the partition
++            dimension is reindexed (``None``, ``"nearest"``, ``"ffill"``/
++            ``"pad"``, ``"bfill"``/``"backfill"``); forwarded to xarray's
++            own ``reindex`` otherwise.
++        tolerance : float or iterable of float, optional
++            Forwarded to ``pandas.Index.get_indexer``/xarray's ``reindex``.
++        fill_value : Any, optional
++            Value used for labels with no match in ``value``. Default ``NaN``.
++        chunk_info : mapping, optional
++            Reserved for parity with ``repartition``'s signature; not
++            consulted by the redistributing path, which always balances.
++        log_partitions : bool, optional
++            Currently unused by the redistributing path.
++        **indexers_kwargs : Any
++            Additional indexers given as keywords, merged with ``indexers``.
++
++        Returns
++        -------
++        xarray.Dataset or xarray.DataArray
++            The reindexed object: rank-local (metadata preserved) if no
++            partitioned dimension was touched; freshly, memory-scalably
++            redistributed (new bounds, possibly a new global length)
++            otherwise -- see ``_shuffle_by_position``.
++
++        Raises
++        ------
++        ValueError
++            If no indexers are given.
++        NotImplementedError
++            If a partitioned dimension is reindexed under a
++            multi-dimensional (Cartesian) partition, or with a non-1D
++            coordinate along that dimension.
++        """
++        indexers = {**(indexers or {}), **indexers_kwargs}
++        if not indexers:
++            raise ValueError("reindex() requires at least one indexer.")
++
++        meta = get_mpi_meta(value)
++        if meta is None:
++            return value.reindex(
++                indexers, method=method, tolerance=tolerance, fill_value=fill_value
++            )
++
++        partition_dims = meta["dims"]
++        touched = tuple(str(d) for d in partition_dims if d in indexers)
++
++        if not touched:
++            result = strip_mpi_meta(value).reindex(
++                indexers, method=method, tolerance=tolerance, fill_value=fill_value
++            )
++            set_mpi_meta(
++                result,
++                dim=meta["dims"],
++                global_size=meta["global_sizes"],
++                start=meta["starts"],
++                stop=meta["stops"],
++                chunk_info=prune_chunk_info(meta["chunk_info"], result),
++                cart=meta.get("cart"),
++            )
++            return result
++
++        if len(partition_dims) > 1:
++            raise NotImplementedError(
++                "reindex() cannot yet redistribute a multi-dimensionally "
++                + f"partitioned object (dims={partition_dims!r}) when the "
++                + f"reindexed dimension(s) {touched!r} include an active "
++                + "partition axis. Reindexing a dimension that is NOT "
++                + "currently partitioned is unaffected by this and already "
++                + "works."
++            )
++
++        dim = touched[0]
++        new_labels = np.asarray(indexers[dim])
++        if new_labels.ndim != 1:
++            raise NotImplementedError(
++                f"reindex(): the new {dim!r} labels must be one-dimensional "
++                + f"to redistribute; got shape {new_labels.shape!r}."
++            )
++        self._agree(
++            (
++                "reindex",
++                dim,
++                int(new_labels.shape[0]),
++                str(method),
++                str(tolerance),
++            )
++        )
++
++        comm = self._runtime.comm
++        old_coord_local = np.asarray(value[dim].values)
++        old_full_coord = np.concatenate(comm.allgather(old_coord_local))
++        old_index = pd.Index(old_full_coord)
++        old_pos = old_index.get_indexer(new_labels, method=method, tolerance=tolerance)
++        old_pos = old_pos.astype(np.int64)
++
++        return self._shuffle_by_position(
++            value,
++            meta,
++            dim,
++            new_coord=new_labels,
++            old_pos=old_pos,
++            fill_value=fill_value,
++        )
++
++    def sortby(
++        self,
++        value: xr.Dataset | xr.DataArray,
++        by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
++        *,
++        ascending: bool = True,
++        chunk_info: Mapping[str, int] | None = None,
++        log_partitions: bool = False,
++    ) -> xr.Dataset | xr.DataArray:
++        """Sort ``value`` by one or more keys, redistributing if needed.
++
++        Parameters
++        ----------
++        value : xarray.Dataset or xarray.DataArray
++            Object to sort; distributed or replicated.
++        by : Hashable, DataArray, or sequence of these
++            Sort key(s): variable/coordinate name(s) or explicit
++            DataArray(s), exactly as ``xarray.Dataset.sortby``/
++            ``DataArray.sortby`` accepts. When redistribution is needed,
++            each key must be one-dimensional along the partition dimension
++            (a multi-dimensional sort key would need a different global
++            ordering per position along another axis, which this does not
++            support).
++        ascending : bool, optional
++            Sort order. Default True.
++        chunk_info : mapping, optional
++            Reserved for parity with ``repartition``'s signature; not
++            consulted by the redistributing path, which always balances.
++        log_partitions : bool, optional
++            Currently unused by the redistributing path.
++
++        Returns
++        -------
++        xarray.Dataset or xarray.DataArray
++            The sorted object: rank-local (metadata preserved) if no sort
++            key varies along a partitioned dimension; freshly,
++            memory-scalably redistributed otherwise -- see
++            ``_shuffle_by_position``.
++
++        Raises
++        ------
++        NotImplementedError
++            If a sort key varies along a partitioned dimension under a
++            multi-dimensional (Cartesian) partition, or is not
++            one-dimensional along that dimension.
++        """
++        meta = get_mpi_meta(value)
++        if meta is None:
++            return value.sortby(by, ascending=ascending)
++
++        keys = list(by) if isinstance(by, (list, tuple)) else [by]
++        touched_dims: set[str] = set()
++        for key in keys:
++            if isinstance(key, xr.DataArray):
++                touched_dims.update(str(d) for d in key.dims)
++                continue
++            try:
++                touched_dims.update(str(d) for d in value[key].dims)
++            except (KeyError, TypeError):
++                continue
++
++        partition_dims = meta["dims"]
++        touched = tuple(str(d) for d in partition_dims if d in touched_dims)
++
++        if not touched:
++            result = strip_mpi_meta(value).sortby(by, ascending=ascending)
++            set_mpi_meta(
++                result,
++                dim=meta["dims"],
++                global_size=meta["global_sizes"],
++                start=meta["starts"],
++                stop=meta["stops"],
++                chunk_info=prune_chunk_info(meta["chunk_info"], result),
++                cart=meta.get("cart"),
++            )
++            return result
++
++        if len(partition_dims) > 1:
++            raise NotImplementedError(
++                "sortby() cannot yet redistribute a multi-dimensionally "
++                + f"partitioned object (dims={partition_dims!r}) when a sort "
++                + f"key varies along an active partition axis {touched!r}. "
++                + "Sorting by a key that does not vary along any partition "
++                + "dimension is unaffected by this and already works."
++            )
++
++        dim = touched[0]
++        local_len = int(value.sizes[dim])
++        key_arrays_local: list[np.ndarray[Any, Any]] = []
++        for key in keys:
++            arr = np.asarray(
++                key.values if isinstance(key, xr.DataArray) else value[key].values
++            )
++            if arr.ndim != 1 or arr.shape[0] != local_len:
++                raise NotImplementedError(
++                    f"sortby(): key {key!r} is not one-dimensional along the "
++                    + f"partition dimension {dim!r} (shape {arr.shape!r} vs. "
++                    + f"local length {local_len!r}); redistribution needs "
++                    + "every key to give exactly one sort value per element "
++                    + "along the partition dimension."
++                )
++            key_arrays_local.append(arr)
++
++        key_signature = tuple(
++            "<dataarray>" if isinstance(key, xr.DataArray) else str(key) for key in keys
++        )
++        self._agree(("sortby", dim, key_signature, bool(ascending)))
++
++        comm = self._runtime.comm
++        full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
++        old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
++        # np.lexsort sorts by the *last* array primarily; reverse so the
++        # first key in `by` is primary, matching xarray.sortby's own order.
++        order = np.lexsort(tuple(reversed(full_keys)))
++        if not ascending:
++            order = order[::-1]
++        old_pos = order.astype(np.int64)
++        new_coord = old_full_coord[order]
++
++        return self._shuffle_by_position(
++            value,
++            meta,
++            dim,
++            new_coord=new_coord,
++            old_pos=old_pos,
++            fill_value=np.nan,
++        )
++
+     # -- arithmetic -----------------------------------------------------------
+ 
+     @staticmethod
+@@ -942,6 +1447,22 @@ class Arithmetic:
+         if before < 0 or after < 0:
+             raise ValueError("halo_exchange(): before and after must be >= 0.")
+ 
++        self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
++
++        if before == 0 and after == 0:
++            # No boundary data requested on either side: every rank's own
++            # local slice is already the complete answer, so this is a
++            # local operation and should communicate nothing at all (the
++            # same "no MPI traffic when no communication is structurally
++            # required" rule the routing model applies everywhere else) --
++            # skip the length allgather and every point-to-point call
++            # below, which would otherwise still post/complete 2-4 messages
++            # per rank carrying zero-length payloads for no benefit. Callers
++            # that pass before=after=0 unconditionally (e.g. diff()/shift()
++            # with n=0/periods=0, or an edge_order that needs no interior
++            # halo) get correct output at zero communication cost instead.
++            return value, 0, 0
++
+         comm = self._runtime.comm
+         rank = comm.rank
+         if len(partition_dims) > 1:
+@@ -962,8 +1483,6 @@ class Arithmetic:
+             left_rank = rank - 1 if rank > 0 else None
+             right_rank = rank + 1 if rank < size - 1 else None
+ 
+-        self._agree(("halo_exchange", str(partition_dim), int(before), int(after)))
+-
+         local_len = int(value.sizes[partition_dim])
+         lengths = comm.allgather(local_len)
+         deficient = [
+diff --git a/xarray/core.py b/xarray/core.py
+index ff3b5e6..e296c0c 100644
+--- a/xarray/core.py
++++ b/xarray/core.py
+@@ -43,6 +43,10 @@ _PARTITIONED_ATTR = "mpi_partitioned"
+ #: in :meth:`MPIXarray.where`.
+ _WHERE_UNSET = object()
+ 
++#: Sentinel distinguishing "fill_value not given" (defer to the engine's own
++#: ``NaN`` default) from a genuine ``fill_value=None`` in :meth:`MPIXarray.reindex`.
++_FILL_VALUE_UNSET = object()
++
+ #: Explicit allowlist of read-only xarray properties ``MPIXarray.__getattr__``
+ #: forwards to ``self.data``. Deliberately a fixed list, not a
+ #: ``callable(...)`` check: a heuristic based on callability would pass
+@@ -1346,6 +1350,97 @@ class MPIXarray:
+         )
+         return finalize(left, self._runtime), finalize(right, self._runtime)
+ 
++    def reindex(
++        self,
++        indexers: Mapping[Hashable, Any] | None = None,
++        *,
++        method: str | None = None,
++        tolerance: float | Iterable[float] | None = None,
++        fill_value: Any = _FILL_VALUE_UNSET,
++        chunk_info: Mapping[str, int] | None = None,
++        log_partitions: bool = False,
++        **indexers_kwargs: Any,
++    ) -> MPIXarray:
++        """Reindex onto new coordinate labels, redistributing if needed.
++
++        MPI-aware counterpart to ``xarray.Dataset.reindex``/``DataArray.reindex``.
++        Rank-local (no communication) when the reindexed dimension(s) are not
++        the active partition dimension; otherwise gathers, reindexes, and
++        repartitions. See :meth:`~.arithmetic.Arithmetic.reindex`.
++
++        Parameters
++        ----------
++        indexers : mapping, optional
++            New coordinate labels per dimension. Every rank must pass
++            identical values for any currently partitioned dimension.
++        method : str, optional
++            Forwarded to xarray's ``reindex``.
++        tolerance : float or iterable of float, optional
++            Forwarded to xarray's ``reindex``.
++        fill_value : Any, optional
++            Value used for labels with no match. Defaults to xarray's own
++            ``reindex`` default (``NaN``) when omitted.
++        chunk_info : mapping, optional
++            Forwarded to ``repartition`` when a partition dimension is reindexed.
++        log_partitions : bool, optional
++            Forwarded to ``repartition`` when a partition dimension is reindexed.
++        **indexers_kwargs : Any
++            Additional indexers given as keywords.
++
++        Returns
++        -------
++        MPIXarray
++            The reindexed object.
++        """
++        kwargs: dict[str, Any] = {
++            "method": method,
++            "tolerance": tolerance,
++            "chunk_info": chunk_info,
++            "log_partitions": log_partitions,
++        }
++        if fill_value is not _FILL_VALUE_UNSET:
++            kwargs["fill_value"] = fill_value
++        return self._dispatch("reindex", indexers, **kwargs, **indexers_kwargs)
++
++    def sortby(
++        self,
++        by: Hashable | Any | Iterable[Hashable | Any],
++        *,
++        ascending: bool = True,
++        chunk_info: Mapping[str, int] | None = None,
++        log_partitions: bool = False,
++    ) -> MPIXarray:
++        """Sort by one or more keys, redistributing if needed.
++
++        MPI-aware counterpart to ``xarray.Dataset.sortby``/``DataArray.sortby``.
++        Rank-local (no communication) when no sort key varies along the
++        active partition dimension; otherwise gathers, sorts, and
++        repartitions. See :meth:`~.arithmetic.Arithmetic.sortby`.
++
++        Parameters
++        ----------
++        by : Hashable, DataArray, or sequence of these
++            Sort key(s): variable/coordinate name(s) or explicit DataArray(s).
++        ascending : bool, optional
++            Sort order. Default True.
++        chunk_info : mapping, optional
++            Forwarded to ``repartition`` when a partition dimension is sorted.
++        log_partitions : bool, optional
++            Forwarded to ``repartition`` when a partition dimension is sorted.
++
++        Returns
++        -------
++        MPIXarray
++            The sorted object.
++        """
++        return self._dispatch(
++            "sortby",
++            by,
++            ascending=ascending,
++            chunk_info=chunk_info,
++            log_partitions=log_partitions,
++        )
++
+     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
+ 
+@@ -1639,6 +1734,75 @@ class MPIXarray:
+         """
+         return self._dispatch("diff", dim, n, label=label)
+ 
++    def shift(
++        self,
++        dim: Hashable,
++        periods: int = 1,
++        *,
++        fill_value: Any = _FILL_VALUE_UNSET,
++    ) -> MPIXarray:
++        """Shift by ``periods`` along ``dim``, correct when ``dim`` is distributed.
++
++        Borrows ``|periods|`` boundary values from the relevant neighbor
++        (:meth:`halo_exchange`) so a shift across a partition boundary
++        sees the same values a non-distributed shift would -- see
++        :meth:`~.elementwise.Elementwise.shift` for the exact mechanism.
++
++        Parameters
++        ----------
++        dim : Hashable
++            Dimension to shift along.
++        periods : int, optional
++            Number of positions to shift by. Its magnitude must be less
++            than every rank's local length along ``dim`` when ``dim`` is
++            the partition dimension.
++        fill_value : Any, optional
++            As in ``xarray.DataArray.shift``; defaults to xarray's own
++            dtype-aware NA fill when omitted.
++
++        Returns
++        -------
++        MPIXarray
++            The shifted object, same shape and distribution as ``self``.
++        """
++        kwargs: dict[str, Any] = {}
++        if fill_value is not _FILL_VALUE_UNSET:
++            kwargs["fill_value"] = fill_value
++        return self._dispatch("shift", dim, periods, **kwargs)
++
++    def differentiate(
++        self,
++        coord: Hashable,
++        edge_order: Literal[1, 2] = 1,
++        datetime_unit: Any = None,
++    ) -> MPIXarray:
++        """Differentiate along ``coord``, correct when ``coord`` is distributed.
++
++        Borrows a one-element halo from each neighbor
++        (:meth:`halo_exchange`) so the interior centered-difference
++        stencil sees the same values a non-distributed differentiate
++        would at every rank boundary -- see
++        :meth:`~.elementwise.Elementwise.differentiate` for the exact
++        mechanism.
++
++        Parameters
++        ----------
++        coord : Hashable
++            Coordinate to differentiate along.
++        edge_order : {1, 2}, optional
++            As in ``xarray.DataArray.differentiate``. Default 1.
++        datetime_unit : Any, optional
++            As in ``xarray.DataArray.differentiate``.
++
++        Returns
++        -------
++        MPIXarray
++            The derivative, same shape and distribution as ``self``.
++        """
++        return self._dispatch(
++            "differentiate", coord, edge_order=edge_order, datetime_unit=datetime_unit
++        )
++
+ 
+ def mark_partitioned(
+     data: xr.Dataset | xr.DataArray, meta: dict[str, Any] | None
+diff --git a/xarray/elementwise.py b/xarray/elementwise.py
+index f37be4a..609192b 100644
+--- a/xarray/elementwise.py
++++ b/xarray/elementwise.py
+@@ -402,3 +402,128 @@ class Elementwise:
+             cart=meta.get("cart"),
+         )
+         return diffed
++
++    def shift(
++        self,
++        value: xr.Dataset | xr.DataArray,
++        dim: Hashable,
++        periods: int = 1,
++        *,
++        fill_value: Any = _UNSET,
++    ) -> xr.Dataset | xr.DataArray:
++        """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is distributed.
++
++        A stencil operation: shifting by ``periods`` moves each position's
++        value ``periods`` slots along ``dim`` without changing length, so a
++        rank whose local window would otherwise pull in a neighbor's data
++        (any rank except the one at the true edge the shift moves away
++        from) needs ``|periods|`` boundary elements from that neighbor
++        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) before shifting
++        locally. ``xarray.shift``'s own fill-value semantics fall out for
++        free: shifting the *padded* array only introduces ``fill_value``
++        at the padded array's own edges, and ``halo_exchange`` only leaves
++        an edge unpadded (0 elements) at the true global boundary -- so a
++        fill value appears exactly where the global array actually runs
++        out of data, and nowhere else.
++
++        Parameters
++        ----------
++        value : xarray.Dataset or xarray.DataArray
++            Object to shift.
++        dim : Hashable
++            Dimension to shift along.
++        periods : int, optional
++            Number of positions to shift by; positive shifts values toward
++            higher indices (as in ``xarray.DataArray.shift``). Its
++            magnitude must not exceed any rank's local length along
++            ``dim`` when ``dim`` is the partition dimension (see
++            ``halo_exchange``'s own limit).
++        fill_value : Any, optional
++            As in ``xarray.DataArray.shift``; defaults to xarray's own
++            dtype-aware NA fill when omitted.
++
++        Returns
++        -------
++        xarray.Dataset or xarray.DataArray
++            The shifted object, same shape and distribution as the input.
++        """
++        meta = get_mpi_meta(value)
++        if meta is None or dim not in meta["dims"]:
++            kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
++            return value.shift({dim: periods}, **kwargs)
++        if periods == 0:
++            return value
++
++        before, after = (periods, 0) if periods > 0 else (0, -periods)
++        padded, left_pad, _right_pad = self.halo_exchange(
++            value, dim, before=before, after=after
++        )
++        kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
++        shifted = padded.shift({dim: periods}, **kwargs)
++
++        local_len = int(value.sizes[dim])
++        trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
++        return self._reattach_meta(trimmed, meta)
++
++    def differentiate(
++        self,
++        value: xr.Dataset | xr.DataArray,
++        coord: Hashable,
++        edge_order: Literal[1, 2] = 1,
++        datetime_unit: Any = None,
++    ) -> xr.Dataset | xr.DataArray:
++        """Differentiate ``value`` along ``coord``, correct when ``coord`` is distributed.
++
++        A stencil operation: every interior point's derivative is a
++        centered difference needing exactly one neighbor on each side
++        regardless of ``edge_order`` (``edge_order`` only changes the
++        one-sided formula used at the *true* global first/last position,
++        which never needs another rank's data -- it is computed from
++        this rank's own later/earlier local points exactly as plain
++        ``xarray`` would). So a fixed one-element halo
++        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) on each side
++        suffices for any ``edge_order``: it supplies genuine neighbor
++        values at every rank boundary and, at the true global edge (where
++        ``halo_exchange`` returns 0 padding), differentiating the
++        unpadded-there array reproduces xarray's own edge-order-specific
++        boundary stencil unchanged.
++
++        Parameters
++        ----------
++        value : xarray.Dataset or xarray.DataArray
++            Object to differentiate.
++        coord : Hashable
++            Coordinate to differentiate along.
++        edge_order : {1, 2}, optional
++            As in ``xarray.DataArray.differentiate``. Default 1.
++        datetime_unit : Any, optional
++            As in ``xarray.DataArray.differentiate``.
++
++        Returns
++        -------
++        xarray.Dataset or xarray.DataArray
++            The derivative, same shape and distribution as the input.
++
++        Raises
++        ------
++        ValueError
++            If any rank's local length along ``coord`` is shorter than 1
++            (see ``halo_exchange``'s own synchronized length check) or
++            too short overall for ``edge_order`` (raised by xarray itself).
++        """
++        meta = get_mpi_meta(value)
++        if meta is None or coord not in meta["dims"]:
++            return value.differentiate(
++                coord, edge_order=edge_order, datetime_unit=datetime_unit
++            )
++
++        padded, left_pad, _right_pad = self.halo_exchange(
++            value, coord, before=1, after=1
++        )
++        derivative = padded.differentiate(
++            coord, edge_order=edge_order, datetime_unit=datetime_unit
++        )
++
++        local_len = int(value.sizes[coord])
++        trimmed = derivative.isel({coord: slice(left_pad, left_pad + local_len)})
++        return self._reattach_meta(trimmed, meta)
+diff --git a/xarray/groupby.py b/xarray/groupby.py
+index 42a46e4..634d205 100644
+--- a/xarray/groupby.py
++++ b/xarray/groupby.py
+@@ -23,6 +23,99 @@ _GROUP_DIM = "_mpi_group"
+ _GROUP_OPS = ("sum", "mean", "count", "min", "max")
+ 
+ 
++def _resample_bin_labels(
++    timestamps: pd.DatetimeIndex, freq: str, comm: MPI.Comm
++) -> pd.DatetimeIndex:
++    """Rank-consistent resample bin-start label per element of ``timestamps``.
++
++    Dispatches on whether ``freq`` is a fixed-duration (pandas ``Tick``)
++    offset -- ``"h"``, ``"6min"``, ``"D"``, ``"7D"``, and similar -- or a
++    calendar-anchored one -- ``"MS"``, ``"YS"``, ``"W"``, ``"QS"``, and
++    similar. See :meth:`Groupby.resample_reduce` for why these need
++    different treatment: a calendar frequency's bins are already
++    absolute and rank-independent, but a Tick frequency's are not
++    unless every rank anchors to the same shared origin, which pandas'
++    own ``origin=`` argument cannot be relied on to provide for
++    day-or-coarser Tick frequencies.
++
++    Parameters
++    ----------
++    timestamps : pandas.DatetimeIndex
++        This rank's own local timestamps along the resampled dimension;
++        may be empty on some ranks.
++    freq : str
++        Pandas frequency string, exactly as ``xarray.Dataset.resample``
++        accepts.
++    comm : mpi4py.MPI.Comm
++        Communicator spanning every rank that holds a piece of the
++        resampled dimension; used for exactly one scalar ``Allreduce``
++        when ``freq`` is Tick-based, and not at all otherwise.
++
++    Returns
++    -------
++    pandas.DatetimeIndex
++        One bin-start label per element of ``timestamps``, identical in
++        meaning (though each rank only sees its own labels) to what a
++        single-process ``pandas.Series(...).resample(freq).mean()``
++        would assign that same timestamp.
++    """
++    offset = pd.tseries.frequencies.to_offset(freq)
++
++    # Fixed-duration ("Tick"-like) frequencies expose a working `.nanos`
++    # property; note that pandas' own `Tick` base class is, confusingly,
++    # NOT the right classifier here -- `pandas.tseries.offsets.Day` (so
++    # `"D"`/`"7D"`) has a perfectly well-defined, always-24h `.nanos` but
++    # is NOT a `Tick` subclass in this pandas version (only sub-day
++    # units -- h/min/s/ms/us/ns -- are). Checking `.nanos` directly
++    # covers both correctly instead of misclassifying `"D"`-and-coarser
++    # Tick-equivalents as calendar-anchored.
++    try:
++        delta_ns = int(offset.nanos)
++        fixed_duration = True
++    except (ValueError, AttributeError):
++        fixed_duration = False
++
++    if not fixed_duration:
++        # Calendar-anchored: absolute regardless of which timestamps
++        # this rank happens to hold, so no shared origin is needed.
++        with warnings.catch_warnings():
++            warnings.filterwarnings("ignore", category=RuntimeWarning)
++            edges = pd.Series(0, index=timestamps).resample(freq).count().index
++        positions = edges.searchsorted(timestamps, side="right") - 1
++        return edges[positions]
++
++    # Tick-based: reproduce xarray/pandas' own default `origin="start_day"`
++    # -- midnight of the day containing the *global* first timestamp --
++    # via a single MPI.MIN reduction of every rank's local minimum, so
++    # every rank bins against the identical anchor without gathering the
++    # coordinate itself. A rank with no local timestamps contributes the
++    # int64 maximum as a no-op sentinel rather than skewing the MIN.
++    #
++    # pandas (>=2.0) DatetimeIndex can carry any of several time
++    # resolutions ("ns"/"us"/"ms"/"s"; `pd.date_range`'s own default
++    # changed to "us" in pandas 3.0), and `.asi8` counts in *that*
++    # index's own unit, not always nanoseconds -- normalize to "ns"
++    # first so the raw-integer arithmetic below has an unambiguous,
++    # fixed-width unit regardless of the caller's input resolution.
++    timestamps_ns = timestamps.as_unit("ns")
++    local_min_ns = (
++        int(timestamps_ns.asi8.min()) if len(timestamps_ns) else np.iinfo(np.int64).max
++    )
++    global_min_ns = comm.allreduce(local_min_ns, op=MPI.MIN)
++    if global_min_ns == np.iinfo(np.int64).max:
++        # No rank holds any timestamps at all; nothing to label.
++        return timestamps
++    anchor = pd.Timestamp(global_min_ns, unit="ns").normalize()
++
++    if delta_ns <= 0:
++        raise ValueError(f"resample(): non-positive Tick frequency {freq!r}.")
++
++    offsets_ns = timestamps_ns.asi8 - anchor.value
++    bin_index = offsets_ns // delta_ns  # floor division: works for negatives too
++    label_ns = anchor.value + bin_index.astype(np.int64) * delta_ns
++    return pd.DatetimeIndex(label_ns.astype("datetime64[ns]")).as_unit(timestamps.unit)
++
++
+ class Groupby(ReductionPlanningMixin):
+     """Provide distributed groupby and resample reductions.
+ 
+@@ -272,35 +365,61 @@ class Groupby(ReductionPlanningMixin):
+         """Resample a datetime dimension to ``freq``, then reduce.
+ 
+         A thin wrapper over :meth:`groupby_reduce`: group labels are each
+-        timestamp's resampled bin-start, computed from this rank's local
+-        ``dim`` coordinate against a fixed, data-independent grid anchored
+-        at the Unix epoch (``origin="epoch"``) -- not the rank's own local
+-        min/max -- so every rank agrees on identical bin edges without any
+-        extra communication, exactly reproducing ``xarray``'s own
+-        ``.resample(freq)`` bins (e.g. ``"D"``, ``"MS"``, ``"YS"``, and,
+-        unlike an earlier ``DatetimeIndex.to_period(freq)``-based
+-        implementation, frequency multiples such as ``"12h"``/``"6min"``/
+-        ``"3D"`` too -- ``to_period`` silently mis-bins those, since pandas
+-        ``Period`` arithmetic with a multiple does not snap to a shared
+-        grid the way ``resample``/``Grouper`` does, instead giving nearly
+-        every timestamp its own singleton period). See :meth:`groupby_reduce`
+-        for parameters and MPI cost."""
++        timestamp's resampled bin-start. Every rank must agree on
++        identical bin edges without gathering the full coordinate, so
++        this splits on frequency kind (see :func:`_resample_bin_labels`):
++
++        - **Fixed-duration (Tick) frequencies** (``"h"``, ``"6min"``,
++          ``"D"``, ``"7D"``, ...): bin edges are computed by direct
++          integer-nanosecond arithmetic against a single shared anchor
++          (an ``MPI.MIN`` reduction of every rank's local minimum
++          timestamp -- one ``int64``, negligible cost), reproducing
++          ``xarray``'s own default ``origin="start_day"`` resample
++          anchor exactly. This is required, not just an optimization:
++          pandas' own ``Series.resample(freq, origin=...)`` silently
++          ignores ``origin`` for any frequency of a day or coarser (its
++          own warning names the frequencies where ``origin`` *does*
++          apply: ``h``, ``m``, ``s``, ``ms``, ``us``, ``ns`` -- ``D`` is
++          not among them), always falling back to anchoring on
++          whatever local slice of timestamps it was called with. Doing
++          the previous, simpler thing -- calling ``.resample(freq)`` on
++          each rank's own local timestamps -- would then silently
++          anchor every rank's bin grid on that rank's own first local
++          timestamp instead of the true global one, so ranks would
++          disagree about where a bin starts. That is not a rounding
++          difference: it fragments what should be one bin into two
++          separate (wrong) labels at every rank boundary that does not
++          already fall on a bin edge -- the common case, not an edge
++          case -- silently corrupting the result with no error raised.
++        - **Calendar-anchored frequencies** (``"MS"``, ``"YS"``,
++          ``"W"``, ``"QS"``, ...): every rank's local
++          ``.resample(freq).count().index`` already agrees, since these
++          bin on the absolute calendar (month/year/week/quarter
++          boundaries) independent of which subset of timestamps a rank
++          happens to hold, so no shared anchor is needed.
++
++        See :meth:`groupby_reduce` for parameters and MPI cost.
++
++        Limitation
++        ----------
++        Pre-existing, not addressed by this pass: this is built on
++        :meth:`groupby_reduce`, which -- like any group-by -- only
++        returns a bin for a label that actually occurs in the data. It
++        cannot materialize an empty bin. Native ``xarray``'s own
++        ``.resample(freq).mean()`` always returns a *complete*, regular
++        grid from the data's first to last timestamp, inserting ``NaN``
++        for any bin with no observations -- e.g. resampling daily data
++        to ``"6h"`` (a target frequency *finer* than the data's own
++        spacing) yields three ``NaN`` bins between every pair of real
++        days in native ``xarray``, and yields nothing at all for those
++        gaps here. This does not affect the ordinary downsampling case
++        (target frequency coarser than or equal to the data's own
++        spacing, e.g. daily -> weekly/monthly), which is unaffected and
++        is what :func:`_resample_bin_labels`'s fix targets; it only
++        matters when upsampling to a finer grid than the source data.
++        """
+         timestamps = pd.DatetimeIndex(value[dim].values)
+-        with warnings.catch_warnings():
+-            # pandas warns that `origin` has no effect for calendar
+-            # (non-Tick-like, e.g. "MS"/"YS") frequencies -- expected and
+-            # harmless here: those frequencies are already anchored to an
+-            # absolute calendar grid regardless of origin, which is exactly
+-            # the rank-independent property this needs.
+-            warnings.filterwarnings("ignore", category=RuntimeWarning)
+-            edges = (
+-                pd.Series(0, index=timestamps)
+-                .resample(freq, origin="epoch")
+-                .count()
+-                .index
+-            )
+-        positions = edges.searchsorted(timestamps, side="right") - 1
+-        labels = edges[positions]
++        labels = _resample_bin_labels(timestamps, freq, self._runtime.comm)
+         result = self.groupby_reduce(
+             value,
+             dim,
+diff --git a/xarray/io.py b/xarray/io.py
+index 49e461b..3b2cd86 100644
+--- a/xarray/io.py
++++ b/xarray/io.py
+@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+ from numbers import Integral
+ from os import PathLike
+ from pathlib import Path
+-from typing import Any, Literal, cast
++from typing import TYPE_CHECKING, Any, Literal, cast
+ 
+ import numpy as np
+ from mpi4py.MPI import Intracomm
+@@ -25,7 +25,6 @@ from .chunks import (
+     get_effective_chunk_size,
+     prune_chunk_info,
+ )
+-from .core import MPIXarray, unwrap
+ from .elementwise import Elementwise
+ from .groupby import Groupby
+ from .indexing import Indexing
+@@ -46,6 +45,13 @@ from .netcdf import append, to_netcdf_parallel, to_netcdf_serial
+ from .reductions import Reduction
+ from .statistics import Statistics
+ 
++if TYPE_CHECKING:
++    # `.core` imports `MPIXarrayOps` from this module, so importing `MPIXarray`
++    # and `unwrap` back from `.core` at module scope would be circular. Typing
++    # positions are safe (evaluated only under `from __future__ import
++    # annotations`); call sites that need them at runtime import locally.
++    from .core import MPIXarray, unwrap
++
+ __all__ = ["append", "dataset_is_empty", "empty_dataset", "to_netcdf"]
+ 
+ _NO_DATA_ATTR = "_climtools_no_data"
+@@ -63,12 +69,12 @@ class IO:
+         self,
+         filename_or_obj: Any,
+         *,
+-        partition_dim: Hashable | Literal["auto"] = "auto",
++        partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
+         chunks: Any = None,
+         log_partitions: bool = True,
+         **kwargs: Any,
+     ) -> xr.Dataset:
+-        """Open a Dataset lazily and distribute one dimension across ranks.
++        """Open a Dataset lazily and distribute it across MPI ranks.
+ 
+         Parameters
+         ----------
+@@ -76,10 +82,20 @@ class IO:
+             Input accepted by :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset`.
+             Strings containing a wildcard ("*") or sequences (e.g., list, tuple) will
+             automatically trigger multi-file loading.
+-        partition_dim : Hashable or {"auto"}, optional
+-            Dimension to distribute. ``"auto"`` selects the longest dimension,
+-            which is the choice that leaves the fewest ranks idle. Selection is
+-            deterministic and identical on every rank. Default is "auto".
++        partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
++            Dimension(s) to distribute. ``"auto"`` selects the longest
++            dimension, which is the choice that leaves the fewest ranks
++            idle (unchanged, single-dimension only -- ``"auto"`` does not
++            extend to choosing more than one dimension automatically, as
++            in :meth:`partition`). A single dimension, given directly
++            (``"lat"``) or as a length-one sequence (``("lat",)``), takes
++            the same one-dimensional path either way. A sequence of two
++            or more dimensions (e.g. ``("lat", "lon")``) lays ranks out
++            on an MPI Cartesian process grid and opens every rank's own
++            slice along every listed dimension simultaneously, exactly
++            like :meth:`partition`'s own multi-dimensional path -- see
++            :mod:`.cartesian`. Selection is deterministic and identical
++            on every rank.
+         chunks : int, dict, "auto" or None, optional
+             Passed unchanged to xarray. ``None`` keeps single-file reads
+             backend-lazy without Dask; explicit chunking enables Dask
+@@ -124,6 +140,21 @@ class IO:
+ 
+         open_dataset: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
+ 
++        requested_dims = self._as_partition_dims(partition_dim)
++        if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
++            return self._open_dataset_nd(
++                filename_or_obj,
++                requested_dims,
++                open_dataset,
++                chunks,
++                log_partitions,
++                **kwargs,
++            )
++        # Single dimension (given directly, as a length-one sequence, or
++        # "auto") -- exactly the original, unchanged one-dimensional path.
++        partition_dim = (
++            requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
++        )
+         automatic = partition_dim == "auto"
+ 
+         # Build the metadata plan on rank 0.
+@@ -220,6 +251,131 @@ class IO:
+             )
+         return data
+ 
++    def _open_dataset_nd(
++        self,
++        filename_or_obj: Any,
++        dims: tuple[Hashable, ...],
++        open_fn: Callable,
++        chunks: Any,
++        log_partitions: bool,
++        **kwargs: Any,
++    ) -> xr.Dataset:
++        """Open a Dataset lazily on an MPI Cartesian process grid.
++
++        The multi-dimensional counterpart of :meth:`open_dataset`'s
++        single-dimension path above, mirroring :meth:`partition`'s own
++        multi-dimensional path (:meth:`_partition_pieces_nd`) but for a
++        lazy on-disk open rather than an in-memory root-owned object:
++        every rank opens ``filename_or_obj`` itself and computes its own
++        bounds from :func:`~.cartesian.compute_layout` and
++        :func:`~.chunks.get_balanced_bounds` -- the same deterministic,
++        rank-invariant computation :meth:`_partition_pieces_nd` performs
++        once per rank on root's behalf -- so no root-side slicing or
++        point-to-point transfer of the data itself is needed here either;
++        only the small metadata plan (each requested dimension's global
++        length) needs the same single rank-0-computed, broadcast round
++        trip the one-dimensional path above already does.
++
++        Parameters
++        ----------
++        filename_or_obj : str, path-like, file-like, or list of these
++            As in :meth:`open_dataset`.
++        dims : tuple of Hashable
++            Two or more partition dimensions, already validated non-empty
++            by :meth:`_as_partition_dims`.
++        open_fn : callable
++            ``xarray.open_dataset`` or ``xarray.open_mfdataset``, chosen
++            by :meth:`open_dataset` from ``filename_or_obj``'s shape.
++        chunks : Any
++            As in :meth:`open_dataset`.
++        log_partitions : bool
++            As in :meth:`open_dataset`.
++        **kwargs : Any
++            Forwarded to ``open_fn``.
++
++        Returns
++        -------
++        xarray.Dataset
++            Lazy rank-local Dataset carrying Cartesian ``mpi_meta``.
++
++        Raises
++        ------
++        ValueError
++            If any of ``dims`` is not a dimension of the opened dataset.
++        """
++        comm = self._runtime.comm
++
++        plan: dict[str, Any] | None = None
++        error: BaseException | None = None
++        if self._runtime.is_root():
++            try:
++                with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
++                    for d in dims:
++                        if d not in metadata.dims:
++                            raise ValueError(
++                                f"partition_dim {d!r} is not in "
++                                + f"{list(metadata.dims)!r}."
++                            )
++                    plan = {"extents": tuple(int(metadata.sizes[d]) for d in dims)}
++            except BaseException as exc:
++                error = exc
++
++        # Synchronize rank-0 planning failures before broadcasting the plan.
++        self._runtime.raise_if_error(error, "open_dataset planning")
++
++        # Broadcast the plan (just the per-dimension global lengths).
++        plan = self._runtime.broadcast(plan, root=0)
++        extents = plan["extents"]
++
++        # Every rank derives its own Cartesian coordinates and per-axis
++        # bounds from `extents` and `comm.size` alone -- identical on
++        # every rank, no further communication needed to agree on it.
++        grid_shape = compute_layout(extents, comm.size)
++        coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
++        bounds = {
++            d: get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
++            for axis, d in enumerate(dims)
++        }
++
++        # Synchronize before opening the dataset (mirrors the
++        # single-dimension path's own barrier here).
++        comm.Barrier()
++
++        # Open this rank's lazy slice.
++        data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
++        data = data.isel({d: slice(*bounds[d]) for d in dims})
++
++        chunk_info = {
++            str(other_dim): get_effective_chunk_size(int(other_length), None, comm.size)
++            for other_dim, other_length in data.sizes.items()
++        }
++        set_mpi_meta(
++            data,
++            dim=dims,
++            global_size=dict(zip(dims, extents, strict=True)),
++            start={d: bounds[d][0] for d in dims},
++            stop={d: bounds[d][1] for d in dims},
++            chunk_info=chunk_info,
++            cart={
++                "grid_shape": grid_shape,
++                "coords": coords,
++                "periods": (False,) * len(dims),
++            },
++        )
++        if should_log_partitions(self._runtime, log_partitions):
++            log_partition_report_cartesian(
++                self._runtime,
++                data,
++                dims,
++                origin="open_dataset",
++                global_sizes=dict(zip(dims, extents, strict=True)),
++                starts={d: bounds[d][0] for d in dims},
++                stops={d: bounds[d][1] for d in dims},
++                grid_shape=grid_shape,
++                coords=coords,
++            )
++        return data
++
+     # mpi4py point-to-point tag for distribute(); arbitrary but fixed so a
+     # stray message from unrelated code can never be mistaken for a piece
+     # this call is expecting.
+@@ -905,12 +1061,12 @@ def mpi_open_dataset(
+     filename_or_obj: Any,
+     mpi_runtime: MPIRuntime | Intracomm,
+     *,
+-    partition_dim: Hashable | Literal["auto"] = "auto",
++    partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
+     chunks: Any = None,
+     log_partitions: bool = True,
+     **kwargs: Any,
+ ) -> MPIXarray:
+-    """Open a Dataset lazily and distribute one dimension across MPI ranks.
++    """Open a Dataset lazily and distribute it across MPI ranks.
+ 
+     Parameters
+     ----------
+@@ -919,8 +1075,13 @@ def mpi_open_dataset(
+         A wildcard string or a list/tuple triggers multi-file loading.
+     mpi_runtime : MPIRuntime or mpi4py.MPI.Intracomm
+         Runtime whose communicator the result is bound to.
+-    partition_dim : Hashable or {"auto"}, optional
+-        Dimension to distribute. "auto" selects the longest dimension.
++    partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
++        Dimension(s) to distribute. "auto" selects the longest dimension
++        (single-dimension only). A sequence of two or more dimensions
++        (e.g. ``("lat", "lon")``) lays ranks out on an MPI Cartesian
++        process grid and distributes every listed dimension at once,
++        exactly like ``mpi_partition_data``'s own multi-dimensional
++        support -- see ``IO.open_dataset``.
+     chunks : int, dict, "auto" or None, optional
+         Passed unchanged to xarray.
+     log_partitions : bool, optional
+@@ -936,6 +1097,7 @@ def mpi_open_dataset(
+         Lazy rank-local Dataset with ``.meta`` set.
+     """
+     from ..mpi.runtime import MPIRuntime
++    from .core import MPIXarray
+ 
+     if not isinstance(mpi_runtime, MPIRuntime):
+         mpi_runtime = MPIRuntime(mpi_runtime)
+@@ -993,6 +1155,8 @@ def mpi_create_dataarray(
+     MPIXarray
+         Lazy rank-local DataArray with ``.meta`` set.
+     """
++    from .core import MPIXarray
++
+     data = MPIXarrayOps(runtime).create_dataarray(
+         fill,
+         dims,
+@@ -1047,6 +1211,8 @@ def mpi_create_dataset(
+     MPIXarray
+         Lazy rank-local Dataset with ``.meta`` set.
+     """
++    from .core import MPIXarray
++
+     data = MPIXarrayOps(runtime).create_dataset(
+         data_vars,
+         sizes,
+@@ -1094,6 +1260,8 @@ def mpi_partition_data(
+     MPIXarray
+         Rank-local slice with ``.meta`` set.
+     """
++    from .core import MPIXarray, unwrap
++
+     data = MPIXarrayOps(runtime).partition(
+         unwrap(value),
+         dim,
+diff --git a/xarray/netcdf.py b/xarray/netcdf.py
+index 5a50b99..485c3d3 100755
+--- a/xarray/netcdf.py
++++ b/xarray/netcdf.py
+@@ -22,12 +22,17 @@ from ..core.progress import SerialProgressBar
+ from ..mpi.diagnostics import MPIError
+ from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
+ from .encoding import encode_dataset_time, encode_time, is_time_like
+-from .io import MPIXarrayOps, mpi_partition_data
+ from .meta import MPI_META, _format_bytes, get_mpi_meta
+ 
+ if TYPE_CHECKING:
+     from collections.abc import Iterable
+     from os import PathLike
++
++    # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
++    # module, so importing `MPIXarrayOps`/`mpi_partition_data` back from `.io`
++    # at module scope would be circular. Call sites that need them at runtime
++    # import locally.
++    from .io import MPIXarrayOps, mpi_partition_data
+     from typing import Any, Literal
+ 
+     from mpi4py.MPI import Intracomm
