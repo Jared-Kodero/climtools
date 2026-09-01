@@ -68,9 +68,9 @@ def build_dataset(
         np.float32
     )
 
-    pressure_cooling = (7.0 * np.log(1000.0 / plev.astype(np.float64))).astype(
-        np.float32
-    )[:, None, None]
+    pressure_cooling = (
+        7.0 * np.log(1000.0 / np.clip(plev.astype(np.float64), 1.0, None))
+    ).astype(np.float32)[:, None, None]
     air_temperature = surface_temperature_base[0][None, :, :] - pressure_cooling
 
     lat_index = np.arange(n_lat)[:, None]
