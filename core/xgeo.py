@@ -55,7 +55,7 @@ __all__ = [
 ]
 
 
-_LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+_LAZY_IMPORTS = {
     "DaskProgressBar": (".progress", "DaskProgressBar"),
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": (".xr_utils", "SetupDask"),
@@ -77,6 +77,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "mpi_create_dataarray": ("..xarray.constructors", "mpi_create_dataarray"),
     "mpi_create_dataset": ("..xarray.constructors", "mpi_create_dataset"),
     "mpi_partition_data": ("..xarray.constructors", "mpi_partition_data"),
+    "MPIXarray": ("..xarray.core", "MPIXarray"),
 }
 
 
