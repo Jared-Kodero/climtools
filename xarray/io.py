@@ -581,13 +581,42 @@ def _partition_pieces_nd(
     return pieces
 
 
+def _normalize_create_dim(
+    dim: Hashable | int | Sequence[Hashable], dims: Sequence[Hashable]
+) -> tuple[Hashable, ...]:
+    """Normalize ``create_dataarray``/``create_dataset``'s ``dim`` to a tuple.
+
+    A bare dimension name or axis ``int`` becomes a length-one tuple --
+    the existing single-dimension behavior, unchanged in every respect
+    including accepting an axis index, which a multi-dimension request
+    cannot (there is no unambiguous per-axis ordering to infer an index
+    against once more than one dimension is named). A sequence of two or
+    more dimension names requests a Cartesian-topology partition,
+    mirroring :func:`partition`'s own ``dim`` argument and using the same
+    :func:`~.cartesian.compute_layout` process-grid factorization.
+    """
+    if isinstance(dim, (list, tuple)):
+        if not dim:
+            raise ValueError("dim sequence must not be empty.")
+        for d in dim:
+            if d not in dims:
+                raise ValueError(f"dim {d!r} is not in dims {tuple(dims)!r}.")
+        if len(set(dim)) != len(dim):
+            raise ValueError(f"dim entries must be unique; got {tuple(dim)!r}.")
+        return tuple(dim)
+    axis_or_name = dims.index(dim) if not isinstance(dim, Integral) else int(dim)
+    if not 0 <= axis_or_name < len(dims):
+        raise ValueError(f"dim {dim!r} is not in dims {tuple(dims)!r}.")
+    return (dims[axis_or_name],)
+
+
 def create_dataarray(
     runtime,
-    fill: Callable[[int, int], Any],
+    fill: Callable[..., Any],
     dims: Sequence[Hashable],
     *,
     shape: Sequence[int] | Mapping[Hashable, int] | None = None,
-    dim: Hashable | int = 0,
+    dim: Hashable | int | Sequence[Hashable] = 0,
     dtype: Any = np.float64,
     coords: Mapping[Hashable, Any] | None = None,
     name: Hashable | None = None,
@@ -599,13 +628,21 @@ def create_dataarray(
     Parameters
     ----------
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds.
+        Function called as ``fill(start, stop)`` for this rank's bounds
+        when ``dim`` names a single dimension. When ``dim`` names two or
+        more dimensions, called instead as
+        ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one
+        ``(start, stop)`` pair per partitioned dimension, in ``dim``'s
+        own order, laid out on an MPI Cartesian process grid exactly like
+        :func:`partition`'s own multi-dimensional support.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
         Global dimension sizes. Missing sizes may be inferred from ``coords``.
-    dim : Hashable or int, optional
-        Dimension or axis to partition. Default is 0.
+    dim : Hashable, int, or sequence of Hashable, optional
+        Dimension or axis to partition. Default is 0. A sequence of two
+        or more dimension names requests a Cartesian-topology partition;
+        an axis ``int`` is only valid for a single dimension.
     dtype : Any, optional
         Data type returned by ``fill``. Default is ``numpy.float64``.
     coords : mapping, optional
@@ -626,10 +663,7 @@ def create_dataarray(
     ------
     ValueError
         If ``dim`` is invalid or global sizes cannot be resolved."""
-    axis = dims.index(dim) if not isinstance(dim, Integral) else int(dim)
-    if not 0 <= axis < len(dims):
-        raise ValueError(f"dim {dim!r} is not in dims {tuple(dims)!r}.")
-    dim_name = dims[axis]
+    partition_dims = _normalize_create_dim(dim, dims)
 
     if shape is None or isinstance(shape, Mapping):
         explicit_sizes = dict(shape) if shape else None
@@ -642,41 +676,79 @@ def create_dataarray(
     resolved_sizes = resolve_sizes(dims, explicit_sizes, coords)
 
     comm = runtime.comm
-    global_size = int(resolved_sizes[dim_name])
-    start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
+    extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
+
+    cart: dict[str, Any] | None = None
+    if len(partition_dims) > 1:
+        grid_shape = compute_layout(extents, comm.size)
+        cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
+        bounds = {
+            d: get_balanced_bounds(extents[axis], cart_coords[axis], grid_shape[axis])
+            for axis, d in enumerate(partition_dims)
+        }
+        cart = {
+            "grid_shape": grid_shape,
+            "coords": cart_coords,
+            "periods": (False,) * len(partition_dims),
+        }
+    else:
+        start, stop = get_balanced_bounds(extents[0], comm.rank, comm.size)
+        bounds = {partition_dims[0]: (start, stop)}
+
     local_shape = tuple(
-        stop - start if name == dim_name else int(resolved_sizes[name]) for name in dims
+        (bounds[name][1] - bounds[name][0]) if name in bounds
+        else int(resolved_sizes[name])
+        for name in dims
     )
 
-    local_data = delayed_local(fill, (start, stop), local_shape, dtype)
+    fill_args = tuple(v for d in partition_dims for v in bounds[d])
+    local_data = delayed_local(fill, fill_args, local_shape, dtype)
 
     local_coords = dict(coords) if coords else {}
-    if dim_name in local_coords:
-        local_coords[dim_name] = localize_coord(
-            local_coords[dim_name], global_size, start, stop
-        )
+    for d in partition_dims:
+        if d in local_coords:
+            d_start, d_stop = bounds[d]
+            local_coords[d] = localize_coord(
+                local_coords[d], int(resolved_sizes[d]), d_start, d_stop
+            )
 
     da = xr.DataArray(
         local_data, dims=tuple(dims), coords=local_coords, name=name, attrs=attrs
     )
+    chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
     set_mpi_meta(
         da,
-        dim=dim_name,
-        global_size=global_size,
-        start=start,
-        stop=stop,
-        chunk_info={str(dim_name): stop - start},
+        dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
+        global_size={d: int(resolved_sizes[d]) for d in partition_dims},
+        start={d: bounds[d][0] for d in partition_dims},
+        stop={d: bounds[d][1] for d in partition_dims},
+        chunk_info=chunk_info,
+        cart=cart,
     )
     if should_log_partitions(runtime, log_partitions):
-        log_partition_report(
-            runtime,
-            da,
-            dim_name,
-            origin="create_dataarray",
-            global_size=global_size,
-            start=start,
-            stop=stop,
-        )
+        if len(partition_dims) > 1:
+            log_partition_report_cartesian(
+                runtime,
+                da,
+                partition_dims,
+                origin="create_dataarray",
+                global_sizes={d: int(resolved_sizes[d]) for d in partition_dims},
+                starts={d: bounds[d][0] for d in partition_dims},
+                stops={d: bounds[d][1] for d in partition_dims},
+                grid_shape=cart["grid_shape"],
+                coords=cart["coords"],
+            )
+        else:
+            d0 = partition_dims[0]
+            log_partition_report(
+                runtime,
+                da,
+                d0,
+                origin="create_dataarray",
+                global_size=int(resolved_sizes[d0]),
+                start=bounds[d0][0],
+                stop=bounds[d0][1],
+            )
     return da
 
 
@@ -688,7 +760,7 @@ def create_dataset(
     ],
     sizes: Mapping[Hashable, int] | None = None,
     *,
-    dim: Hashable,
+    dim: Hashable | Sequence[Hashable],
     dtype: Any = np.float64,
     coords: Mapping[Hashable, Any] | None = None,
     attrs: Mapping[str, Any] | None = None,
@@ -699,12 +771,20 @@ def create_dataset(
     Parameters
     ----------
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs. Partitioned fill
-        functions receive ``(start, stop)``; unpartitioned fills take no arguments.
+        Variables as DataArrays or ``(dims, fill)`` pairs. A fill function
+        is called with one ``(start, stop)`` pair per partition dimension
+        present in that variable's own ``dims``, in ``dim``'s order (a
+        single pair for the common single-dimension case); a variable
+        whose ``dims`` contain none of the partition dimensions is
+        unpartitioned -- identical on every rank -- and its fill takes no
+        arguments.
     sizes : mapping, optional
         Global dimension sizes. Missing sizes may be inferred from ``coords``.
-    dim : Hashable
-        Dimension to partition.
+    dim : Hashable or sequence of Hashable
+        Dimension(s) to partition. A sequence of two or more dimension
+        names lays ranks out on an MPI Cartesian process grid and
+        partitions every one simultaneously, exactly like
+        :func:`partition`'s own multi-dimensional support.
     dtype : Any or mapping, optional
         Default or per-variable fill dtype. Default is ``numpy.float64``.
     coords : mapping, optional
@@ -724,7 +804,16 @@ def create_dataset(
     ValueError
         If sizes cannot be resolved or a partitioned DataArray has the wrong
         local length."""
-    required_dims: set[Hashable] = {dim}
+    if isinstance(dim, (list, tuple)):
+        if not dim:
+            raise ValueError("dim sequence must not be empty.")
+        if len(set(dim)) != len(dim):
+            raise ValueError(f"dim entries must be unique; got {tuple(dim)!r}.")
+        partition_dims = tuple(dim)
+    else:
+        partition_dims = (dim,)
+
+    required_dims: set[Hashable] = set(partition_dims)
     for spec in data_vars.values():
         if not isinstance(spec, xr.DataArray):
             var_dims, _ = spec
@@ -732,23 +821,43 @@ def create_dataset(
     resolved_sizes = resolve_sizes(required_dims, sizes, coords)
 
     comm = runtime.comm
-    global_size = int(resolved_sizes[dim])
-    start, stop = get_balanced_bounds(global_size, comm.rank, comm.size)
+    extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
+
+    cart: dict[str, Any] | None = None
+    if len(partition_dims) > 1:
+        grid_shape = compute_layout(extents, comm.size)
+        cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
+        bounds = {
+            d: get_balanced_bounds(extents[axis], cart_coords[axis], grid_shape[axis])
+            for axis, d in enumerate(partition_dims)
+        }
+        cart = {
+            "grid_shape": grid_shape,
+            "coords": cart_coords,
+            "periods": (False,) * len(partition_dims),
+        }
+    else:
+        start, stop = get_balanced_bounds(extents[0], comm.rank, comm.size)
+        bounds = {partition_dims[0]: (start, stop)}
 
     dtype_map = dtype if isinstance(dtype, Mapping) else None
 
     built_vars: dict[Hashable, Any] = {}
     for var_name, spec in data_vars.items():
         if isinstance(spec, xr.DataArray):
-            if dim in spec.dims and int(spec.sizes[dim]) != stop - start:
-                raise ValueError(
-                    f"data_vars[{var_name!r}] is a DataArray of length "
-                    + f"{spec.sizes[dim]} along {dim!r}, but this rank "
-                    + f"owns [{start}:{stop}) ({stop - start} elements). "
-                    + "Pass a DataArray already sized to this rank's own "
-                    + "bounds (e.g. from create_dataarray), not the full "
-                    + "global array."
-                )
+            for d in partition_dims:
+                if d in spec.dims:
+                    d_start, d_stop = bounds[d]
+                    expected_len = d_stop - d_start
+                    if int(spec.sizes[d]) != expected_len:
+                        raise ValueError(
+                            f"data_vars[{var_name!r}] is a DataArray of length "
+                            + f"{spec.sizes[d]} along {d!r}, but this rank "
+                            + f"owns [{d_start}:{d_stop}) ({expected_len} "
+                            + "elements). Pass a DataArray already sized to "
+                            + "this rank's own bounds (e.g. from "
+                            + "create_dataarray), not the full global array."
+                        )
             built_vars[var_name] = spec
             continue
 
@@ -756,45 +865,68 @@ def create_dataset(
         var_dtype = (
             dtype_map.get(var_name, np.float64) if dtype_map is not None else dtype
         )
-        if dim in var_dims:
-            local_shape = tuple(
-                stop - start if name == dim else int(resolved_sizes[name])
-                for name in var_dims
-            )
-            local_data = delayed_local(var_fill, (start, stop), local_shape, var_dtype)
+        local_dims_here = [d for d in partition_dims if d in var_dims]
+        local_shape = tuple(
+            (bounds[name][1] - bounds[name][0])
+            if name in local_dims_here
+            else int(resolved_sizes[name])
+            for name in var_dims
+        )
+        if local_dims_here:
+            fill_args = tuple(v for d in local_dims_here for v in bounds[d])
+            local_data = delayed_local(var_fill, fill_args, local_shape, var_dtype)
         elif callable(var_fill):
             # Not partitioned: identical on every rank, so there is no
             # (start, stop) to give -- fill() takes no arguments and
             # closes over whatever sizes it needs itself.
-            local_shape = tuple(int(resolved_sizes[name]) for name in var_dims)
             local_data = delayed_local(var_fill, (), local_shape, var_dtype)
         else:
             local_data = var_fill
         built_vars[var_name] = (tuple(var_dims), local_data)
 
     local_coords = dict(coords) if coords else {}
-    if dim in local_coords:
-        local_coords[dim] = localize_coord(local_coords[dim], global_size, start, stop)
+    for d in partition_dims:
+        if d in local_coords:
+            d_start, d_stop = bounds[d]
+            local_coords[d] = localize_coord(
+                local_coords[d], int(resolved_sizes[d]), d_start, d_stop
+            )
 
     ds = xr.Dataset(built_vars, coords=local_coords, attrs=attrs)
+    chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
     set_mpi_meta(
         ds,
-        dim=dim,
-        global_size=global_size,
-        start=start,
-        stop=stop,
-        chunk_info={str(dim): stop - start},
+        dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
+        global_size={d: int(resolved_sizes[d]) for d in partition_dims},
+        start={d: bounds[d][0] for d in partition_dims},
+        stop={d: bounds[d][1] for d in partition_dims},
+        chunk_info=chunk_info,
+        cart=cart,
     )
     if should_log_partitions(runtime, log_partitions):
-        log_partition_report(
-            runtime,
-            ds,
-            dim,
-            origin="create_dataset",
-            global_size=global_size,
-            start=start,
-            stop=stop,
-        )
+        if len(partition_dims) > 1:
+            log_partition_report_cartesian(
+                runtime,
+                ds,
+                partition_dims,
+                origin="create_dataset",
+                global_sizes={d: int(resolved_sizes[d]) for d in partition_dims},
+                starts={d: bounds[d][0] for d in partition_dims},
+                stops={d: bounds[d][1] for d in partition_dims},
+                grid_shape=cart["grid_shape"],
+                coords=cart["coords"],
+            )
+        else:
+            d0 = partition_dims[0]
+            log_partition_report(
+                runtime,
+                ds,
+                d0,
+                origin="create_dataset",
+                global_size=int(resolved_sizes[d0]),
+                start=bounds[d0][0],
+                stop=bounds[d0][1],
+            )
     return ds
 
 
@@ -1018,11 +1150,11 @@ def mpi_open_dataset(
 
 def mpi_create_dataarray(
     runtime: MPIRuntime,
-    fill: Callable[[int, int], Any],
+    fill: Callable[..., Any],
     dims: Sequence[Hashable],
     *,
     shape: Sequence[int] | Mapping[Hashable, int] | None = None,
-    dim: Hashable | int = 0,
+    dim: Hashable | int | Sequence[Hashable] = 0,
     dtype: Any = np.float64,
     coords: Mapping[Hashable, Any] | None = None,
     name: Hashable | None = None,
@@ -1036,13 +1168,20 @@ def mpi_create_dataarray(
     runtime : MPIRuntime
         Runtime whose communicator the result is bound to.
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds.
+        Function called as ``fill(start, stop)`` for this rank's bounds
+        when ``dim`` names a single dimension, or as
+        ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one pair per
+        partitioned dimension, in ``dim``'s order -- when ``dim`` names
+        two or more.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
         Global dimension sizes. Missing sizes may be inferred from ``coords``.
-    dim : Hashable or int, optional
-        Dimension or axis to partition.
+    dim : Hashable, int, or sequence of Hashable, optional
+        Dimension or axis to partition. A sequence of two or more
+        dimension names lays ranks out on an MPI Cartesian process grid
+        and partitions every one simultaneously, exactly like
+        ``mpi_partition_data``'s own multi-dimensional support.
     dtype : Any, optional
         Data type returned by ``fill``.
     coords : mapping, optional
@@ -1079,11 +1218,11 @@ def mpi_create_dataarray(
 def mpi_create_dataset(
     runtime: MPIRuntime,
     data_vars: Mapping[
-        Hashable, xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]]
+        Hashable, xr.DataArray | tuple[Sequence[Hashable], Callable[..., Any]]
     ],
     sizes: Mapping[Hashable, int] | None = None,
     *,
-    dim: Hashable,
+    dim: Hashable | Sequence[Hashable],
     dtype: Any = np.float64,
     coords: Mapping[Hashable, Any] | None = None,
     attrs: Mapping[str, Any] | None = None,
@@ -1096,12 +1235,18 @@ def mpi_create_dataset(
     runtime : MPIRuntime
         Runtime whose communicator the result is bound to.
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs. Partitioned fill
-        functions receive ``(start, stop)``; unpartitioned fills take no arguments.
+        Variables as DataArrays or ``(dims, fill)`` pairs. A fill function
+        receives one ``(start, stop)`` pair per partition dimension present
+        in that variable's own ``dims``, in ``dim``'s order; a variable
+        naming none of the partition dimensions is unpartitioned and its
+        fill takes no arguments.
     sizes : mapping, optional
         Global dimension sizes. Missing sizes may be inferred from ``coords``.
-    dim : Hashable
-        Dimension to partition.
+    dim : Hashable or sequence of Hashable
+        Dimension(s) to partition. A sequence of two or more dimension
+        names lays ranks out on an MPI Cartesian process grid and
+        partitions every one simultaneously, exactly like
+        ``mpi_partition_data``'s own multi-dimensional support.
     dtype : Any or mapping, optional
         Default or per-variable fill dtype.
     coords : mapping, optional
@@ -1116,6 +1261,7 @@ def mpi_create_dataset(
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
     """
+    from .core import MPIXarray
 
     data = create_dataset(
         runtime,
