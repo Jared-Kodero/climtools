@@ -461,13 +461,45 @@ def resample_reduce(
         return result
     meta = get_mpi_meta(result)
     renamed = strip_mpi_meta(result).rename({_GROUP_DIM: dim})
-    if meta is not None:
+    if meta is not None and _GROUP_DIM in meta["dims"]:
+        # _GROUP_DIM is itself an active partition dimension only when
+        # groupby_reduce() took its cross-rank combine path and
+        # finish() then (auto-)redistributed the reduced result onto
+        # the new group dimension -- rename that one entry to `dim`,
+        # keeping every other partition dimension (relevant under a
+        # multi-dimensional partition) unchanged.
+        new_dims = tuple(dim if d == _GROUP_DIM else d for d in meta["dims"])
+        remap = {(dim if d == _GROUP_DIM else d): d for d in meta["dims"]}
         set_mpi_meta(
             renamed,
-            dim=dim,
-            global_size=meta["global_size"],
-            start=meta["start"],
-            stop=meta["stop"],
+            dim=new_dims,
+            global_size={nd: meta["global_sizes"][od] for nd, od in remap.items()},
+            start={nd: meta["starts"][od] for nd, od in remap.items()},
+            stop={nd: meta["stops"][od] for nd, od in remap.items()},
             chunk_info=meta["chunk_info"],
+            cart=meta.get("cart"),
+        )
+    elif meta is not None:
+        # The active partition dimension is something else entirely
+        # (the common resample() case: `dim` -- the axis being
+        # resampled -- is not the distributed axis at all, so
+        # groupby_reduce() took its local, non-communicating path and
+        # returned `meta` describing that other, untouched dimension
+        # unchanged). That metadata is still exactly correct for
+        # `renamed` (only `_GROUP_DIM` was renamed; every other
+        # dimension, including the real partition one, is untouched)
+        # and must be reattached as-is -- an earlier version of this
+        # function instead force-relabeled it under `dim`, mislabeling
+        # that other dimension's own start/stop/global_size as if they
+        # belonged to `dim` and corrupting `.meta` for every resample()
+        # call where the partition dimension isn't the one resampled.
+        set_mpi_meta(
+            renamed,
+            dim=meta["dims"],
+            global_size=dict(meta["global_sizes"]),
+            start=dict(meta["starts"]),
+            stop=dict(meta["stops"]),
+            chunk_info=meta["chunk_info"],
+            cart=meta.get("cart"),
         )
     return renamed
