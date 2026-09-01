@@ -889,7 +889,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -938,7 +938,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -984,7 +984,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1029,7 +1029,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1074,7 +1074,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1116,7 +1116,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1157,7 +1157,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1201,7 +1201,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1246,7 +1246,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1296,7 +1296,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1345,7 +1345,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)distribute the result once the active partition
+            Where to (re)partition the result once the active partition
             dimension is reduced away. The default, "auto", picks the
             largest surviving dimension and redistributes onto it --
             the result stays distributed, not replicated, even though
@@ -1435,7 +1435,7 @@ class MPIXarray:
         other : MPIXarray, xarray.Dataset, or xarray.DataArray
             Operand to align against ``self``.
         dim : Hashable or {"auto"} or None, optional
-            Dimension to distribute both operands along when neither is yet
+            Dimension to partition both operands along when neither is yet
             distributed. Required in that case; ignored otherwise.
         chunk_info : mapping, optional
             Forwarded to ``repartition`` when neither operand is yet distributed.

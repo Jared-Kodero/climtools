@@ -461,7 +461,9 @@ def sel_scalar(
                     )
                 local_index = int(selected.item())
                 matched_coord = local_coord[local_index]
-                key = abs(matched_coord - label) if method == "nearest" else matched_coord
+                key = (
+                    abs(matched_coord - label) if method == "nearest" else matched_coord
+                )
                 candidate = (local_start + local_index, key)
 
         # A small, fixed-size (one tuple per rank) collective -- not the
@@ -590,7 +592,7 @@ def _repartition_singleton(
     counts : list of int
         Each rank's local size on ``old_dim``, from ``allgather``.
     partition_dim : Hashable or {"auto"}
-        Dimension to distribute across ranks. ``"auto"`` selects the
+        Dimension to partition across ranks. ``"auto"`` selects the
         largest remaining dimension; if none has more than one
         element there is nothing to spread out, and the existing
         single-owner layout on ``old_dim`` is kept unchanged.
@@ -651,7 +653,7 @@ def _repartition_singleton(
     # Guard the owner's slicing so a failure there can't strand every
     # other rank blocked forever inside scatter() waiting on a root
     # that already raised and never called it -- the same hazard
-    # IOMixin.distribute() guards against for its own root-side prep.
+    # IOMixin.partition() guards against for its own root-side prep.
     error: BaseException | None = None
     parts: list[xr.Dataset | xr.DataArray] | None = None
     if comm.rank == owner:

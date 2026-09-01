@@ -279,7 +279,7 @@ def _open_dataset_cartesian(
     return data
 
 
-# mpi4py point-to-point tag for distribute(); arbitrary but fixed so a
+# mpi4py point-to-point tag for partition(); arbitrary but fixed so a
 # stray message from unrelated code can never be mistaken for a piece
 # this call is expecting.
 _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
@@ -294,7 +294,7 @@ def partition(
     chunk_info: Mapping[str, int] | None = None,
     log_partitions: bool = False,
 ) -> xr.Dataset | xr.DataArray:
-    """Distribute a root-owned xarray object across MPI ranks.
+    """partition a root-owned xarray object across MPI ranks.
 
     The root slices the object along ``dim`` and sends each rank only its local
     piece. Use :meth:`repartition` when the full object already exists on every
@@ -356,7 +356,7 @@ def partition(
                 raise ValueError(f"Rank {root} (root) must provide a value, not None.")
             if get_mpi_meta(value) is not None:
                 raise ValueError(
-                    "Cannot distribute an already distributed object. "
+                    "Cannot partition an already distributed object. "
                     + "Reduce or gather its distributed dimension first."
                 )
             stripped = strip_mpi_meta(value)
@@ -397,7 +397,7 @@ def partition(
             )
     except BaseException as exc:
         error = exc
-    runtime.raise_if_error(error, "distribute")
+    runtime.raise_if_error(error, "partition")
 
     # Broadcast which transfer path root prepared.
     dimensionless = runtime.broadcast(
@@ -428,7 +428,7 @@ def partition(
                 runtime,
                 output,
                 meta["dims"],
-                origin="distribute",
+                origin="partition",
                 global_sizes=meta["global_sizes"],
                 starts=meta["starts"],
                 stops=meta["stops"],
@@ -440,7 +440,7 @@ def partition(
                 runtime,
                 output,
                 meta["dim"],
-                origin="distribute",
+                origin="partition",
                 global_size=meta["global_size"],
                 start=meta["start"],
                 stop=meta["stop"],
@@ -945,7 +945,7 @@ def mpi_open_dataset(
     log_partitions: bool = True,
     **kwargs: Any,
 ) -> MPIXarray:
-    """Open a Dataset lazily and distribute it across MPI ranks.
+    """Open a Dataset lazily and partition it across MPI ranks.
 
     Parameters
     ----------
@@ -955,7 +955,7 @@ def mpi_open_dataset(
     mpi_runtime : MPIRuntime or mpi4py.MPI.Intracomm
         Runtime whose communicator the result is bound to.
     partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Dimension(s) to distribute. "auto" selects the longest dimension
+        Dimension(s) to partition. "auto" selects the longest dimension
         (single-dimension only). A sequence of two or more dimensions
         (e.g. ``("lat", "lon")``) lays ranks out on an MPI Cartesian
         process grid and distributes every listed dimension at once,

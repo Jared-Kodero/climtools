@@ -287,7 +287,9 @@ def _exchange_halo_blocks(
         if right_rank is not None and before > 0:
             send_to_right[name] = _mpi_buffer_view(
                 np.ascontiguousarray(
-                    var.isel({partition_dim: slice(local_len - before, local_len)}).values
+                    var.isel(
+                        {partition_dim: slice(local_len - before, local_len)}
+                    ).values
                 )
             )
         if left_rank is not None and after > 0:
@@ -543,7 +545,7 @@ def align(
     right : xarray.Dataset or xarray.DataArray
         Right operand to align.
     dim : hashable or {"auto"}, optional
-        Dimension to distribute both operands along when neither is
+        Dimension to partition both operands along when neither is
         currently distributed, or the shared dimension to reconcile
         onto when both are already distributed differently. Required
         when neither operand is distributed; defaults to ``left``'s
