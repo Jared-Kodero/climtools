@@ -62,9 +62,9 @@ class BaseProgress:
             truncate=False,
         )
 
-    def save_stream(self, stream) -> None:
+    def save_stream(self, stream):
         if stream is not None:
-            return
+            return stream
 
         try:
             stream = RedirectStreams.duplicate(self._stream)
@@ -236,7 +236,7 @@ class BaseProgress:
         self.reset_redirect()
 
         if self._interactive:
-            self.save_stream()
+            self._progress_stream = self.save_stream(self._progress_stream)
             self._redirect.start()
 
             self._start_interactive(
