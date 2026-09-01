@@ -195,7 +195,7 @@ def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     return _validate_mpi_meta(value, reference)
 
 
-def _assign_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
+def assign_mpi_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
     """Attach an already-built ``meta`` dict to ``value`` and its variables.
 
     Shared by :func:`set_mpi_meta` (building ``meta`` from scratch) and
@@ -303,7 +303,7 @@ def set_mpi_meta(
     }
     if cart is not None:
         meta["cart"] = dict(cart)
-    _assign_meta(value, meta)
+    assign_mpi_meta(value, meta)
 
 
 def set_save_chunks(
@@ -348,7 +348,7 @@ def set_save_chunks(
         str(name): tuple(int(length) for length in shape)
         for name, shape in save_chunks.items()
     }
-    _assign_meta(value, updated)
+    assign_mpi_meta(value, updated)
 
 
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:

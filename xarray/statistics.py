@@ -26,6 +26,7 @@ from .planning import (
     guarded,
     local_reduction_meta,
     normalize_dim,
+    reduction_plan,
     repartition_candidates,
     resolve_comm,
 )
@@ -54,7 +55,7 @@ def _var_or_std(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    plan = plan(runtime, value, dims, old_meta, operation="std" if root else "var")
+    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation="std" if root else "var")
 
     def combine(
         variable: xr.DataArray,
@@ -123,15 +124,15 @@ def _var_or_std(
             value,
             dims,
             mean,
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
-            replica_count=plan[0].replica_count,
+            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            replica_count=reduce_plan[0].replica_count,
         )
         return finish(
             runtime,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     mean_ds = mean_reduce(
@@ -143,7 +144,7 @@ def _var_or_std(
         partition_dim=None,
     )
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -166,7 +167,7 @@ def _var_or_std(
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 

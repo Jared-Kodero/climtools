@@ -24,6 +24,7 @@ from .planning import (
     guarded,
     local_reduction_meta,
     normalize_dim,
+    reduction_plan,
     repartition_candidates,
     resolve_comm,
     skipna_enabled,
@@ -98,11 +99,35 @@ def _combine_mean(
     global_count = count_valid_values(
         runtime, value, dims, comm=comm, replica_count=replica_count
     )
-    # Divide in the dtype numpy.mean would produce for this input. Dividing
-    # the float32 sum by the int64 count directly would promote the whole
-    # array to float64 and then cast it back, costing two full-width
-    # temporaries for a result that is float32 either way.
-    target = np.asarray(np.mean(np.zeros(1, dtype=value.dtype))).dtype
+    # Divide in the dtype xarray's own .mean() would produce for this
+    # input. This is genuinely shape-dependent, not just dtype-dependent:
+    # confirmed directly, a float32 array reduced over one dimension
+    # while keeping others (an ordinary partial reduction) stays float32
+    # in xarray's own .mean(), but the same array reduced over *every*
+    # dimension to a scalar promotes to float64 -- an earlier version of
+    # this line asked a synthetic size-1 array for its dtype, which
+    # reliably reproduces the partial-reduction case (kept-dimension
+    # size is what governs it, confirmed across several shapes) but not
+    # the full-reduction one, where a genuinely size-1 sample take the
+    # *other*, non-promoting branch a real, larger reduction does not
+    # -- so a same-dtype full reduction of, e.g., a length-3 real array
+    # silently disagreed with xarray by staying in the narrower dtype.
+    # Rather than chase further shape-dependent thresholds, this uses
+    # the two independently-verified, stable end cases directly:
+    # non-floating dtypes always promote to float64 (confirmed for
+    # int32); floating dtypes are dtype-preserving for a partial
+    # reduction and promote to float64 for a full one *except*
+    # complex, which never promotes either way (confirmed both ways
+    # for complex64) -- xarray evidently special-cases complex
+    # dtype preservation the same way regardless of reduction shape.
+    kind = value.dtype.kind
+    if kind not in "fc":
+        target = np.dtype(np.float64)
+    elif kind == "c":
+        target = value.dtype
+    else:
+        is_full_reduction = set(dims) == set(value.dims)
+        target = np.dtype(np.float64) if is_full_reduction else value.dtype
     divisor = (
         global_count.astype(target, keep_attrs=False)
         if target.kind in "fc"
@@ -189,15 +214,15 @@ def _combine_extreme(
     # Encoding the flag in the same buffer avoids a second boolean collective.
     send: np.ndarray[Any, Any] | None = None
     template: xr.DataArray | None = None
-    skipna_enabled = skipna_enabled(value.dtype, skipna)
+    use_skipna = skipna_enabled(value.dtype, skipna)
     # ANY valid rank suffices under skipna; without it every rank must be
     # NaN-free for the result to be defined.
-    flip = -1.0 if ((not minimum) != skipna_enabled) else 1.0
+    flip = -1.0 if ((not minimum) != use_skipna) else 1.0
 
     if error is None:
         try:
             identity = extreme_identity(expect_dtype, minimum=minimum)
-            if skipna_enabled:
+            if use_skipna:
                 good = value.count(dim=dims, keep_attrs=False) > 0
             else:
                 good = ~value.isnull().any(dim=dims, keep_attrs=False)
@@ -375,7 +400,7 @@ def _sum_prod(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    plan = plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
 
     if isinstance(value, xr.DataArray):
         method = value.prod if product else value.sum
@@ -397,19 +422,19 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
-            replica_count=plan[0].replica_count,
+            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            replica_count=reduce_plan[0].replica_count,
         )
         return finish(
             runtime,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -443,7 +468,7 @@ def _sum_prod(
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -488,7 +513,7 @@ def mean_reduce(
         local_result = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    plan = plan(runtime, value, dims, old_meta, operation="mean")
+    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation="mean")
 
     if isinstance(value, xr.DataArray):
         if not dims:
@@ -506,19 +531,19 @@ def mean_reduce(
             dims,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
-            replica_count=plan[0].replica_count,
+            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            replica_count=reduce_plan[0].replica_count,
         )
         return finish(
             runtime,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -549,7 +574,7 @@ def mean_reduce(
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -653,7 +678,7 @@ def _min_max(
         local_result = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    plan = plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
 
     def locally_empty(variable: xr.DataArray) -> bool:
         """Return whether this rank's local slice of ``variable`` is
@@ -694,18 +719,18 @@ def _min_max(
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
+            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
         )
         return finish(
             runtime,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -742,7 +767,7 @@ def _min_max(
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -840,7 +865,7 @@ def _logical(
         local_result = method(dim=local_dim, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    plan = plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
 
     if isinstance(value, xr.DataArray):
         method = value.all if all_values else value.any
@@ -858,18 +883,18 @@ def _logical(
             expect_dtype=partial_dtype(value.dtype.str, operation, None),
             error=local_error,
             phase=f"MPI xarray {operation} reduction",
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
+            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
         )
         return finish(
             runtime,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -899,7 +924,7 @@ def _logical(
         runtime,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
         partition_dim=partition_dim,
     )
 
@@ -1116,7 +1141,7 @@ def _first_or_last(
             )
         return finish_local_reduction(result, old_meta=local_meta)
 
-    plan = plan(
+    reduce_plan = reduction_plan(
         runtime, value, dims, old_meta, operation="first" if want_first else "last"
     )
 
@@ -1136,11 +1161,11 @@ def _first_or_last(
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(plan),
+            auto_candidates=repartition_candidates(reduce_plan),
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
-    for entry in plan:
+    for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
             variables[entry.name] = variable
@@ -1165,6 +1190,6 @@ def _first_or_last(
         runtime,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
-        auto_candidates=repartition_candidates(plan),
+        auto_candidates=repartition_candidates(reduce_plan),
         partition_dim=partition_dim,
     )

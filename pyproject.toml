@@ -93,11 +93,11 @@ dev = ["typing_extensions", "build", "twine", "pytest", "bottleneck"]
 # file, rather than assuming a src-layout that does not exist here.
 packages = [
     "climtools",
-    "climtools.accessors",
     "climtools.cdo",
     "climtools.core",
-    "climtools.netcdf",
+    "climtools.mpi",
     "climtools.viz",
+    "climtools.xarray",
 ]
 package-dir = { climtools = "." }
 

@@ -13,6 +13,7 @@ from mpi4py import MPI
 
 import xarray as xr
 
+from .cartesian import dim_comm as _dim_comm
 from .cartesian import get_cartesian_topology
 from .chunks import get_balanced_bounds, prune_chunk_info
 from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
@@ -147,12 +148,29 @@ def _haloed_variable_names(
     rank already (that is what "replicated along this axis" means), so it
     needs no communication at all: the local copy already held by this rank
     is a perfectly valid stand-in for the neighbor's copy.
+
+    A ``DataArray``'s own coordinates are included here too, not just its
+    named data variable: a dimension coordinate (e.g. a real "time" axis
+    opened from a NetCDF file) varies along ``partition_dim`` exactly like
+    the data itself, and skipping it here left `_reconstruct` falling back
+    to this rank's own full, unsliced coordinate for the returned
+    before/after block -- silently wrong length, one bug this genuinely
+    slipped past every purely-synthetic, coordinate-less DataArray this
+    project's own tests built directly (no test here ever gave `halo_exchange`
+    a DataArray with a real matching dimension coordinate until a real
+    NetCDF-backed benchmark did) until real file I/O surfaced it.
     """
     if isinstance(value, xr.Dataset):
         return tuple(
             name for name, var in value.variables.items() if partition_dim in var.dims
         )
-    return (value.name,) if partition_dim in value.dims else ()
+    names = [value.name] if partition_dim in value.dims else []
+    names.extend(
+        name
+        for name, coord in value.coords.items()
+        if partition_dim in coord.dims and name != value.name
+    )
+    return tuple(names)
 
 
 def _exchange_halo_blocks(
@@ -219,29 +237,68 @@ def _exchange_halo_blocks(
     haloed = _haloed_variable_names(value, partition_dim)
 
     def _local_array(name: Hashable) -> np.ndarray:
-        var = value[name].variable if isinstance(value, xr.Dataset) else value.variable
-        return var
+        if isinstance(value, xr.Dataset):
+            return value[name].variable
+        if name == value.name:
+            return value.variable
+        return value.coords[name].variable
+
+    def _mpi_buffer_view(arr: np.ndarray) -> np.ndarray:
+        """View ``arr`` as a dtype the raw MPI buffer protocol accepts.
+
+        ``datetime64``/``timedelta64`` -- exactly what a real,
+        CF-decoded "time" coordinate is, almost always the very
+        dimension being partitioned for real climate data -- have no
+        direct MPI datatype; ``Isend``/``Irecv`` need a numeric dtype.
+        Both are always backed by a fixed-width ``int64`` internally,
+        so this is a lossless, zero-copy bit-level reinterpretation
+        (the returned array shares the same underlying memory as
+        ``arr``, not a converted copy), not a value conversion --
+        every other supported dtype passes through unchanged.
+        """
+        return arr.view(np.int64) if arr.dtype.kind in "mM" else arr
 
     # This rank's own boundary slabs to send: the tail (size `before`) goes
     # to right_rank, who will use it as their own "before" padding; the
     # head (size `after`) goes to left_rank, who will use it as their own
     # "after" padding -- symmetric with what this rank expects back below.
+    #
+    # Guarded on before>0/after>0, matching the receive side's guard
+    # exactly (not just on left_rank/right_rank being non-None): every
+    # rank agrees on the same before/after (see _agree() in the caller),
+    # so before==0 means *no* rank anywhere posts a recv_before this
+    # call. An unconditional send here would still fire a zero-byte
+    # Isend with no matching Irecv anywhere in this call -- MPI does not
+    # require a receive to exist for a send to "complete" locally, so
+    # that stray message is left unmatched and queued for the next
+    # message from the same (source, tag). The very next call that
+    # *does* request a halo on this axis then has its own legitimate
+    # Irecv silently satisfied by that old, empty, unrelated message
+    # instead of the new data -- a real cross-call corruption bug,
+    # confirmed by reproduction: a `before=0` or `after=0` call
+    # immediately followed by one with a nonzero request on the same
+    # side reads back an uninitialized (`np.empty`) buffer, not the
+    # true neighbor data.
     send_to_right: dict[Hashable, np.ndarray] = {}
     send_to_left: dict[Hashable, np.ndarray] = {}
     for name in haloed:
         var = _local_array(name)
         axis = var.dims.index(partition_dim)
-        if right_rank is not None:
-            send_to_right[name] = np.ascontiguousarray(
-                var.isel({partition_dim: slice(local_len - before, local_len)}).values
+        if right_rank is not None and before > 0:
+            send_to_right[name] = _mpi_buffer_view(
+                np.ascontiguousarray(
+                    var.isel({partition_dim: slice(local_len - before, local_len)}).values
+                )
             )
-        if left_rank is not None:
-            send_to_left[name] = np.ascontiguousarray(
-                var.isel({partition_dim: slice(0, after)}).values
+        if left_rank is not None and after > 0:
+            send_to_left[name] = _mpi_buffer_view(
+                np.ascontiguousarray(var.isel({partition_dim: slice(0, after)}).values)
             )
 
     recv_before: dict[Hashable, np.ndarray] = {}
     recv_after: dict[Hashable, np.ndarray] = {}
+    recv_before_bufs: dict[Hashable, np.ndarray] = {}
+    recv_after_bufs: dict[Hashable, np.ndarray] = {}
     if left_rank is not None and before > 0:
         for name in haloed:
             var = _local_array(name)
@@ -249,6 +306,7 @@ def _exchange_halo_blocks(
             shape = list(var.shape)
             shape[axis] = before
             recv_before[name] = np.empty(shape, dtype=var.dtype)
+            recv_before_bufs[name] = _mpi_buffer_view(recv_before[name])
     if right_rank is not None and after > 0:
         for name in haloed:
             var = _local_array(name)
@@ -256,10 +314,11 @@ def _exchange_halo_blocks(
             shape = list(var.shape)
             shape[axis] = after
             recv_after[name] = np.empty(shape, dtype=var.dtype)
+            recv_after_bufs[name] = _mpi_buffer_view(recv_after[name])
 
     recv_reqs: list[MPI.Request] = [
-        comm.Irecv(buf, source=left_rank) for buf in recv_before.values()
-    ] + [comm.Irecv(buf, source=right_rank) for buf in recv_after.values()]
+        comm.Irecv(buf, source=left_rank) for buf in recv_before_bufs.values()
+    ] + [comm.Irecv(buf, source=right_rank) for buf in recv_after_bufs.values()]
     send_reqs: list[MPI.Request] = [
         comm.Isend(arr, dest=right_rank) for arr in send_to_right.values()
     ] + [comm.Isend(arr, dest=left_rank) for arr in send_to_left.values()]
@@ -1502,6 +1561,7 @@ def halo_exchange(
     *,
     before: int,
     after: int,
+    periodic: bool = False,
 ) -> tuple[xr.Dataset | xr.DataArray, int, int]:
     """Pad ``value`` with boundary slices from the adjacent ranks.
 
@@ -1553,6 +1613,24 @@ def halo_exchange(
         owns -- fetching a window wider than one rank's partition
         would need a multi-hop relay, which this primitive does not
         perform.
+    periodic : bool, optional
+        Wrap the neighbor lookup at the global boundary instead of
+        leaving that side unpadded -- rank 0's "left" neighbor becomes
+        the last rank and vice versa (and symmetrically on the right),
+        mirroring how FMS/``mpp_domains`` treats periodicity purely as
+        a boundary condition on which rank a *bounded* halo exchange
+        talks to (``cyclic``/``x_cyclic_offset``), not as a general
+        block-move primitive. Only changes which rank(s) messages are
+        exchanged with; the exchange itself, and the single-hop
+        ``before``/``after`` <= local-length limit above, are
+        unchanged -- with a single rank, that rank is its own
+        wrapped neighbor on both sides, so the whole exchange
+        collapses to a local no-op copy of this rank's own boundary
+        back onto itself (still correct, still only relevant if
+        ``comm.size > 1`` and this rank is at a true global edge).
+        Default False (existing non-wrapping edge behavior, used by
+        :func:`rolling_reduce`/:func:`diff`/:func:`shift`, which must
+        not wrap).
 
     Returns
     -------
@@ -1601,7 +1679,10 @@ def halo_exchange(
     if before < 0 or after < 0:
         raise ValueError("halo_exchange(): before and after must be >= 0.")
 
-    _agree(runtime, ("halo_exchange", str(partition_dim), int(before), int(after)))
+    _agree(
+        runtime,
+        ("halo_exchange", str(partition_dim), int(before), int(after), bool(periodic)),
+    )
 
     if before == 0 and after == 0:
         # No boundary data requested on either side: every rank's own
@@ -1629,11 +1710,39 @@ def halo_exchange(
         # neighbors instead -- built once and cached, not repeated
         # per call; see `get_cartesian_topology`.
         topology = get_cartesian_topology(comm, partition_dims, meta["global_sizes"])
-        left_rank, right_rank = topology.neighbors[partition_dim]
+        if periodic:
+            # `topology.cart_comm` was itself built non-periodic (its
+            # `Shift`-derived `neighbors` always stop at a true edge,
+            # which every *other* caller of this function needs), so
+            # periodic wrapping is done by hand here rather than by
+            # asking Cart_create for a periodic communicator: wrap
+            # this rank's own coordinate on the target axis and look
+            # up the owning rank directly with `Get_cart_rank`, which
+            # (unlike `Shift`) does not consult the communicator's own
+            # `periods` flag at all -- it just maps a coordinate tuple
+            # to a rank, so this works regardless of how the
+            # communicator itself was created. Safe to feed straight
+            # back into `comm` (not just `cart_comm`) because
+            # `Create_cart` above used `reorder=False`, which
+            # `CartesianTopology.cart_comm`'s own docstring documents
+            # as keeping the two rank numberings identical.
+            axis = partition_dims.index(partition_dim)
+            axis_size = topology.grid_shape[axis]
+            coords = list(topology.coords)
+            coords[axis] = (topology.coords[axis] - 1) % axis_size
+            left_rank = topology.cart_comm.Get_cart_rank(coords)
+            coords[axis] = (topology.coords[axis] + 1) % axis_size
+            right_rank = topology.cart_comm.Get_cart_rank(coords)
+        else:
+            left_rank, right_rank = topology.neighbors[partition_dim]
     else:
         size = comm.size
-        left_rank = rank - 1 if rank > 0 else None
-        right_rank = rank + 1 if rank < size - 1 else None
+        if periodic:
+            left_rank = (rank - 1) % size
+            right_rank = (rank + 1) % size
+        else:
+            left_rank = rank - 1 if rank > 0 else None
+            right_rank = rank + 1 if rank < size - 1 else None
 
     local_len = int(value.sizes[partition_dim])
     lengths = comm.allgather(local_len)
@@ -1747,7 +1856,13 @@ def rolling_reduce(
         rolled = value.rolling({dim: window}, center=center, min_periods=min_periods)
         return getattr(rolled, reduce)()
 
-    before = (window - 1) // 2 if center else window - 1
+    # xarray's own centered-window convention (verified against
+    # DataArray.rolling(..., center=True) directly): for an odd window
+    # the split is symmetric either way, but for an *even* window the
+    # extra element goes on the left, i.e. before=window//2, not
+    # (window-1)//2 -- the two only differ (by one, in the wrong
+    # direction) when window is even.
+    before = window // 2 if center else window - 1
     after = (window - 1) - before if center else 0
 
     padded, left_pad, _right_pad = halo_exchange(
@@ -1759,6 +1874,203 @@ def rolling_reduce(
     local_len = int(value.sizes[dim])
     trimmed = reduced.isel({dim: slice(left_pad, left_pad + local_len)})
     return reattach_meta(trimmed, meta)
+
+
+def coarsen_reduce(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    window: int,
+    reduce: str = "mean",
+    *,
+    boundary: str = "exact",
+    side: str = "left",
+    coord_func: str = "mean",
+) -> xr.Dataset | xr.DataArray:
+    """Block reduction along ``dim``, correct when ``dim`` is distributed.
+
+    Equivalent to ``value.coarsen({dim: window}, boundary=boundary,
+    side=side, coord_func=coord_func).<reduce>()``, but safe when
+    ``dim`` is the active partition dimension: unlike a sliding
+    ``rolling`` window, a coarsen block only ever needs boundary data
+    when this rank's own local range does not start (and, at the true
+    global edge, end) on a multiple of ``window`` -- i.e. only when
+    the block grid genuinely straddles a partition boundary, not on
+    every call regardless of alignment. Borrows just the (at most
+    ``window - 1``-element) remainder needed to complete that
+    boundary block via :func:`~.arithmetic.halo_exchange`, exactly
+    the FMS/``mpp_domains`` principle of moving only what the
+    operation's own footprint requires, then reduces locally.
+
+    A boundary block that straddles two ranks is computed
+    independently by both (each borrows what it is missing from the
+    other), so exactly one of them must report it to avoid double
+    counting in the reconstructed global result: by construction, the
+    block starting at the multiple of ``window`` at or below this
+    rank's own ``start`` is owned by whichever rank's own *unpadded*
+    range contains that start index. When this rank borrowed a
+    nonzero ``before`` amount, that block starts inside the left
+    neighbor's own range (not this rank's), so this rank drops its
+    own first coarsened block; a rank that borrowed nothing there
+    (the true left edge, or a rank whose ``start`` already lands on a
+    block boundary) always owns its own first block outright, with
+    nothing to drop.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to coarsen.
+    dim : Hashable
+        Dimension to coarsen along.
+    window : int
+        Block size, as in ``xarray.DataArray.coarsen``.
+    reduce : str, optional
+        Name of the reduction to call on the coarsen object (e.g.
+        ``"mean"``, ``"sum"``, ``"min"``, ``"max"``, ``"construct"``).
+        Default ``"mean"``.
+    boundary : {"exact", "trim", "pad"}, optional
+        As in ``xarray.DataArray.coarsen``. ``"exact"`` (the default,
+        matching ``xarray``) raises if the *global* size along
+        ``dim`` is not a multiple of ``window``. Default ``"exact"``.
+    side : {"left"}, optional
+        As in ``xarray.DataArray.coarsen``. Only ``"left"`` (the
+        ``xarray`` default) is currently supported for a distributed
+        dimension; ``"right"`` anchors the block grid from the
+        opposite end, which needs a different (and, so far, untested)
+        edge-block derivation and is not yet implemented here.
+    coord_func : str, optional
+        As in ``xarray.DataArray.coarsen``.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The coarsened-and-reduced result, correctly distributed along
+        the now block-reduced ``dim``.
+
+    Raises
+    ------
+    ValueError
+        If ``boundary="exact"`` and the global size is not evenly
+        divisible by ``window``.
+    NotImplementedError
+        If ``side="right"`` is requested on a distributed ``dim``.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        coarsened = value.coarsen(
+            {dim: window}, boundary=boundary, side=side, coord_func=coord_func
+        )
+        return getattr(coarsened, reduce)()
+
+    if side != "left":
+        raise NotImplementedError(
+            "coarsen_reduce(): side='right' is not yet implemented for a "
+            + "distributed dimension (only the default side='left' is); "
+            + "gather/repartition onto a single rank along this dimension "
+            + "first if side='right' is required."
+        )
+
+    _agree(
+        runtime,
+        ("coarsen_reduce", str(dim), int(window), boundary, side),
+    )
+
+    global_size = int(meta["global_sizes"][dim])
+    start = int(meta["starts"][dim])
+    stop = int(meta["stops"][dim])
+    remainder = global_size % window
+
+    if boundary == "exact" and remainder != 0:
+        raise ValueError(
+            f"Could not coarsen a distributed dimension of size {global_size} "
+            + f"with window {window} and boundary='exact'. Try boundary="
+            + "'trim' or 'pad'."
+        )
+
+    is_left_edge = start == 0
+    is_right_edge = stop == global_size
+
+    before_needed = 0 if is_left_edge else start % window
+    after_needed = 0 if is_right_edge else (window - stop % window) % window
+
+    # halo_exchange() requires every rank to request the *same*
+    # before/after width (enforced by its own internal _agree(), which
+    # exists to catch genuine cross-rank call mismatches elsewhere and
+    # should not be weakened here) -- but each rank's own alignment
+    # offset (before_needed/after_needed above) is a function of its
+    # own start/stop, so it is not, and must not be forced to be, the
+    # same on every rank. Request the single largest width any rank
+    # could ever need (window - 1, an O(window) bound, not an
+    # O(global_size) one) uniformly instead, then trim the excess back
+    # off below once each rank knows what it actually received -- the
+    # same "ask for an upper bound, trim locally" trick, just applied
+    # to a collective-agreement constraint rather than to the maximum
+    # halo width itself.
+    request = max(window - 1, 0)
+    padded, left_pad, right_pad = halo_exchange(
+        runtime, value, dim, before=request, after=request
+    )
+    # left_pad/right_pad are what was actually fetched (0 at a true
+    # global edge, `request` everywhere else); keep only the slice
+    # closest to this rank's own data on each side.
+    padded = padded.isel(
+        {
+            dim: slice(
+                left_pad - before_needed,
+                left_pad + int(value.sizes[dim]) + after_needed,
+            )
+        }
+    )
+
+    local_boundary = "exact"
+    if is_right_edge and remainder != 0:
+        if boundary == "trim":
+            trim_len = int(padded.sizes[dim]) - remainder
+            padded = padded.isel({dim: slice(0, trim_len)})
+        else:  # "pad": only the true global edge ever needs a synthetic
+            # (non-neighbor-sourced) pad -- every interior boundary block
+            # already got real data from halo_exchange above.
+            local_boundary = "pad"
+
+    coarsened = getattr(
+        padded.coarsen(
+            {dim: window}, boundary=local_boundary, side="left", coord_func=coord_func
+        ),
+        reduce,
+    )()
+
+    if before_needed > 0:
+        # This rank's own first block started inside the left neighbor's
+        # unpadded range (see the ownership rule in the docstring); the
+        # left neighbor computes and reports the identical block itself.
+        coarsened = coarsened.isel({dim: slice(1, None)})
+
+    # coarsen changes the dimension's length, so -- exactly like diff()'s
+    # own length-changing case -- start/stop/global_size are recomputed
+    # from an allgather of each rank's new local length, not carried
+    # over from the (now stale) pre-coarsen meta.
+    comm = _dim_comm(runtime, meta, dim)
+    counts = comm.allgather(int(coarsened.sizes[dim]))
+    new_global_size = sum(counts)
+    new_start = sum(counts[: comm.rank])
+    new_stop = new_start + counts[comm.rank]
+    new_chunk_info = prune_chunk_info(meta["chunk_info"], coarsened)
+    global_sizes = dict(meta["global_sizes"])
+    starts = dict(meta["starts"])
+    stops = dict(meta["stops"])
+    global_sizes[dim] = new_global_size
+    starts[dim] = new_start
+    stops[dim] = new_stop
+    set_mpi_meta(
+        coarsened,
+        dim=meta["dims"],
+        global_size=global_sizes,
+        start=starts,
+        stop=stops,
+        chunk_info=new_chunk_info,
+        cart=meta.get("cart"),
+    )
+    return coarsened
 
 
 def _eval_ast_node(runtime, node: ast.expr, variables: Mapping[str, Any]) -> Any:

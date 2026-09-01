@@ -15,6 +15,7 @@ import xarray as xr
 from .arithmetic import (
     align,
     apply,
+    coarsen_reduce,
     evaluate,
     halo_exchange,
     matmul,
@@ -22,12 +23,23 @@ from .arithmetic import (
     rolling_reduce,
     sortby,
 )
-from .elementwise import cumsum, diff, differentiate, median, shift, where
+from .elementwise import (
+    bfill,
+    cumsum,
+    diff,
+    differentiate,
+    ffill,
+    interp,
+    median,
+    roll,
+    shift,
+    where,
+)
 from .handles import MPIGroupBy, MPIResample, MPIRolling
 from .indexing import isel, sel
 from .io import attach_save_chunks, repartition
 from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
-from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
+from .meta import assign_mpi_meta, get_mpi_meta, strip_mpi_meta
 from .reductions import (
     all_reduce,
     any_reduce,
@@ -184,15 +196,33 @@ class MPIXarray:
     root-owned input.
     """
 
-    #: Tells NumPy (and anything that follows its convention, including
-    #: xarray's own binary-op dispatch) not to try to handle a mixed
-    #: operation itself when the *other* operand is an ``MPIXarray`` --
-    #: defer to this class's own ``__radd__``/etc. instead. Without this,
-    #: ``xr.DataArray(...) + mpixarray_instance`` could be handled by
-    #: xarray's ``__add__`` treating the ``MPIXarray`` as some generic
-    #: array-like (undefined, unpredictable) instead of reaching
-    #: :meth:`__radd__` at all.
-    __array_ufunc__ = None
+    #: NumPy ufunc dispatch (`np.log(mpixarray)`, `np.add(a, b)`, ...): for
+    #: an elementwise call (`method == "__call__"`, the overwhelming
+    #: majority of ufuncs -- `log`, `sqrt`, `exp`, `sin`, `add`,
+    #: `multiply`, `isnan`, ...), every input is elementwise-independent
+    #: by definition, so it is exactly the kind of partition-preserving,
+    #: rank-local callable `apply()` exists for: no communication, and
+    #: the result stays a distributed MPIXarray rather than being
+    #: silently gathered onto every rank (`apply()`/`check_operands_distribution`
+    #: already validate any MPIXarray operands share a compatible
+    #: partition -- the same check `__add__`/etc. below rely on -- and a
+    #: plain scalar or numpy array operand is left untouched, so ordinary
+    #: broadcasting applies exactly as it would for `self.data`). Any
+    #: other method (`reduce`, `accumulate`, `outer`, `at`, ...) is a
+    #: non-elementwise, potentially cross-rank operation (`np.add.reduce`
+    #: is a sum across the array, for instance) that must not be routed
+    #: through this rank-local path -- returning `NotImplemented` lets
+    #: NumPy raise its own clear error rather than silently mishandling
+    #: it; use the dedicated distributed method (`.sum()`, `.cumsum()`,
+    #: ...) instead. `out=` is similarly refused: MPIXarray is immutable
+    #: by construction (see the class docstring), so there is no rank-local
+    #: buffer to write into in place.
+    def __array_ufunc__(
+        self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any
+    ) -> Any:
+        if method != "__call__" or kwargs.get("out") is not None:
+            return NotImplemented
+        return self.apply(ufunc, *inputs, **kwargs)
 
     def __init__(
         self,
@@ -593,7 +623,7 @@ class MPIXarray:
         if self.meta is None:
             return self.data
         prepared = self.data.copy(deep=False)
-        _assign_meta(prepared, self.meta)
+        assign_mpi_meta(prepared, self.meta)
         return prepared
 
     # -- IO --------------------------------------------------------------------
@@ -676,7 +706,7 @@ class MPIXarray:
             prepared = attach_save_chunks(self._runtime, prepared)
         if self.meta is not None and get_mpi_meta(prepared) is None:
             prepared = prepared.copy(deep=False)
-            _assign_meta(prepared, self.meta)
+            assign_mpi_meta(prepared, self.meta)
 
         to_netcdf(
             prepared,
@@ -1647,6 +1677,55 @@ class MPIXarray:
         )
         return finalize(result, self._runtime)
 
+    def coarsen_reduce(
+        self,
+        dim: Hashable,
+        window: int,
+        reduce: str = "mean",
+        *,
+        boundary: str = "exact",
+        side: str = "left",
+        coord_func: str = "mean",
+    ) -> MPIXarray:
+        """Block reduction along ``dim``, correct when ``dim`` is distributed.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to coarsen along.
+        window : int
+            Block size, as in ``xarray.DataArray.coarsen``.
+        reduce : str, optional
+            Name of the reduction to call on the coarsen object (e.g.
+            "mean", "sum", "min", "max").
+        boundary : {"exact", "trim", "pad"}, optional
+            As in ``xarray.DataArray.coarsen``. Default "exact" (raises
+            if the global size along ``dim`` is not a multiple of
+            ``window``).
+        side : {"left"}, optional
+            Only "left" (the ``xarray`` default) is supported for a
+            distributed dimension so far.
+        coord_func : str, optional
+            As in ``xarray.DataArray.coarsen``.
+
+        Returns
+        -------
+        MPIXarray
+            Coarsened-and-reduced object with ``.meta`` updated to
+            match the new, block-reduced length along ``dim``.
+        """
+        result = coarsen_reduce(
+            self._runtime,
+            self._prepare(),
+            dim,
+            window,
+            reduce,
+            boundary=boundary,
+            side=side,
+            coord_func=coord_func,
+        )
+        return finalize(result, self._runtime)
+
     def rolling(
         self,
         dim: Hashable,
@@ -1890,6 +1969,121 @@ class MPIXarray:
             kwargs["fill_value"] = fill_value
         return finalize(
             shift(self._runtime, self._prepare(), dim, periods, **kwargs), self._runtime
+        )
+
+    def roll(self, dim: Hashable, shift_by: int) -> MPIXarray:
+        """Circularly shift by ``shift_by`` along ``dim``, wrapping at the edge.
+
+        Same mechanism as :meth:`shift` (borrows ``|shift_by|`` boundary
+        values via :meth:`halo_exchange`), except the rank at the true
+        global edge wraps around to the rank at the opposite edge
+        instead of leaving that side unpadded -- see
+        :meth:`~.elementwise.roll` for the exact mechanism. Coordinates
+        are not rolled; only the data is.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to roll along.
+        shift_by : int
+            Number of positions to roll by; positive rolls toward
+            higher indices, matching ``xarray.DataArray.roll``. Its
+            magnitude must not exceed every rank's local length along
+            ``dim`` when ``dim`` is the partition dimension (see
+            ``halo_exchange``'s own single-hop limit).
+
+        Returns
+        -------
+        MPIXarray
+            The rolled object, same shape and distribution as ``self``.
+        """
+        return finalize(
+            roll(self._runtime, self._prepare(), dim, shift_by), self._runtime
+        )
+
+    def ffill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
+        """Forward-fill along ``dim``, correct when ``dim`` is distributed.
+
+        With ``limit`` given, borrows ``limit`` boundary values from
+        the left neighbor (:meth:`halo_exchange`), the same bounded
+        mechanism as :meth:`shift`. With ``limit=None`` (default), the
+        dependency is unbounded (the last valid value may be
+        arbitrarily many ranks back), so this instead runs a
+        gather/scatter "carry the last value seen so far" scan across
+        ranks -- see :meth:`~.elementwise.ffill` for the exact
+        mechanism.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to fill along.
+        limit : int or None, optional
+            As in ``xarray.DataArray.ffill``.
+
+        Returns
+        -------
+        MPIXarray
+            The forward-filled object, same shape and distribution as
+            ``self``.
+        """
+        return finalize(
+            ffill(self._runtime, self._prepare(), dim, limit), self._runtime
+        )
+
+    def bfill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
+        """Backward-fill along ``dim``, correct when ``dim`` is distributed.
+
+        Mirror image of :meth:`ffill`; see
+        :meth:`~.elementwise.bfill` for the exact mechanism.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to fill along.
+        limit : int or None, optional
+            As in ``xarray.DataArray.bfill``.
+
+        Returns
+        -------
+        MPIXarray
+            The backward-filled object, same shape and distribution as
+            ``self``.
+        """
+        return finalize(
+            bfill(self._runtime, self._prepare(), dim, limit), self._runtime
+        )
+
+    def interp(
+        self, dim: Hashable, new_coord: Any, method: str = "linear", **kwargs: Any
+    ) -> MPIXarray:
+        """Interpolate onto ``new_coord`` along ``dim``, correct when distributed.
+
+        Unlike :meth:`shift`/:meth:`rolling`, a target point's source
+        dependency is not bounded to a fixed-width halo, so this
+        reconstructs the full source along ``dim`` via an
+        ``Allgather`` and interpolates locally -- see
+        :meth:`~.elementwise.interp` for the full rationale.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to interpolate along.
+        new_coord : array-like
+            This rank's own local slice of the new target coordinate.
+        method : str, optional
+            As in ``xarray.DataArray.interp``. Default ``"linear"``.
+        **kwargs : Any
+            Forwarded to ``xarray.DataArray.interp``.
+
+        Returns
+        -------
+        MPIXarray
+            Interpolated result, with ``.meta`` recomputed for the new
+            length along ``dim``.
+        """
+        return finalize(
+            interp(self._runtime, self._prepare(), dim, new_coord, method, **kwargs),
+            self._runtime,
         )
 
     def differentiate(

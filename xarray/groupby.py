@@ -197,7 +197,21 @@ def _group_combine(
             replica_count=replica_count,
         )
         with np.errstate(divide="ignore", invalid="ignore"):
-            return (global_sum / global_count).where(global_count > 0)
+            result = global_sum / global_count
+        # A groupby-mean's result is always array-shaped (one value per
+        # group -- reducing to a single group still leaves a size-1
+        # group axis, never a bare scalar), so it follows the same
+        # dtype rule confirmed for an ordinary *partial* (array-result)
+        # xarray reduction, not a full/scalar one: a non-floating dtype
+        # promotes to float64 (the plain division above already does
+        # this correctly on its own), but xarray keeps a floating or
+        # complex dtype exactly as it was, which the plain division
+        # above does NOT (float32/int64 division always promotes to
+        # float64 -- confirmed directly against native
+        # DataArray.groupby(...).mean(), which stays float32).
+        if variable.dtype.kind in "fc" and result.dtype != variable.dtype:
+            result = result.astype(variable.dtype, keep_attrs=True)
+        return result.where(global_count > 0)
 
     if op in ("sum", "count"):
         local = _group_reduce_local(runtime, variable, dim, group, op=op, skipna=skipna)

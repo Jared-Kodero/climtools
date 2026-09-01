@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral
 from os import PathLike
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from mpi4py.MPI import Intracomm
@@ -15,6 +15,9 @@ from mpi4py.MPI import Intracomm
 import xarray as xr
 
 from ..mpi.runtime import MPIRuntime
+
+if TYPE_CHECKING:
+    from .core import MPIXarray
 from .cartesian import compute_layout
 from .chunks import (
     compute_save_chunks,
@@ -24,7 +27,6 @@ from .chunks import (
     get_effective_chunk_size,
     prune_chunk_info,
 )
-from .core import MPIXarray
 from .meta import (
     choose_partition_dim,
     delayed_local,
@@ -1007,6 +1009,8 @@ def mpi_open_dataset(
             log_partitions,
             **kwargs,
         )
+
+    from .core import MPIXarray
 
     return MPIXarray(data, mpi_runtime)
 

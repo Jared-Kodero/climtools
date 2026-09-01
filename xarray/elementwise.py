@@ -219,6 +219,281 @@ def _cumsum_scan(
     return local_cumsum + exclusive_prefix
 
 
+def ffill(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    limit: int | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Forward-fill along ``dim``, correct when ``dim`` is distributed.
+
+    Two genuinely different strategies, chosen by whether ``limit``
+    bounds the dependency (per the routing rules in the module's
+    top-level design notes: bounded gets a halo, unbounded gets a
+    scan):
+
+    ``limit`` given: the fill can only ever reach back ``limit``
+    positions, so this borrows exactly ``limit`` elements from the
+    left neighbor via :func:`~.arithmetic.halo_exchange` -- the same
+    single-hop, fixed-width structure as :func:`shift` -- fills
+    locally, and trims the borrowed prefix back off.
+
+    ``limit=None`` (default, matching ``xarray``): the last valid
+    value can originate arbitrarily many ranks back (an entire empty
+    rank must still receive it), which no fixed-width halo can bound.
+    Uses the same gather-on-root/scatter-back exclusive-prefix scan
+    :func:`cumsum` already uses for its own unbounded cross-rank
+    dependency, with "carry the last value seen so far" in place of
+    "carry the running sum": every rank computes its own local
+    ``ffill`` (fills everything reachable from data it already owns)
+    and reports one small (dim-collapsed) slice -- its own last valid
+    value, or nothing if it has none -- to root; root's sequential
+    scan turns those into each rank's *incoming* carry (the nearest
+    earlier rank's last valid value, skipping over any rank with none
+    at all); every rank then fills whatever its own local ``ffill``
+    could not with that one broadcast-shaped value. A rank with no
+    valid value anywhere before it (including itself) is left with
+    genuine leading NaNs, exactly matching plain ``xarray.ffill`` at
+    the true start of the array.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to fill.
+    dim : Hashable
+        Dimension to fill along.
+    limit : int or None, optional
+        As in ``xarray.DataArray.ffill``. When given and ``dim`` is
+        the partition dimension, must not exceed any rank's own local
+        length along ``dim`` (see ``halo_exchange``'s single-hop
+        limit).
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The forward-filled object, same shape and distribution as the
+        input.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.ffill(dim, limit=limit)
+    if len(meta["dims"]) > 1:
+        raise NotImplementedError(
+            "ffill() cannot yet fill along a partition dimension "
+            + f"({dim!r}) under a multi-dimensional partition "
+            + f"(dims={meta['dims']!r})."
+        )
+
+    if limit is not None:
+        _agree(runtime, ("ffill", str(dim), int(limit)))
+        padded, left_pad, _right_pad = halo_exchange(
+            runtime, value, dim, before=limit, after=0
+        )
+        filled = padded.ffill(dim, limit=limit)
+        local_len = int(value.sizes[dim])
+        trimmed = filled.isel({dim: slice(left_pad, left_pad + local_len)})
+        return reattach_meta(trimmed, meta)
+
+    _agree(runtime, ("ffill", str(dim), None))
+    return reattach_meta(_fill_scan(runtime, value, dim, forward=True), meta)
+
+
+def bfill(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    limit: int | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Backward-fill along ``dim``, correct when ``dim`` is distributed.
+
+    Exact mirror image of :func:`ffill`: bounded ``limit`` borrows
+    from the *right* neighbor instead of the left; unbounded runs the
+    same carry scan in reverse rank order, carrying each rank's own
+    *first* valid value backward instead of its last valid value
+    forward. See :func:`ffill` for the full rationale.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to fill.
+    dim : Hashable
+        Dimension to fill along.
+    limit : int or None, optional
+        As in ``xarray.DataArray.bfill``.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The backward-filled object, same shape and distribution as
+        the input.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.bfill(dim, limit=limit)
+    if len(meta["dims"]) > 1:
+        raise NotImplementedError(
+            "bfill() cannot yet fill along a partition dimension "
+            + f"({dim!r}) under a multi-dimensional partition "
+            + f"(dims={meta['dims']!r})."
+        )
+
+    if limit is not None:
+        _agree(runtime, ("bfill", str(dim), int(limit)))
+        padded, _left_pad, right_pad = halo_exchange(
+            runtime, value, dim, before=0, after=limit
+        )
+        filled = padded.bfill(dim, limit=limit)
+        local_len = int(value.sizes[dim])
+        trimmed = filled.isel({dim: slice(0, local_len)})
+        return reattach_meta(trimmed, meta)
+
+    _agree(runtime, ("bfill", str(dim), None))
+    return reattach_meta(_fill_scan(runtime, value, dim, forward=False), meta)
+
+
+def _fill_scan(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    forward: bool,
+) -> xr.Dataset | xr.DataArray:
+    """Unbounded ffill/bfill core: a gather/scatter last-value-seen scan.
+
+    ``forward=True`` scans ranks 0..size-1 carrying each rank's own
+    last valid value forward (ffill); ``forward=False`` scans ranks
+    size-1..0 carrying each rank's own first valid value backward
+    (bfill). Both are the same "override with whatever was most
+    recently seen" associative scan as :func:`~.ffill`'s docstring
+    describes, just walked in opposite directions.
+    """
+    comm = runtime.comm
+    edge_index = -1 if forward else 0
+
+    def _local() -> tuple[xr.Dataset | xr.DataArray, Any, bool]:
+        local_filled = value.ffill(dim) if forward else value.bfill(dim)
+        edge_slice = local_filled.isel({dim: edge_index}, drop=True)
+        has_valid = bool(edge_slice.notnull().all())
+        return local_filled, edge_slice, has_valid
+
+    local_or_none, error = guarded(_local)
+    runtime.raise_if_error(
+        error,
+        "MPI xarray ffill/bfill",
+        signature=("fill_scan", str(dim), forward),
+    )
+    local_filled, edge_slice, has_valid = local_or_none
+
+    rank_order = range(comm.size) if forward else range(comm.size - 1, -1, -1)
+    gathered = runtime.gather((has_valid, edge_slice), root=0)
+    carries = None
+    if runtime.is_root():
+        carries = [None] * comm.size
+        running = None
+        for r in rank_order:
+            carries[r] = running
+            rank_has_valid, rank_edge = gathered[r]
+            if rank_has_valid:
+                running = rank_edge
+    carry_in = runtime.scatter(carries, root=0)
+
+    if carry_in is None:
+        return local_filled
+    return local_filled.fillna(carry_in)
+
+
+def interp(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    new_coord: Any,
+    method: str = "linear",
+    **kwargs: Any,
+) -> xr.Dataset | xr.DataArray:
+    """Interpolate onto ``new_coord`` along ``dim``, correct when distributed.
+
+    Unlike :func:`rolling_reduce`/:func:`diff`/:func:`shift`, an
+    interpolation target point has no fixed-width dependency on the
+    source data: depending on how ``new_coord`` relates to the
+    original grid, the two source points bracketing a given target
+    point could be owned by any rank, not just an immediate neighbor
+    (the spec's own distinction: interp "may require targeted source
+    points rather than a fixed-width halo"). Building genuine
+    point-to-point targeted delivery for arbitrary target grids is
+    real future work; this instead takes the explicitly-sanctioned
+    fallback for exactly this situation -- "global reconstruction,
+    only when genuinely required" -- but as an ``Allgather`` (every
+    rank ends up with the full source along ``dim``) rather than a
+    gather-to-root: unlike :func:`median`'s reduction (whose *output*
+    is small and identical on every rank, so a single root computes it
+    once and broadcasts), every rank here interpolates onto its own,
+    generally different, slice of ``new_coord`` and so must each end
+    up with a real, independently-usable result -- there is no single
+    small answer to broadcast.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to interpolate.
+    dim : Hashable
+        Dimension to interpolate along.
+    new_coord : array-like
+        This rank's own local slice of the new target coordinate
+        along ``dim`` (not the global target grid -- exactly as this
+        rank's own local ``value`` is its slice of the source, not
+        the global source).
+    method : str, optional
+        As in ``xarray.DataArray.interp``. Default ``"linear"``.
+    **kwargs : Any
+        Forwarded to ``xarray.DataArray.interp``.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Interpolated onto this rank's ``new_coord``, with ``.meta``
+        recomputed for the new length along ``dim`` (an allgather of
+        each rank's own new local length, the same mechanism
+        :func:`diff`/:func:`~.arithmetic.coarsen_reduce` use for their
+        own length-changing case).
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.interp({dim: new_coord}, method=method, **kwargs)
+    if len(meta["dims"]) > 1:
+        raise NotImplementedError(
+            "interp() cannot yet interpolate along a partition dimension "
+            + f"({dim!r}) under a multi-dimensional partition "
+            + f"(dims={meta['dims']!r})."
+        )
+
+    _agree(runtime, ("interp", str(dim), method))
+
+    comm = _dim_comm(runtime, meta, dim)
+    pieces = comm.allgather(value)
+    full = (
+        xr.concat(pieces, dim=dim, data_vars="minimal")
+        if isinstance(value, xr.Dataset)
+        else xr.concat(pieces, dim=dim)
+    )
+    result = full.interp({dim: new_coord}, method=method, **kwargs)
+
+    counts = comm.allgather(int(result.sizes[dim]))
+    new_global_size = sum(counts)
+    new_start = sum(counts[: comm.rank])
+    new_stop = new_start + counts[comm.rank]
+    new_chunk_info = prune_chunk_info(meta["chunk_info"], result)
+    set_mpi_meta(
+        result,
+        dim=dim,
+        global_size=new_global_size,
+        start=new_start,
+        stop=new_stop,
+        chunk_info=new_chunk_info,
+        cart=meta.get("cart"),
+    )
+    return result
+
+
 def median(
     runtime,
     value: xr.Dataset | xr.DataArray,
@@ -453,6 +728,82 @@ def shift(
     )
     kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
     shifted = padded.shift({dim: periods}, **kwargs)
+
+    local_len = int(value.sizes[dim])
+    trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
+    return reattach_meta(trimmed, meta)
+
+
+def roll(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    shift: int,
+) -> xr.Dataset | xr.DataArray:
+    """Circularly shift ``value`` by ``shift`` along ``dim``, wrapping at the edge.
+
+    Same shift-amount and sign convention as :func:`shift` (and as
+    ``xarray.DataArray.roll``: a positive ``shift`` moves each value
+    toward higher indices) and built the same way -- borrow
+    ``|shift|`` boundary elements from the neighbor via
+    :func:`~.arithmetic.halo_exchange` and shift the padded local
+    array -- but with ``periodic=True``, so the rank at the true
+    global edge borrows from the rank at the *opposite* edge instead
+    of getting no neighbor at all. That is the one and only
+    difference from ``shift()``: once every rank's padding is real
+    data (never "missing"), a plain windowed ``.shift()`` on the
+    padded array already reproduces circular-roll semantics exactly,
+    with no fill value anywhere -- mirroring FMS/``mpp_domains``,
+    where periodicity is likewise just a boundary condition on a
+    *bounded* halo exchange's neighbor lookup, not a distinct
+    general-purpose data-movement primitive. Coordinates are not
+    rolled (``roll_coords=False`` in ``xarray`` terms): under MPI,
+    "which rank owns which global index" is fixed distribution
+    metadata, not something a data-only circular shift should
+    perturb.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to roll.
+    dim : Hashable
+        Dimension to roll along.
+    shift : int
+        Number of positions to roll by; positive rolls toward higher
+        indices. Its magnitude must not exceed any rank's local
+        length along ``dim`` when ``dim`` is the partition dimension
+        (see ``halo_exchange``'s own single-hop limit) -- repartition
+        to fewer, larger chunks first for a roll wider than that.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The rolled object, same shape and distribution as the input.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.roll({dim: shift}, roll_coords=False)
+
+    global_size = int(meta["global_sizes"][dim])
+    if global_size > 0:
+        # Normalize to the smallest-magnitude equivalent shift, not
+        # just into [0, global_size): e.g. shift=-2 on a length-8 array
+        # is mathematically identical to shift=6, but would request an
+        # unnecessarily wide (6-element) halo instead of the genuinely
+        # sufficient 2-element one -- exactly the "don't exchange more
+        # than the operation actually needs" rule applied to the wrap
+        # case too.
+        shift = shift % global_size
+        if shift > global_size // 2:
+            shift -= global_size
+    if shift == 0:
+        return value
+
+    before, after = (shift, 0) if shift > 0 else (0, -shift)
+    padded, left_pad, _right_pad = halo_exchange(
+        runtime, value, dim, before=before, after=after, periodic=True
+    )
+    shifted = padded.shift({dim: shift})
 
     local_len = int(value.sizes[dim])
     trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
