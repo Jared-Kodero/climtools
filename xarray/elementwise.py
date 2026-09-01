@@ -210,7 +210,14 @@ def _cumsum_scan(
     prefixes = None
     if runtime.is_root():
         prefixes = []
-        running = totals[0] * 0
+        # The additive identity must be a genuine zero, not `totals[0] * 0`:
+        # if any rank's local total contains +-inf (routine in real
+        # geophysical fields -- e.g. log of a non-positive value), `inf * 0`
+        # is NaN, and that single NaN becomes every rank's exclusive prefix
+        # at that position (each `prefixes[i]` derives from this same
+        # `running` seed), silently turning a correct +-inf cumsum result
+        # into NaN everywhere, not just on the rank that produced the inf.
+        running = xr.zeros_like(totals[0])
         for total in totals:
             prefixes.append(running)
             running = running + total
