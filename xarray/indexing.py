@@ -418,19 +418,60 @@ def sel_scalar(
             local_coord = np.asarray(value[dim].values)
         else:
             local_coord = np.arange(int(meta["starts"][dim]), int(meta["stops"][dim]))
-        coord_parts = dim_comm.allgather(local_coord)
-        global_coord = np.concatenate(coord_parts)
-        locator = xr.DataArray(
-            np.arange(global_coord.size, dtype=np.int64),
-            dims=(dim,),
-            coords={dim: global_coord},
-        )
-        selected = locator.sel({dim: label}, method=method, tolerance=tolerance)
-        if selected.ndim != 0:
+        local_start = int(meta["starts"][dim])
+
+        # Resolve the match using only this rank's own local coordinate
+        # slice -- no other rank's coordinate values are needed to know
+        # how good this rank's own candidate is, so this is entirely
+        # rank-local (zero communication). "nearest" ranks candidates by
+        # distance to `label`; "pad"/"ffill" and "backfill"/"bfill" rank
+        # by the matched coordinate value itself, since xarray's own
+        # per-rank `.sel(method=...)` already finds this rank's tightest
+        # local bound (largest local coord <= label, or smallest local
+        # coord >= label respectively) -- the true global bound is then
+        # just the max (ffill) or min (bfill) of those local bounds
+        # across ranks, exactly like a bounded reduction rather than a
+        # full-object allgather.
+        if method in ("nearest",):
+            rank_fn = min
+        elif method in ("pad", "ffill"):
+            rank_fn = max
+        elif method in ("backfill", "bfill"):
+            rank_fn = min
+        else:
             raise NotImplementedError(
-                "Inexact distributed sel requires a unique one-dimensional index."
+                f"Distributed inexact sel does not support method={method!r}."
             )
-        global_index = int(selected.item())
+
+        candidate: tuple[int, Any] | None = None
+        if local_coord.size:
+            locator = xr.DataArray(
+                np.arange(local_coord.size, dtype=np.int64),
+                dims=(dim,),
+                coords={dim: local_coord},
+            )
+            try:
+                selected = locator.sel({dim: label}, method=method, tolerance=tolerance)
+            except (KeyError, IndexError):
+                selected = None
+            if selected is not None:
+                if selected.ndim != 0:
+                    raise NotImplementedError(
+                        "Inexact distributed sel requires a unique one-dimensional index."
+                    )
+                local_index = int(selected.item())
+                matched_coord = local_coord[local_index]
+                key = abs(matched_coord - label) if method == "nearest" else matched_coord
+                candidate = (local_start + local_index, key)
+
+        # A small, fixed-size (one tuple per rank) collective -- not the
+        # coordinate data itself -- is all that is genuinely required to
+        # pick the global winner among each rank's already-resolved local
+        # candidate.
+        candidates = [c for c in dim_comm.allgather(candidate) if c is not None]
+        if not candidates:
+            raise KeyError(f"No match for label {label!r} on {dim!r}.")
+        global_index = rank_fn(candidates, key=lambda pair: pair[1])[0]
 
         bounds = dim_comm.allgather((int(meta["starts"][dim]), int(meta["stops"][dim])))
         owner = next(
