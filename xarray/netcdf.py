@@ -22,7 +22,7 @@ from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
-from .meta import format_bytes, get_mpi_meta, strip_export_attrs
+from .meta import get_mpi_meta, strip_export_attrs
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -949,15 +949,7 @@ def to_netcdf_parallel(
                 "unlimited_dim": unlimited,
                 "variables": variables,
             }
-            total_bytes = sum(variable.nbytes for variable in ds.variables.values())
-            mpi_runtime.log(
-                "xgeo.to_netcdf (rank-0 source): rank 0 holds "
-                + f"{format_bytes(total_bytes)} before scatter, "
-                + f"~{format_bytes(total_bytes / mpi_runtime.comm.size)}/rank after. "
-                + "An already-distributed input (open_dataset/"
-                + "repartition) avoids this rank-0 peak entirely -- see the "
-                + "README's Parallel NetCDF output section.",
-            )
+
         except BaseException as exc:
             error = exc
 
@@ -1220,8 +1212,8 @@ def dataset_to_netcdf(
         stop = min(start + batch_size, n_items)
 
         append(
-            file,
             data.isel({dim0: slice(start, stop)}),
+            file,
             dim=dim0,
             format=format,
             shuffle=shuffle,
@@ -1294,8 +1286,8 @@ def dataarray_to_netcdf(
 
 
 def append(
-    file: str | PathLike[str],
     data: xr.Dataset,
+    file: str | PathLike[str],
     dim: str = "time",
     mode: Literal["a", "r+"] = "r+",
     format: str = "NETCDF4",
@@ -1315,12 +1307,12 @@ def append(
 
     Parameters
     ----------
-    file : str or os.PathLike
-        NetCDF4 file with read/write access. ``dim`` must be the unlimited
-        dimension.
     data : xr.Dataset
         Data to append. All variables containing ``dim`` must share the same
         length along ``dim``.
+    file : str or os.PathLike
+        NetCDF4 file with read/write access. ``dim`` must be the unlimited
+        dimension.
     dim : str, optional
         Unlimited dimension to append along. Default "time".
     mode : {"a", "r+"}, optional

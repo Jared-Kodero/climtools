@@ -16,7 +16,7 @@ OUTPUT_DIR = (Path.home() / "jobtmp" / "climtools_mock_dataset_test").resolve()
 
 name = uuid.uuid4().hex if mpi.comm.rank == 0 else None
 name = mpi.comm.bcast(name, root=0)
-path = OUTPUT_DIR / f"{name}.nc"
+_path = OUTPUT_DIR / f"{name}.nc"
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +117,14 @@ def build_dataset(
 
 
 def create_dataset(
-    path: Path,
-    n_time: int = 48,
-    resolution_deg: float = 10.0,
-    plev_step: float = -200.0,
+    path: Path | None = None,
+    n_time: int = 12,
+    resolution_deg: float = 1,
+    plev_step: float = -100,
 ) -> Path:
+
+    if not path:
+        path = _path
 
     if mpi.comm.rank == 0:
         if path.parent.exists():
@@ -131,3 +134,6 @@ def create_dataset(
         # we need to broadcaste the constanst
         build_dataset(path, n_time, resolution_deg, plev_step)
     mpi.comm.barrier()
+
+
+__all__ = ["create_dataset"]

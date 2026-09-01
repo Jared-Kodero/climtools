@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import xarray as xr
 
 from ..core import xgeo
+from ..core.utils import exclude_key
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -14,7 +15,9 @@ if TYPE_CHECKING:
     import numpy as np
     from IPython.display import DisplayHandle
     from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+    from mpi4py.MPI import Intracomm
 
+    from ..mpi.runtime import MPIRuntime
     from ..viz.plotting import GeoPlot
 
 
@@ -64,12 +67,8 @@ class GeoBase:
             The object on the target grid.
         """
 
-        return xgeo.remap(
-            self._obj,
-            grid_out,
-            method=method,
-            parallel=parallel,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.remap(self._obj, **kwargs)
 
     def mask(
         self,
@@ -137,13 +136,8 @@ class GeoBase:
             If ``mask`` cannot be resolved to an xarray.DataArray.
 
         """
-        return xgeo.mask(
-            self._obj,
-            mask=mask,
-            data_var=data_var,
-            valid_value=valid_value,
-            parallel=parallel,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.mask(self._obj, **kwargs)
 
     # -- coordinate helpers ----------------------------------------------
     def add_local_solar_time(
@@ -246,18 +240,8 @@ class GeoBase:
         drop
             Drop coordinate locations outside the transect.
         """
-        return xgeo.sel_transect(
-            self._obj,
-            x=x,
-            y=y,
-            orientation=orientation,
-            width=width,
-            xdim=xdim,
-            ydim=ydim,
-            geometry=geometry,
-            snap=snap,
-            drop=drop,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.sel_transect(self._obj, **kwargs)
 
     # -- NetCDF output -----------------------------------------------------
     def append(
@@ -296,20 +280,13 @@ class GeoBase:
         -------
         None
         """
-        return xgeo.append(
-            file=Path(file),
-            data=self._obj,
-            dim=dim,
-            mode=mode,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.append(self._obj, **kwargs)
 
     def to_netcdf(
         self,
         file: str | Path,
+        mpi_runtime: MPIRuntime | Intracomm = None,
         unlimited_dim: str | Iterable[str] | None = None,
         partition_dim: str | None = None,
         *,
@@ -341,6 +318,8 @@ class GeoBase:
         ----------
         file : str or pathlib.Path
             Output path. An existing file is replaced.
+        mpi_runtime : MPIRuntime or Intracomm, optional
+            MPI runtime or communicator.
         unlimited_dim : str or iterable of str, optional
             Dimension(s) made unlimited in the NetCDF schema.
         partition_dim : str, optional
@@ -377,24 +356,9 @@ class GeoBase:
         -------
         None
         """
-        return xgeo.to_netcdf(
-            self._obj,
-            file,
-            unlimited_dim=unlimited_dim,
-            partition_dim=partition_dim,
-            parallel=parallel,
-            batch_size=batch_size,
-            format=format,
-            shuffle=shuffle,
-            zlib=zlib,
-            complevel=complevel,
-            show_progress=show_progress,
-            stdout=stdout,
-            chunks=chunks,
-            hints=hints,
-            nofill=nofill,
-            allow_serial=allow_serial,
-        )
+
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.to_netcdf(self._obj, **kwargs)
 
 
 class PlotAccessor:
@@ -598,13 +562,12 @@ class PlotAccessor:
         Input coordinates are plotted with a ``cartopy.crs.PlateCarree()`` transform.
         The display projection is controlled by ``projection``.
         """
-        kwargs0 = locals()
-        kwargs1 = kwargs0.pop("kwargs")
-        _ = kwargs0.pop("self")
 
         from ..viz import plotting
 
-        return plotting.geo(self._obj, **kwargs0, **kwargs1)
+        opts = exclude_key("self", dict(locals()))
+        kwargs = opts.pop("kwargs")
+        return plotting.geo(self._obj, **opts, **kwargs)
 
     def animate(
         self,
@@ -803,13 +766,12 @@ class PlotAccessor:
         because multiple data slices and figures may be active concurrently.
         """
 
-        kwargs0 = locals()
-        kwargs1 = kwargs0.pop("kwargs")
-        _ = kwargs0.pop("self")
-
         from ..viz import plotting
 
-        return plotting.animate(self._obj, **kwargs0, **kwargs1)
+        opts = exclude_key("self", dict(locals()))
+        kwargs = opts.pop("kwargs")
+
+        return plotting.animate(self._obj, **opts, **kwargs)
 
     def quiver(
         self,
@@ -857,19 +819,10 @@ class PlotAccessor:
         """
         from ..viz import plotting
 
-        return plotting.quiver(
-            self._obj,
-            v,
-            x=x,
-            y=y,
-            ax=ax,
-            subsample=subsample,
-            add_key=add_key,
-            subplots=subplots,
-            key_magnitude=key_magnitude,
-            key_units=key_units,
-            **kwargs,
-        )
+        opts = exclude_key("self", dict(locals()))
+        kwargs = opts.pop("kwargs")
+
+        return plotting.quiver(self._obj, **opts, **kwargs)
 
     def significance(
         self,
@@ -917,19 +870,9 @@ class PlotAccessor:
         """
         from ..viz import plotting
 
-        return plotting.significance(
-            self._obj,
-            x=x,
-            y=y,
-            ax=ax,
-            level=level,
-            color=color,
-            alpha=alpha,
-            marker=marker,
-            edgecolors=edgecolors,
-            subsample=subsample,
-            size=size,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+
+        return plotting.plot_significance(self._obj, **kwargs)
 
 
 class CalcAccessor:
@@ -976,14 +919,9 @@ class CalcAccessor:
         """
         from ..core import stats as calc
 
-        return calc.corr(
-            self._obj,
-            other,
-            corr_type=corr_type,
-            alternative=alternative,
-            dim=dim,
-            dask_scheduler=dask_scheduler,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        kwargs["y"] = kwargs.pop("other")
+        return calc.corr(self._obj, kwargs)
 
     def pvalues(self, other: xr.DataArray, dim: str = "time") -> xr.DataArray:
         """Test the difference in mean between the bound array and ``other``.
@@ -1037,13 +975,8 @@ class CalcAccessor:
         """
         from ..core import stats as calc
 
-        return calc.trends(
-            self._obj,
-            dim=dim,
-            scale=scale,
-            dask_scheduler=dask_scheduler,
-            polyfit=polyfit,
-        )
+        kwargs = exclude_key("self", dict(locals()))
+        return calc.trends(self._obj, **kwargs)
 
 
 class PreprocessAccessor:

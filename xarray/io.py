@@ -18,6 +18,7 @@ from ..mpi.runtime import MPIRuntime
 
 if TYPE_CHECKING:
     from .core import MPIXarray
+
 from .cartesian import compute_layout
 from .chunks import (
     compute_save_chunks,
@@ -1237,24 +1238,26 @@ def to_netcdf(
         Object to write.
     file : str or os.PathLike
         Output path.
+    mpi_runtime : MPIRuntime or Intracomm, optional
+        MPI runtime or communicator.
     unlimited_dim : str or iterable of str, optional
         Dimension or dimensions made unlimited.
     partition_dim : str, optional
         MPI partition dimension. For an already distributed object this must
         agree with ``mpi_meta["dim"]``.
-    parallel : bool, default False
+    parallel : bool, default: False
         Use MPI-parallel NetCDF-4 output.
-    batch_size : int, default 24
+    batch_size : int, default: 24
         Number of slices written per serial append.
-    format : str, default "NETCDF4"
+    format : str, default: "NETCDF4"
         NetCDF format for serial output.
-    shuffle : bool, default True
+    shuffle : bool, default: True
         Apply the HDF5 shuffle filter.
-    zlib : bool, default True
+    zlib : bool, default: True
         Apply zlib compression.
-    complevel : int, default 4
+    complevel : int, default: 4
         Compression level from 0 through 9.
-    show_progress : bool, default True
+    show_progress : bool, default: True
         Display serial write progress.
     stdout : Any, optional
         Serial progress output stream.
@@ -1262,26 +1265,27 @@ def to_netcdf(
         Explicit NetCDF variable chunk shapes.
     hints : str, optional
         Semicolon-separated MPI-IO hints in ``key=value`` form.
-    nofill : bool, default True
+    nofill : bool, default: True
         Disable NetCDF pre-filling during parallel initialization.
-    allow_serial : bool, default False
+    allow_serial : bool, default: False
         Permit the parallel writer with one MPI rank.
 
     Returns
     -------
     None
     """
+
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         raise TypeError("data must be an xarray.Dataset or xarray.DataArray")
 
     target_path = Path(file)
 
-    if not mpi_runtime:
-        from ..mpi.runtime import mpi
-
-        mpi_runtime = mpi
-
     if parallel:
+        if not mpi_runtime:
+            from ..mpi.runtime import mpi
+
+            mpi_runtime = mpi
+
         mpi_meta = get_mpi_meta(data)
         distributed = mpi_meta is not None
 

@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         LockedLogger,
         LockFile,
         RedirectStreams,
+        exclude_key,
         locked_print,
     )
     from .mpi.runtime import mpi
@@ -71,6 +72,7 @@ __all__ = [
     "SerialProgressBar",
     "cdo",
     "cmaps",
+    "exclude_key",
     "locked_print",
     "mpi",
     "n_cpus",

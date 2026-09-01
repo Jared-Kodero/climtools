@@ -247,8 +247,6 @@ class MPIRuntime(MPIDiagnostics):
     """User-facing MPI runtime namespace.
 
     Owns one intracommunicator, exposed directly through :attr:`comm`.
-    MPI-aware xarray operations, including distributed reductions, live
-    under :attr:`xarray`.
 
     Parameters
     ----------
@@ -487,13 +485,13 @@ class MPIRuntime(MPIDiagnostics):
 
     def scatterv(
         self,
-        send: "np.ndarray | None",
-        counts: "Sequence[int] | np.ndarray",
-        local_shape: "Sequence[int]",
-        dtype: "npt.DTypeLike",
+        send: np.ndarray | None,
+        counts: Sequence[int] | np.ndarray,
+        local_shape: Sequence[int],
+        dtype: npt.DTypeLike,
         *,
         root: int = 0,
-    ) -> "np.ndarray":
+    ) -> np.ndarray:
         """Scatter an array's leading axis with a variable per-rank count.
 
         Zero-copy counterpart to :meth:`scatter`: rather than one Python
@@ -543,7 +541,9 @@ class MPIRuntime(MPIDiagnostics):
 
         dtype = np.dtype(dtype)
         counts = np.asarray(counts, dtype=np.int64)
-        row_elems = int(np.prod(local_shape[1:], dtype=np.int64)) if len(local_shape) > 1 else 1
+        row_elems = (
+            int(np.prod(local_shape[1:], dtype=np.int64)) if len(local_shape) > 1 else 1
+        )
         elem_counts = counts * row_elems
         displs = np.zeros(len(counts), dtype=np.int64)
         np.cumsum(elem_counts[:-1], out=displs[1:])

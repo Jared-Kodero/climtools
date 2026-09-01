@@ -49,10 +49,14 @@ if is_mpi:
     home = Path.home()
 
     base = Path(
-        os.environ.get("SCRATCH")
-        or os.environ.get("WORK")
+        os.environ.get("SCRATCH", None)
+        or os.environ.get("WORK", None)
+        or os.environ.get("SLURM_JOB_TMPDIR")
+        or os.environ.get("PBS_JOBTMP")
+        or os.environ.get("TMPDIR")
         or (home / "scratch" if (home / "scratch").exists() else None)
         or (home / "jobtmp" if (home / "jobtmp").exists() else None)
+        or (home / "work" if (home / "work").exists() else None)
         or home
     )
     tmp = base / ".tmp" / ".xgeo" / tmp_id
@@ -152,6 +156,14 @@ def get_fsig(func: Callable) -> dict:
         )
 
     return params
+
+
+def exclude_key(name: str | list[str], data: dict) -> dict:
+    """Exclude keys in-place and return the dictionary without copying."""
+    keys = {name} if isinstance(name, str) else set(name)
+    for k in keys:
+        data.pop(k, None)
+    return data
 
 
 class AttrDict(dict):
