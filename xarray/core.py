@@ -157,7 +157,7 @@ dataset_binary_op = xr.Dataset._binary_op
 
 
 class MPIXarray:
-    """Wrap rank-local xarray data with MPI distribution state.
+    """MPI aware xarray Dataset/DataArray object
 
     Parameters
     ----------

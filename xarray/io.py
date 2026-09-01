@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from mpi4py.MPI import Intracomm
@@ -24,6 +24,7 @@ from .chunks import (
     get_effective_chunk_size,
     prune_chunk_info,
 )
+from .core import MPIXarray
 from .meta import (
     choose_partition_dim,
     delayed_local,
@@ -39,110 +40,21 @@ from .meta import (
 )
 from .netcdf import append, to_netcdf_parallel, to_netcdf_serial
 
-if TYPE_CHECKING:
-    # `.core` imports several functions from this module (e.g. `repartition`,
-    # `attach_save_chunks`), so importing `MPIXarray` and `unwrap` back from
-    # `.core` at module scope would be circular. Typing positions are safe
-    # (evaluated only under `from __future__ import annotations`); call sites
-    # that need them at runtime import locally.
-    from .core import MPIXarray
-
 __all__ = ["append", "dataset_is_empty", "empty_dataset", "to_netcdf"]
 
 _NO_DATA_ATTR = "_climtools_no_data"
 
 
-def open_dataset(
+def _open_dataset_1d(
     runtime,
     filename_or_obj: Any,
-    *,
-    partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
-    chunks: Any = None,
-    log_partitions: bool = True,
+    partition_dim: Hashable | Literal["auto"],
+    open_fn: Callable,
+    chunks: Any,
+    log_partitions: bool,
     **kwargs: Any,
 ) -> xr.Dataset:
-    """Open a Dataset lazily and distribute it across MPI ranks.
-
-    Parameters
-    ----------
-    filename_or_obj : str, path-like, file-like, or list of these
-        Input accepted by :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset`.
-        Strings containing a wildcard ("*") or sequences (e.g., list, tuple) will
-        automatically trigger multi-file loading.
-    partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Dimension(s) to distribute. ``"auto"`` selects the longest
-        dimension, which is the choice that leaves the fewest ranks
-        idle (unchanged, single-dimension only -- ``"auto"`` does not
-        extend to choosing more than one dimension automatically, as
-        in :meth:`partition`). A single dimension, given directly
-        (``"lat"``) or as a length-one sequence (``("lat",)``), takes
-        the same one-dimensional path either way. A sequence of two
-        or more dimensions (e.g. ``("lat", "lon")``) lays ranks out
-        on an MPI Cartesian process grid and opens every rank's own
-        slice along every listed dimension simultaneously, exactly
-        like :meth:`partition`'s own multi-dimensional path -- see
-        :mod:`.cartesian`. Selection is deterministic and identical
-        on every rank.
-    chunks : int, dict, "auto" or None, optional
-        Passed unchanged to xarray. ``None`` keeps single-file reads
-        backend-lazy without Dask; explicit chunking enables Dask
-        according to xarray semantics.
-    log_partitions : bool, optional
-        Print one aligned table showing which global interval each rank
-        received. Default is True.
-    engine : str, optional
-        Engine to use for reading files. Options include 'netcdf4', 'h5netcdf',
-        'scipy', 'cfgrib', 'zarr', etc. Passed via ``**kwargs``.
-    concat_dim : str, DataArray, Index or list thereof, optional
-        (Multi-file only) Dimension(s) over which to concatenate datasets. Passed
-        via ``**kwargs``.
-    combine : {"by_coords", "nested"}, optional
-        (Multi-file only) Whether to combine datasets by matching coordinates or
-        by their nested structure. Passed via ``**kwargs``.
-    preprocess : callable, optional
-        (Multi-file only) If provided, call this function on each dataset prior to
-        concatenation. Passed via ``**kwargs``.
-    parallel : bool, optional
-        (Multi-file only) If True, the open and preprocess steps will be performed
-        in parallel using ``dask.delayed``. Passed via ``**kwargs``.
-    decode_cf : bool, optional
-        Whether to decode these variables, assuming they were saved according to
-        CF conventions (e.g., ``mask_and_scale``, ``decode_times``). Passed via ``**kwargs``.
-    **kwargs : Any
-        Any additional standard arguments passed unchanged to
-        :func:`xarray.open_dataset` or :func:`xarray.open_mfdataset` (e.g.,
-        ``decode_times``, ``drop_variables``, ``compat``, ``data_vars``).
-
-    Returns
-    -------
-    xarray.Dataset
-        Lazy rank-local Dataset carrying ``mpi_meta``.
-    """
-
-    xr.set_options(keep_attrs=True)
-
-    use_mfdataset = (
-        isinstance(filename_or_obj, str) and "*" in filename_or_obj
-    ) or isinstance(filename_or_obj, (list, tuple))
-
-    open_dataset: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
-
-    requested_dims = _as_partition_dims(partition_dim)
-    if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
-        return _open_dataset_nd(
-            runtime,
-            filename_or_obj,
-            requested_dims,
-            open_dataset,
-            chunks,
-            log_partitions,
-            **kwargs,
-        )
-    # Single dimension (given directly, as a length-one sequence, or
-    # "auto") -- exactly the original, unchanged one-dimensional path.
-    partition_dim = (
-        requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
-    )
+    """Open and partition a Dataset along one dimension."""
     automatic = partition_dim == "auto"
 
     # Build the metadata plan on rank 0.
@@ -150,7 +62,7 @@ def open_dataset(
     error: BaseException | None = None
     if runtime.is_root():
         try:
-            with open_dataset(filename_or_obj, chunks=None, **kwargs) as metadata:
+            with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
                 if automatic:
                     partition_dim = choose_partition_dim(
                         metadata.sizes,
@@ -213,7 +125,7 @@ def open_dataset(
     runtime.comm.Barrier()
 
     # Open this rank's lazy slice.
-    data: xr.Dataset = open_dataset(filename_or_obj, chunks=chunks, **kwargs)
+    data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
     data = data.isel({partition_dim: slice(start, stop)})
 
     set_mpi_meta(
@@ -238,7 +150,7 @@ def open_dataset(
     return data
 
 
-def _open_dataset_nd(
+def _open_dataset_cartesian(
     runtime,
     filename_or_obj: Any,
     dims: tuple[Hashable, ...],
@@ -249,8 +161,8 @@ def _open_dataset_nd(
 ) -> xr.Dataset:
     """Open a Dataset lazily on an MPI Cartesian process grid.
 
-    The multi-dimensional counterpart of :meth:`open_dataset`'s
-    single-dimension path above, mirroring :meth:`partition`'s own
+    The multi-dimensional counterpart of :func:`_open_dataset_1d`, mirroring
+    :meth:`partition`'s own
     multi-dimensional path (:meth:`_partition_pieces_nd`) but for a
     lazy on-disk open rather than an in-memory root-owned object:
     every rank opens ``filename_or_obj`` itself and computes its own
@@ -266,17 +178,17 @@ def _open_dataset_nd(
     Parameters
     ----------
     filename_or_obj : str, path-like, file-like, or list of these
-        As in :meth:`open_dataset`.
+        As in :func:`mpi_open_dataset`.
     dims : tuple of Hashable
         Two or more partition dimensions, already validated non-empty
         by :meth:`_as_partition_dims`.
     open_fn : callable
         ``xarray.open_dataset`` or ``xarray.open_mfdataset``, chosen
-        by :meth:`open_dataset` from ``filename_or_obj``'s shape.
+        by :func:`mpi_open_dataset` from ``filename_or_obj``'s shape.
     chunks : Any
-        As in :meth:`open_dataset`.
+        As in :func:`mpi_open_dataset`.
     log_partitions : bool
-        As in :meth:`open_dataset`.
+        As in :func:`mpi_open_dataset`.
     **kwargs : Any
         Forwarded to ``open_fn``.
 
@@ -1022,7 +934,7 @@ def attach_save_chunks(
 
 
 def mpi_open_dataset(
-    filename_or_obj: Any,
+    filename: Path | str | PathLike,
     mpi_runtime: MPIRuntime | Intracomm,
     *,
     partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
@@ -1060,20 +972,42 @@ def mpi_open_dataset(
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
     """
-    from ..mpi.runtime import MPIRuntime
-    from .core import MPIXarray
 
     if not isinstance(mpi_runtime, MPIRuntime):
         mpi_runtime = MPIRuntime(mpi_runtime)
 
-    data = open_dataset(
-        mpi_runtime,
-        filename_or_obj,
-        partition_dim=partition_dim,
-        chunks=chunks,
-        log_partitions=log_partitions,
-        **kwargs,
+    xr.set_options(keep_attrs=True)
+
+    use_mfdataset = (isinstance(filename, str) and "*" in filename) or isinstance(
+        filename, (list, tuple)
     )
+    open_fn: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
+
+    requested_dims = _as_partition_dims(partition_dim)
+    if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
+        data = _open_dataset_cartesian(
+            mpi_runtime,
+            filename,
+            requested_dims,
+            open_fn,
+            chunks,
+            log_partitions,
+            **kwargs,
+        )
+    else:
+        resolved_dim = (
+            requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
+        )
+        data = _open_dataset_1d(
+            mpi_runtime,
+            filename,
+            resolved_dim,
+            open_fn,
+            chunks,
+            log_partitions,
+            **kwargs,
+        )
+
     return MPIXarray(data, mpi_runtime)
 
 
@@ -1177,7 +1111,6 @@ def mpi_create_dataset(
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
     """
-    from .core import MPIXarray
 
     data = create_dataset(
         runtime,
