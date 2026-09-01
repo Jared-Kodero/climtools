@@ -115,14 +115,21 @@ class MPIGroupBy:
         keep_attrs: bool | None,
         partition_dim: Hashable | Literal["auto"] | None,
     ) -> MPIXarray:
-        return self._parent._dispatch(
-            "groupby_reduce",
-            self._dim,
-            self._labels,
-            op,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        from .core import finalize
+        from .groupby import groupby_reduce
+
+        return finalize(
+            groupby_reduce(
+                self._parent._runtime,
+                self._parent._prepare(),
+                self._dim,
+                self._labels,
+                op,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._parent._runtime,
         )
 
     def sum(
@@ -216,14 +223,21 @@ class MPIResample:
         keep_attrs: bool | None,
         partition_dim: Hashable | Literal["auto"] | None,
     ) -> MPIXarray:
-        return self._parent._dispatch(
-            "resample_reduce",
-            self._dim,
-            self._freq,
-            op,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        from .core import finalize
+        from .groupby import resample_reduce
+
+        return finalize(
+            resample_reduce(
+                self._parent._runtime,
+                self._parent._prepare(),
+                self._dim,
+                self._freq,
+                op,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._parent._runtime,
         )
 
     def sum(

@@ -12,9 +12,34 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
+from .arithmetic import (
+    align,
+    apply,
+    evaluate,
+    halo_exchange,
+    matmul,
+    reindex,
+    rolling_reduce,
+    sortby,
+)
+from .elementwise import cumsum, diff, differentiate, median, shift, where
 from .handles import MPIGroupBy, MPIResample, MPIRolling
-from .io import MPIXarrayOps
+from .indexing import isel, sel
+from .io import attach_save_chunks, repartition
+from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
 from .meta import _assign_meta, get_mpi_meta, strip_mpi_meta
+from .reductions import (
+    all_reduce,
+    any_reduce,
+    first_reduce,
+    last_reduce,
+    max_reduce,
+    mean_reduce,
+    min_reduce,
+    prod_reduce,
+    sum_reduce,
+)
+from .statistics import std, var
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -29,15 +54,16 @@ if TYPE_CHECKING:
 
 #: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
 #: stamps onto ``MPIXarray.data`` (and, for a Dataset, every distributed
-#: variable) after the full ``mpi_meta`` dict is popped into ``.meta``. Not
-#: read by anything in this package -- ``.meta`` (or, inside the engine,
-#: the ``mpi_meta`` dict reattached transiently by :meth:`MPIXarray._prepare`)
-#: is always the source of truth for distribution state. This exists only
-#: so code that sees ``.data`` on its own (e.g. after it is handed to a
-#: plain xarray function, or written to disk) has a cheap, human-inspectable
-#: hint that it was part of an MPI partition, without exposing the full
-#: metadata dict.
-_PARTITIONED_ATTR = "mpi_partitioned"
+#: variable) after the full ``mpi_meta`` dict is popped into ``.meta``.
+#: ``.meta`` (or, inside the engine, the ``mpi_meta`` dict reattached
+#: transiently by :meth:`MPIXarray._prepare`) remains the source of truth
+#: for distribution state; this exists so code that sees ``.data`` on its
+#: own (e.g. after it is handed to a plain xarray function) has a cheap,
+#: human-inspectable hint that it was part of an MPI partition. Defined in
+#: :mod:`.meta` as :data:`~.meta.PARTITIONED_ATTR` (imported here under its
+#: original name) so :func:`~.meta.strip_mpi_meta` and every NetCDF
+#: attribute writer in :mod:`.netcdf` filter the identical key -- see
+#: :func:`~.meta.strip_export_attrs`.
 
 #: Sentinel distinguishing "no fill value given" from a genuine ``other=None``
 #: in :meth:`MPIXarray.where`.
@@ -183,7 +209,6 @@ class MPIXarray:
             self.data = data.data
             self.meta = data.meta
             self._runtime = data._runtime
-            self._ops = data._ops
             return
 
         if meta is None:
@@ -193,11 +218,14 @@ class MPIXarray:
         self.data = data
         self.meta = meta
         self._runtime = runtime
-        self._ops = MPIXarrayOps(runtime)
 
         if self.meta is None and auto_partition:
-            partitioned = self._ops.repartition(
-                self.data, dim, chunk_info=chunk_info, log_partitions=log_partitions
+            partitioned = repartition(
+                runtime,
+                self.data,
+                dim,
+                chunk_info=chunk_info,
+                log_partitions=log_partitions,
             )
             new_meta = get_mpi_meta(partitioned)
             if new_meta is not None:
@@ -542,7 +570,7 @@ class MPIXarray:
 
     def __rmatmul__(self, other: Any) -> Any:
         """Matrix multiplication (``other @ self``); MPI-aware like :meth:`matmul`."""
-        result = self._ops.matmul(unwrap(other), self._prepare())
+        result = matmul(self._runtime, unwrap(other), self._prepare())
         return finalize(result, self._runtime)
 
     def _prepare(self) -> xr.Dataset | xr.DataArray:
@@ -567,26 +595,6 @@ class MPIXarray:
         prepared = self.data.copy(deep=False)
         _assign_meta(prepared, self.meta)
         return prepared
-
-    def _dispatch(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        """Call ``_MPIXarrayOps.<name>`` on ``self.data`` and wrap the result.
-
-        Parameters
-        ----------
-        name : str
-            Method name on :class:`~.ops._MPIXarrayOps` to invoke.
-        *args : Any
-            Positional arguments forwarded to that method.
-        **kwargs : Any
-            Keyword arguments forwarded to that method.
-
-        Returns
-        -------
-        MPIXarray or Any
-            The method's result, wrapped by :func:`finalize`.
-        """
-        method = getattr(self._ops, name)
-        return finalize(method(self._prepare(), *args, **kwargs), self._runtime)
 
     # -- IO --------------------------------------------------------------------
 
@@ -665,7 +673,7 @@ class MPIXarray:
 
         prepared = self._prepare()
         if parallel:
-            prepared = self._ops.attach_save_chunks(prepared)
+            prepared = attach_save_chunks(self._runtime, prepared)
         if self.meta is not None and get_mpi_meta(prepared) is None:
             prepared = prepared.copy(deep=False)
             _assign_meta(prepared, self.meta)
@@ -715,8 +723,15 @@ class MPIXarray:
         MPIXarray
             Rank-local slice with ``.meta`` set.
         """
-        return self._dispatch(
-            "repartition", dim, chunk_info=chunk_info, log_partitions=log_partitions
+        return finalize(
+            repartition(
+                self._runtime,
+                self._prepare(),
+                dim,
+                chunk_info=chunk_info,
+                log_partitions=log_partitions,
+            ),
+            self._runtime,
         )
 
     # -- Indexing --------------------------------------------------------------
@@ -755,8 +770,15 @@ class MPIXarray:
             Indexed object with ``.meta`` updated. Replicated (``.meta`` is
             None) if the partition dimension was indexed with a scalar.
         """
-        return self._dispatch(
-            "isel", indexers, partition_dim=partition_dim, **indexers_kwargs
+        return finalize(
+            isel(
+                self._runtime,
+                self._prepare(),
+                indexers,
+                partition_dim=partition_dim,
+                **indexers_kwargs,
+            ),
+            self._runtime,
         )
 
     def sel(
@@ -799,14 +821,18 @@ class MPIXarray:
             Indexed object with ``.meta`` updated. A scalar selection on the
             partition dimension is replicated on every rank.
         """
-        return self._dispatch(
-            "sel",
-            indexers,
-            method,
-            tolerance,
-            drop,
-            partition_dim=partition_dim,
-            **indexers_kwargs,
+        return finalize(
+            sel(
+                self._runtime,
+                self._prepare(),
+                indexers,
+                method,
+                tolerance,
+                drop,
+                partition_dim=partition_dim,
+                **indexers_kwargs,
+            ),
+            self._runtime,
         )
 
     # -- Reductions --------------------------------------------------------
@@ -847,13 +873,17 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "sum",
-            dim,
-            skipna=skipna,
-            min_count=min_count,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            sum_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                min_count=min_count,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def prod(
@@ -892,13 +922,17 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "prod",
-            dim,
-            skipna=skipna,
-            min_count=min_count,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            prod_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                min_count=min_count,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def mean(
@@ -934,12 +968,16 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "mean",
-            dim,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            mean_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def min(
@@ -975,12 +1013,16 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "min",
-            dim,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            min_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def max(
@@ -1016,12 +1058,16 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "max",
-            dim,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            max_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def any(
@@ -1054,8 +1100,15 @@ class MPIXarray:
         MPIXarray
             Logical OR over the requested dimensions, with ``.meta`` updated.
         """
-        return self._dispatch(
-            "any", dim, keep_attrs=keep_attrs, partition_dim=partition_dim
+        return finalize(
+            any_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def all(
@@ -1088,8 +1141,15 @@ class MPIXarray:
         MPIXarray
             Logical AND over the requested dimensions, with ``.meta`` updated.
         """
-        return self._dispatch(
-            "all", dim, keep_attrs=keep_attrs, partition_dim=partition_dim
+        return finalize(
+            all_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def first(
@@ -1125,12 +1185,16 @@ class MPIXarray:
         MPIXarray
             Selected object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "first",
-            dim,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            first_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def last(
@@ -1166,12 +1230,16 @@ class MPIXarray:
         MPIXarray
             Selected object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "last",
-            dim,
-            skipna=skipna,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            last_reduce(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     # -- Statistics ----------------------------------------------------------
@@ -1212,13 +1280,17 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "var",
-            dim,
-            skipna=skipna,
-            ddof=ddof,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            var(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                ddof=ddof,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     def std(
@@ -1257,13 +1329,17 @@ class MPIXarray:
         MPIXarray
             Reduced object with ``.meta`` updated.
         """
-        return self._dispatch(
-            "std",
-            dim,
-            skipna=skipna,
-            ddof=ddof,
-            keep_attrs=keep_attrs,
-            partition_dim=partition_dim,
+        return finalize(
+            std(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                ddof=ddof,
+                keep_attrs=keep_attrs,
+                partition_dim=partition_dim,
+            ),
+            self._runtime,
         )
 
     # -- Groupby (xarray-styled entry points; groupby_reduce/resample_reduce
@@ -1341,7 +1417,8 @@ class MPIXarray:
         tuple of MPIXarray
             ``(left, right)``, each with matching distribution metadata.
         """
-        left, right = self._ops.align(
+        left, right = align(
+            self._runtime,
             self._prepare(),
             unwrap(other),
             dim,
@@ -1400,7 +1477,12 @@ class MPIXarray:
         }
         if fill_value is not _FILL_VALUE_UNSET:
             kwargs["fill_value"] = fill_value
-        return self._dispatch("reindex", indexers, **kwargs, **indexers_kwargs)
+        return finalize(
+            reindex(
+                self._runtime, self._prepare(), indexers, **kwargs, **indexers_kwargs
+            ),
+            self._runtime,
+        )
 
     def sortby(
         self,
@@ -1433,12 +1515,16 @@ class MPIXarray:
         MPIXarray
             The sorted object.
         """
-        return self._dispatch(
-            "sortby",
-            by,
-            ascending=ascending,
-            chunk_info=chunk_info,
-            log_partitions=log_partitions,
+        return finalize(
+            sortby(
+                self._runtime,
+                self._prepare(),
+                by,
+                ascending=ascending,
+                chunk_info=chunk_info,
+                log_partitions=log_partitions,
+            ),
+            self._runtime,
         )
 
     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -1466,7 +1552,7 @@ class MPIXarray:
         """
         unwrapped_args = tuple(unwrap(arg) for arg in args)
         unwrapped_kwargs = {name: unwrap(value) for name, value in kwargs.items()}
-        result = self._ops.apply(func, *unwrapped_args, **unwrapped_kwargs)
+        result = apply(self._runtime, func, *unwrapped_args, **unwrapped_kwargs)
         return finalize(result, self._runtime)
 
     def matmul(self, right: MPIXarray | Any) -> MPIXarray:
@@ -1484,7 +1570,7 @@ class MPIXarray:
             The matrix product. Replicated (``.meta`` is None) if the
             distributed dimension was contracted away.
         """
-        result = self._ops.matmul(self._prepare(), unwrap(right))
+        result = matmul(self._runtime, self._prepare(), unwrap(right))
         return finalize(result, self._runtime)
 
     def _halo_exchange(
@@ -1515,8 +1601,8 @@ class MPIXarray:
         tuple[MPIXarray, int, int]
             ``(padded, left_pad, right_pad)``.
         """
-        padded, left_pad, right_pad = self._ops.halo_exchange(
-            self._prepare(), dim, before=before, after=after
+        padded, left_pad, right_pad = halo_exchange(
+            self._runtime, self._prepare(), dim, before=before, after=after
         )
         return finalize(padded, self._runtime), left_pad, right_pad
 
@@ -1550,8 +1636,14 @@ class MPIXarray:
         MPIXarray
             Rolled-and-reduced object with ``.meta`` preserved.
         """
-        result = self._ops.rolling_reduce(
-            self._prepare(), dim, window, reduce, center=center, min_periods=min_periods
+        result = rolling_reduce(
+            self._runtime,
+            self._prepare(),
+            dim,
+            window,
+            reduce,
+            center=center,
+            min_periods=min_periods,
         )
         return finalize(result, self._runtime)
 
@@ -1610,7 +1702,7 @@ class MPIXarray:
             Dataset/DataArray, otherwise returned as-is.
         """
         unwrapped = {name: unwrap(value) for name, value in variables.items()}
-        result = self._ops.evaluate(expression, **unwrapped)
+        result = evaluate(self._runtime, expression, **unwrapped)
         return finalize(result, self._runtime)
 
     # -- Elementwise, scan, and gather-based operations -------------------
@@ -1641,7 +1733,15 @@ class MPIXarray:
             The selected object, with ``.meta`` unchanged.
         """
         args = (cond,) if other is _WHERE_UNSET else (cond, other)
-        return self._dispatch("where", *(unwrap(arg) for arg in args), drop=drop)
+        return finalize(
+            where(
+                self._runtime,
+                self._prepare(),
+                *(unwrap(arg) for arg in args),
+                drop=drop,
+            ),
+            self._runtime,
+        )
 
     def cumsum(
         self,
@@ -1666,7 +1766,16 @@ class MPIXarray:
         MPIXarray
             Cumulative sum with ``.meta`` unchanged.
         """
-        return self._dispatch("cumsum", dim, skipna=skipna, keep_attrs=keep_attrs)
+        return finalize(
+            cumsum(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            ),
+            self._runtime,
+        )
 
     def median(
         self,
@@ -1699,7 +1808,16 @@ class MPIXarray:
             Reduced object. Replicated (``.meta`` is None) if ``dim`` was
             the active partition dimension.
         """
-        return self._dispatch("median", dim, skipna=skipna, keep_attrs=keep_attrs)
+        return finalize(
+            median(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            ),
+            self._runtime,
+        )
 
     def diff(
         self,
@@ -1732,7 +1850,9 @@ class MPIXarray:
             The differenced object, ``n`` elements shorter along ``dim``
             globally, with ``.meta`` updated to match.
         """
-        return self._dispatch("diff", dim, n, label=label)
+        return finalize(
+            diff(self._runtime, self._prepare(), dim, n, label=label), self._runtime
+        )
 
     def shift(
         self,
@@ -1768,7 +1888,9 @@ class MPIXarray:
         kwargs: dict[str, Any] = {}
         if fill_value is not _FILL_VALUE_UNSET:
             kwargs["fill_value"] = fill_value
-        return self._dispatch("shift", dim, periods, **kwargs)
+        return finalize(
+            shift(self._runtime, self._prepare(), dim, periods, **kwargs), self._runtime
+        )
 
     def differentiate(
         self,
@@ -1799,8 +1921,15 @@ class MPIXarray:
         MPIXarray
             The derivative, same shape and distribution as ``self``.
         """
-        return self._dispatch(
-            "differentiate", coord, edge_order=edge_order, datetime_unit=datetime_unit
+        return finalize(
+            differentiate(
+                self._runtime,
+                self._prepare(),
+                coord,
+                edge_order=edge_order,
+                datetime_unit=datetime_unit,
+            ),
+            self._runtime,
         )
 
 

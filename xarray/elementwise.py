@@ -6,9 +6,16 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import xarray as xr
 
+from .arithmetic import (
+    check_operands_distribution,
+    check_partition_preserved,
+    halo_exchange,
+    reattach_meta,
+)
 from .cartesian import dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
+from .planning import _agree, guarded
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
@@ -17,513 +24,500 @@ if TYPE_CHECKING:
 _UNSET = object()
 
 
-class Elementwise:
-    """Elementwise, scan, and gather-based operations for distributed xarray objects.
+def where(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    cond: Any,
+    other: Any = _UNSET,
+    *,
+    drop: bool = False,
+) -> xr.Dataset | xr.DataArray:
+    """Elementwise selection (``value.where(cond, other)``), MPI-safe.
 
-    Assumes the host class provides ``self._runtime`` (with its
-    ``gather``/``scatter``/``broadcast``/``is_root``/``raise_if_error``
-    methods) and the ``self._check_operands_distribution``,
-    ``self._check_partition_preserved``, ``self._reattach_meta``,
-    ``self._agree``, ``self._guarded`` helpers defined on
-    :class:`~.arithmetic.Arithmetic`/:class:`~.reduction_planning.ReductionPlanningMixin`;
-    provided by :class:`~.ops._MPIXarrayOps`.
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to select from.
+    cond : Any
+        Boolean condition, following ``xarray.DataArray.where``.
+    other : Any, optional
+        Fill value where ``cond`` is False. Omit for xarray's default
+        (NaN).
+    drop : bool, optional
+        Must be False for a distributed object.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The selected object, with ``.meta`` preserved unchanged.
+
+    Raises
+    ------
+    ValueError
+        If ``drop=True`` is requested on a distributed object, or the
+        operands are distributed over incompatible partitions (see
+        :meth:`~.arithmetic.Arithmetic.apply`).
+    """
+    operands = (value, cond) if other is _UNSET else (value, cond, other)
+    meta, reference = check_operands_distribution(runtime, operands)
+    if meta is not None and drop:
+        raise ValueError(
+            "where(): drop=True is not supported on a distributed "
+            "object; it can remove a different number of positions on "
+            "different ranks and desynchronize the partition. Select "
+            "with isel()/sel() first, or repartition afterwards."
+        )
+
+    _agree(
+        runtime,
+        (
+            "where",
+            None if meta is None else (str(meta["dim"]), int(meta["global_size"])),
+        ),
+    )
+    result = value.where(cond) if other is _UNSET else value.where(cond, other)
+    if meta is None:
+        return result
+    check_partition_preserved(result, meta, reference)
+    return reattach_meta(result, meta)
+
+
+def cumsum(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    skipna: bool | None = None,
+    keep_attrs: bool | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Cumulative sum along ``dim``, correct when ``dim`` is distributed.
+
+    When ``dim`` is the active partition dimension, each rank's running
+    total must include every earlier rank's total. This gathers every
+    rank's local total onto rank 0, which computes each rank's
+    *exclusive* prefix (the sum of every rank before it) and scatters
+    one prefix back to each rank; every rank then adds its prefix onto
+    its own local cumulative sum. No new MPI collective: just the
+    ``gather``/``scatter`` pair already used elsewhere in this package
+    (see :func:`~.io.IO.attach_save_chunks`).
+
+    The rank-local cumulative-sum/total computation happens on every
+    rank independently before the first collective; it is guarded the
+    same way :meth:`~.reduction_planning.ReductionPlanningMixin._comm_reduce` guards
+    its own local step, so a local failure on one rank (e.g. an
+    unsupported dtype) is reported consistently on every rank via
+    ``raise_if_error`` instead of leaving the other ranks blocked
+    waiting at ``gather`` for a rank that already raised.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to accumulate.
+    dim : Hashable
+        Dimension to accumulate along.
+    skipna : bool or None, optional
+        Missing-value behavior, following xarray semantics. Applied
+        consistently to both the local cumulative sum and the local
+        total that feeds the cross-rank prefix, so a rank's NaNs never
+        change another rank's prefix.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes on the rank-local cumulative sum
+        step; lost by the subsequent addition of the cross-rank prefix.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Cumulative sum with the same local length and ``.meta`` as
+        ``value``.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
+    if len(meta["dims"]) > 1:
+        raise NotImplementedError(
+            "cumsum() cannot yet scan along a partition dimension "
+            + f"({dim!r}) under a multi-dimensional partition "
+            + f"(dims={meta['dims']!r}); its cross-rank prefix-sum "
+            + "gather/scatter needs the same dimension-scoped "
+            + "communicator generalization diff()/isel() already have, "
+            + "not yet done here."
+        )
+
+    _agree(runtime, ("cumsum", str(dim), int(meta["global_size"])))
+
+    if isinstance(value, xr.Dataset):
+        # Only data variables that actually carry `dim` may enter the
+        # cross-rank prefix scan below. xarray's own `.sum(dim)` (and
+        # `.cumsum(dim)`) silently leave a variable lacking `dim`
+        # completely unchanged rather than reducing it to a scalar --
+        # every rank's "total" for such a variable is really just its
+        # own already-identical, unreduced, replicated array. Feeding
+        # that into the same gather/scatter prefix machinery as the
+        # genuinely-reduced variables would silently add rank_index
+        # extra copies of that array onto itself (rank r's exclusive
+        # prefix becomes the sum of r copies of the same array, not the
+        # additive identity 0 it needs to be for a variable with
+        # nothing to accumulate), corrupting a variable that `dim`
+        # never touched at all.
+        touched = [name for name, var in value.data_vars.items() if dim in var.dims]
+        if not touched:
+            return strip_mpi_meta(value.copy(deep=False))
+        untouched = [name for name in value.data_vars if name not in touched]
+        scanned = _cumsum_scan(
+            runtime, value[touched], dim, skipna=skipna, keep_attrs=keep_attrs
+        )
+        result = (
+            xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
+            if untouched
+            else scanned
+        )
+        result.attrs = dict(value.attrs)
+        return reattach_meta(result, meta)
+
+    return reattach_meta(
+        _cumsum_scan(runtime, value, dim, skipna=skipna, keep_attrs=keep_attrs), meta
+    )
+
+
+def _cumsum_scan(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    skipna: bool | None,
+    keep_attrs: bool | None,
+) -> xr.Dataset | xr.DataArray:
+    """Cross-rank prefix-sum core of :meth:`cumsum`.
+
+    Every variable in ``value`` (a DataArray, or a Dataset already
+    filtered to only the variables that carry ``dim``) is assumed to
+    actually contain ``dim``, so ``value.sum(dim)`` genuinely reduces
+    every one of them to a same-shaped, rank-local total -- the
+    precondition the gather/scatter exclusive-prefix computation below
+    requires.
     """
 
-    def where(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        cond: Any,
-        other: Any = _UNSET,
-        *,
-        drop: bool = False,
-    ) -> xr.Dataset | xr.DataArray:
-        """Elementwise selection (``value.where(cond, other)``), MPI-safe.
+    def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
+        local_cumsum = value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
+        local_total = value.sum(dim, skipna=skipna)
+        return local_cumsum, local_total
 
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to select from.
-        cond : Any
-            Boolean condition, following ``xarray.DataArray.where``.
-        other : Any, optional
-            Fill value where ``cond`` is False. Omit for xarray's default
-            (NaN).
-        drop : bool, optional
-            Must be False for a distributed object.
+    locals_or_none, error = guarded(_locals)
+    runtime.raise_if_error(error, "MPI xarray cumsum", signature=("cumsum", str(dim)))
+    local_cumsum, local_total = locals_or_none
 
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            The selected object, with ``.meta`` preserved unchanged.
+    totals = runtime.gather(local_total, root=0)
+    prefixes = None
+    if runtime.is_root():
+        prefixes = []
+        running = totals[0] * 0
+        for total in totals:
+            prefixes.append(running)
+            running = running + total
+    exclusive_prefix = runtime.scatter(prefixes, root=0)
 
-        Raises
-        ------
-        ValueError
-            If ``drop=True`` is requested on a distributed object, or the
-            operands are distributed over incompatible partitions (see
-            :meth:`~.arithmetic.Arithmetic.apply`).
-        """
-        operands = (value, cond) if other is _UNSET else (value, cond, other)
-        meta, reference = self._check_operands_distribution(operands)
-        if meta is not None and drop:
-            raise ValueError(
-                "where(): drop=True is not supported on a distributed "
-                "object; it can remove a different number of positions on "
-                "different ranks and desynchronize the partition. Select "
-                "with isel()/sel() first, or repartition afterwards."
-            )
+    return local_cumsum + exclusive_prefix
 
-        self._agree(
-            (
-                "where",
-                None if meta is None else (str(meta["dim"]), int(meta["global_size"])),
-            )
-        )
-        result = value.where(cond) if other is _UNSET else value.where(cond, other)
-        if meta is None:
-            return result
-        self._check_partition_preserved(result, meta, reference)
-        return self._reattach_meta(result, meta)
 
-    def cumsum(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        dim: Hashable,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-    ) -> xr.Dataset | xr.DataArray:
-        """Cumulative sum along ``dim``, correct when ``dim`` is distributed.
+def median(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    skipna: bool | None = None,
+    keep_attrs: bool | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Median over ``dim``, correct when ``dim`` is distributed.
 
-        When ``dim`` is the active partition dimension, each rank's running
-        total must include every earlier rank's total. This gathers every
-        rank's local total onto rank 0, which computes each rank's
-        *exclusive* prefix (the sum of every rank before it) and scatters
-        one prefix back to each rank; every rank then adds its prefix onto
-        its own local cumulative sum. No new MPI collective: just the
-        ``gather``/``scatter`` pair already used elsewhere in this package
-        (see :func:`~.io.IO.attach_save_chunks`).
+    Median has no MPI reduction operator (unlike sum/min/max), so when
+    ``dim`` is the active partition dimension this gathers every
+    rank's slice onto rank 0, which reconstructs the full ``dim`` and
+    takes xarray's own median locally, then broadcasts the (already
+    reduced, small) result back to every rank. Only rank 0 ever
+    materializes the full ``dim`` -- unlike an ``Allgather``, which
+    would replicate it onto every rank.
 
-        The rank-local cumulative-sum/total computation happens on every
-        rank independently before the first collective; it is guarded the
-        same way :meth:`~.reduction_planning.ReductionPlanningMixin._comm_reduce` guards
-        its own local step, so a local failure on one rank (e.g. an
-        unsupported dtype) is reported consistently on every rank via
-        ``raise_if_error`` instead of leaving the other ranks blocked
-        waiting at ``gather`` for a rank that already raised.
+    The reconstruct-and-reduce step runs on rank 0 only, immediately
+    before every other rank is already waiting at the final
+    ``broadcast`` -- the case :meth:`cumsum`'s equivalent guarding
+    note describes as most dangerous to leave unguarded, since a
+    rank-0-only failure there (e.g. an ``xr.concat`` dtype mismatch)
+    would otherwise leave every other rank blocked forever. Guarded
+    the same way: the root's attempt is wrapped and any exception
+    deferred, then every rank (root or not) calls ``raise_if_error``
+    together so the failure -- if any -- is reported consistently
+    everywhere instead of only on rank 0.
 
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to accumulate.
-        dim : Hashable
-            Dimension to accumulate along.
-        skipna : bool or None, optional
-            Missing-value behavior, following xarray semantics. Applied
-            consistently to both the local cumulative sum and the local
-            total that feeds the cross-rank prefix, so a rank's NaNs never
-            change another rank's prefix.
-        keep_attrs : bool or None, optional
-            Whether to preserve attributes on the rank-local cumulative sum
-            step; lost by the subsequent addition of the cross-rank prefix.
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to reduce. Unlike :meth:`~.core.MPIXarray.mean`,
+        :meth:`~.core.MPIXarray.sum`, etc., only a single dimension is
+        supported (not an iterable, ``None``, or ``...``).
+    dim : Hashable
+        Dimension to reduce.
+    skipna : bool or None, optional
+        Missing-value behavior, following xarray semantics.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes.
 
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            Cumulative sum with the same local length and ``.meta`` as
-            ``value``.
-        """
-        meta = get_mpi_meta(value)
-        if meta is None or dim not in meta["dims"]:
-            return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
-        if len(meta["dims"]) > 1:
-            raise NotImplementedError(
-                "cumsum() cannot yet scan along a partition dimension "
-                + f"({dim!r}) under a multi-dimensional partition "
-                + f"(dims={meta['dims']!r}); its cross-rank prefix-sum "
-                + "gather/scatter needs the same dimension-scoped "
-                + "communicator generalization diff()/isel() already have, "
-                + "not yet done here."
-            )
-
-        self._agree(("cumsum", str(dim), int(meta["global_size"])))
-
-        if isinstance(value, xr.Dataset):
-            # Only data variables that actually carry `dim` may enter the
-            # cross-rank prefix scan below. xarray's own `.sum(dim)` (and
-            # `.cumsum(dim)`) silently leave a variable lacking `dim`
-            # completely unchanged rather than reducing it to a scalar --
-            # every rank's "total" for such a variable is really just its
-            # own already-identical, unreduced, replicated array. Feeding
-            # that into the same gather/scatter prefix machinery as the
-            # genuinely-reduced variables would silently add rank_index
-            # extra copies of that array onto itself (rank r's exclusive
-            # prefix becomes the sum of r copies of the same array, not the
-            # additive identity 0 it needs to be for a variable with
-            # nothing to accumulate), corrupting a variable that `dim`
-            # never touched at all.
-            touched = [name for name, var in value.data_vars.items() if dim in var.dims]
-            if not touched:
-                return strip_mpi_meta(value.copy(deep=False))
-            untouched = [name for name in value.data_vars if name not in touched]
-            scanned = self._cumsum_scan(
-                value[touched], dim, skipna=skipna, keep_attrs=keep_attrs
-            )
-            result = (
-                xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
-                if untouched
-                else scanned
-            )
-            result.attrs = dict(value.attrs)
-            return self._reattach_meta(result, meta)
-
-        return self._reattach_meta(
-            self._cumsum_scan(value, dim, skipna=skipna, keep_attrs=keep_attrs), meta
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Reduced object. Replicated (``.meta`` is None) if ``dim`` was
+        the active partition dimension; otherwise ``.meta`` is
+        preserved unchanged.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
+    if len(meta["dims"]) > 1:
+        raise NotImplementedError(
+            "median() cannot yet gather along a partition dimension "
+            + f"({dim!r}) under a multi-dimensional partition "
+            + f"(dims={meta['dims']!r}); its gather-to-root needs the "
+            + "same dimension-scoped communicator generalization "
+            + "diff()/isel() already have, not yet done here."
         )
 
-    def _cumsum_scan(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        dim: Hashable,
-        *,
-        skipna: bool | None,
-        keep_attrs: bool | None,
-    ) -> xr.Dataset | xr.DataArray:
-        """Cross-rank prefix-sum core of :meth:`cumsum`.
+    _agree(runtime, ("median", str(dim), int(meta["global_size"])))
+    pieces = runtime.gather(value, root=0)
 
-        Every variable in ``value`` (a DataArray, or a Dataset already
-        filtered to only the variables that carry ``dim``) is assumed to
-        actually contain ``dim``, so ``value.sum(dim)`` genuinely reduces
-        every one of them to a same-shaped, rank-local total -- the
-        precondition the gather/scatter exclusive-prefix computation below
-        requires.
-        """
-
-        def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
-            local_cumsum = value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
-            local_total = value.sum(dim, skipna=skipna)
-            return local_cumsum, local_total
-
-        locals_or_none, error = self._guarded(_locals)
-        self._runtime.raise_if_error(
-            error, "MPI xarray cumsum", signature=("cumsum", str(dim))
+    def _reduce_on_root() -> xr.Dataset | xr.DataArray:
+        full = (
+            xr.concat(pieces, dim=dim, data_vars="minimal")
+            if isinstance(value, xr.Dataset)
+            else xr.concat(pieces, dim=dim)
         )
-        local_cumsum, local_total = locals_or_none
+        return full.median(dim, skipna=skipna, keep_attrs=keep_attrs)
 
-        totals = self._runtime.gather(local_total, root=0)
-        prefixes = None
-        if self._runtime.is_root():
-            prefixes = []
-            running = totals[0] * 0
-            for total in totals:
-                prefixes.append(running)
-                running = running + total
-        exclusive_prefix = self._runtime.scatter(prefixes, root=0)
+    result, error = guarded(_reduce_on_root) if runtime.is_root() else (None, None)
+    runtime.raise_if_error(error, "MPI xarray median", signature=("median", str(dim)))
+    result = runtime.broadcast(result, root=0)
+    return strip_mpi_meta(result)
 
-        return local_cumsum + exclusive_prefix
 
-    def median(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        dim: Hashable,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-    ) -> xr.Dataset | xr.DataArray:
-        """Median over ``dim``, correct when ``dim`` is distributed.
+def diff(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    n: int = 1,
+    *,
+    label: Literal["upper", "lower"] = "upper",
+) -> xr.Dataset | xr.DataArray:
+    """``n``-th order difference along ``dim``, correct when ``dim`` is distributed.
 
-        Median has no MPI reduction operator (unlike sum/min/max), so when
-        ``dim`` is the active partition dimension this gathers every
-        rank's slice onto rank 0, which reconstructs the full ``dim`` and
-        takes xarray's own median locally, then broadcasts the (already
-        reduced, small) result back to every rank. Only rank 0 ever
-        materializes the full ``dim`` -- unlike an ``Allgather``, which
-        would replicate it onto every rank.
+    When ``dim`` is the active partition dimension: ``label="upper"``
+    drops the global *first* ``n`` elements (xarray labels each
+    difference with the later/"upper" of the two positions it came
+    from), so every rank except rank 0 can compute its output at full
+    local length by borrowing ``n`` elements from its left neighbor
+    (:meth:`~.arithmetic.Arithmetic.halo_exchange`); rank 0 has no left
+    neighbor and is genuinely ``n`` shorter, which is exactly where the
+    global array actually lost those ``n`` elements. ``label="lower"``
+    is the mirror image: drops the global *last* ``n``, borrows from
+    the right neighbor instead, and only the last rank comes up short.
+    Either way, every rank's new ``start``/``stop``/``global_size`` is
+    then recomputed from an ``allgather`` of each rank's new local
+    length -- the same mechanism :meth:`~.indexing.Indexing.isel`
+    already uses for its own length-changing slice case.
 
-        The reconstruct-and-reduce step runs on rank 0 only, immediately
-        before every other rank is already waiting at the final
-        ``broadcast`` -- the case :meth:`cumsum`'s equivalent guarding
-        note describes as most dangerous to leave unguarded, since a
-        rank-0-only failure there (e.g. an ``xr.concat`` dtype mismatch)
-        would otherwise leave every other rank blocked forever. Guarded
-        the same way: the root's attempt is wrapped and any exception
-        deferred, then every rank (root or not) calls ``raise_if_error``
-        together so the failure -- if any -- is reported consistently
-        everywhere instead of only on rank 0.
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to difference.
+    dim : Hashable
+        Dimension to difference along.
+    n : int, optional
+        Order of the difference. Must be less than every rank's local
+        length along ``dim`` when ``dim`` is the partition dimension
+        (see ``halo_exchange``'s own limit: a rank can only forward
+        data it owns, so a wider request would need a multi-hop relay
+        this does not perform).
+    label : {"upper", "lower"}, optional
+        As in ``xarray.DataArray.diff``.
 
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to reduce. Unlike :meth:`~.core.MPIXarray.mean`,
-            :meth:`~.core.MPIXarray.sum`, etc., only a single dimension is
-            supported (not an iterable, ``None``, or ``...``).
-        dim : Hashable
-            Dimension to reduce.
-        skipna : bool or None, optional
-            Missing-value behavior, following xarray semantics.
-        keep_attrs : bool or None, optional
-            Whether to preserve attributes.
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The differenced object, ``n`` elements shorter along ``dim``
+        globally -- and, when ``dim`` is the partition dimension, at
+        exactly one rank (0 for "upper", the last rank for "lower")
+        locally; every other rank's local length is unchanged.
 
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            Reduced object. Replicated (``.meta`` is None) if ``dim`` was
-            the active partition dimension; otherwise ``.meta`` is
-            preserved unchanged.
-        """
-        meta = get_mpi_meta(value)
-        if meta is None or dim not in meta["dims"]:
-            return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
-        if len(meta["dims"]) > 1:
-            raise NotImplementedError(
-                "median() cannot yet gather along a partition dimension "
-                + f"({dim!r}) under a multi-dimensional partition "
-                + f"(dims={meta['dims']!r}); its gather-to-root needs the "
-                + "same dimension-scoped communicator generalization "
-                + "diff()/isel() already have, not yet done here."
-            )
+    Raises
+    ------
+    ValueError
+        If ``n`` is negative, ``label`` is not "upper"/"lower", or any
+        rank's local length along ``dim`` is shorter than ``n`` (this
+        last case is caught by :meth:`~.arithmetic.Arithmetic.halo_exchange`
+        itself, which checks every rank's local length together via a
+        synchronized ``allgather`` before raising, so the error is
+        consistent and every rank raises together rather than some
+        hanging).
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.diff(dim, n=n, label=label)
+    if n < 0:
+        raise ValueError(f"diff(): n must be >= 0, got {n!r}.")
+    if label not in ("upper", "lower"):
+        raise ValueError(f"diff(): label must be 'upper' or 'lower', got {label!r}.")
+    if n == 0:
+        return reattach_meta(value.diff(dim, n=0, label=label), meta)
 
-        self._agree(("median", str(dim), int(meta["global_size"])))
-        pieces = self._runtime.gather(value, root=0)
+    before, after = (n, 0) if label == "upper" else (0, n)
+    padded, _left_pad, _right_pad = halo_exchange(
+        runtime, value, dim, before=before, after=after
+    )
+    diffed = padded.diff(dim, n=n, label=label)
 
-        def _reduce_on_root() -> xr.Dataset | xr.DataArray:
-            full = (
-                xr.concat(pieces, dim=dim, data_vars="minimal")
-                if isinstance(value, xr.Dataset)
-                else xr.concat(pieces, dim=dim)
-            )
-            return full.median(dim, skipna=skipna, keep_attrs=keep_attrs)
+    comm = _dim_comm(runtime, meta, dim)
+    counts = comm.allgather(int(diffed.sizes[dim]))
+    new_global_size = sum(counts)
+    new_start = sum(counts[: comm.rank])
+    new_stop = new_start + counts[comm.rank]
+    chunk_info = prune_chunk_info(meta["chunk_info"], diffed)
+    global_sizes = dict(meta["global_sizes"])
+    starts = dict(meta["starts"])
+    stops = dict(meta["stops"])
+    global_sizes[dim] = new_global_size
+    starts[dim] = new_start
+    stops[dim] = new_stop
+    set_mpi_meta(
+        diffed,
+        dim=meta["dims"],
+        global_size=global_sizes,
+        start=starts,
+        stop=stops,
+        chunk_info=chunk_info,
+        cart=meta.get("cart"),
+    )
+    return diffed
 
-        result, error = (
-            self._guarded(_reduce_on_root) if self._runtime.is_root() else (None, None)
-        )
-        self._runtime.raise_if_error(
-            error, "MPI xarray median", signature=("median", str(dim))
-        )
-        result = self._runtime.broadcast(result, root=0)
-        return strip_mpi_meta(result)
 
-    def diff(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        dim: Hashable,
-        n: int = 1,
-        *,
-        label: Literal["upper", "lower"] = "upper",
-    ) -> xr.Dataset | xr.DataArray:
-        """``n``-th order difference along ``dim``, correct when ``dim`` is distributed.
+def shift(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    periods: int = 1,
+    *,
+    fill_value: Any = _UNSET,
+) -> xr.Dataset | xr.DataArray:
+    """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is distributed.
 
-        When ``dim`` is the active partition dimension: ``label="upper"``
-        drops the global *first* ``n`` elements (xarray labels each
-        difference with the later/"upper" of the two positions it came
-        from), so every rank except rank 0 can compute its output at full
-        local length by borrowing ``n`` elements from its left neighbor
-        (:meth:`~.arithmetic.Arithmetic.halo_exchange`); rank 0 has no left
-        neighbor and is genuinely ``n`` shorter, which is exactly where the
-        global array actually lost those ``n`` elements. ``label="lower"``
-        is the mirror image: drops the global *last* ``n``, borrows from
-        the right neighbor instead, and only the last rank comes up short.
-        Either way, every rank's new ``start``/``stop``/``global_size`` is
-        then recomputed from an ``allgather`` of each rank's new local
-        length -- the same mechanism :meth:`~.indexing.Indexing.isel`
-        already uses for its own length-changing slice case.
+    A stencil operation: shifting by ``periods`` moves each position's
+    value ``periods`` slots along ``dim`` without changing length, so a
+    rank whose local window would otherwise pull in a neighbor's data
+    (any rank except the one at the true edge the shift moves away
+    from) needs ``|periods|`` boundary elements from that neighbor
+    (:meth:`~.arithmetic.Arithmetic.halo_exchange`) before shifting
+    locally. ``xarray.shift``'s own fill-value semantics fall out for
+    free: shifting the *padded* array only introduces ``fill_value``
+    at the padded array's own edges, and ``halo_exchange`` only leaves
+    an edge unpadded (0 elements) at the true global boundary -- so a
+    fill value appears exactly where the global array actually runs
+    out of data, and nowhere else.
 
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to difference.
-        dim : Hashable
-            Dimension to difference along.
-        n : int, optional
-            Order of the difference. Must be less than every rank's local
-            length along ``dim`` when ``dim`` is the partition dimension
-            (see ``halo_exchange``'s own limit: a rank can only forward
-            data it owns, so a wider request would need a multi-hop relay
-            this does not perform).
-        label : {"upper", "lower"}, optional
-            As in ``xarray.DataArray.diff``.
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to shift.
+    dim : Hashable
+        Dimension to shift along.
+    periods : int, optional
+        Number of positions to shift by; positive shifts values toward
+        higher indices (as in ``xarray.DataArray.shift``). Its
+        magnitude must not exceed any rank's local length along
+        ``dim`` when ``dim`` is the partition dimension (see
+        ``halo_exchange``'s own limit).
+    fill_value : Any, optional
+        As in ``xarray.DataArray.shift``; defaults to xarray's own
+        dtype-aware NA fill when omitted.
 
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            The differenced object, ``n`` elements shorter along ``dim``
-            globally -- and, when ``dim`` is the partition dimension, at
-            exactly one rank (0 for "upper", the last rank for "lower")
-            locally; every other rank's local length is unchanged.
-
-        Raises
-        ------
-        ValueError
-            If ``n`` is negative, ``label`` is not "upper"/"lower", or any
-            rank's local length along ``dim`` is shorter than ``n`` (this
-            last case is caught by :meth:`~.arithmetic.Arithmetic.halo_exchange`
-            itself, which checks every rank's local length together via a
-            synchronized ``allgather`` before raising, so the error is
-            consistent and every rank raises together rather than some
-            hanging).
-        """
-        meta = get_mpi_meta(value)
-        if meta is None or dim not in meta["dims"]:
-            return value.diff(dim, n=n, label=label)
-        if n < 0:
-            raise ValueError(f"diff(): n must be >= 0, got {n!r}.")
-        if label not in ("upper", "lower"):
-            raise ValueError(
-                f"diff(): label must be 'upper' or 'lower', got {label!r}."
-            )
-        if n == 0:
-            return self._reattach_meta(value.diff(dim, n=0, label=label), meta)
-
-        before, after = (n, 0) if label == "upper" else (0, n)
-        padded, _left_pad, _right_pad = self.halo_exchange(
-            value, dim, before=before, after=after
-        )
-        diffed = padded.diff(dim, n=n, label=label)
-
-        comm = _dim_comm(self._runtime, meta, dim)
-        counts = comm.allgather(int(diffed.sizes[dim]))
-        new_global_size = sum(counts)
-        new_start = sum(counts[: comm.rank])
-        new_stop = new_start + counts[comm.rank]
-        chunk_info = prune_chunk_info(meta["chunk_info"], diffed)
-        global_sizes = dict(meta["global_sizes"])
-        starts = dict(meta["starts"])
-        stops = dict(meta["stops"])
-        global_sizes[dim] = new_global_size
-        starts[dim] = new_start
-        stops[dim] = new_stop
-        set_mpi_meta(
-            diffed,
-            dim=meta["dims"],
-            global_size=global_sizes,
-            start=starts,
-            stop=stops,
-            chunk_info=chunk_info,
-            cart=meta.get("cart"),
-        )
-        return diffed
-
-    def shift(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        dim: Hashable,
-        periods: int = 1,
-        *,
-        fill_value: Any = _UNSET,
-    ) -> xr.Dataset | xr.DataArray:
-        """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is distributed.
-
-        A stencil operation: shifting by ``periods`` moves each position's
-        value ``periods`` slots along ``dim`` without changing length, so a
-        rank whose local window would otherwise pull in a neighbor's data
-        (any rank except the one at the true edge the shift moves away
-        from) needs ``|periods|`` boundary elements from that neighbor
-        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) before shifting
-        locally. ``xarray.shift``'s own fill-value semantics fall out for
-        free: shifting the *padded* array only introduces ``fill_value``
-        at the padded array's own edges, and ``halo_exchange`` only leaves
-        an edge unpadded (0 elements) at the true global boundary -- so a
-        fill value appears exactly where the global array actually runs
-        out of data, and nowhere else.
-
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to shift.
-        dim : Hashable
-            Dimension to shift along.
-        periods : int, optional
-            Number of positions to shift by; positive shifts values toward
-            higher indices (as in ``xarray.DataArray.shift``). Its
-            magnitude must not exceed any rank's local length along
-            ``dim`` when ``dim`` is the partition dimension (see
-            ``halo_exchange``'s own limit).
-        fill_value : Any, optional
-            As in ``xarray.DataArray.shift``; defaults to xarray's own
-            dtype-aware NA fill when omitted.
-
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            The shifted object, same shape and distribution as the input.
-        """
-        meta = get_mpi_meta(value)
-        if meta is None or dim not in meta["dims"]:
-            kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
-            return value.shift({dim: periods}, **kwargs)
-        if periods == 0:
-            return value
-
-        before, after = (periods, 0) if periods > 0 else (0, -periods)
-        padded, left_pad, _right_pad = self.halo_exchange(
-            value, dim, before=before, after=after
-        )
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The shifted object, same shape and distribution as the input.
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or dim not in meta["dims"]:
         kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
-        shifted = padded.shift({dim: periods}, **kwargs)
+        return value.shift({dim: periods}, **kwargs)
+    if periods == 0:
+        return value
 
-        local_len = int(value.sizes[dim])
-        trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
-        return self._reattach_meta(trimmed, meta)
+    before, after = (periods, 0) if periods > 0 else (0, -periods)
+    padded, left_pad, _right_pad = halo_exchange(
+        runtime, value, dim, before=before, after=after
+    )
+    kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
+    shifted = padded.shift({dim: periods}, **kwargs)
 
-    def differentiate(
-        self,
-        value: xr.Dataset | xr.DataArray,
-        coord: Hashable,
-        edge_order: Literal[1, 2] = 1,
-        datetime_unit: Any = None,
-    ) -> xr.Dataset | xr.DataArray:
-        """Differentiate ``value`` along ``coord``, correct when ``coord`` is distributed.
+    local_len = int(value.sizes[dim])
+    trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
+    return reattach_meta(trimmed, meta)
 
-        A stencil operation: every interior point's derivative is a
-        centered difference needing exactly one neighbor on each side
-        regardless of ``edge_order`` (``edge_order`` only changes the
-        one-sided formula used at the *true* global first/last position,
-        which never needs another rank's data -- it is computed from
-        this rank's own later/earlier local points exactly as plain
-        ``xarray`` would). So a fixed one-element halo
-        (:meth:`~.arithmetic.Arithmetic.halo_exchange`) on each side
-        suffices for any ``edge_order``: it supplies genuine neighbor
-        values at every rank boundary and, at the true global edge (where
-        ``halo_exchange`` returns 0 padding), differentiating the
-        unpadded-there array reproduces xarray's own edge-order-specific
-        boundary stencil unchanged.
 
-        Parameters
-        ----------
-        value : xarray.Dataset or xarray.DataArray
-            Object to differentiate.
-        coord : Hashable
-            Coordinate to differentiate along.
-        edge_order : {1, 2}, optional
-            As in ``xarray.DataArray.differentiate``. Default 1.
-        datetime_unit : Any, optional
-            As in ``xarray.DataArray.differentiate``.
+def differentiate(
+    runtime,
+    value: xr.Dataset | xr.DataArray,
+    coord: Hashable,
+    edge_order: Literal[1, 2] = 1,
+    datetime_unit: Any = None,
+) -> xr.Dataset | xr.DataArray:
+    """Differentiate ``value`` along ``coord``, correct when ``coord`` is distributed.
 
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            The derivative, same shape and distribution as the input.
+    A stencil operation: every interior point's derivative is a
+    centered difference needing exactly one neighbor on each side
+    regardless of ``edge_order`` (``edge_order`` only changes the
+    one-sided formula used at the *true* global first/last position,
+    which never needs another rank's data -- it is computed from
+    this rank's own later/earlier local points exactly as plain
+    ``xarray`` would). So a fixed one-element halo
+    (:meth:`~.arithmetic.Arithmetic.halo_exchange`) on each side
+    suffices for any ``edge_order``: it supplies genuine neighbor
+    values at every rank boundary and, at the true global edge (where
+    ``halo_exchange`` returns 0 padding), differentiating the
+    unpadded-there array reproduces xarray's own edge-order-specific
+    boundary stencil unchanged.
 
-        Raises
-        ------
-        ValueError
-            If any rank's local length along ``coord`` is shorter than 1
-            (see ``halo_exchange``'s own synchronized length check) or
-            too short overall for ``edge_order`` (raised by xarray itself).
-        """
-        meta = get_mpi_meta(value)
-        if meta is None or coord not in meta["dims"]:
-            return value.differentiate(
-                coord, edge_order=edge_order, datetime_unit=datetime_unit
-            )
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to differentiate.
+    coord : Hashable
+        Coordinate to differentiate along.
+    edge_order : {1, 2}, optional
+        As in ``xarray.DataArray.differentiate``. Default 1.
+    datetime_unit : Any, optional
+        As in ``xarray.DataArray.differentiate``.
 
-        padded, left_pad, _right_pad = self.halo_exchange(
-            value, coord, before=1, after=1
-        )
-        derivative = padded.differentiate(
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The derivative, same shape and distribution as the input.
+
+    Raises
+    ------
+    ValueError
+        If any rank's local length along ``coord`` is shorter than 1
+        (see ``halo_exchange``'s own synchronized length check) or
+        too short overall for ``edge_order`` (raised by xarray itself).
+    """
+    meta = get_mpi_meta(value)
+    if meta is None or coord not in meta["dims"]:
+        return value.differentiate(
             coord, edge_order=edge_order, datetime_unit=datetime_unit
         )
 
-        local_len = int(value.sizes[coord])
-        trimmed = derivative.isel({coord: slice(left_pad, left_pad + local_len)})
-        return self._reattach_meta(trimmed, meta)
+    padded, left_pad, _right_pad = halo_exchange(
+        runtime, value, coord, before=1, after=1
+    )
+    derivative = padded.differentiate(
+        coord, edge_order=edge_order, datetime_unit=datetime_unit
+    )
+
+    local_len = int(value.sizes[coord])
+    trimmed = derivative.isel({coord: slice(left_pad, left_pad + local_len)})
+    return reattach_meta(trimmed, meta)

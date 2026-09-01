@@ -22,22 +22,21 @@ from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
-from .meta import MPI_META, _format_bytes, get_mpi_meta
+from .meta import format_bytes, get_mpi_meta, strip_export_attrs
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from os import PathLike
-
-    # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
-    # module, so importing `MPIXarrayOps`/`mpi_partition_data` back from `.io`
-    # at module scope would be circular. Call sites that need them at runtime
-    # import locally.
-    from .io import MPIXarrayOps, mpi_partition_data
     from typing import Any, Literal
 
     from mpi4py.MPI import Intracomm
 
     from ..mpi.runtime import MPIRuntime
+
+    # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
+    # module, so importing `mpi_partition_data` back from `.io` at module
+    # scope would be circular. Call sites that need it at runtime import
+    # locally.
 
 
 class NetCDFWriteError(MPIError):
@@ -61,8 +60,8 @@ def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
     attrs : Mapping[str, Any]
         Attributes to write.
     """
-    for key, value in attrs.items():
-        if key not in ("_FillValue", MPI_META) and value is not None:
+    for key, value in strip_export_attrs(attrs).items():
+        if key != "_FillValue" and value is not None:
             target.setncattr(str(key), value)
 
 
@@ -621,6 +620,8 @@ def to_netcdf_parallel(
         is_dask_backed = mpi_runtime.comm.bcast(is_dask_backed, root=0)
 
         if is_dask_backed:
+            from .io import mpi_partition_data
+
             local_ds = mpi_partition_data(
                 local_ds if mpi_runtime.comm.rank == 0 else None,
                 mpi_runtime,
@@ -665,7 +666,14 @@ def to_netcdf_parallel(
         # chunks to honor below, since every rank sees the same `chunks`
         # argument and can decide this identically without communication.
         if chunks is None:
-            MPIXarrayOps(mpi_runtime).attach_save_chunks(local_ds)  # this is a bug
+            # Deferred import: `.io` imports `to_netcdf_parallel` from this
+            # module at module scope, so `attach_save_chunks` can only be
+            # reached here without a circular import. It mutates
+            # local_ds.attrs[mpi_meta] in place via _assign_meta and returns
+            # the same object, so its return value is intentionally unused.
+            from .io import attach_save_chunks
+
+            attach_save_chunks(mpi_runtime, local_ds)
             local_meta = get_mpi_meta(local_ds)
             if local_meta is None:
                 raise AssertionError(
@@ -786,11 +794,7 @@ def to_netcdf_parallel(
                         source = prewritten_coords[name]
                     variable = encode_time(source) if is_time_like(source) else source
                     values, dtype = _normalise_variable(source)
-                    attrs = {
-                        key: value
-                        for key, value in variable.attrs.items()
-                        if key != MPI_META
-                    }
+                    attrs = strip_export_attrs(variable.attrs)
                     dims = tuple(variable.dims)
                     shape = list(values.shape)
                     if partition_dim in dims:
@@ -812,9 +816,7 @@ def to_netcdf_parallel(
 
                 output_path = str(Path(path).expanduser().resolve(strict=False))
                 schema = {
-                    "attrs": {
-                        key: value for key, value in ds.attrs.items() if key != MPI_META
-                    },
+                    "attrs": strip_export_attrs(ds.attrs),
                     "chunks": chunk_map,
                     "deflate": None if deflate is None else int(deflate),
                     "hints": hints,
@@ -899,11 +901,7 @@ def to_netcdf_parallel(
                         dtype = source.dtype.newbyteorder("=")
                     else:
                         dtype = source.dtype
-                    attrs = {
-                        key: value
-                        for key, value in source.attrs.items()
-                        if key != MPI_META
-                    }
+                    attrs = strip_export_attrs(source.attrs)
                     root_data[name] = {
                         "attrs": attrs,
                         "data": None,
@@ -921,11 +919,7 @@ def to_netcdf_parallel(
 
                 variable = encode_time(source) if is_time_like(source) else source
                 values, dtype = _normalise_variable(source)
-                attrs = {
-                    key: value
-                    for key, value in variable.attrs.items()
-                    if key != MPI_META
-                }
+                attrs = strip_export_attrs(variable.attrs)
                 root_data[name] = {
                     "attrs": attrs,
                     "data": values,
@@ -942,9 +936,7 @@ def to_netcdf_parallel(
 
             output_path = str(Path(path).expanduser().resolve(strict=False))
             schema = {
-                "attrs": {
-                    key: value for key, value in ds.attrs.items() if key != MPI_META
-                },
+                "attrs": strip_export_attrs(ds.attrs),
                 "chunks": chunk_map,
                 "deflate": None if deflate is None else int(deflate),
                 "hints": hints,
@@ -960,8 +952,8 @@ def to_netcdf_parallel(
             total_bytes = sum(variable.nbytes for variable in ds.variables.values())
             mpi_runtime.log(
                 "xgeo.to_netcdf (rank-0 source): rank 0 holds "
-                + f"{_format_bytes(total_bytes)} before scatter, "
-                + f"~{_format_bytes(total_bytes / mpi_runtime.comm.size)}/rank after. "
+                + f"{format_bytes(total_bytes)} before scatter, "
+                + f"~{format_bytes(total_bytes / mpi_runtime.comm.size)}/rank after. "
                 + "An already-distributed input (open_dataset/"
                 + "repartition) avoids this rank-0 peak entirely -- see the "
                 + "README's Parallel NetCDF output section.",
@@ -1460,7 +1452,7 @@ def createVariable(
     ncvar = ncf.createVariable(
         varname=varname, datatype=da.dtype, dimensions=da.dims, **kwargs
     )
-    for attr_name, attr_val in da.attrs.items():
+    for attr_name, attr_val in strip_export_attrs(da.attrs).items():
         ncvar.setncattr(attr_name, attr_val)
 
     if write_values:

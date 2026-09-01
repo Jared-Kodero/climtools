@@ -17,6 +17,19 @@ if TYPE_CHECKING:
     from ..mpi.runtime import MPIRuntime
 
 MPI_META = "mpi_meta"
+#: Attrs key for the lightweight boolean partition flag set by
+#: :func:`~.core.mark_partitioned`. Tracked here (not just in ``MPI_META``)
+#: so it can be stripped alongside the full metadata dict by
+#: :func:`strip_mpi_meta` and by every NetCDF attribute writer -- a bare
+#: Python/NumPy bool is not a valid NetCDF attribute type, so leaving it in
+#: ``attrs`` fails schema creation as soon as a freshly partitioned (not
+#: reopened) object is passed to ``to_netcdf(..., parallel=True)``.
+PARTITIONED_ATTR = "mpi_partitioned"
+#: Internal bookkeeping keys that must never reach a NetCDF attribute
+#: writer or a "real" attrs comparison. Centralized so every strip/export
+#: call site (``strip_mpi_meta``, every schema-building block in
+#: ``netcdf.py``) filters the identical set instead of each re-deriving it.
+_INTERNAL_ATTRS = frozenset({MPI_META, PARTITIONED_ATTR})
 # The subset of a partition's metadata that decides whether two partitions
 # describe the same rank-local ownership. chunk_info and save_chunks are
 # deliberately excluded: they record how the split/write was computed for
@@ -341,11 +354,35 @@ def set_save_chunks(
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
     """Return a shallow copy without MPI distribution metadata."""
     output = value.copy(deep=False)
-    output.attrs.pop(MPI_META, None)
+    for key in _INTERNAL_ATTRS:
+        output.attrs.pop(key, None)
     if isinstance(output, xr.Dataset):
         for variable in output.variables.values():
-            variable.attrs.pop(MPI_META, None)
+            for key in _INTERNAL_ATTRS:
+                variable.attrs.pop(key, None)
     return output
+
+
+def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``attrs`` without internal MPI bookkeeping keys.
+
+    Single source of truth for the attribute filter every NetCDF schema/
+    write path in :mod:`.netcdf` must apply. Used in place of each call
+    site re-deriving its own ``if key != MPI_META`` predicate, which is
+    exactly how :data:`PARTITIONED_ATTR` previously went unfiltered at
+    several of those sites while only :data:`MPI_META` was excluded.
+
+    Parameters
+    ----------
+    attrs : Mapping[str, Any]
+        Source attributes, e.g. ``variable.attrs`` or ``dataset.attrs``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Copy of ``attrs`` with every key in :data:`_INTERNAL_ATTRS` removed.
+    """
+    return {key: value for key, value in attrs.items() if key not in _INTERNAL_ATTRS}
 
 
 def _format_label(value: Any, limit: int = 16) -> str:
@@ -374,7 +411,7 @@ def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, s
     return _format_label(values[0]), _format_label(values[-1])
 
 
-def _format_bytes(count: float) -> str:
+def format_bytes(count: float) -> str:
     """Return a compact binary size label."""
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if count < 1024.0 or unit == "TiB":
@@ -459,7 +496,7 @@ def log_partition_report(
     if idle:
         split_str += f" (IDLE={idle})"
 
-    usage_str = f"{_format_bytes(total)} total (Peak/Rank: {_format_bytes(peak_bytes)})"
+    usage_str = f"{format_bytes(total)} total (Peak/Rank: {format_bytes(peak_bytes)})"
 
     border = "=" * 80
     separator = "-" * 80
@@ -555,8 +592,8 @@ def log_partition_report_cartesian(
         f" \U0001f539 Process grid : {grid_str} ({comm.size} ranks)",
         " \U0001f539 Global sizes : "
         + ", ".join(f"{str(d)!s}={int(global_sizes[d])}" for d in dims),
-        f" \U0001f539 Memory       : {_format_bytes(total)} total "
-        + f"(Peak/Rank: {_format_bytes(peak_bytes)})",
+        f" \U0001f539 Memory       : {format_bytes(total)} total "
+        + f"(Peak/Rank: {format_bytes(peak_bytes)})",
         "-" * 80,
     ]
     for rank_id, rank_coords, rank_starts, rank_stops, nbytes in sorted(rows):
@@ -601,7 +638,7 @@ def _coord_length(spec: Any) -> int | None:
     return int(array.shape[0]) if array.ndim > 0 else None
 
 
-def _resolve_sizes(
+def resolve_sizes(
     required_dims: Iterable[Hashable],
     sizes: Mapping[Hashable, int] | None,
     coords: Mapping[Hashable, Any] | None,
@@ -637,7 +674,7 @@ def _resolve_sizes(
     return resolved
 
 
-def _localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
+def localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
     """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
 
     Accepts a coordinate in any of the three forms
@@ -659,7 +696,7 @@ def _localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
     return (coord_dims, coord_array, *rest)
 
 
-def _delayed_local(
+def delayed_local(
     fn: Callable[..., Any], args: tuple[Any, ...], shape: tuple[int, ...], dtype: Any
 ) -> Any:
     """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.

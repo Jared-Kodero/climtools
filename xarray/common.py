@@ -21,7 +21,7 @@ _OP_LIST: tuple[tuple[Any, str], ...] = (
     (MPI.LOR, "LOR"),
 )
 
-_MPI_REDUCIBLE_KINDS = "biufc"
+MPI_REDUCIBLE_KINDS = "biufc"
 
 # Verify that every rank entered a reduction with the same per-variable plan
 # before any buffer collective is posted. The check costs one small object
@@ -30,7 +30,7 @@ _MPI_REDUCIBLE_KINDS = "biufc"
 CHECK_COLLECTIVE_AGREEMENT = True
 
 
-def _op_name(op: MPI.Op) -> str:
+def op_name(op: MPI.Op) -> str:
     """Return a rank-stable label for an MPI reduction operation."""
     for candidate, name in _OP_LIST:
         if op == candidate:
@@ -39,7 +39,7 @@ def _op_name(op: MPI.Op) -> str:
 
 
 @cache
-def _mpi_representable(dtype_string: str) -> bool:
+def mpi_representable(dtype_string: str) -> bool:
     """Return whether a NumPy dtype has a usable predefined MPI datatype."""
     dtype = np.dtype(dtype_string)
     try:
@@ -53,7 +53,7 @@ def _mpi_representable(dtype_string: str) -> bool:
 
 
 @cache
-def _partial_dtype(
+def partial_dtype(
     dtype_string: str, operation: str, skipna: bool | None
 ) -> np.dtype[Any]:
     """Return the dtype of a rank-local xarray reduction.
@@ -86,7 +86,7 @@ def _partial_dtype(
     return cast("np.dtype[Any]", result.dtype)
 
 
-def _extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
+def extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
     """Return the neutral element for a min/max reduction: the dtype's max
     value (for a minimum) or min value (for a maximum), so that combining it
     with any real value leaves the real value unchanged."""

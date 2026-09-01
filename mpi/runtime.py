@@ -8,13 +8,17 @@ import functools
 import os
 from collections.abc import Callable, Sequence
 from numbers import Integral
-from typing import ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from mpi4py import MPI
 from mpi4py.MPI import Intracomm
 
 from ..core.utils import _LAUNCH_ENV, LockFile, tmp
 from .diagnostics import MPIDiagnostics, MPIError
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -480,6 +484,82 @@ class MPIRuntime(MPIDiagnostics):
             Object assigned to this rank.
         """
         return cast("T", self.comm.scatter(values, root=root))
+
+    def scatterv(
+        self,
+        send: "np.ndarray | None",
+        counts: "Sequence[int] | np.ndarray",
+        local_shape: "Sequence[int]",
+        dtype: "npt.DTypeLike",
+        *,
+        root: int = 0,
+    ) -> "np.ndarray":
+        """Scatter an array's leading axis with a variable per-rank count.
+
+        Zero-copy counterpart to :meth:`scatter`: rather than one Python
+        object per rank, this splits ``send``'s axis 0 into ``counts[rank]``
+        rows per rank via ``MPI_Scatterv`` and returns each rank's
+        contiguous local slab directly as a NumPy array, without pickling.
+        Use this whenever every rank's row count may differ (e.g. an
+        uneven partition), unlike :meth:`scatter`, whose one-Python-object-
+        per-rank contract has no notion of a shared leading axis to split.
+
+        Parameters
+        ----------
+        send : numpy.ndarray or None
+            Complete array on ``root``, axis 0 already ordered rank by
+            rank (row ``i`` for ``sum(counts[:r]) <= i < sum(counts[:r+1])``
+            belongs to rank ``r``). Ignored (may be None) on every other
+            rank.
+        counts : sequence of int or numpy.ndarray
+            Row count along axis 0 assigned to each rank, ``counts[rank]``
+            summing to ``send.shape[0]``. Every rank must pass the
+            identical ``counts``.
+        local_shape : sequence of int
+            This rank's output shape; ``local_shape[0]`` must equal
+            ``counts[self.comm.rank]`` and the trailing dimensions must
+            match ``send.shape[1:]``.
+        dtype : numpy dtype-like
+            Element dtype of ``send`` and the returned array. Every rank
+            must agree on this dtype; :func:`~mpi4py.util.dtlib.from_numpy_dtype`
+            maps it to the matching ``MPI.Datatype`` for the transfer, so
+            an unsupported (e.g. non-numeric) dtype raises there before
+            any communication happens.
+        root : int, optional
+            Rank holding ``send``. Default 0.
+
+        Returns
+        -------
+        numpy.ndarray
+            This rank's contiguous local slab, shape ``local_shape``.
+
+        Raises
+        ------
+        ValueError
+            If ``root`` is asked to scatter without providing ``send``.
+        """
+        import numpy as np
+        from mpi4py.util import dtlib
+
+        dtype = np.dtype(dtype)
+        counts = np.asarray(counts, dtype=np.int64)
+        row_elems = int(np.prod(local_shape[1:], dtype=np.int64)) if len(local_shape) > 1 else 1
+        elem_counts = counts * row_elems
+        displs = np.zeros(len(counts), dtype=np.int64)
+        np.cumsum(elem_counts[:-1], out=displs[1:])
+
+        mpi_dtype = dtlib.from_numpy_dtype(dtype)
+        local = np.empty(local_shape, dtype=dtype)
+
+        sendbuf = None
+        if self.comm.rank == root:
+            if send is None:
+                raise ValueError("`send` is required on the scattering root rank.")
+            contiguous = np.ascontiguousarray(send, dtype=dtype)
+            sendbuf = [contiguous, (elem_counts, displs), mpi_dtype]
+
+        self.comm.Scatterv(sendbuf, [local, mpi_dtype], root=root)
+        return local
 
     def gather(self, value: T, *, root: int = 0) -> list[T] | None:
         """Gather one Python object from every rank onto ``root``.
