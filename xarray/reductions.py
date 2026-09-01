@@ -1056,7 +1056,59 @@ def _first_last_combine(
         phase="MPI xarray first/last value reduction",
         comm=comm,
     )
-    return combined.where(owner != sentinel) if kind in "fc" else combined
+    result = combined.where(owner != sentinel) if kind in "fc" else combined
+
+    # Any coordinate of `variable` that itself varies along `dim` (most
+    # commonly `dim`'s own dimension coordinate, e.g. "lat" or a real
+    # "time" axis) rides along with the vectorized `.isel(dim=index,
+    # drop=True)` inside `_first_last_local`: `candidate` ends up
+    # carrying that coordinate's value *at the locally-picked index*,
+    # not a scalar. `comm_reduce` above only Allreduces the requested
+    # data array and otherwise copies `payload`'s own (rank-local)
+    # coordinates onto the result verbatim -- correct for every other
+    # caller in this module, where a surviving coordinate is already
+    # identical on every rank, but wrong here: each rank's own local
+    # pick differs, so left alone this coordinate silently reports
+    # whichever value *this* rank's own local slice happened to pick,
+    # not the value at the true, cross-rank-elected first/last
+    # position. It needs the identical owner-election combine the data
+    # itself just got.
+    index_coords = {name: coord for name, coord in variable.coords.items() if dim in coord.dims}
+    if index_coords:
+        combined_coords: dict[Hashable, xr.DataArray] = {}
+        for name, coord in index_coords.items():
+            local_coord = candidate.coords[name]
+            coord_kind = local_coord.dtype.kind
+            # datetime64/timedelta64 (a real "time" axis, most commonly)
+            # have no MPI reduction operator; Allreduce their lossless
+            # int64 view instead -- the same reinterpretation
+            # `_mpi_buffer_view` uses for halo exchange in
+            # arithmetic.py -- and cast back afterward.
+            as_int = coord_kind in "mM"
+            reducible = local_coord.astype(np.int64) if as_int else local_coord
+            reducible_kind = reducible.dtype.kind
+            coord_neutral = (
+                False if reducible_kind == "b" else np.zeros((), dtype=reducible.dtype).item()
+            )
+            coord_payload, coord_error = guarded(
+                lambda reducible=reducible: reducible.where(is_owner, other=coord_neutral)
+            )
+            coord_combined = comm_reduce(
+                runtime,
+                coord_payload,
+                MPI.LOR if reducible_kind == "b" else MPI.SUM,
+                expect_dtype=reducible.dtype,
+                error=coord_error,
+                phase="MPI xarray first/last coordinate reduction",
+                comm=comm,
+            )
+            if reducible_kind in "fc":
+                coord_combined = coord_combined.where(owner != sentinel)
+            combined_coords[name] = (
+                coord_combined.astype(local_coord.dtype) if as_int else coord_combined
+            )
+        result = result.assign_coords(combined_coords)
+    return result
 
 
 def first_reduce(
