@@ -76,14 +76,14 @@ Documentation = "https://github.com/Jared-Kodero/climtools#readme"
 # of the package works without it. Its ESMF dependency is far more reliable
 # from conda-forge than from pip; see env/environment.yml.
 regrid = ["xesmf"]
-# pytest: not used by tests/test_mpi*.py directly (those are plain scripts
+# pytest: not used by test/test_*.py directly (those are plain scripts
 # run under `mpirun ... python -m mpi4py`), but needed to run this project's
 # own unit tests, if any are added under pytest collection later.
-# bottleneck: tests/test_mpi_reductions.py builds its serial reference for
+# bottleneck: test/_sweep-style checks build their serial reference for
 # first()/last() with xarray's DataArray.bfill()/.ffill(), which xarray
 # routes through `bottleneck.push` (core/duck_array_ops.py::_push) and raises
 # ModuleNotFoundError without. Not a runtime dependency of climtools itself
-# (first/last never calls bfill/ffill), only of this test file.
+# (first/last never calls bfill/ffill), only of the test suite.
 dev = ["typing_extensions", "build", "twine", "pytest", "bottleneck"]
 
 [tool.setuptools]
@@ -107,5 +107,5 @@ package-dir = { climtools = "." }
 
 [tool.setuptools.exclude-package-data]
 # Keep the sdist/wheel free of dev tooling and the multi-hundred-MB test
-# scratch output that setup_env.sh and tests/test_mpi.py can generate.
-"*" = ["env/*", "tests/*.log", "tests/__pycache__/*"]
+# scratch output that setup_env.sh and test/*.py can generate.
+"*" = ["env/*", "test/*.log", "test/__pycache__/*"]

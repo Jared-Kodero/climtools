@@ -814,6 +814,22 @@ def roll(
 
     local_len = int(value.sizes[dim])
     trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
+    # `.shift()` unconditionally reserves a float NaN fill value for the
+    # boundary it introduces, upcasting any integer/bool variable to
+    # float even though, by construction, that boundary is never
+    # actually missing here: `halo_exchange(..., periodic=True)` already
+    # padded with genuine neighbor data (wrapping at the true global
+    # edge), so every position `trimmed` keeps is real, borrowed data,
+    # never a fill value. Restore each variable's original dtype now
+    # that the shift itself is done -- safe precisely because nothing
+    # in `trimmed` can be NaN from this operation.
+    if isinstance(value, xr.Dataset):
+        original_dtypes = {name: var.dtype for name, var in value.variables.items()}
+        for name, dtype in original_dtypes.items():
+            if name in trimmed.variables and trimmed.variables[name].dtype != dtype:
+                trimmed[name] = trimmed[name].astype(dtype)
+    elif trimmed.dtype != value.dtype:
+        trimmed = trimmed.astype(value.dtype)
     return reattach_meta(trimmed, meta)
 
 
