@@ -68,6 +68,13 @@ def _var_or_std(
         """Combine rank-local sums of squared deviation into variance
         (``std`` when ``root``), via one ``Allreduce``."""
         deviation = variable - mean
+        # `deviation`'s dtype (always floating: subtracting a float
+        # `mean` promotes even an integer `variable`) is what the
+        # squared-deviation sum below actually produces -- using
+        # `variable.dtype` here instead would predict an *integer*
+        # expected dtype for an integer-typed variable, silently
+        # truncating the genuinely-fractional sum of squares to an
+        # integer before the Allreduce ever runs.
         partial_sq_sum, error = guarded(
             lambda: (deviation * deviation).sum(
                 dim=variable_dims, skipna=skipna, min_count=None, keep_attrs=False
@@ -77,7 +84,7 @@ def _var_or_std(
             runtime,
             partial_sq_sum,
             MPI.SUM,
-            expect_dtype=partial_dtype(variable.dtype.str, "sum", skipna),
+            expect_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray variance reduction",
             comm=comm,
