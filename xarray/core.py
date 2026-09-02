@@ -1165,7 +1165,8 @@ class MPIXarray:
         Returns
         -------
         MPIGroupBy
-            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``, ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
+            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
+            ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
         """
         return MPIGroupBy(self, dim, labels)
 
@@ -1181,7 +1182,8 @@ class MPIXarray:
         Returns
         -------
         MPIResample
-            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``, ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
+            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
+            ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
         """
         return MPIResample(self, dim, freq)
 
