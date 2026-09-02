@@ -54,13 +54,7 @@ _INTERNAL_ATTRS = frozenset({MPI_META, PARTITIONED_ATTR})
 
 
 def _canonicalize_meta(meta: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return ``meta`` with both plural and singular partition keys present.
-
-    Accepts either the canonical multi-dimensional form (``dims`` present)
-    or the legacy single-dimension-only form (``dim`` present, no ``dims``),
-    and returns a dict carrying both. Returns None if neither form's
-    required keys are all present.
-    """
+    """Return ``meta`` with both plural and singular partition keys present."""
     if "dims" in meta:
         required = {"dims", "global_sizes", "starts", "stops", "chunk_info"}
         if not required <= meta.keys():
@@ -145,27 +139,10 @@ def _validate_mpi_meta(
 def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     """Return validated MPI distribution metadata.
 
-    The metadata is looked for on the object itself and, for a Dataset, on its
-    variables as a fallback. The fallback exists because
-    :meth:`xarray.DataArray.to_dataset` moves the array's attributes onto the
-    resulting data variable and leaves ``Dataset.attrs`` empty. Inspecting only
-    the top level therefore reported a distributed DataArray as ordinary
-    replicated data as soon as any caller converted it, which silently routed
-    parallel writes through the rank-0 scatter path and produced a file holding
-    only rank 0's slab.
-
-    Variable-level metadata is used only when every variable that carries it
-    agrees, and only when it also describes the Dataset as a whole. Disagreeing
-    variables mean the object was assembled from separately distributed pieces,
-    which no single partition description can represent, so None is returned
-    and the caller treats the object as undistributed rather than acting on an
-    arbitrary choice.
-
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
         Object whose distribution metadata is requested.
-
     Returns
     -------
     dict or None
@@ -198,11 +175,12 @@ def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
 def assign_mpi_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
     """Attach an already-built ``meta`` dict to ``value`` and its variables.
 
-    Shared by :func:`set_mpi_meta` (building ``meta`` from scratch) and
-    :func:`set_save_chunks` (adding one key to an existing ``meta``): both
-    need the identical propagation rule -- set on the object itself, and
-    on every variable that carries at least one of ``meta["dims"]``,
-    clearing any stale metadata on variables that do not.
+    Parameters
+    ----------
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    meta : Mapping[str, Any]
+        MPI distribution metadata.
     """
     dims = meta["dims"]
     value.attrs[MPI_META] = dict(meta)
@@ -226,12 +204,7 @@ def _as_dims(dim: Hashable | Iterable[Hashable]) -> tuple[str, ...]:
 def _as_dim_map(
     dims: tuple[str, ...], value: int | Mapping[Hashable, int], name: str
 ) -> dict[str, int]:
-    """Normalize a per-dimension argument to a ``{dim: value}`` mapping.
-
-    A bare scalar is only accepted for a single partition dimension --
-    with more than one, which dimension it describes is ambiguous, so a
-    mapping is required.
-    """
+    """Normalize a per-dimension argument to a ``{dim: value}`` mapping."""
     if isinstance(value, Mapping):
         resolved = {str(k): int(v) for k, v in value.items()}
         missing = [dim for dim in dims if dim not in resolved]
@@ -263,21 +236,15 @@ def set_mpi_meta(
     value : xarray.Dataset or xarray.DataArray
         Rank-local xarray object.
     dim : hashable or sequence of hashable
-        Distributed dimension(s). A single dimension is the default,
-        backward-compatible case; a sequence of two or more dimensions
-        describes a Cartesian-topology partition.
+        Distributed dimension(s).
     global_size : int or mapping
-        Global length of ``dim``. A bare int is only valid when ``dim`` is
-        a single dimension; otherwise pass a ``{dim: length}`` mapping.
+        Global length of ``dim``.
     start, stop : int or mapping
-        Global half-open interval owned by this rank, per dimension. Same
-        scalar-vs-mapping rule as ``global_size``.
+        Global half-open interval owned by this rank, per dimension.
     chunk_info : mapping
         Effective climtools chunk size for every retained dimension.
     cart : mapping, optional
-        Cartesian topology descriptor (``grid_shape``, ``coords``,
-        ``periods``), attached only for a multi-dimensional partition. See
-        :mod:`climtools.mpi.cartesian`.
+        Cartesian topology descriptor (``grid_shape``, ``coords``, ``periods``), attached only for a multi-dimensional partition.
     """
     dims = _as_dims(dim)
     global_sizes = _as_dim_map(dims, global_size, "global_size")
@@ -311,30 +278,16 @@ def set_save_chunks(
 ) -> None:
     """Attach save_chunks to ``value``'s existing MPI distribution metadata.
 
-    ``save_chunks`` -- the on-disk NetCDF chunk shape computed by
-    :func:`~climtools.core.xr_chunks.compute_save_chunks` -- is stored
-    under the ``"save_chunks"`` key alongside the ``dim``/``global_size``/
-    ``start``/``stop``/``chunk_info`` keys :func:`set_mpi_meta` already
-    sets. It is excluded from ``_PARTITION_KEYS`` deliberately, for the
-    same reason ``chunk_info`` is: it records how a write should be
-    shaped, not which slice this rank owns, so two partitions with
-    different (or absent) ``save_chunks`` but identical
-    dim/global_size/start/stop still describe the same ownership and are
-    still equal under :func:`_partitions_match`.
-
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
-        Rank-local xarray object that already carries valid MPI
-        distribution metadata (see :func:`get_mpi_meta`).
+        Rank-local xarray object that already carries valid MPI distribution metadata (see :func:`get_mpi_meta`).
     save_chunks : mapping
         Mapping from variable name to save_chunk shape.
-
     Raises
     ------
     ValueError
-        If ``value`` carries no valid MPI distribution metadata to attach
-        ``save_chunks`` to.
+        If ``value`` carries no valid MPI distribution metadata to attach ``save_chunks`` to.
     """
     meta = get_mpi_meta(value)
     if meta is None:
@@ -352,7 +305,17 @@ def set_save_chunks(
 
 
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
-    """Return a shallow copy without MPI distribution metadata."""
+    """Return a shallow copy without MPI distribution metadata.
+
+    Parameters
+    ----------
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Shallow copy without internal MPI metadata.
+    """
     output = value.copy(deep=False)
     for key in _INTERNAL_ATTRS:
         output.attrs.pop(key, None)
@@ -366,17 +329,10 @@ def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArra
 def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     """Return ``attrs`` without internal MPI bookkeeping keys.
 
-    Single source of truth for the attribute filter every NetCDF schema/
-    write path in :mod:`.netcdf` must apply. Used in place of each call
-    site re-deriving its own ``if key != MPI_META`` predicate, which is
-    exactly how :data:`PARTITIONED_ATTR` previously went unfiltered at
-    several of those sites while only :data:`MPI_META` was excluded.
-
     Parameters
     ----------
     attrs : Mapping[str, Any]
-        Source attributes, e.g. ``variable.attrs`` or ``dataset.attrs``.
-
+        Source attributes, e.g.
     Returns
     -------
     dict[str, Any]
@@ -386,12 +342,7 @@ def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _format_label(value: Any, limit: int = 16) -> str:
-    """Return a short, fixed-width-friendly label for a coordinate value.
-
-    Datetime labels are the reason the previous report scrolled sideways: a
-    numpy datetime64[ns] renders as 29 characters. Seconds and nanoseconds
-    carry no information for a partition boundary, so they are dropped.
-    """
+    """Return a short, fixed-width-friendly label for a coordinate value."""
     if isinstance(value, np.datetime64):
         text = str(np.datetime64(value, "m"))
     elif isinstance(value, (np.floating, float)):
@@ -412,7 +363,17 @@ def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, s
 
 
 def format_bytes(count: float) -> str:
-    """Return a compact binary size label."""
+    """Return a compact binary size label.
+
+    Parameters
+    ----------
+    count : float
+        Byte count.
+    Returns
+    -------
+    str
+        Human-readable binary size label.
+    """
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if count < 1024.0 or unit == "TiB":
             return f"{count:.0f}{unit}" if unit == "B" else f"{count:.1f}{unit}"
@@ -423,30 +384,16 @@ def format_bytes(count: float) -> str:
 def should_log_partitions(runtime: MPIRuntime, log_partitions: bool) -> bool:
     """Collectively resolve whether to call :func:`log_partition_report`.
 
-    ``log_partition_report`` itself calls ``comm.gather`` unconditionally
-    to assemble its table -- every rank must call it together or the
-    ranks that do call it block forever waiting for the ones that don't.
-    But the natural, expected way to request the report is exactly the
-    one thing that breaks that requirement: ``log_partitions=(rank == 0)``
-    ("only print from rank 0"), which passes a *different* boolean on
-    different ranks. Resolving the decision through one cheap
-    ``Allreduce``/``LOR`` here first -- report if *any* rank asked, a
-    result every rank computes identically -- makes that idiom safe
-    without changing behavior for the common case where every rank
-    already agrees (all True, or all False).
-
     Parameters
     ----------
     runtime : MPIRuntime
         Runtime whose communicator backs the collective.
     log_partitions : bool
         This rank's own request.
-
     Returns
     -------
     bool
-        Identical on every rank: whether to call
-        :func:`log_partition_report`.
+        Identical on every rank: whether to call :func:`log_partition_report`.
     """
     return bool(runtime.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
@@ -463,7 +410,29 @@ def log_partition_report(
     automatic: bool = False,
     detail: bool = True,
 ) -> None:
-    """Print a structured, compact description of the rank-local partition layout."""
+    """Print a structured, compact description of the rank-local partition layout.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    data : xr.Dataset | xr.DataArray
+        Input xarray object.
+    dim : Hashable
+        Dimension to operate on.
+    origin : str
+        Origin label for diagnostics.
+    global_size : int
+        Global dimension length.
+    start : int
+        Global inclusive start index.
+    stop : int
+        Global exclusive stop index.
+    automatic : bool
+        Whether partitioning was selected automatically.
+    detail : bool
+        Whether to print detailed partition diagnostics.
+    """
     comm = runtime.comm
     first, last = _edge_labels(data, dim)
     local = (int(comm.rank), int(start), int(stop), first, last, int(data.nbytes))
@@ -559,12 +528,28 @@ def log_partition_report_cartesian(
 ) -> None:
     """Print a compact per-axis summary of a Cartesian-topology partition.
 
-    The multi-dimensional counterpart of :func:`log_partition_report`. Kept
-    as a separate function, rather than folding a variable-arity case into
-    :func:`log_partition_report`, so the existing one-dimensional report's
-    exact output is not put at risk by a multi-dimensional generalization;
-    the one-dimensional path continues to call the original function
-    unchanged.
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    data : xr.Dataset | xr.DataArray
+        Input xarray object.
+    dims : tuple[Hashable, ...]
+        Dimensions to operate on.
+    origin : str
+        Origin label for diagnostics.
+    global_sizes : Mapping[Hashable, int]
+        Global sizes by partition dimension.
+    starts : Mapping[Hashable, int]
+        Global start indices by partition dimension.
+    stops : Mapping[Hashable, int]
+        Global stop indices by partition dimension.
+    grid_shape : tuple[int, ...]
+        Cartesian process-grid shape.
+    coords : tuple[int, ...]
+        Coordinate specifications.
+    automatic : bool
+        Whether partitioning was selected automatically.
     """
     comm = runtime.comm
     local = (
@@ -613,26 +598,17 @@ def indexer_is_scalar(indexer: Any) -> bool:
     Parameters
     ----------
     indexer : Any
-        Value passed as an index. A :class:`slice`, ``list``, ``tuple``,
-        :class:`numpy.ndarray`, or :class:`xarray.DataArray` selects zero or
-        more positions; anything else (an int, a label, ...) selects one.
-
+        Value passed as an index.
     Returns
     -------
     bool
-        True when ``indexer`` selects exactly one position and therefore
-        drops its dimension, rather than keeping it with length one.
+        True when ``indexer`` selects exactly one position and therefore drops its dimension, rather than keeping it with length one.
     """
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
 
 def _coord_length(spec: Any) -> int | None:
-    """Return a coordinate spec's own length, or None if it has none.
-
-    Accepts the same forms as :func:`_localize_coord`: a bare array-like or
-    a ``(dims, array[, attrs])`` tuple. A 0-D (scalar) coordinate has no
-    length to offer.
-    """
+    """Return a coordinate spec's own length, or None if it has none."""
     array = spec[1] if isinstance(spec, tuple) else spec
     array = np.asarray(array)
     return int(array.shape[0]) if array.ndim > 0 else None
@@ -645,13 +621,18 @@ def resolve_sizes(
 ) -> dict[Hashable, int]:
     """Fill in any dimension length missing from ``sizes`` using ``coords``.
 
-    A dimension's length can come from either an explicit entry in
-    ``sizes`` (checked first, so it always wins) or the length of a
-    matching full-length coordinate in ``coords`` -- reading that length
-    never forces any computation, since coordinates passed to
-    :meth:`~.io.IO.create_dataarray`/``create_dataset`` are always plain,
-    eager arrays, never lazy ``fill`` functions. Any dimension with
-    neither is reported together, in one error, rather than one at a time.
+    Parameters
+    ----------
+    required_dims : Iterable[Hashable]
+        Dimensions whose sizes must be resolved.
+    sizes : Mapping[Hashable, int] | None
+        Known dimension sizes.
+    coords : Mapping[Hashable, Any] | None
+        Coordinate specifications.
+    Returns
+    -------
+    dict[Hashable, int]
+        Resolved dimension-size mapping.
     """
     resolved = dict(sizes) if sizes else {}
     coords = coords or {}
@@ -677,12 +658,20 @@ def resolve_sizes(
 def localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
     """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
 
-    Accepts a coordinate in any of the three forms
-    :class:`xarray.DataArray`/:class:`~xarray.Dataset` themselves accept: a
-    bare array-like, ``(dims, array)``, or ``(dims, array, attrs)``. A
-    coordinate whose own length does not equal ``global_size`` is returned
-    unchanged (already rank-local, or a scalar/unrelated-length auxiliary
-    coordinate -- not this function's business to guess about).
+    Parameters
+    ----------
+    spec : Any
+        Coordinate specification.
+    global_size : int
+        Global dimension length.
+    start : int
+        Global inclusive start index.
+    stop : int
+        Global exclusive stop index.
+    Returns
+    -------
+    Any
+        Localized coordinate specification.
     """
     if isinstance(spec, tuple):
         coord_dims, coord_array, *rest = spec
@@ -701,12 +690,20 @@ def delayed_local(
 ) -> Any:
     """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
 
-    Shared by :meth:`~.io.IO.create_dataarray` and
-    :meth:`~.io.IO.create_dataset`: every call site passes a *different*
-    ``fn``/``args`` (this rank's own ``fill`` and its own bounds, or none
-    for a non-partitioned variable), computed independently with no
-    communication -- this helper only avoids repeating the
-    ``dask.delayed``/``from_delayed`` wiring three times.
+    Parameters
+    ----------
+    fn : Callable[..., Any]
+        Callable used to construct local data.
+    args : tuple[Any, ...]
+        Arguments passed to the callable.
+    shape : tuple[int, ...]
+        Expected local array shape.
+    dtype : Any
+        NumPy dtype.
+    Returns
+    -------
+    Any
+        Delayed Dask array for the local slice.
     """
     import dask
     import dask.array as dask_array
@@ -733,12 +730,6 @@ def choose_partition_dim(
 ) -> Hashable:
     """Select a partition dimension automatically.
 
-    The dimension that keeps the most ranks busy is the longest one, so the
-    primary key is length. Ties are broken by dataset declaration order, which
-    is identical on every rank, so the choice is rank-invariant without any
-    communication. Dimensions of length one are never chosen unless nothing
-    else exists, because partitioning them leaves every rank but one empty.
-
     Parameters
     ----------
     sizes : mapping
@@ -746,16 +737,9 @@ def choose_partition_dim(
     mpi_size : int
         Number of ranks the data will be spread over.
     exclude : iterable of hashable, optional
-        Dimensions that must not be chosen, for example a dimension the caller
-        intends to reduce over.
+        Dimensions that must not be chosen, for example a dimension the caller intends to reduce over.
     rank : int, optional
-        Calling rank, used only to gate the short-partition warning below to
-        rank 0. The dimension this function returns never depends on it: the
-        choice is identical on every rank regardless. None (the default)
-        always warns, which is correct both for a caller that has already
-        gated its own call to one rank and for a direct, standalone call
-        (as in a test) where there is no meaningful "rank" to gate on.
-
+        Calling rank, used only to gate the short-partition warning below to rank 0.
     Returns
     -------
     hashable
@@ -765,20 +749,6 @@ def choose_partition_dim(
     ------
     ValueError
         If no dimension is available.
-
-    Notes
-    -----
-    A short-partition warning (see below) is emitted at most once per
-    distinct ``(dim, length, mpi_size)`` combination for the life of the
-    process, and, when ``rank`` is given, only from rank 0. climtools sets
-    its own warnings filter to ``"always"`` for ``climtools.*`` modules (see
-    ``climtools/__init__.py``) precisely so a climtools warning is never
-    silently dropped by Python's default per-callsite dedup -- but that same
-    policy means a warning raised identically on every rank of a hot,
-    rank-invariant path would otherwise print once per rank in addition to
-    repeating on every call, which is pure noise rather than new
-    information. Every rank computes the exact same decision here without
-    any communication, so only rank 0 needs to report it.
     """
     blocked = set(exclude)
     candidates = [
@@ -817,32 +787,18 @@ def choose_partition_dims(
 ) -> tuple[Hashable, ...]:
     """Select ``ndims`` partition dimensions automatically.
 
-    Repeatedly applies :func:`choose_partition_dim`, excluding each
-    dimension already chosen, so an N-dimensional automatic choice is
-    exactly the same greedy, rank-invariant, longest-dimension-first rule
-    the existing one-dimensional ``"auto"`` path already uses -- applied
-    ``ndims`` times instead of once. Ties are broken identically (dataset
-    declaration order), so ``choose_partition_dims(sizes, 1, mpi_size)``
-    returns the same single dimension ``choose_partition_dim`` would.
-
     Parameters
     ----------
     sizes : mapping
         Dimension name to global length.
     ndims : int
-        Number of partition dimensions to choose. Must be at least 1 and
-        at most the number of available (non-excluded) dimensions.
+        Number of partition dimensions to choose.
     mpi_size : int
-        Number of ranks the data will be spread over. Passed through to
-        :func:`choose_partition_dim` unchanged (used only for its
-        short-partition warning heuristic); the process-grid shape across
-        the chosen dimensions is decided separately by the Cartesian
-        topology, not by this function.
+        Number of ranks the data will be spread over.
     exclude : iterable of hashable, optional
         Dimensions that must not be chosen.
     rank : int, optional
         Forwarded to :func:`choose_partition_dim`.
-
     Returns
     -------
     tuple of hashable
@@ -851,8 +807,7 @@ def choose_partition_dims(
     Raises
     ------
     ValueError
-        If ``ndims`` is less than 1 or exceeds the number of available
-        dimensions.
+        If ``ndims`` is less than 1 or exceeds the number of available dimensions.
     """
     if ndims < 1:
         raise ValueError(f"ndims must be at least 1; got {ndims}.")

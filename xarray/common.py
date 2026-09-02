@@ -31,7 +31,17 @@ CHECK_COLLECTIVE_AGREEMENT = True
 
 
 def op_name(op: MPI.Op) -> str:
-    """Return a rank-stable label for an MPI reduction operation."""
+    """Return a rank-stable label for an MPI reduction operation.
+
+    Parameters
+    ----------
+    op : MPI.Op
+        Reduction or MPI operation.
+    Returns
+    -------
+    str
+        Stable operation label.
+    """
     for candidate, name in _OP_LIST:
         if op == candidate:
             return name
@@ -40,7 +50,17 @@ def op_name(op: MPI.Op) -> str:
 
 @cache
 def mpi_representable(dtype_string: str) -> bool:
-    """Return whether a NumPy dtype has a usable predefined MPI datatype."""
+    """Return whether a NumPy dtype has a usable predefined MPI datatype.
+
+    Parameters
+    ----------
+    dtype_string : str
+        NumPy dtype string.
+    Returns
+    -------
+    bool
+        Whether the dtype has a predefined MPI representation.
+    """
     dtype = np.dtype(dtype_string)
     try:
         datatype = _dtlib.from_numpy_dtype(dtype)
@@ -66,11 +86,11 @@ def partial_dtype(
         Reduction operation.
     skipna : bool or None
         Missing-value behavior passed to xarray.
-
     Returns
     -------
     numpy.dtype
-        Dtype produced by the local reduction."""
+        Dtype produced by the local reduction.
+    """
     probe = xr.DataArray(np.zeros((1,), dtype=np.dtype(dtype_string)), dims=("_probe",))
     if operation == "count":
         return cast("np.dtype[Any]", probe.count(dim="_probe").dtype)
@@ -87,9 +107,19 @@ def partial_dtype(
 
 
 def extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
-    """Return the neutral element for a min/max reduction: the dtype's max
-    value (for a minimum) or min value (for a maximum), so that combining it
-    with any real value leaves the real value unchanged."""
+    """Return the neutral value for a minimum or maximum reduction.
+
+    Parameters
+    ----------
+    dtype : np.dtype[Any]
+        NumPy dtype.
+    minimum : bool
+        Whether to construct the minimum-reduction identity.
+    Returns
+    -------
+    Any
+        Neutral value for the requested extreme reduction.
+    """
     kind = dtype.kind
     if kind == "b":
         return bool(minimum)

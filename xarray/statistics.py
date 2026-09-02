@@ -1,19 +1,18 @@
-"""Compute distributed variance and standard deviation.
-
-The implementation uses one collective for the mean and one for squared
-deviations.
-"""
+"""Compute distributed variance and standard deviation."""
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable
 from types import EllipsisType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from mpi4py import MPI
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from ..mpi.runtime import MPIRuntime
 
 from .common import partial_dtype
 from .meta import get_mpi_meta
@@ -34,7 +33,7 @@ from .reductions import mean_reduce
 
 
 def _var_or_std(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -65,8 +64,7 @@ def _var_or_std(
         comm: MPI.Comm | None = None,
         replica_count: int = 1,
     ) -> xr.DataArray:
-        """Combine rank-local sums of squared deviation into variance
-        (``std`` when ``root``), via one ``Allreduce``."""
+        """Combine local squared deviations into global variance or standard deviation."""
         deviation = variable - mean
         # `deviation`'s dtype (always floating: subtracting a float
         # `mean` promotes even an integer `variable`) is what the
@@ -179,7 +177,7 @@ def _var_or_std(
 
 
 def var(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -192,30 +190,25 @@ def var(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     ddof : int, optional
-        Delta degrees of freedom; the divisor is ``N - ddof``. Default 0.
+        Delta degrees of freedom; the divisor is ``N - ddof``.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` includes the active
-    partition dimension, and costs two ``Allreduce`` calls (mean, then
-    sum of squared deviation) rather than one."""
+    """
     return _var_or_std(
         runtime,
         value,
@@ -229,7 +222,7 @@ def var(
 
 
 def std(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -242,30 +235,25 @@ def std(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     ddof : int, optional
-        Delta degrees of freedom; the divisor is ``N - ddof``. Default 0.
+        Delta degrees of freedom; the divisor is ``N - ddof``.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` includes the active
-    partition dimension, and costs two ``Allreduce`` calls (mean, then
-    sum of squared deviation) rather than one."""
+    """
     return _var_or_std(
         runtime,
         value,

@@ -6,12 +6,15 @@ import hashlib
 import math
 from collections.abc import Hashable, Iterable, Mapping
 from types import EllipsisType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from mpi4py import MPI
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from ..mpi.runtime import MPIRuntime
 
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
@@ -30,7 +33,19 @@ def normalize_dim(
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
 ) -> tuple[Any, tuple[Hashable, ...]]:
-    """Normalize a reduction dimension specification."""
+    """Normalize a reduction dimension specification.
+
+    Parameters
+    ----------
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    dim : str | Iterable[Hashable] | EllipsisType | None
+        Dimension to operate on.
+    Returns
+    -------
+    tuple[Any, tuple[Hashable, ...]]
+        Normalized local dimension argument and dimension tuple.
+    """
     if not isinstance(value, (xr.DataArray, xr.Dataset)):
         raise TypeError("MPI xarray operations require an xarray DataArray or Dataset.")
     if dim is None or dim is ...:
@@ -42,7 +57,19 @@ def normalize_dim(
 
 
 def skipna_enabled(dtype: np.dtype[Any], skipna: bool | None) -> bool:
-    """Return the effective dtype-aware ``skipna`` setting."""
+    """Return the effective dtype-aware ``skipna`` setting.
+
+    Parameters
+    ----------
+    dtype : np.dtype[Any]
+        NumPy dtype.
+    skipna : bool | None
+        Whether to ignore missing values.
+    Returns
+    -------
+    bool
+        Effective missing-value policy.
+    """
     if skipna is not None:
         return skipna
     return dtype.kind in "fc"
@@ -76,10 +103,18 @@ def local_reduction_meta(
 ) -> Mapping[str, Any] | None:
     """Return metadata when a reduction remains rank-local.
 
-    A multi-dimensional partition stays local only when *none* of its
-    partition dimensions are being reduced -- reducing away just one
-    of several partition axes still requires a (sub-)communicator
-    collective for any variable that owns that axis.
+    Parameters
+    ----------
+    meta : Mapping[str, Any] | None
+        MPI distribution metadata.
+    dims : tuple[Hashable, ...]
+        Dimensions to operate on.
+    partition_dim : Hashable | Literal['auto'] | None
+        Partition dimension to use for the result.
+    Returns
+    -------
+    Mapping[str, Any] | None
+        Metadata for a rank-local reduction, if applicable.
     """
     if meta is None or any(dim in dims for dim in meta["dims"]):
         return None
@@ -94,7 +129,19 @@ def local_reduction_meta(
 def finish_local_reduction(
     result: xr.Dataset | xr.DataArray, *, old_meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
-    """Restore metadata after a rank-local reduction."""
+    """Restore metadata after a rank-local reduction.
+
+    Parameters
+    ----------
+    result : xr.Dataset | xr.DataArray
+        Operation result.
+    old_meta : Mapping[str, Any]
+        Existing MPI distribution metadata.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Reduction result with restored metadata.
+    """
     dims = tuple(dim for dim in old_meta["dims"] if dim in result.dims)
     if not dims:
         return strip_mpi_meta(result)
@@ -110,7 +157,7 @@ def finish_local_reduction(
     return result
 
 
-def _agree(runtime, signature: tuple[Any, ...]) -> None:
+def _agree(runtime: MPIRuntime, signature: tuple[Any, ...]) -> None:
     """Verify that all ranks entered the same reduction plan."""
     if not CHECK_COLLECTIVE_AGREEMENT or runtime.comm.size == 1:
         return
@@ -123,7 +170,7 @@ def _agree(runtime, signature: tuple[Any, ...]) -> None:
 
 
 def reduction_plan(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     meta: Mapping[str, Any] | None,
@@ -132,21 +179,22 @@ def reduction_plan(
 ) -> tuple[PlanEntry, ...]:
     """Build and validate the rank-independent reduction plan.
 
-    For each variable, classifies the active partition dimensions
-    (``meta["dims"]``) into those the variable *owns* (present in its
-    own dims) and those it is merely *replicated* along (a partition
-    dimension of the object as a whole that this particular variable
-    does not vary over -- e.g. a ``(lat,)`` mask under a ``(lat, lon)``
-    partition). ``comm_axes`` is the set of partition dimensions this
-    variable's reduction must communicate over: the owned dimensions
-    actually being reduced, plus every replicated dimension (whose
-    duplicate copies must be merged into the collective group so they
-    are not silently omitted, and whose count is recorded in
-    ``replica_count`` so :meth:`_comm_reduce` can undo the resulting
-    over-counting of an ``MPI.SUM``). A variable with no active
-    partition dimensions at all (the one-dimensional case when it
-    lacks the sole partition dim, exactly as before) gets an empty
-    ``comm_axes`` and is untouched by this generalization.
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    dims : tuple[Hashable, ...]
+        Dimensions to operate on.
+    meta : Mapping[str, Any] | None
+        MPI distribution metadata.
+    operation : str
+        Operation name used for planning.
+    Returns
+    -------
+    tuple[PlanEntry, ...]
+        Validated reduction plan entries.
     """
     if isinstance(value, xr.DataArray):
         items: tuple[tuple[Hashable, xr.DataArray], ...] = ((value.name, value),)
@@ -255,16 +303,22 @@ def reduction_plan(
 
 
 def resolve_comm(
-    runtime, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
+    runtime: MPIRuntime, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
 ) -> MPI.Comm:
     """Return the communicator a plan entry's collective should use.
 
-    The full communicator for the default one-dimensional case (no
-    ``meta["cart"]``, or only one active partition dimension) --
-    identical to every collective call before this generalization, so
-    that path pays no extra cost. Otherwise, the cached
-    :class:`~.cartesian.CartesianTopology` sub-communicator that spans
-    exactly ``comm_axes`` (see :meth:`.cartesian.CartesianTopology.sub_comm`).
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    meta : Mapping[str, Any] | None
+        MPI distribution metadata.
+    comm_axes : Iterable[Hashable]
+        Partition axes included in the communicator.
+    Returns
+    -------
+    MPI.Comm
+        Communicator for the requested partition axes.
     """
     axes = frozenset(comm_axes)
     if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
@@ -274,18 +328,27 @@ def resolve_comm(
 
 
 def guarded(function: Any) -> tuple[Any, BaseException | None]:
-    """Run a local operation and defer any exception for synchronization."""
+    """Run a local operation and defer any exception for synchronization.
+
+    Parameters
+    ----------
+    function : Any
+        Callable to execute.
+    Returns
+    -------
+    tuple[Any, BaseException | None]
+        Operation result and deferred exception.
+    """
     try:
         return function(), None
     except BaseException as exc:
         return None, exc
 
 
-# -- collective primitives -----------------------------------------------
 
 
 def comm_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.DataArray | None,
     op: MPI.Op,
     *,
@@ -299,20 +362,26 @@ def comm_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.DataArray | None
+        Distributed DataArray buffer.
+    op : MPI.Op
+        MPI reduction operation.
+    expect_dtype : np.dtype[Any] | None
+        Expected dtype of the collective buffer.
+    error : BaseException | None
+        Deferred local exception, if any.
+    phase : str
+        Diagnostic label for the collective phase.
     comm : mpi4py.MPI.Comm, optional
-        Communicator to reduce over. Defaults to the full runtime
-        communicator, exactly as before this parameter existed --
-        pass a :meth:`ReductionPlanningMixin._resolve_comm` result for
-        a partial (sub-communicator) collective under a
-        multi-dimensional partition.
+        Communicator to reduce over.
     replica_count : int, optional
-        Size of a replicated-axis subgroup folded into ``comm`` (see
-        :attr:`~.common.PlanEntry.replica_count`). Only meaningful for
-        ``op=MPI.SUM``: the raw Allreduce total then counts each
-        logical contribution ``replica_count`` times over, so it is
-        divided back out here, exactly, before returning. Ignored
-        (default 1) for every other op, since MIN/MAX/LAND/LOR are
-        idempotent under duplication and need no correction.
+        Size of a replicated-axis subgroup folded into ``comm`` (see :attr:`~.common.PlanEntry.replica_count`).
+    Returns
+    -------
+    xr.DataArray
+        Globally reduced DataArray.
     """
     send: np.ndarray[Any, Any] | None = None
     if error is None:
@@ -366,12 +435,24 @@ def comm_reduce(
 
 
 def exchange(
-    runtime, send: np.ndarray[Any, Any], op: MPI.Op, *, comm: MPI.Comm | None = None
+    runtime: MPIRuntime, send: np.ndarray[Any, Any], op: MPI.Op, *, comm: MPI.Comm | None = None
 ) -> np.ndarray[Any, Any]:
     """All-reduce a validated contiguous NumPy buffer over ``comm``.
 
-    ``comm`` defaults to the full runtime communicator, unchanged from
-    before this parameter existed.
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    send : np.ndarray[Any, Any]
+        Local NumPy buffer to reduce.
+    op : MPI.Op
+        Reduction or MPI operation.
+    comm : MPI.Comm | None
+        MPI communicator.
+    Returns
+    -------
+    np.ndarray[Any, Any]
+        Globally reduced NumPy buffer.
     """
     recv = np.empty(send.shape, dtype=send.dtype)
     active_comm = runtime.comm if comm is None else comm
@@ -380,14 +461,32 @@ def exchange(
 
 
 def count_valid_values(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.DataArray,
     dims: tuple[Hashable, ...],
     *,
     comm: MPI.Comm | None = None,
     replica_count: int = 1,
 ) -> xr.DataArray:
-    """Count valid values globally across the requested dimensions."""
+    """Count valid values globally across the requested dimensions.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.DataArray
+        Distributed xarray object.
+    dims : tuple[Hashable, ...]
+        Dimensions to operate on.
+    comm : MPI.Comm | None
+        MPI communicator.
+    replica_count : int
+        Number of replicated contributions.
+    Returns
+    -------
+    xr.DataArray
+        Global valid-value counts.
+    """
     count: xr.DataArray | None = None
     error: BaseException | None = None
     try:
@@ -411,7 +510,21 @@ def dataset_result(
     dims: tuple[Hashable, ...],
     variables: Mapping[Hashable, xr.DataArray],
 ) -> xr.Dataset:
-    """Rebuild a Dataset from reduced data variables."""
+    """Rebuild a Dataset from reduced data variables.
+
+    Parameters
+    ----------
+    value : xr.Dataset
+        Distributed xarray object.
+    dims : tuple[Hashable, ...]
+        Dimensions to operate on.
+    variables : Mapping[Hashable, xr.DataArray]
+        Reduced data variables.
+    Returns
+    -------
+    xr.Dataset
+        Dataset rebuilt from reduced variables.
+    """
     reduced = set(dims)
     coords = {
         name: coord
@@ -422,21 +535,49 @@ def dataset_result(
 
 
 def repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
-    """Return dimensions eligible for post-reduction repartition."""
+    """Return dimensions eligible for post-reduction repartition.
+
+    Parameters
+    ----------
+    plan : tuple[PlanEntry, ...]
+        Reduction plan entries.
+    Returns
+    -------
+    frozenset[Hashable]
+        Eligible post-reduction partition dimensions.
+    """
     return frozenset(
         dim for entry in plan if entry.distributed for dim, _ in entry.shape
     )
 
 
 def finish(
-    runtime,
+    runtime: MPIRuntime,
     result: xr.Dataset | xr.DataArray,
     *,
     old_meta: Mapping[str, Any] | None,
     partition_dim: Hashable | Literal["auto"] | None,
     auto_candidates: frozenset[Hashable],
 ) -> xr.Dataset | xr.DataArray:
-    """Finalize metadata and optional repartition after a reduction."""
+    """Finalize metadata and optional repartition after a reduction.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    result : xr.Dataset | xr.DataArray
+        Operation result.
+    old_meta : Mapping[str, Any] | None
+        Existing MPI distribution metadata.
+    partition_dim : Hashable | Literal['auto'] | None
+        Partition dimension to use for the result.
+    auto_candidates : frozenset[Hashable]
+        Dimensions eligible for automatic repartitioning.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Finalized distributed result.
+    """
     result = strip_mpi_meta(result)
     old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
     remaining_dims = tuple(dim for dim in old_dims if dim in result.dims)

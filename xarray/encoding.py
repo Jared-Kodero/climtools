@@ -1,16 +1,4 @@
-"""CF encoding helpers shared by the serial and parallel NetCDF writers.
-
-Both writers call :func:`encode_time`/:func:`is_time_like` from this module.
-The serial writer encodes each batch as it is appended, because it hands raw
-numeric buffers to ``netCDF4``. The parallel writer encodes once, on rank 0,
-while building the file schema: only rank 0 ever holds the real Dataset or
-DataArray (every other rank supplies :func:`~climtools.core.xgeo.empty_dataset`
-in its place, per the ``climtools.mpi`` calling convention), so there is a
-single time axis to encode and no cross-rank negotiation of CF units is
-needed. The resulting numeric values and ``units``/``calendar`` attrs are
-included in the schema broadcast to every rank alongside the rest of the
-file layout.
-"""
+"""Encode xarray time coordinates for NetCDF output."""
 
 from __future__ import annotations
 
@@ -33,7 +21,6 @@ def is_cftime(da: xr.DataArray) -> bool:
     ----------
     da : xarray.DataArray
         Variable to inspect.
-
     Returns
     -------
     bool
@@ -52,12 +39,10 @@ def is_time_like(da: xr.DataArray) -> bool:
     ----------
     da : xarray.DataArray
         Variable to inspect.
-
     Returns
     -------
     bool
-        ``True`` when the variable requires CF numeric encoding before it can
-        be written through the ``netCDF4`` interface.
+        ``True`` when the variable requires CF numeric encoding before it can be written through the ``netCDF4`` interface.
     """
     return (
         np.issubdtype(da.dtype, np.datetime64)
@@ -76,28 +61,15 @@ def encode_time(
     Parameters
     ----------
     da : xarray.DataArray
-        Variable to encode. Variables of any other dtype are returned
-        unchanged.
+        Variable to encode.
     units : str or None, optional
-        Target CF units, for example ``"seconds since 1970-01-01"``. When
-        ``None``, datetime axes use seconds since the Unix epoch and other
-        axes fall back to the variable's own encoding.
+        Target CF units, for example ``"seconds since 1970-01-01"``.
     calendar : str or None, optional
-        Target CF calendar. When ``None``, datetime64 axes use
-        ``"proleptic_gregorian"``.
-
+        Target CF calendar.
     Returns
     -------
     xarray.DataArray
-        Numeric variable carrying ``units`` and, where applicable,
-        ``calendar`` in both ``attrs`` and ``encoding``.
-
-    Notes
-    -----
-    Passing ``units`` explicitly is required when appending to an existing
-    file. Re-deriving units from the values of one batch would place a second
-    time origin under the single ``units`` attribute already stored in the
-    file, which corrupts the axis without raising.
+        Numeric variable carrying ``units`` and, where applicable, ``calendar`` in both ``attrs`` and ``encoding``.
     """
     if np.issubdtype(da.dtype, np.datetime64) and not is_cftime(da):
         target_units = units or "seconds since 1970-01-01 00:00:00"
@@ -146,17 +118,10 @@ def encode_dataset_time(ds: xr.Dataset) -> xr.Dataset:
     ----------
     ds : xarray.Dataset
         Dataset to encode.
-
     Returns
     -------
     xarray.Dataset
         Shallow copy in which time-like variables carry CF numeric values.
-
-    Notes
-    -----
-    The copy is what makes this safe to call from a writer. Assigning encoded
-    variables back into the caller's dataset would leave the caller holding an
-    integer time axis after the write returned.
     """
     out = ds.copy()
     replacements: dict[Any, xr.DataArray] = {}

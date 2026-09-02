@@ -1,3 +1,5 @@
+"""Provide geographic xarray utilities and local Dask cluster management."""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,11 +19,13 @@ from ..core.utils import n_cpus, tmp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from types import TracebackType
     from typing import Literal, Self
+
+    from dask.distributed import Client
 
 xr.set_options(display_expand_attrs=False)
 
-# Collapse attributes by default in the repr.
 script_dir = Path(__file__).resolve().parent
 
 
@@ -31,7 +35,17 @@ _dask_cluster = None
 
 
 def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
-    """Return the longitude and latitude coordinate names."""
+    """Return the longitude and latitude coordinate names.
+
+    Parameters
+    ----------
+    da : xr.DataArray | xr.Dataset
+        Input DataArray or Dataset.
+    Returns
+    -------
+    tuple[str, str]
+        Longitude and latitude coordinate names.
+    """
     ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
 
     if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
@@ -51,7 +65,21 @@ def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
 def set_edges_to_nan(
     da: xr.DataArray, dims: str | Sequence[str], width: int = 1
 ) -> xr.DataArray:
-    """Set edge cells along selected dimensions to NaN."""
+    """Set edge cells along selected dimensions to NaN.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input DataArray.
+    dims : str | Sequence[str]
+        Dimensions to operate on.
+    width : int
+        Transect or edge width.
+    Returns
+    -------
+    xr.DataArray
+        DataArray with selected edge cells masked.
+    """
     if width < 0:
         raise ValueError("width must be non-negative")
 
@@ -80,17 +108,17 @@ def set_edges_to_nan(
     return da.where(mask)
 
 
-def add_cyclic_point(obj: xr.DataArray | xr.Dataset, lon: str = "lon"):
-    """
-    Add a cyclic point to a DataArray along the specified longitude dimension.
+def add_cyclic_point(
+    obj: xr.DataArray | xr.Dataset, lon: str = "lon"
+) -> xr.DataArray | xr.Dataset:
+    """Add a cyclic point to a DataArray along the specified longitude dimension.
 
     Parameters
     ----------
     obj : xarray.DataArray or xarray.Dataset
         The input DataArray or Dataset to which a cyclic point will be added.
     lon : str, optional
-        The name of the longitude dimension. Default is "lon".
-
+        The name of the longitude dimension.
     Returns
     -------
     xarray.DataArray or xarray.Dataset
@@ -138,36 +166,32 @@ def sel_transect(
     snap: bool = True,
     drop: bool = True,
 ) -> xr.Dataset | xr.DataArray:
-    """
-    Select cells lying within a transect on a rectilinear xarray grid.
+    """Select cells lying within a transect on a rectilinear xarray grid.
 
     Parameters
     ----------
-    data
+    data : xr.Dataset | xr.DataArray
         Input Dataset or DataArray.
-    x, y
-        Transect centre. For spherical geometry, x is longitude and y is
-        latitude. Either coordinate may be omitted to select an axis-aligned
-        band.
-    orientation
-        Transect orientation in degrees clockwise from the positive y
-        direction. For spherical geometry, this is clockwise from north.
-    width
+    x, y : float | None
+        Transect centre.
+    orientation : float
+        Transect orientation in degrees clockwise from the positive y direction.
+    width : float
         Transect width in approximate grid-cell units.
-    xdim, ydim
+    xdim, ydim : str | None
         Names of the x and y coordinates.
-    geometry
-        ``"xy"`` for planar coordinates or ``"latlon"`` for
-        longitude-latitude coordinates in degrees.
-    auto_infer_xy
-        Extreme used to infer the transect centre when both ``x`` and ``y``
-        are omitted. The default, ``None``, disables automatic inference.
-        Set explicitly to ``"min"`` or ``"max"`` to infer the centre from
-        a two-dimensional field.
-    snap
+    geometry : Literal['xy', 'latlon']
+        ``"xy"`` for planar coordinates or ``"latlon"`` for longitude-latitude coordinates in degrees.
+    auto_infer_xy : Literal['min', 'max'] | None
+        Extreme used to infer the transect centre when both ``x`` and ``y`` are omitted.
+    snap : bool
         Snap the supplied centre coordinates to the nearest grid point.
-    drop
+    drop : bool
         Drop coordinate locations outside the transect.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Selected transect subset.
     """
 
     if xdim not in data.coords or ydim not in data.coords:
@@ -346,8 +370,7 @@ def sel_transect(
 def to_lon180(
     data: xr.Dataset | xr.DataArray, lon: str = "lon"
 ) -> xr.Dataset | xr.DataArray:
-    """
-    Standardize longitude coordinates to [-180, 180).
+    """Standardize longitude coordinates to [-180, 180).
 
     Parameters
     ----------
@@ -355,7 +378,6 @@ def to_lon180(
         The input dataset or data array containing a longitude coordinate.
     lon : str, default 'lon'
         The name of the longitude coordinate in the dataset.
-
     Returns
     -------
     xr.Dataset or xr.DataArray
@@ -371,7 +393,17 @@ def to_lon180(
 
 
 def coord_id(coord: xr.DataArray) -> str:
-    """Return a compact description of a regular coordinate."""
+    """Return a compact description of a regular coordinate.
+
+    Parameters
+    ----------
+    coord : xr.DataArray
+        Coord value.
+    Returns
+    -------
+    str
+        Compact coordinate descriptor.
+    """
     dim = coord.dims[0]
     step = float(coord.diff(dim).mean())
     mean = float(coord.mean(dim))
@@ -380,7 +412,17 @@ def coord_id(coord: xr.DataArray) -> str:
 
 
 def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
-    """Return a deterministic hexadecimal identifier for a lat-lon grid."""
+    """Return a deterministic hexadecimal identifier for a lat-lon grid.
+
+    Parameters
+    ----------
+    coords : xr.DataArray | xr.Dataset
+        Coordinate specifications.
+    Returns
+    -------
+    str
+        Deterministic grid identifier.
+    """
     signature = f"lat-{coord_id(coords['lat'])}_lon-{coord_id(coords['lon'])}"
 
     return hashlib.blake2b(signature.encode("utf-8"), digest_size=8).hexdigest()
@@ -399,8 +441,22 @@ def remap(
     ] = "bilinear",
     parallel: bool = False,
 ) -> xr.Dataset | xr.DataArray:
-    """
-    Remap source data to the destination grid using xESMF.
+    """Remap source data to the destination grid using xESMF.
+
+    Parameters
+    ----------
+    grid_in : xr.Dataset | xr.DataArray
+        Source xarray object.
+    grid_out : xr.Dataset | xr.DataArray
+        Target xarray grid.
+    method : Literal['bilinear', 'conservative', 'conservative_normed', 'patch', 'nearest_s2d', 'nearest_d2s']
+        Operation method.
+    parallel : bool
+        Whether to use parallel execution.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Input data remapped to the target grid.
     """
 
     import xesmf as xe
@@ -482,70 +538,31 @@ def mask(
     valid_value: float = 1,
     parallel: bool = False,
 ) -> xr.DataArray | xr.Dataset:
-    """
-    Mask grid cells that do not match a specified land-sea mask value.
-
-    The mask is remapped to the horizontal grid of ``data`` using
-    nearest-neighbour interpolation. This method preserves categorical mask
-    values. The remapped mask is cached so that repeated calls using the same
-    mask and target-grid specification do not repeat the remapping operation.
-
-    Before masking, ``data`` is sorted by increasing latitude and longitude.
-    Consequently, the returned object may have a different coordinate order
-    from the input.
+    """Mask grid cells that do not match a specified land-sea mask value.
 
     Parameters
     ----------
     data : xarray.DataArray or xarray.Dataset
-        Object to mask. It must contain one-dimensional ``lat`` and ``lon``
-        coordinates and corresponding dimensions.
-
+        Object to mask.
     mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path, or None, optional
         Categorical land-sea mask.
-
-        - If a DataArray is supplied, it is used directly.
-        - If a Dataset is supplied, the variable named by ``data_var`` is used.
-        - If a path is supplied, the Dataset at that path is opened and the
-          variable named by ``data_var`` is used.
-        - If None, the package's default land-sea mask is used.
-
-        The mask must contain ``lat`` and ``lon`` coordinates. By convention,
-        values equal to ``valid_value`` identify cells to retain.
-
     data_var : str, default "land"
-        Name of the mask variable to extract when ``mask`` is a Dataset or a
-        path to a Dataset. This argument is ignored when ``mask`` is already
-        a DataArray.
-
+        Name of the mask variable to extract when ``mask`` is a Dataset or a path to a Dataset.
     valid_value : float or int, default 1
-        Mask value identifying grid cells to retain. Cells whose remapped mask
-        value differs from ``valid_value`` are replaced with NaN.
-
+        Mask value identifying grid cells to retain.
     parallel : bool, default False
-        Whether to perform mask remapping in parallel with Dask. This option
-        is passed to :func:`remap`.
-
+        Whether to perform mask remapping in parallel with Dask.
     Returns
     -------
     xarray.DataArray or xarray.Dataset
-        A latitude- and longitude-sorted object with cells outside the
-        retained mask category replaced by NaN. The return type matches the
-        type of ``data``.
+        A latitude- and longitude-sorted object with cells outside the retained mask category replaced by NaN.
 
     Raises
     ------
     KeyError
         If ``mask`` resolves to a Dataset that does not contain ``data_var``.
-
     TypeError
         If ``mask`` cannot be resolved to an xarray.DataArray.
-
-    Notes
-    -----
-    The cache key is based on the mask identity, mask-variable name, target
-    coordinate bounds, and target-grid dimensions. The cached object is the
-    remapped categorical mask, not the final Boolean mask, so different
-    ``valid_value`` values may reuse the same cached remapping.
     """
 
     if mask is None:
@@ -588,21 +605,7 @@ def add_local_solar_time(
     time: str = "time",
     name: str = "lst",
 ) -> xr.Dataset | xr.DataArray:
-    """
-    Add mean local solar time as a coordinate.
-
-    Local solar time is approximated as UTC shifted by the longitude offset,
-
-    .. math::
-
-        \\mathrm{LST} = \\mathrm{UTC} + \\mathrm{round}\\!\\left(
-        \\frac{\\lambda}{15^\\circ}\\right)\\,\\mathrm{h}
-
-    where :math:`\\lambda` is longitude in degrees east, wrapped to
-    :math:`[-180, 180)`. The offset is rounded to whole hours, so the result is
-    a mean solar time on hourly zones rather than apparent solar time: the
-    equation of time, which reaches roughly plus or minus 16 minutes over the
-    year, is not applied.
+    """Add mean local solar time as a coordinate.
 
     Parameters
     ----------
@@ -614,12 +617,10 @@ def add_local_solar_time(
         Name of the UTC time coordinate.
     name : str, default "lst"
         Name given to the new coordinate.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The input object with the local solar time coordinate attached. The
-        coordinate spans both the time and longitude dimensions.
+        The input object with the local solar time coordinate attached.
     """
     for coord in (lon, time):
         if coord not in data.coords:
@@ -677,7 +678,8 @@ class SetupDask:
         processes: bool = False,
         filter_warnings: bool = True,
         memory_limit: str | int = "auto",
-    ):
+    ) -> None:
+        """Initialize local Dask cluster settings."""
         self.cluster = None
         self.client = None
         self.workers = workers
@@ -686,15 +688,13 @@ class SetupDask:
         self.filter_warnings = filter_warnings
         self.memory_limit = memory_limit
 
-    def start(self):
-        """
-        Start the cluster and client, or return the existing ones.
+    def start(self) -> Client:
+        """Start the cluster and client, or return the existing ones.
 
         Returns
         -------
         dask.distributed.Client
-            The active client. The dashboard is served on the port given by
-            ``DASK_DASHBOARD_PORT`` (default 8787).
+            The active client.
         """
         global _dask_client, _dask_cluster
 
@@ -746,8 +746,15 @@ class SetupDask:
         self.cluster = None
 
     def __enter__(self) -> Self:
+        """Enter the local Dask cluster context."""
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Close the local Dask cluster context."""
         self.close()

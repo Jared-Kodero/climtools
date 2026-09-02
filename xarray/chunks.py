@@ -22,9 +22,6 @@ if TYPE_CHECKING:
 MAX_SAVE_CHUNK_BYTES = 2**31
 
 
-# ---------------------------------------------------------------------------
-# distribution_chunks: in-memory MPI partitioning
-# ---------------------------------------------------------------------------
 
 
 def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
@@ -36,12 +33,10 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
         Dataset to inspect for native chunk sizes.
     dim : hashable
         Dimension name to evaluate.
-
     Returns
     -------
     int or None
-        Smallest interval whose boundaries align with every available native
-        chunk grid, or None if native chunking is unavailable.
+        Smallest interval whose boundaries align with every available native chunk grid, or None if native chunking is unavailable.
     """
     sizes: set[int] = set()
     for variable in data.data_vars.values():
@@ -71,7 +66,6 @@ def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
         Total length of the dimension.
     native_chunk : int or None
         Representative native chunk size.
-
     Returns
     -------
     bool
@@ -95,7 +89,6 @@ def get_effective_chunk_size(
         Representative native chunk size.
     mpi_size : int
         Number of MPI ranks.
-
     Returns
     -------
     int
@@ -119,7 +112,6 @@ def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
         Dataset to evaluate.
     mpi_size : int
         Number of MPI ranks.
-
     Returns
     -------
     dict
@@ -144,7 +136,6 @@ def get_chunk_overrides(
         Dataset to evaluate.
     chunk_info : mapping
         Effective chunk sizes for dimensions.
-
     Returns
     -------
     dict
@@ -168,7 +159,6 @@ def get_balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
         Current MPI rank.
     size : int
         Total number of MPI ranks.
-
     Returns
     -------
     tuple of int
@@ -190,7 +180,6 @@ def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
         Candidate distribution_chunk length.
     size : int
         Number of MPI ranks.
-
     Returns
     -------
     bool
@@ -217,7 +206,6 @@ def get_chunk_bounds(
         Current MPI rank.
     size : int
         Total number of MPI ranks.
-
     Returns
     -------
     tuple of int
@@ -249,7 +237,6 @@ def prune_chunk_info(
         Full mapping of chunk sizes.
     value : xarray.Dataset or xarray.DataArray
         Object whose dimensions are used as a filter.
-
     Returns
     -------
     dict
@@ -262,9 +249,6 @@ def prune_chunk_info(
     }
 
 
-# ---------------------------------------------------------------------------
-# save_chunks: on-disk NetCDF/Zarr output shape
-# ---------------------------------------------------------------------------
 
 
 def _other_dims_bytes(
@@ -273,44 +257,14 @@ def _other_dims_bytes(
     shape: Iterable[int],
     partition_dim: Hashable | None,
 ) -> int:
-    """Return bytes contributed by one partition-dimension element.
-
-    Parameters
-    ----------
-    itemsize : int
-        Data type item size in bytes.
-    dims : iterable of hashable
-        Dimension names.
-    shape : iterable of int
-        Dimension sizes.
-    partition_dim : hashable or None
-        Partition dimension name to exclude.
-
-    Returns
-    -------
-    int
-        Byte size of a single slice along the non-partition dimensions.
-    """
+    """Return bytes contributed by one partition-dimension element."""
     return itemsize * math.prod(
         length for dim, length in zip(dims, shape, strict=True) if dim != partition_dim
     )
 
 
 def _cap_partition_chunk_to_hdf5_limit(preferred: int, other_bytes: int) -> int:
-    """Shrink a partition-dimension save_chunk length to fit the HDF5 4 GiB chunk limit.
-
-    Parameters
-    ----------
-    preferred : int
-        Partition-dimension chunk length before check.
-    other_bytes : int
-        Bytes contributed by one partition-dimension element.
-
-    Returns
-    -------
-    int
-        Adjusted chunk length complying with the HDF5 limit.
-    """
+    """Shrink a partition-dimension save_chunk length to fit the HDF5 4 GiB chunk limit."""
     if other_bytes <= 0 or preferred * other_bytes <= MAX_SAVE_CHUNK_BYTES:
         return preferred
     return max(1, MAX_SAVE_CHUNK_BYTES // other_bytes)
@@ -329,7 +283,6 @@ def get_partition_chunk_size(
         Dimension that MPI ranks write disjoint slabs of.
     mpi_size : int
         Number of MPI ranks participating in the write.
-
     Returns
     -------
     int or None
@@ -372,7 +325,6 @@ def get_chunks(
         Dimension that MPI ranks write disjoint slabs of.
     partition_length : int, optional
         Global size of ``partition_dim``.
-
     Returns
     -------
     dict
@@ -405,20 +357,7 @@ def get_chunks(
 
 
 def _largest_divisor_at_most(value: int, ceiling: int) -> int:
-    """Return the largest divisor of ``value`` that is at most ``ceiling``.
-
-    Parameters
-    ----------
-    value : int
-        The number being divided.
-    ceiling : int
-        The largest acceptable result.
-
-    Returns
-    -------
-    int
-        Largest divisor meeting the ceiling constraint.
-    """
+    """Return the largest divisor of ``value`` that is at most ``ceiling``."""
     if value <= 0 or ceiling <= 0:
         return max(1, ceiling)
     if ceiling >= value:
@@ -441,32 +380,14 @@ def compute_save_chunks(
 ) -> dict[str, tuple[int, ...]]:
     """Derive save chunks for a distributed object using global metadata.
 
-    Calculates optimal save chunks for writing a distributed dataset or data array
-    across MPI ranks. Because each rank holds only a local slice, this function
-    reconstructs the global shape using ``meta`` and applies Dask's default
-    ``"auto"`` chunking heuristic (~128 MiB target) independently on every rank
-    without data communication.
-
-    The partition dimension's chunk size is subsequently adjusted to ensure
-    compatibility with HDF5 limits and MPI rank boundaries:
-
-    - **Capped**: Limited by the HDF5 4 GiB chunk-size restriction.
-    - **Snapped**: If distribution-chunk alignment holds, snapped down to the
-      largest divisor of the distribution chunk size.
-    - **Boundary-aligned**: If distribution-chunk alignment does not hold,
-      snapped down to the largest divisor common to all balanced MPI rank
-      boundaries.
-
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
         Local slice of a distributed object on the current MPI rank.
     meta : mapping
-        Distribution metadata returned by ``get_mpi_meta``. Must include
-        ``meta["dim"]`` within ``meta["chunk_info"]``.
+        Distribution metadata returned by ``get_mpi_meta``.
     mpi_size : int
         Number of MPI ranks the data is distributed across.
-
     Returns
     -------
     dict

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from ..mpi.runtime import MPIRuntime
 
 from .cartesian import dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
@@ -23,19 +26,7 @@ from .meta import (
 def _select_partition_dim(
     meta: Mapping[str, Any], supplied: Mapping[Any, Any], *, caller: str
 ) -> Hashable | None:
-    """Return the sole active partition dimension present in ``supplied``.
-
-    None when the indexer touches no partition dimension at all (the
-    caller then falls straight through to a plain, communication-free
-    local ``isel``/``sel``, exactly as before this helper existed).
-
-    Raises
-    ------
-    NotImplementedError
-        If ``supplied`` indexes more than one partition dimension in the
-        same call -- each partition axis needs its own cross-rank
-        bookkeeping pass, which is not yet fused into a single one.
-    """
+    """Return the sole active partition dimension present in ``supplied``."""
     hit = tuple(dim for dim in meta["dims"] if dim in supplied)
     if not hit:
         return None
@@ -59,20 +50,7 @@ def _merge_partition_meta(
     stop: int,
     chunk_info: Mapping[str, int],
 ) -> None:
-    """Attach updated bounds for ``dim`` onto ``output`` in place, while
-    preserving every other active partition dimension's metadata
-    unchanged.
-
-    A single-dimension partition (or a multi-dimensional one updated on
-    every one of its axes at once) can just call :func:`set_mpi_meta`
-    directly; this exists for the case unique to a multi-dimensional
-    partition -- indexing changed the bounds of *one* axis while every
-    other one is untouched, so those other axes' ``global_size``/
-    ``start``/``stop`` must be carried forward exactly as they were, and
-    the Cartesian topology descriptor (structural: grid shape and this
-    rank's coordinates, neither of which indexing changes) carried
-    forward too.
-    """
+    """Update metadata bounds for ``dim`` while preserving other partition axes."""
     global_sizes = dict(meta["global_sizes"])
     starts = dict(meta["starts"])
     stops = dict(meta["stops"])
@@ -91,7 +69,7 @@ def _merge_partition_meta(
 
 
 def isel(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     *,
@@ -102,31 +80,21 @@ def isel(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
     indexers : mapping, optional
         Integer indexers using global coordinates on the partition dimension.
     partition_dim : Hashable or {"auto"} or None, optional
-        Only consulted when a *slice* on the partition dimension leaves a
-        single global element behind (a scalar indexer already collapses
-        the dimension entirely and broadcasts, so this does not apply
-        there). Left at the default ``None``, that single element stays
-        where it landed: one rank holds it, every other rank holds a
-        length-0 slice on that dimension. Passing a dimension name (or
-        ``"auto"`` to pick the largest remaining dimension) instead
-        scatters that one rank's local data across all ranks along
-        ``partition_dim``, so the object stays evenly spread out rather
-        than parked on a single rank. ``"auto"`` is a no-op if no other
-        dimension has more than one element. See
-        :meth:`Indexing._repartition_singleton`.
+        Only consulted when a *slice* on the partition dimension leaves a single global element behind (a scalar indexer already collapses the dimension entirely and broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Indexed object with updated distribution metadata. A scalar selection on
-        the partition dimension is replicated on every rank."""
+        Indexed object with updated distribution metadata.
+    """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
     meta = get_mpi_meta(value)
@@ -190,7 +158,7 @@ def isel(
 
 
 def isel_scalar(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     index: int,
@@ -200,6 +168,8 @@ def isel_scalar(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
     dim : Hashable
@@ -208,7 +178,6 @@ def isel_scalar(
         Global integer index.
     other_indexers : mapping
         Additional local ``isel`` indexers.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -217,7 +186,8 @@ def isel_scalar(
     Raises
     ------
     IndexError
-        If ``index`` is outside the global dimension."""
+        If ``index`` is outside the global dimension.
+    """
     meta = get_mpi_meta(value)
     if meta is None:
         return value.isel({dim: index, **other_indexers})
@@ -271,7 +241,7 @@ def isel_scalar(
 
 
 def sel(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     method: str | None = None,
@@ -285,6 +255,8 @@ def sel(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
     indexers : mapping, optional
@@ -294,21 +266,16 @@ def sel(
     tolerance : Any, optional
         Maximum distance for inexact matches.
     drop : bool, optional
-        Drop selected coordinate variables. Default is False.
+        Drop selected coordinate variables.
     partition_dim : Hashable or {"auto"} or None, optional
-        Only consulted when a label *slice* on the partition dimension
-        leaves a single global element behind (a scalar label already
-        collapses the dimension entirely and broadcasts, so this does
-        not apply there). See :meth:`isel` and
-        :meth:`Indexing._repartition_singleton` for the exact semantics.
+        Only consulted when a label *slice* on the partition dimension leaves a single global element behind (a scalar label already collapses the dimension entirely and broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Indexed object with updated distribution metadata. A scalar selection on
-        the partition dimension is replicated on every rank."""
+        Indexed object with updated distribution metadata.
+    """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
     meta = get_mpi_meta(value)
@@ -370,7 +337,7 @@ def sel(
 
 
 def sel_scalar(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     label: Any,
@@ -384,6 +351,8 @@ def sel_scalar(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
     dim : Hashable
@@ -398,11 +367,11 @@ def sel_scalar(
         Maximum distance for inexact matches.
     drop : bool
         Whether to drop selected coordinates.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Replicated selected slice."""
+        Replicated selected slice.
+    """
     if method is not None:
         meta = get_mpi_meta(value)
         if meta is None:
@@ -562,60 +531,19 @@ def sel_scalar(
 
 
 def _repartition_singleton(
-    runtime,
+    runtime: MPIRuntime,
     output: xr.Dataset | xr.DataArray,
     old_dim: Hashable,
     counts: list[int],
     partition_dim: Hashable | Literal["auto"],
 ) -> xr.Dataset | xr.DataArray:
-    """Scatter a slice-``isel``/``sel`` result stranded on one rank.
-
-    Called only when a *slice* selection on the partition dimension
-    leaves exactly one global element behind: ``counts`` (each rank's
-    local size on ``old_dim`` after the local ``isel``/``sel``) then
-    has a single ``1`` and the rest ``0`` -- every other dimension's
-    full local extent still sits on that one rank alongside it.
-    Rather than leaving the object that lopsided, this picks a
-    surviving dimension and scatters the owning rank's data across
-    every rank along it with one point-to-point transfer per rank (via
-    :meth:`~..mpi.runtime.MPIRuntime.scatter`), which is the least
-    data movement a redistribution of that single owned chunk can do:
-    each rank receives exactly the slice it ends up keeping, nothing
-    more.
-
-    Parameters
-    ----------
-    output : xarray.Dataset or xarray.DataArray
-        Local slice result; ``mpi_meta`` is stripped before use.
-    old_dim : Hashable
-        The now globally length-1 former partition dimension.
-    counts : list of int
-        Each rank's local size on ``old_dim``, from ``allgather``.
-    partition_dim : Hashable or {"auto"}
-        Dimension to partition across ranks. ``"auto"`` selects the
-        largest remaining dimension; if none has more than one
-        element there is nothing to spread out, and the existing
-        single-owner layout on ``old_dim`` is kept unchanged.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Rank-local slice carrying fresh ``mpi_meta`` on the chosen
-        dimension, or on ``old_dim`` if there was nothing to
-        repartition onto.
-
-    Raises
-    ------
-    ValueError
-        If ``partition_dim`` names a dimension that is not present in
-        the result, or is ``old_dim`` itself (already collapsed to one
-        element, so it cannot be reused as the new partition
-        dimension)."""
+    """Scatter a slice-``isel``/``sel`` result stranded on one rank."""
     owner = counts.index(1)
     stripped = strip_mpi_meta(output)
     comm = runtime.comm
 
     def _keep_single_owner() -> xr.Dataset | xr.DataArray:
+        """Keep the singleton result on one owning rank."""
         new_start = sum(counts[: comm.rank])
         new_stop = new_start + counts[comm.rank]
         chunk_info = prune_chunk_info({str(old_dim): 1}, output)

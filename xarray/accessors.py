@@ -1,3 +1,5 @@
+"""Expose geographic, plotting, calculation, and preprocessing xarray accessors."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 
     import numpy as np
     from IPython.display import DisplayHandle
+    from matplotlib.collections import PathCollection
     from matplotlib.colors import LinearSegmentedColormap, ListedColormap
     from mpi4py.MPI import Intracomm
 
@@ -26,10 +29,12 @@ class GeoBase:
 
     __slots__ = ("_obj",)
 
-    def __init__(self, xarray_obj: xr.DataArray | xr.Dataset):
+    def __init__(self, xarray_obj: xr.DataArray | xr.Dataset) -> None:
+        """Initialize the geographic accessor."""
         self._obj = xarray_obj
 
     def __repr__(self) -> str:
+        """Return the geographic accessor representation."""
         kind = type(self._obj).__name__
         dims = ", ".join(f"{name}: {size}" for name, size in self._obj.sizes.items())
         return f"<xgeo accessor on {kind} ({dims})>"
@@ -50,8 +55,6 @@ class GeoBase:
     ) -> xr.Dataset | xr.DataArray:
         """Regrid onto the horizontal grid of ``grid_out``.
 
-        See :func:`climtools.xgeo.remap` for the full description.
-
         Parameters
         ----------
         grid_out : xarray.Dataset or xarray.DataArray
@@ -60,7 +63,6 @@ class GeoBase:
             ESMF regridding method.
         parallel : bool, default False
             Build the weights in parallel with Dask.
-
         Returns
         -------
         xarray.Dataset or xarray.DataArray
@@ -77,64 +79,29 @@ class GeoBase:
         valid_value: float = 1,
         parallel: bool = False,
     ) -> xr.DataArray | xr.Dataset:
-        """
-        Mask grid cells that do not match a specified land-sea mask value.
-
-        The mask is remapped to the horizontal grid of ``data`` using
-        nearest-neighbour interpolation. This method preserves categorical mask
-        values. The remapped mask is cached so that repeated calls using the same
-        mask and target-grid specification do not repeat the remapping operation.
-
-        Before masking, ``data`` is sorted by increasing latitude and longitude.
-        Consequently, the returned object may have a different coordinate order
-        from the input.
+        """Mask grid cells that do not match a specified land-sea mask value.
 
         Parameters
         ----------
-        data : xarray.DataArray or xarray.Dataset
-            Object to mask. It must contain one-dimensional ``lat`` and ``lon``
-            coordinates and corresponding dimensions.
-
         mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path, or None, optional
             Categorical land-sea mask.
-
-            - If a DataArray is supplied, it is used directly.
-            - If a Dataset is supplied, the variable named by ``data_var`` is used.
-            - If a path is supplied, the Dataset at that path is opened and the
-            variable named by ``data_var`` is used.
-            - If None, the package's default land-sea mask is used.
-
-            The mask must contain ``lat`` and ``lon`` coordinates. By convention,
-            values equal to ``valid_value`` identify cells to retain.
-
         data_var : str, default "land"
-            Name of the mask variable to extract when ``mask`` is a Dataset or a
-            path to a Dataset. This argument is ignored when ``mask`` is already
-            a DataArray.
-
+            Name of the mask variable to extract when ``mask`` is a Dataset or a path to a Dataset.
         valid_value : float or int, default 1
-            Mask value identifying grid cells to retain. Cells whose remapped mask
-            value differs from ``valid_value`` are replaced with NaN.
-
+            Mask value identifying grid cells to retain.
         parallel : bool, default False
-            Whether to perform mask remapping in parallel with Dask. This option
-            is passed to :func:`remap`.
-
+            Whether to perform mask remapping in parallel with Dask.
         Returns
         -------
         xarray.DataArray or xarray.Dataset
-            A latitude- and longitude-sorted object with cells outside the
-            retained mask category replaced by NaN. The return type matches the
-            type of ``data``.
+            A latitude- and longitude-sorted object with cells outside the retained mask category replaced by NaN.
 
         Raises
         ------
         KeyError
             If ``mask`` resolves to a Dataset that does not contain ``data_var``.
-
         TypeError
             If ``mask`` cannot be resolved to an xarray.DataArray.
-
         """
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.mask(self._obj, **kwargs)
@@ -149,9 +116,6 @@ class GeoBase:
     ) -> xr.Dataset | xr.DataArray:
         """Add mean local solar time as a coordinate.
 
-        See :func:`climtools.xgeo.add_local_solar_time` for the full
-        description, including the approximation used.
-
         Parameters
         ----------
         lon : str, default "lon"
@@ -160,7 +124,6 @@ class GeoBase:
             Name of the UTC time coordinate.
         name : str, default "lst"
             Name given to the new coordinate.
-
         Returns
         -------
         xarray.Dataset or xarray.DataArray
@@ -175,7 +138,6 @@ class GeoBase:
         ----------
         lon : str, default "lon"
             Name of the longitude coordinate.
-
         Returns
         -------
         xarray.Dataset or xarray.DataArray
@@ -190,7 +152,6 @@ class GeoBase:
         ----------
         lon : str, default "lon"
             Name of the longitude dimension.
-
         Returns
         -------
         xarray.Dataset or xarray.DataArray
@@ -214,31 +175,28 @@ class GeoBase:
         snap: bool = True,
         drop: bool = True,
     ) -> xr.Dataset | xr.DataArray:
-        """
-        Select cells lying within a transect on a rectilinear xarray grid.
+        """Select cells lying within a transect on a rectilinear xarray grid.
 
         Parameters
         ----------
-        data
-            Input Dataset or DataArray.
-        x, y
-            Transect centre. For spherical geometry, x is longitude and y is
-            latitude. Either coordinate may be omitted to select an axis-aligned
-            band.
-        orientation
-            Transect orientation in degrees clockwise from the positive y
-            direction. For spherical geometry, this is clockwise from north.
-        width
+        x, y : float | None
+            Transect centre.
+        orientation : float
+            Transect orientation in degrees clockwise from the positive y direction.
+        width : float
             Transect width in approximate grid-cell units.
-        xdim, ydim
+        xdim, ydim : str | None
             Names of the x and y coordinates.
-        geometry
-            ``"xy"`` for planar coordinates or ``"latlon"`` for
-            longitude-latitude coordinates in degrees.
-        snap
+        geometry : Literal['xy', 'latlon']
+            ``"xy"`` for planar coordinates or ``"latlon"`` for longitude-latitude coordinates in degrees.
+        snap : bool
             Snap the supplied centre coordinates to the nearest grid point.
-        drop
+        drop : bool
             Drop coordinate locations outside the transect.
+        Returns
+        -------
+        xr.Dataset | xr.DataArray
+            Selected transect subset.
         """
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.sel_transect(self._obj, **kwargs)
@@ -256,13 +214,10 @@ class GeoBase:
     ) -> None:
         """Append the bound Dataset to an existing file along an unlimited dimension.
 
-        See :func:`climtools.xgeo.append` for the full description.
-
         Parameters
         ----------
         file : str or pathlib.Path
-            NetCDF4 file with read/write access. ``dim`` must be the unlimited
-            dimension.
+            NetCDF4 file with read/write access.
         dim : str, default "time"
             Unlimited dimension to append along.
         mode : {"a", "r+"}, default "r+"
@@ -275,7 +230,6 @@ class GeoBase:
             Whether to apply zlib compression to newly created variables.
         complevel : int, optional
             Compression level, between 1 and 9.
-
         Returns
         -------
         None
@@ -305,33 +259,22 @@ class GeoBase:
     ) -> None:
         """Write the bound Dataset or DataArray to NetCDF.
 
-        See :func:`climtools.xgeo.to_netcdf` for the full description.
-
-        Serial output is written incrementally along an unlimited dimension. With
-        ``parallel=True``, rank 0 must be bound to the complete object; every
-        other rank must be bound to :func:`climtools.xgeo.empty_dataset` so that
-        ``.xgeo`` still resolves, since MPI ranks cannot bind the accessor to
-        ``None``. The bound object on non-root ranks is otherwise unused, since
-        the parallel writer scatters rank 0's local buffers directly.
-
         Parameters
         ----------
         file : str or pathlib.Path
-            Output path. An existing file is replaced.
+            Output path.
         mpi_runtime : MPIRuntime or Intracomm, optional
             MPI runtime or communicator.
         unlimited_dim : str or iterable of str, optional
             Dimension(s) made unlimited in the NetCDF schema.
         partition_dim : str, optional
-            Dimension partitioned across MPI ranks in parallel mode. If omitted,
-            the parallel writer infers the partition axis.
+            Dimension partitioned across MPI ranks in parallel mode.
         parallel : bool, default False
             Use the MPI-parallel NetCDF-4 writer.
         batch_size : int, default 24
-            Number of slices along the unlimited dimension written per serial
-            append. Not used in parallel mode.
+            Number of slices along the unlimited dimension written per serial append.
         format : str, default "NETCDF4"
-            NetCDF format. Parallel output supports only ``"NETCDF4"``.
+            NetCDF format.
         shuffle : bool, default True
             Apply the HDF5 shuffle filter.
         zlib : bool, default True
@@ -341,8 +284,7 @@ class GeoBase:
         show_progress : bool, default True
             Display a progress bar while writing serially.
         stdout : file-like, optional
-            Stream the serial progress bar is written to. Defaults to
-            ``sys.stdout``.
+            Stream the serial progress bar is written to.
         chunks : mapping of str to iterable of int, optional
             Explicit chunk shape passed to the parallel writer.
         hints : str, optional
@@ -351,7 +293,6 @@ class GeoBase:
             Disable NetCDF pre-filling during parallel initialization.
         allow_serial : bool, default False
             Permit execution when running with a single MPI rank.
-
         Returns
         -------
         None
@@ -370,10 +311,12 @@ class PlotAccessor:
 
     __slots__ = ("_obj",)
 
-    def __init__(self, da: xr.DataArray):
+    def __init__(self, da: xr.DataArray) -> None:
+        """Initialize the plotting accessor."""
         self._obj = da
 
     def __repr__(self) -> str:
+        """Return the plotting accessor representation."""
         return f"<xgeo plotting accessor on DataArray {self._obj.name!r}>"
 
     def geo(
@@ -439,24 +382,16 @@ class PlotAccessor:
         clabel_colors: str | None = None,
         clabel_kwargs: dict | None = None,
         cyclic: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> GeoPlot:
-        """
-        Draw a scalar field on a Cartopy map and return a composable :class:`GeoPlot`.
-
-        This is the public entry point. It renders a two-dimensional or faceted
-        (three-dimensional) DataArray as the base layer and returns a
-        :class:`GeoPlot` whose ``add.contour``, ``add.quiver``, ``add.significance``
-        and ``add.colorbar`` methods add overlays. The full parameter list is
-        declared explicitly so that editors expose every option. This callable
-        is exposed as ``climtools.plot.geo`` and as ``da.xgeo.plot.geo``.
+        """Draw a scalar field on a Cartopy map and return a composable :class:`GeoPlot`.
 
         Parameters
         ----------
         x, y : str, optional
             Coordinate names passed to the selected xarray plotting method.
         col, row : str, optional
-            Faceting coordinate names. Supplying either produces a faceted plot.
+            Faceting coordinate names.
         col_wrap : int, optional
             Number of columns used when wrapping faceted subplots.
         figsize : tuple of float, optional
@@ -474,8 +409,7 @@ class PlotAccessor:
         vmin, vmax : float, optional
             Lower and upper scalar color limits.
         units : str, optional
-            Units used for colorbar labeling. If omitted, inferred from
-            ``da.attrs["units"]`` or ``da.name``.
+            Units used for colorbar labeling.
         levels : int or sequence of float, optional
             Contour levels for contour-based methods.
         extend : {"neither", "both", "min", "max"}, optional
@@ -485,7 +419,7 @@ class PlotAccessor:
         rasterized : bool, default False
             Whether dense scalar artists should be rasterized.
         title : str | Dict, default None
-            Plot title. if dict provide options accepted by plt.title or figure.suptitle
+            Plot title.
         orientation : {"vertical", "horizontal"}, optional
             Colorbar orientation.
         add_colorbar : bool, default True
@@ -493,14 +427,14 @@ class PlotAccessor:
         drawedges : bool, default False
             Whether to draw edges between colorbar intervals.
         cbar_label : str, optional
-            Explicit colorbar label. If omitted, a label is inferred from metadata.
+            Explicit colorbar label.
         global_extent : bool, default False
             If True, set the map extent to the full globe.
         set_extent : tuple of float, optional
             Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
         gridlines : bool, default False
             Whether to draw labeled longitude and latitude gridlines.
-        add_grid_bounds:
+        add_grid_bounds : bool
             If True, draw an outline along the outer perimeter of the plotted grid domain.
         coastlines, borders, states : bool, default True
             Switches controlling common Cartopy geographic feature overlays.
@@ -509,32 +443,17 @@ class PlotAccessor:
         lakes, rivers : bool, default False
             Switches controlling optional Cartopy inland water feature overlays.
         p_value : xarray.DataArray, optional
-            Pointwise p-value field. Values below the significance level are marked.
+            Pointwise p-value field.
         pvalue_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`significance`. Accepted keys are
-            ``level: float`` (significance threshold), ``color: str``,
-            ``alpha: float``, ``marker: str``, ``edgecolors: str``,
-            ``subsample: int | tuple[int, int]``, ``size: float`` (marker size),
-            ``x: str`` and ``y: str`` (coordinate names).
+            Keyword arguments forwarded to :func:`significance`.
         u_component, v_component : xarray.DataArray, optional
             Zonal and meridional vector components for a base quiver overlay.
         quiver_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`quiver`. Accepted keys are
-            ``subsample: int | tuple[int, int]``, ``key_magnitude: int | float``
-            (reference arrow length), ``key_units: str``, ``x: str`` and ``y: str``
-            (coordinate names), plus any argument accepted by
-            ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
-            ``color: str`` and ``width: float``. See
-            https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+            Keyword arguments forwarded to :func:`quiver`.
         colorbar_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`colorbar`. Accepted keys are
-            ``ticks: sequence`` and ``tick_labels: sequence of str``. The
-            orientation, edges, extension and label of the base colorbar are set
-            through the top-level ``orientation``, ``drawedges``, ``extend`` and
-            ``cbar_label`` arguments and must not be repeated here. See
-            https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
+            Keyword arguments forwarded to :func:`colorbar`.
         clabel : bool, default False
-            Label line contours. Ignored for ``method="contourf"``.
+            Label line contours.
         clabel_fmt : str, default "%1.0f"
             Contour-label format.
         clabel_fontsize : float, default 8
@@ -546,21 +465,13 @@ class PlotAccessor:
         clabel_kwargs : dict, optional
             Additional arguments forwarded to ``Axes.clabel``.
         cyclic : bool, default False
-            If True, append a cyclic longitude point before plotting. The longitude
-            dimension is assumed to be named ``"lon"``.
-        **kwargs
-            Additional keyword arguments forwarded to the selected xarray plotting
-            method after signature filtering.
-
+            If True, append a cyclic longitude point before plotting.
+        **kwargs : Any
+            Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
         Returns
         -------
         GeoPlot
             Composable map holding the base artists, with chainable overlay methods.
-
-        Notes
-        -----
-        Input coordinates are plotted with a ``cartopy.crs.PlateCarree()`` transform.
-        The display projection is controlled by ``projection``.
         """
 
         from ..viz import plotting
@@ -637,21 +548,18 @@ class PlotAccessor:
         fps: int = 1,
         parallel: bool = True,
         frame_id: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ) -> DisplayHandle | None:
-        """
-        Render a map animation from an xarray DataArray and encode it as MP4.
+        """Render a map animation from an xarray DataArray and encode it as MP4.
 
         Parameters
         ----------
         dim : str, default "time"
             Dimension used for animation frames.
         x, y : str, optional
-            Coordinate names passed to the selected xarray plotting method when
-            supported.
+            Coordinate names passed to the selected xarray plotting method when supported.
         col, row : str, optional
-            Faceting coordinate names passed to the selected xarray plotting method
-            when supported.
+            Faceting coordinate names passed to the selected xarray plotting method when supported.
         col_wrap : int, optional
             Number of columns used when wrapping faceted subplots.
         figsize : tuple of float, optional
@@ -665,11 +573,9 @@ class PlotAccessor:
         norm : matplotlib normalization, optional
             Normalization applied to the field.
         vmin, vmax : float, optional
-            Lower and upper scalar color limits. Fixed limits are recommended for
-            temporal comparisons.
+            Lower and upper scalar color limits.
         units : str, optional
-            Units used for colorbar labeling. If omitted, inferred from
-            ``da.attrs["units"]`` or ``da.name``.
+            Units used for colorbar labeling.
         levels : int or sequence of float, optional
             Contour levels for contour-based methods.
         extend : {"neither", "both", "min", "max"}, optional
@@ -687,14 +593,14 @@ class PlotAccessor:
         drawedges : bool, default False
             Whether to draw edges between colorbar intervals.
         cbar_label : str, optional
-            Explicit colorbar label. If omitted, a label is inferred from metadata..
+            Explicit colorbar label.
         global_extent : bool, default False
             If True, set each map extent to the full globe.
         set_extent : tuple of float, optional
             Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
         gridlines : bool, default False
             Whether to draw labeled longitude and latitude gridlines.
-        add_grid_bounds:
+        add_grid_bounds : bool
             If True, draw an outline along the outer perimeter of the plotted grid domain.
         coastlines, borders, states : bool, default True
             Switches controlling common Cartopy geographic feature overlays.
@@ -703,25 +609,13 @@ class PlotAccessor:
         lakes, rivers : bool, default False
             Switches controlling optional Cartopy inland water feature overlays.
         u_component, v_component : xarray.DataArray, optional
-            Zonal and meridional vector components for quiver overlays. Both must
-            contain ``dim`` and align with ``da`` along that dimension.
+            Zonal and meridional vector components for quiver overlays.
         colorbar_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`colorbar`. Accepted keys are
-            ``ticks: sequence`` and ``tick_labels: sequence of str``. The
-            orientation, edges, extension and label of the base colorbar are set
-            through the top-level ``orientation``, ``drawedges``, ``extend`` and
-            ``cbar_label`` arguments and must not be repeated here. See
-            https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html
+            Keyword arguments forwarded to :func:`colorbar`.
         quiver_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`quiver`. Accepted keys are
-            ``subsample: int | tuple[int, int]``, ``key_magnitude: int | float``
-            (reference arrow length), ``key_units: str``, ``x: str`` and ``y: str``
-            (coordinate names), plus any argument accepted by
-            ``matplotlib.axes.Axes.quiver`` such as ``scale: float``,
-            ``color: str`` and ``width: float``. See
-            https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.quiver.html
+            Keyword arguments forwarded to :func:`quiver`.
         clabel : bool, default False
-            Label line contours. Ignored for ``method="contourf"``.
+            Label line contours.
         clabel_fmt : str, default "%1.0f"
             Contour-label format.
         clabel_fontsize : float, default 8
@@ -733,37 +627,24 @@ class PlotAccessor:
         clabel_kwargs : dict, optional
         cyclic : bool, default False
             If True, append a cyclic longitude point before plotting each frame.
-            The longitude dimension is assumed to be named ``"lon"``.
         indices : tuple of int, list of int, or numpy.ndarray, optional
-            Positional indices along ``dim`` to render. If omitted, all positions
-            are rendered.
+            Positional indices along ``dim`` to render.
         outfile : str or pathlib.Path, optional
-            Output path for the MP4 animation. If omitted, a temporary output path
-            is used.
+            Output path for the MP4 animation.
         quality : {"low", "medium", "high"}, default "medium"
             Frame-resolution preset used during PNG rendering.
         fps : int, default 1
             Frames per second passed to ffmpeg.
         parallel : bool, default True
             Whether to render frames with multiprocessing.
-        frame_id: bool default True
+        frame_id : bool default True
             If True add frame id to title
-        **kwargs
-            Additional keyword arguments forwarded to the selected xarray plotting
-            method after signature filtering.
-
+        **kwargs : Any
+            Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
         Returns
         -------
         IPython.display.DisplayHandle or None
-            Inside a Jupyter kernel, the encoded MP4 is embedded and its display
-            handle is returned. Otherwise the MP4 is written to ``outfile`` and a
-            ``RuntimeError`` is raised if encoding fails.
-
-        Notes
-        -----
-        Animation output requires an ``ffmpeg`` executable on the system path.
-        Parallel rendering can reduce wall-clock time but increases memory use
-        because multiple data slices and figures may be active concurrently.
+            Inside a Jupyter kernel, the encoded MP4 is embedded and its display handle is returned.
         """
 
         from ..viz import plotting
@@ -785,20 +666,18 @@ class PlotAccessor:
         subplots: bool = False,
         key_magnitude: float | None = None,
         key_units: str | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> tuple[Any, Any, Any]:
         """Draw quiver arrows, using the bound array as the zonal component.
-
-        See :func:`climtools.plotting.quiver` for the full description.
 
         Parameters
         ----------
         v : xarray.DataArray
-            Meridional component. The bound array is the zonal component.
+            Meridional component.
         x, y : str, default "lon", "lat"
             Horizontal coordinate names.
         ax : matplotlib.axes.Axes, optional
-            Axis to draw on. Defaults to the current axis.
+            Axis to draw on.
         subsample : int or tuple of int, default (1, 1)
             Grid stride used to thin the arrows.
         add_key : bool, default True
@@ -809,9 +688,8 @@ class PlotAccessor:
             Reference arrow magnitude.
         key_units : str, optional
             Units shown on the key.
-        **kwargs
+        **kwargs : Any
             Additional arguments forwarded to ``Axes.quiver``.
-
         Returns
         -------
         tuple
@@ -837,17 +715,15 @@ class PlotAccessor:
         edgecolors: str | None = None,
         subsample: int | tuple[int, int] = (1, 1),
         size: float = 0.25,
-    ):
+    ) -> PathCollection:
         """Mark grid points of the bound p-value field below ``level``.
-
-        See :func:`climtools.plotting.significance` for the full description.
 
         Parameters
         ----------
         x, y : str, default "lon", "lat"
             Horizontal coordinate names.
         ax : matplotlib.axes.Axes, optional
-            Axis to draw on. Defaults to the current axis.
+            Axis to draw on.
         level : float, default 0.05
             Significance threshold.
         color : str, default "grey"
@@ -862,7 +738,6 @@ class PlotAccessor:
             Grid stride used to thin the markers.
         size : float, default 0.25
             Marker size.
-
         Returns
         -------
         matplotlib.collections.PathCollection
@@ -880,10 +755,12 @@ class CalcAccessor:
 
     __slots__ = ("_obj",)
 
-    def __init__(self, da: xr.DataArray):
+    def __init__(self, da: xr.DataArray) -> None:
+        """Initialize the calculation accessor."""
         self._obj = da
 
     def __repr__(self) -> str:
+        """Return the calculation accessor representation."""
         return f"<xgeo calc accessor on DataArray {self._obj.name!r}>"
 
     def corr(
@@ -897,8 +774,6 @@ class CalcAccessor:
     ) -> xr.Dataset:
         """Correlate the bound array with ``other`` along ``dim``.
 
-        See :func:`climtools.calc_stats.corr` for the full description.
-
         Parameters
         ----------
         other : xarray.DataArray
@@ -911,7 +786,6 @@ class CalcAccessor:
             Alternative hypothesis used for the p-value.
         dask_scheduler : {"threads", "processes"}, default "threads"
             Scheduler used to evaluate a chunked input.
-
         Returns
         -------
         xarray.Dataset
@@ -926,15 +800,12 @@ class CalcAccessor:
     def pvalues(self, other: xr.DataArray, dim: str = "time") -> xr.DataArray:
         """Test the difference in mean between the bound array and ``other``.
 
-        See :func:`climtools.calc_stats.significance` for the full description.
-
         Parameters
         ----------
         other : xarray.DataArray
             Second sample, for example a second period.
         dim : str, default "time"
             Sample dimension.
-
         Returns
         -------
         xarray.DataArray
@@ -954,8 +825,6 @@ class CalcAccessor:
     ) -> xr.Dataset:
         """Compute a pointwise trend along ``dim``.
 
-        See :func:`climtools.calc_stats.trends` for the full description.
-
         Parameters
         ----------
         dim : str, default "time"
@@ -965,9 +834,7 @@ class CalcAccessor:
         dask_scheduler : {"threads", "processes"}, default "threads"
             Scheduler used to evaluate a chunked input.
         polyfit : bool, default False
-            Use ordinary least squares instead of the modified Mann-Kendall
-            test.
-
+            Use ordinary least squares instead of the modified Mann-Kendall test.
         Returns
         -------
         xarray.Dataset
@@ -984,27 +851,58 @@ class PreprocessAccessor:
 
     __slots__ = ("_obj",)
 
-    def __init__(self, ds: xr.Dataset):
+    def __init__(self, ds: xr.Dataset) -> None:
+        """Initialize the preprocessing accessor."""
         self._obj = ds
 
     def era5(self) -> xr.Dataset:
-        """Preprocess an ERA5 dataset to standardize variable names, dimensions, and attributes."""
+        """Preprocess an ERA5 dataset to standardize variable names, dimensions, and attributes.
+
+        Returns
+        -------
+        xr.Dataset
+            Preprocessed ERA5 dataset.
+        """
         return xgeo.preprocess.era5(self._obj)
 
     def era5_land(self) -> xr.Dataset:
-        """Preprocess an ERA5-Land dataset."""
+        """Preprocess an ERA5-Land dataset.
+
+        Returns
+        -------
+        xr.Dataset
+            Preprocessed ERA5-Land dataset.
+        """
         return xgeo.preprocess.era5_land(self._obj)
 
     def imerg(self) -> xr.Dataset:
-        """Preprocess a GPM IMERG dataset."""
+        """Preprocess a GPM IMERG dataset.
+
+        Returns
+        -------
+        xr.Dataset
+            Preprocessed IMERG dataset.
+        """
         return xgeo.preprocess.imerg(self._obj)
 
     def cmorph(self) -> xr.Dataset:
-        """Preprocess a CMORPH dataset."""
+        """Preprocess a CMORPH dataset.
+
+        Returns
+        -------
+        xr.Dataset
+            Preprocessed CMORPH dataset.
+        """
         return xgeo.preprocess.cmorph(self._obj)
 
     def gpcp(self) -> xr.Dataset:
-        """Preprocess a GPCP dataset."""
+        """Preprocess a GPCP dataset.
+
+        Returns
+        -------
+        xr.Dataset
+            Preprocessed GPCP dataset.
+        """
         return xgeo.preprocess.gpcp(self._obj)
 
 
@@ -1020,12 +918,24 @@ class GeoDataArray(GeoBase):
 
     @property
     def plot(self) -> PlotAccessor:
-        """Plotting namespace, for example ``da.xgeo.plot.geo(...)``."""
+        """Plotting namespace, for example ``da.xgeo.plot.geo(...)``.
+
+        Returns
+        -------
+        PlotAccessor
+            Plotting accessor.
+        """
         return PlotAccessor(self._obj)
 
     @property
     def calc(self) -> CalcAccessor:
-        """Calc namespace for example ``da.xgeo.calc.trends(...)``."""
+        """Calc namespace for example ``da.xgeo.calc.trends(...)``.
+
+        Returns
+        -------
+        CalcAccessor
+            Calculation accessor.
+        """
         return CalcAccessor(self._obj)
 
 
@@ -1041,13 +951,28 @@ class GeoDataset(GeoBase):
 
     @property
     def preprocess(self) -> PreprocessAccessor:
-        """Return the preprocessing namespace."""
+        """Return the preprocessing namespace.
+
+        Returns
+        -------
+        PreprocessAccessor
+            Preprocessing accessor.
+        """
         return PreprocessAccessor(self._obj)
 
 
-# Dev Used in Dev Mode to test xr integration ( DO NOT MODIFY )
 def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
-    """Patch xarray source so IDEs resolve registered accessors for completion."""
+    """Patch xarray source so IDEs resolve registered accessors for completion.
+
+    Parameters
+    ----------
+    force : bool
+        Whether to rebuild an existing source patch.
+    Returns
+    -------
+    tuple[Path, ...]
+        Paths modified by the xarray source patch.
+    """
 
     from importlib.util import find_spec
 
@@ -1077,14 +1002,6 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     begin = "XGEO_IDE_TYPING BEGIN"
     end = "XGEO_IDE_TYPING END"
 
-    # fix_xarray() lives in:
-    #
-    # package/xarray/accessors.py
-    #
-    # Therefore:
-    #
-    # __package__ == "package.xarray"
-    # type_module == "package.xarray.xgeo_patch"
     bridge_path = Path(__file__).resolve().parent / "xgeo_patch.py"
     type_module = f"{__package__}.xgeo_patch"
 
@@ -1142,6 +1059,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                 backup.unlink()
 
     def stat_of(path: str | Path | None) -> list[int] | None:
+        """Return an immutable file-stat signature."""
         if path is None:
             return None
 
@@ -1153,6 +1071,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         return [stat.st_size, stat.st_mtime_ns]
 
     def signature() -> dict:
+        """Return a stable signature for a source file."""
         integrations: dict[str, dict | None] = {}
 
         for name in integration_names:
@@ -1175,6 +1094,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         }
 
     def discover() -> dict[type, list[tuple[str, str, str]]]:
+        """Discover accessor registrations in a source file."""
         found: dict[type, list[tuple[str, str, str]]] = {
             cls: [] for cls, _, _ in targets
         }
@@ -1228,6 +1148,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         return found
 
     def strip(source: str) -> str:
+        """Remove previously injected source regions."""
         output: list[str] = []
         skipping = False
 
@@ -1246,9 +1167,11 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         return "".join(output)
 
     def region(tag: str, indent: str, body: list[str]) -> str:
+        """Wrap generated source with patch markers."""
         return f"{indent}# {begin} {tag}\n" + "".join(body) + f"{indent}# {end} {tag}\n"
 
     def build(class_name: str, stubs: list[tuple[str, str, str]]) -> tuple[str, str]:
+        """Build the accessor bridge source."""
         aliases = {attr: f"_xgeo_{class_name}_{attr}" for attr, _, _ in stubs}
 
         imports = [

@@ -5,12 +5,15 @@ from __future__ import annotations
 import functools
 from collections.abc import Hashable, Iterable
 from types import EllipsisType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from mpi4py import MPI
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from ..mpi.runtime import MPIRuntime
 
 from .common import extreme_identity, op_name, partial_dtype
 from .meta import get_mpi_meta
@@ -32,7 +35,7 @@ from .planning import (
 
 
 def _combine_sum_or_prod(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.DataArray,
     partial: xr.DataArray,
     dims: tuple[Hashable, ...],
@@ -75,7 +78,7 @@ def _combine_sum_or_prod(
 
 
 def _combine_mean(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.DataArray,
     partial_sum: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -142,7 +145,7 @@ def _combine_mean(
 
 
 def _local_extreme(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     variable_dims: tuple[Hashable, ...],
     *,
@@ -161,7 +164,7 @@ def _local_extreme(
 
 
 def _combine_extreme(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.DataArray,
     partial: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -171,14 +174,7 @@ def _combine_extreme(
     error: BaseException | None = None,
     comm: MPI.Comm | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local min/max partials across ranks.
-
-    No ``replica_count`` parameter: unlike a sum, MIN/MAX/LAND/LOR are
-    idempotent under duplication, so a rank redundantly holding the
-    same value as another rank in ``comm`` (a variable replicated
-    along one axis of a multi-dimensional partition) needs no
-    correction here.
-    """
+    """Combine rank-local min/max partials across ranks."""
     # Use the agreed variable dtype, not a rank-local partial dtype. Empty
     # partitions follow a different local path, and dtype-dependent branching
     # could desynchronize collectives. Min/max also require no promotion; using
@@ -271,11 +267,10 @@ def _combine_extreme(
     return template.copy(data=np.asarray(masked, dtype=expect_dtype).reshape(shape))
 
 
-# -- public reductions ---------------------------------------------------
 
 
 def sum_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -288,10 +283,12 @@ def sum_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     min_count : int or None, optional
@@ -300,18 +297,11 @@ def sum_reduce(
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        ``"auto"`` selects a surviving dimension; None leaves the result
-        replicated. Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` includes the active partition
-    dimension."""
+    """
     return _sum_prod(
         runtime,
         value,
@@ -326,7 +316,7 @@ def sum_reduce(
 
 
 def prod_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -339,10 +329,12 @@ def prod_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     min_count : int or None, optional
@@ -351,18 +343,11 @@ def prod_reduce(
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        ``"auto"`` selects a surviving dimension; None leaves the result
-        replicated. Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` includes the active partition
-    dimension."""
+    """
     return _sum_prod(
         runtime,
         value,
@@ -377,7 +362,7 @@ def prod_reduce(
 
 
 def _sum_prod(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -473,7 +458,7 @@ def _sum_prod(
 
 
 def mean_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -485,27 +470,23 @@ def mean_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` includes the active partition
-    dimension."""
+    """
     local_dim, dims = normalize_dim(value, dim)
     old_meta = get_mpi_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
@@ -579,7 +560,7 @@ def mean_reduce(
 
 
 def min_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -591,22 +572,23 @@ def min_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object."""
+        Reduced object.
+    """
     return _min_max(
         runtime,
         value,
@@ -619,7 +601,7 @@ def min_reduce(
 
 
 def max_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -631,22 +613,23 @@ def max_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object."""
+        Reduced object.
+    """
     return _min_max(
         runtime,
         value,
@@ -659,7 +642,7 @@ def max_reduce(
 
 
 def _min_max(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -681,14 +664,7 @@ def _min_max(
     reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
 
     def locally_empty(variable: xr.DataArray) -> bool:
-        """Return whether this rank's local slice of ``variable`` is
-        empty along any partition dimension it owns -- generalizes the
-        single-dimension ``old_meta["dim"] in value.dims and size==0``
-        check to look at every one of ``meta["dims"]`` a given
-        variable actually varies over, since under a multi-dimensional
-        partition different variables can own different subsets of
-        the partition dimensions.
-        """
+        """Return whether the local variable is empty along any owned partition axis."""
         if old_meta is None:
             return False
         return any(
@@ -772,7 +748,7 @@ def _min_max(
 
 
 def any_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -783,20 +759,21 @@ def any_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Logical OR over the requested dimensions."""
+        Logical OR over the requested dimensions.
+    """
     return _logical(
         runtime,
         value,
@@ -809,7 +786,7 @@ def any_reduce(
 
 
 def all_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -820,20 +797,21 @@ def all_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce. ``None`` or ``...`` reduces all dimensions.
+        Dimensions to reduce.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after reducing the active partition dimension.
-        Default is ``"auto"``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Logical AND over the requested dimensions."""
+        Logical AND over the requested dimensions.
+    """
     return _logical(
         runtime,
         value,
@@ -846,7 +824,7 @@ def all_reduce(
 
 
 def _logical(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -929,20 +907,17 @@ def _logical(
     )
 
 
-# -- first/last -------------------------------------------------------
 
 
 def _first_last_local(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     dim: Hashable,
     *,
     skipna: bool | None,
     want_first: bool,
 ) -> tuple[xr.DataArray, xr.DataArray]:
-    """Rank-local first/last valid value along ``dim``, and its any-valid
-    mask (both without ``dim``). A partition of size zero along ``dim``
-    reports ``any_valid=False`` everywhere."""
+    """Rank-local first/last valid value along ``dim``, and its any-valid mask (both without ``dim``)."""
     size = int(variable.sizes[dim])
     if size == 0:
         template = variable.isel({dim: slice(0, 0)}).sum(
@@ -964,15 +939,14 @@ def _first_last_local(
 
 
 def _first_last_pick(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     dim: Hashable,
     *,
     skipna: bool | None,
     want_first: bool,
 ) -> xr.DataArray:
-    """Rank-local first/last, used when ``dim`` is not the partition
-    dimension. NaN where nothing was valid, for float/complex dtypes."""
+    """Rank-local first/last, used when ``dim`` is not the partition dimension."""
     picked, any_valid = _first_last_local(
         runtime, variable, dim, skipna=skipna, want_first=want_first
     )
@@ -980,7 +954,7 @@ def _first_last_pick(
 
 
 def _first_last_combine(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -988,44 +962,7 @@ def _first_last_combine(
     want_first: bool,
     comm: MPI.Comm | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local first/last candidates into a global result.
-
-    Ranks are ordered along ``dim`` by construction (the lowest-ranked
-    member of ``comm`` owns the lowest global indices along ``dim``),
-    so "first/last valid" reduces to "lowest/highest rank with any
-    valid data", via two ``Allreduce`` calls:
-
-    1. ``MIN``/``MAX`` elects, per element, the owning rank (a rank
-       without valid data reports a sentinel that always loses).
-    2. Every rank masks its candidate to zero/``False`` except where it
-       is the elected owner; a ``SUM`` (``LOR`` for boolean data) then
-       combines the masked candidates, recovering the one nonzero
-       contribution per element exactly.
-
-    ``comm`` matters here in a way it does not for the other
-    reductions in this module: unlike a sum or an extreme, "first/
-    last" is order-dependent, and rank order along ``dim`` is only
-    meaningful within a communicator that varies *exclusively* along
-    ``dim``. The caller therefore always passes (via
-    :meth:`ReductionPlanningMixin._resolve_comm`) the sub-communicator
-    for ``{dim}`` alone -- deliberately *not* unioned with any
-    replicated axis the way an additive reduction's group is. That is
-    still correct for a replicated axis: every rank replicated along
-    it holds identical local data, so each such rank's own ``{dim}``-
-    only sub-communicator independently computes the identical
-    answer, with no cross-replica communication needed at all. It
-    also does not need :attr:`~.common.PlanEntry.replica_count`
-    correction the way an additive reduction does: the elected
-    ``owner`` is a single rank per element (``MIN``/``MAX`` over a
-    strictly unique rank id cannot tie), so exactly one rank's value
-    ever contributes a nonzero term to the following ``SUM``,
-    regardless of how many duplicate copies of the same data exist
-    elsewhere.
-
-    Elements with no valid data anywhere become NaN for float/complex
-    dtypes; other dtypes keep their neutral placeholder, matching how
-    :meth:`_combine_extreme` handles the same edge case for min/max.
-    """
+    """Combine rank-local first/last candidates into a global result."""
     candidate, any_valid = _first_last_local(
         runtime, variable, dim, skipna=skipna, want_first=want_first
     )
@@ -1112,7 +1049,7 @@ def _first_last_combine(
 
 
 def first_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1122,11 +1059,25 @@ def first_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Select the first valid value along one dimension.
 
-    Unlike the other reductions in this module, ``first``/``last``
-    operate on exactly one dimension: they pick a position along it
-    rather than collapsing a set of dimensions. ``skipna``/``keep_attrs``
-    follow xarray semantics; MPI communication (two ``Allreduce`` calls)
-    occurs only when ``dim`` is the active partition dimension."""
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    dim : str
+        Dimension to operate on.
+    skipna : bool | None
+        Whether to ignore missing values.
+    keep_attrs : bool | None
+        Whether to preserve xarray attributes.
+    partition_dim : Hashable | Literal['auto'] | None
+        Partition dimension to use for the result.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        First valid value along the requested dimension.
+    """
     return _first_or_last(
         runtime,
         value,
@@ -1139,7 +1090,7 @@ def first_reduce(
 
 
 def last_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1147,7 +1098,27 @@ def last_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Select the last valid value along one dimension. See :meth:`first`."""
+    """Select the last valid value along one dimension.
+
+    Parameters
+    ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    dim : str
+        Dimension to operate on.
+    skipna : bool | None
+        Whether to ignore missing values.
+    keep_attrs : bool | None
+        Whether to preserve xarray attributes.
+    partition_dim : Hashable | Literal['auto'] | None
+        Partition dimension to use for the result.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Last valid value along the requested dimension.
+    """
     return _first_or_last(
         runtime,
         value,
@@ -1160,7 +1131,7 @@ def last_reduce(
 
 
 def _first_or_last(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,

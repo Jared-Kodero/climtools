@@ -1,4 +1,4 @@
-"""MPI-aware alignment and arithmetic for distributed xarray objects."""
+"""Provide MPI-aware alignment and arithmetic for distributed xarray objects."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ from .planning import _agree, comm_reduce, resolve_comm
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
+    from ..mpi.runtime import MPIRuntime
+
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
 # evaluate() is: apply(operator.matmul, a, b) computes the same correct,
@@ -43,14 +45,13 @@ _AST_BINARY_OPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.FloorDiv: operator.floordiv,
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
-    ast.LShift: operator.lshift,  # Bitwise left shift (<<)
-    ast.RShift: operator.rshift,  # Bitwise right shift (>>)
+    ast.LShift: operator.lshift,
+    ast.RShift: operator.rshift,
     ast.BitAnd: operator.and_,
     ast.BitOr: operator.or_,
     ast.BitXor: operator.xor,
 }
 
-# Complete Comparison Operations (==, !=, <, <=, >, >=, is, is not, in, not in)
 _AST_COMPARE_OPS: dict[type[ast.cmpop], Callable[[Any, Any], Any]] = {
     ast.Eq: operator.eq,
     ast.NotEq: operator.ne,
@@ -58,22 +59,20 @@ _AST_COMPARE_OPS: dict[type[ast.cmpop], Callable[[Any, Any], Any]] = {
     ast.LtE: operator.le,
     ast.Gt: operator.gt,
     ast.GtE: operator.ge,
-    ast.Is: operator.is_,  # Identity (is)
-    ast.IsNot: operator.is_not,  # Negated identity (is not)
-    ast.In: lambda a, b: a in b,  # Membership (in)
-    ast.NotIn: lambda a, b: a not in b,  # Negated membership (not in)
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
 }
 
-# Complete Unary Operations (-, +, ~, not)
 _AST_UNARY_OPS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
     ast.Invert: operator.invert,
-    ast.Not: operator.not_,  # Logical negation (not)
+    ast.Not: operator.not_,
 }
 
 
-# Boolean Operations (and, or)
 _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
     ast.And: lambda values: all(values),
     ast.Or: lambda values: any(values),
@@ -83,33 +82,7 @@ _AST_BOOL_OPS: dict[type[ast.boolop], Callable[[list[Any]], Any]] = {
 def _fill_chunk(
     template: xr.Dataset | xr.DataArray, dim: str, n: int, fill_value: Any
 ) -> xr.Dataset | xr.DataArray:
-    """Build an ``n``-long, all-``fill_value`` chunk along ``dim``.
-
-    Used by ``Arithmetic._shuffle_by_position`` for new positions with no
-    source data. Variables that don't carry ``dim`` at all (e.g. a static
-    ``(lat,)`` mask under a ``(time,)`` partition) are taken unchanged from
-    ``template`` rather than filled -- such a variable is already this
-    rank's own correct, complete copy regardless of how ``dim`` is
-    redistributed, so overwriting it with ``fill_value`` would corrupt it
-    for no reason.
-
-    Parameters
-    ----------
-    template : xarray.Dataset or xarray.DataArray
-        Any local slice with the right non-``dim`` shape/dtype/coords to
-        copy structure from (only its first element along ``dim`` is used).
-    dim : str
-        The dimension the fill chunk is ``n`` long.
-    n : int
-        Length of the fill chunk along ``dim``.
-    fill_value : Any
-        Value to fill dim-carrying variables/values with.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        An ``n``-long chunk, structurally consistent with ``template``.
-    """
+    """Build an ``n``-long, all-``fill_value`` chunk along ``dim``."""
     shaped = template.isel({dim: [0] * n})
     if isinstance(shaped, xr.Dataset):
         filled = shaped.copy(deep=False)
@@ -142,24 +115,7 @@ def _fill_chunk(
 def _haloed_variable_names(
     value: xr.Dataset | xr.DataArray, partition_dim: Hashable
 ) -> tuple[Hashable, ...]:
-    """Return every variable (data or coordinate) that actually varies along
-    ``partition_dim`` -- exactly the ones a neighbor's slab can differ on.
-    A variable without ``partition_dim`` in its dims is identical on every
-    rank already (that is what "replicated along this axis" means), so it
-    needs no communication at all: the local copy already held by this rank
-    is a perfectly valid stand-in for the neighbor's copy.
-
-    A ``DataArray``'s own coordinates are included here too, not just its
-    named data variable: a dimension coordinate (e.g. a real "time" axis
-    opened from a NetCDF file) varies along ``partition_dim`` exactly like
-    the data itself, and skipping it here left `_reconstruct` falling back
-    to this rank's own full, unsliced coordinate for the returned
-    before/after block -- silently wrong length, one bug this genuinely
-    slipped past every purely-synthetic, coordinate-less DataArray this
-    project's own tests built directly (no test here ever gave `halo_exchange`
-    a DataArray with a real matching dimension coordinate until a real
-    NetCDF-backed benchmark did) until real file I/O surfaced it.
-    """
+    """Return variables that vary along ``partition_dim``."""
     if isinstance(value, xr.Dataset):
         return tuple(
             name for name, var in value.variables.items() if partition_dim in var.dims
@@ -184,59 +140,11 @@ def _exchange_halo_blocks(
     left_rank: int | None,
     right_rank: int | None,
 ) -> tuple[xr.Dataset | xr.DataArray | None, xr.Dataset | xr.DataArray | None]:
-    """Exchange both boundary slabs with the left/right neighbors via raw
-    MPI buffers, all four messages posted non-blocking together (mirroring
-    the original pickled implementation's overlap) and waited on once.
-
-    Replaces a pickled ``comm.isend``/``comm.irecv`` of the *whole* sliced
-    object with one ``MPI_Isend``/``MPI_Irecv`` per variable that actually
-    varies along ``partition_dim`` -- variables that don't vary along it
-    are identical on every rank and are copied locally with zero
-    communication, mirroring FMS/MPP's "move only the data another rank
-    actually needs" principle.
-
-    This also fixes a real correctness hazard the pickled path had:
-    ``mpi4py``'s ``comm.irecv(source=...)`` without an explicit buffer
-    falls back to a fixed-size (currently 256 KiB) receive buffer, and a
-    pickled multi-variable Dataset slab can silently exceed it -- observed
-    directly as a segfault / ``malloc(): corrupted top size`` crash, not a
-    clean Python exception, for a realistic wide-halo, multi-variable
-    exchange. Every rank already holds an identical Dataset/DataArray
-    *schema* (same variable names, dims, dtypes, and non-partition-dim
-    shapes; only the partition-dim length can differ, and ``before``/
-    ``after`` are themselves already agreed identically on every rank by
-    the caller). That means no metadata needs to travel over the wire at
-    all: each rank derives the exact dtype and shape it will receive from
-    its own local copy of ``value`` before posting the raw-buffer receive,
-    and reconstructs each neighbor's slab afterward using that same known
-    schema with the received buffers substituted in.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        This rank's own local slice (not yet padded).
-    partition_dim : Hashable
-        The distributed dimension being exchanged.
-    before, after : int
-        Requested halo widths, already validated non-negative and
-        satisfiable by every rank's local length by the caller.
-    comm : mpi4py.MPI.Comm
-        Communicator to exchange on.
-    local_len : int
-        This rank's own length along ``partition_dim``.
-    left_rank, right_rank : int or None
-        Neighbor ranks below/above along ``partition_dim``. None at a
-        global edge.
-
-    Returns
-    -------
-    tuple[xarray.Dataset or xarray.DataArray or None, ...]
-        ``(before_block, after_block)``, each None where there is no
-        neighbor on that side.
-    """
+    """Exchange boundary slabs with adjacent ranks using nonblocking MPI buffers."""
     haloed = _haloed_variable_names(value, partition_dim)
 
     def _local_array(name: Hashable) -> np.ndarray:
+        """Return a contiguous local array for one variable."""
         if isinstance(value, xr.Dataset):
             return value[name].variable
         if name == value.name:
@@ -244,18 +152,7 @@ def _exchange_halo_blocks(
         return value.coords[name].variable
 
     def _mpi_buffer_view(arr: np.ndarray) -> np.ndarray:
-        """View ``arr`` as a dtype the raw MPI buffer protocol accepts.
-
-        ``datetime64``/``timedelta64`` -- exactly what a real,
-        CF-decoded "time" coordinate is, almost always the very
-        dimension being partitioned for real climate data -- have no
-        direct MPI datatype; ``Isend``/``Irecv`` need a numeric dtype.
-        Both are always backed by a fixed-width ``int64`` internally,
-        so this is a lossless, zero-copy bit-level reinterpretation
-        (the returned array shares the same underlying memory as
-        ``arr``, not a converted copy), not a value conversion --
-        every other supported dtype passes through unchanged.
-        """
+        """View ``arr`` as a dtype the raw MPI buffer protocol accepts."""
         return arr.view(np.int64) if arr.dtype.kind in "mM" else arr
 
     # This rank's own boundary slabs to send: the tail (size `before`) goes
@@ -331,6 +228,7 @@ def _exchange_halo_blocks(
     def _reconstruct(
         received: dict[Hashable, np.ndarray],
     ) -> xr.Dataset | xr.DataArray | None:
+        """Reconstruct an xarray object from exchanged arrays."""
         if not received:
             return None
         if isinstance(value, xr.Dataset):
@@ -358,32 +256,9 @@ def _exchange_halo_blocks(
 
 
 def _gather_full(
-    runtime, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
+    runtime: MPIRuntime, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
-    """Reconstruct ``value``'s full, replicated extent on every rank.
-
-    Used by :meth:`align` to reconcile two operands distributed on
-    genuinely different partitions: :meth:`repartition` (which
-    :meth:`align` then calls on the result) requires a replicated
-    input present on every rank, not just rank 0, so this uses
-    ``MPI_Allgather`` rather than the gather-to-root-then-broadcast
-    pattern :meth:`~.elementwise.Elementwise.median` uses for its
-    (much smaller) reduced result -- every rank ends up holding the
-    complete array, which is correct but not memory-scalable for a
-    large distributed dimension.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        This rank's own local slice.
-    meta : mapping
-        ``value``'s distribution metadata.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The full, replicated object (no ``mpi_meta`` attached).
-    """
+    """Reconstruct ``value``'s full, replicated extent on every rank."""
     dim = meta["dim"]
     if len(meta["dims"]) > 1:
         raise NotImplementedError(
@@ -405,52 +280,12 @@ def _gather_full(
 
 
 def _align_replicated(
-    runtime,
+    runtime: MPIRuntime,
     other: Any,
     meta: dict[str, Any],
     partner: xr.Dataset | xr.DataArray | None = None,
 ) -> Any:
-    """Slice a replicated operand onto an already-distributed partner's bounds.
-
-    Parameters
-    ----------
-    other : Any
-        Replicated operand to slice. Returned unchanged if it is not an
-        xarray object or carries none of ``meta["dims"]``. Under a
-        multi-dimensional partition, ``other`` need not carry every
-        one of ``meta["dims"]`` -- it is sliced along whichever it
-        does carry (exactly the one-dimensional behavior, applied
-        independently per axis; an operand missing an axis entirely
-        is, as before, replicated along that axis and untouched
-        there).
-    meta : dict[str, Any]
-        Distribution metadata of the already-distributed partner.
-    partner : xarray.Dataset or xarray.DataArray, optional
-        The already-distributed partner itself. When given and both
-        objects carry an index along a shared axis, :func:`xarray.align`
-        with ``join="exact"`` cross-checks the coordinate *labels* of
-        the slice against the partner's own labels. This is a local,
-        communication-free check: ``partner`` already holds only this
-        rank's slice, so it catches a replicated operand whose
-        coordinate does not correspond label-for-label to the
-        partner's (reordered, offset, or otherwise not simply "the same
-        index sliced the same way"), which same-length position-based
-        slicing alone cannot detect.
-
-    Returns
-    -------
-    Any
-        The sliced xarray object with distribution metadata attached, or
-        ``other`` unchanged if it is not an xarray object or carries
-        none of the partition dimensions.
-
-    Raises
-    ------
-    ValueError
-        If an operand length does not match the corresponding global
-        size, or if coordinate labels fail the ``join="exact"``
-        validation check.
-    """
+    """Slice a replicated operand onto an already-distributed partner's bounds."""
     if not isinstance(other, (xr.Dataset, xr.DataArray)):
         return other
     shared_dims = tuple(dim for dim in meta["dims"] if dim in other.dims)
@@ -494,7 +329,7 @@ def _align_replicated(
 
 
 def align(
-    runtime,
+    runtime: MPIRuntime,
     left: xr.Dataset | xr.DataArray,
     right: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] | None = None,
@@ -504,79 +339,29 @@ def align(
 ) -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
     """Return ``(left, right)`` partitioned identically across ranks.
 
-    The counterpart to :func:`xarray.align` for rank ownership rather
-    than coordinate labels: after this call, ``left`` and ``right`` are
-    guaranteed combinable by :meth:`apply`/:meth:`evaluate` without
-    raising and without any further MPI communication.
-
-    Four cases are handled:
-
-    - Neither operand is distributed: returned unchanged, unless
-      ``dim`` is given, in which case both are distributed along
-      ``dim`` via ``repartition``. Repartition is a deterministic
-      function of (length, chunk size, rank, size), so two operands of
-      the same length along ``dim`` land on identical per-rank bounds
-      without any coordination between them. No data moves between
-      ranks.
-    - One operand is already distributed, the other is replicated at
-      the full length of the distributed dimension (or does not carry
-      that dimension at all): the replicated operand is sliced down to
-      the distributed operand's exact bounds. No data moves between
-      ranks -- the replicated side already has the full array present
-      on every rank, so this is a purely local slice.
-    - Both are already distributed identically: returned unchanged.
-    - Both are already distributed, but *differently* (different
-      dimension, global size, or per-rank bounds): unlike the other
-      three cases, this genuinely requires moving data between ranks.
-      Each operand is gathered back to its full extent on every rank
-      (``MPI_Allgather`` plus ``xr.concat`` -- the same mechanism as
-      :meth:`~.elementwise.Elementwise.median`'s gather, but onto
-      every rank rather than just rank 0, since ``repartition``
-      requires a replicated input present everywhere), then both are
-      repartitioned onto a shared scheme (``dim`` if given, else
-      ``left``'s own dimension). Correct, but -- like ``median`` --
-      not memory-scalable: every rank briefly holds the complete data
-      for both operands.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     left : xarray.Dataset or xarray.DataArray
         Left operand to align.
     right : xarray.Dataset or xarray.DataArray
         Right operand to align.
     dim : hashable or {"auto"}, optional
-        Dimension to partition both operands along when neither is
-        currently distributed, or the shared dimension to reconcile
-        onto when both are already distributed differently. Required
-        when neither operand is distributed; defaults to ``left``'s
-        own dimension when both are already distributed differently.
+        Dimension to partition both operands along when neither is currently distributed, or the shared dimension to reconcile onto when both are already distributed differently.
     chunk_info : mapping, optional
         Forwarded to ``repartition``.
     log_partitions : bool, optional
         Forwarded to ``repartition``.
-
     Returns
     -------
     tuple of xarray.Dataset or xarray.DataArray
-        ``(left, right)``, each carrying matching distribution
-        metadata (or neither carrying any, if both remain replicated).
+        ``(left, right)``, each carrying matching distribution metadata (or neither carrying any, if both remain replicated).
 
     Raises
     ------
     ValueError
         If neither operand is distributed and ``dim`` is omitted.
-
-    Examples
-    --------
-    >>> left, right = align(local_field, full_climatology)
-    >>> anomaly = apply(operator.sub, left, right)
-
-    >>> left, right = align(a_full, b_full, dim="time")
-    >>> combined = apply(operator.add, left, right)
-
-    >>> # both already distributed, but on different dimensions
-    >>> left, right = align(a_by_time, b_by_space)
-    >>> combined = apply(operator.add, left, right)
     """
     from .io import repartition
 
@@ -641,7 +426,6 @@ def align(
     )
 
 
-# -- structural redistribution -------------------------------------------
 #
 # reindex() and sortby() are xarray's own coordinate-label operations
 # (unlike align() above, which reconciles rank *ownership* rather than
@@ -673,7 +457,7 @@ def align(
 
 
 def _shuffle_by_position(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     meta: Mapping[str, Any],
     dim: str,
@@ -682,38 +466,7 @@ def _shuffle_by_position(
     old_pos: np.ndarray[Any, Any],
     fill_value: Any,
 ) -> xr.Dataset | xr.DataArray:
-    """Redistribute ``value`` along ``dim`` to match ``old_pos``.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        This rank's own current local slice along ``dim``.
-    meta : mapping
-        ``value``'s current distribution metadata. May describe more
-        than one active partition dimension; every dimension other than
-        ``dim`` is carried through to the result unchanged (this
-        function only ever redistributes along ``dim`` itself, via the
-        sub-communicator that varies along ``dim`` alone -- see
-        :func:`~.cartesian.dim_comm`).
-    dim : str
-        The partition dimension being redistributed.
-    new_coord : numpy.ndarray
-        The full, global new coordinate values for ``dim`` (length
-        ``M``), identical on every rank.
-    old_pos : numpy.ndarray of int64
-        Length-``M`` array: ``old_pos[p]`` is the *old* global position
-        along ``dim`` that new global position ``p`` should take its
-        value from, or ``-1`` if ``p`` has no source (filled with
-        ``fill_value`` instead). Identical on every rank.
-    fill_value : Any
-        Value used for any position with no source.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        This rank's new local slice: ``new_coord`` sliced to this
-        rank's fresh balanced bounds, with fresh ``mpi_meta`` set.
-    """
+    """Redistribute ``value`` along ``dim`` to match ``old_pos``."""
     comm = _dim_comm(runtime, meta, dim)
     rank, size = comm.rank, comm.size
 
@@ -733,9 +486,9 @@ def _shuffle_by_position(
     def _owner_of(
         global_positions: np.ndarray[Any, Any], starts: np.ndarray[Any, Any]
     ) -> np.ndarray[Any, Any]:
+        """Return the rank owning a global position."""
         return np.searchsorted(starts, global_positions, side="right") - 1
 
-    # -- what MY own old data must be sent out as a source -------------
     owned_mask = (old_pos >= old_start) & (old_pos < old_stop)
     p_owned = np.nonzero(owned_mask)[0]  # ascending new positions I feed
     g_owned = old_pos[p_owned]  # corresponding old global positions (mine)
@@ -854,7 +607,7 @@ def _shuffle_by_position(
 
 
 def reindex(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Hashable, Any] | None = None,
     *,
@@ -869,46 +622,35 @@ def reindex(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reindex; distributed or replicated.
     indexers : mapping, optional
-        New coordinate labels per dimension, exactly as
-        ``xarray.Dataset.reindex``/``DataArray.reindex`` accepts. Every
-        rank must pass the identical indexer values for any dimension
-        that is currently partitioned.
+        New coordinate labels per dimension, exactly as ``xarray.Dataset.reindex``/``DataArray.reindex`` accepts.
     method : str, optional
-        Forwarded to ``pandas.Index.get_indexer`` when the partition
-        dimension is reindexed (``None``, ``"nearest"``, ``"ffill"``/
-        ``"pad"``, ``"bfill"``/``"backfill"``); forwarded to xarray's
-        own ``reindex`` otherwise.
+        Forwarded to ``pandas.Index.get_indexer`` when the partition dimension is reindexed (``None``, ``"nearest"``, ``"ffill"``/ ``"pad"``, ``"bfill"``/``"backfill"``); forwarded to xarray's own ``reindex`` otherwise.
     tolerance : float or iterable of float, optional
         Forwarded to ``pandas.Index.get_indexer``/xarray's ``reindex``.
     fill_value : Any, optional
-        Value used for labels with no match in ``value``. Default ``NaN``.
+        Value used for labels with no match in ``value``.
     chunk_info : mapping, optional
-        Reserved for parity with ``repartition``'s signature; not
-        consulted by the redistributing path, which always balances.
+        Reserved for parity with ``repartition``'s signature; not consulted by the redistributing path, which always balances.
     log_partitions : bool, optional
         Currently unused by the redistributing path.
     **indexers_kwargs : Any
         Additional indexers given as keywords, merged with ``indexers``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The reindexed object: rank-local (metadata preserved) if no
-        partitioned dimension was touched; freshly, memory-scalably
-        redistributed (new bounds, possibly a new global length)
-        otherwise -- see ``_shuffle_by_position``.
+        The reindexed object: rank-local (metadata preserved) if no partitioned dimension was touched; freshly, memory-scalably redistributed (new bounds, possibly a new global length) otherwise -- see ``_shuffle_by_position``.
 
     Raises
     ------
     ValueError
         If no indexers are given.
     NotImplementedError
-        If more than one active partition dimension is reindexed at
-        once, or a reindexed partition dimension's new coordinate is
-        not one-dimensional.
+        If more than one active partition dimension is reindexed at once, or a reindexed partition dimension's new coordinate is not one-dimensional.
     """
     indexers = {**(indexers or {}), **indexers_kwargs}
     if not indexers:
@@ -985,7 +727,7 @@ def reindex(
 
 
 def sortby(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
     *,
@@ -997,39 +739,27 @@ def sortby(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to sort; distributed or replicated.
     by : Hashable, DataArray, or sequence of these
-        Sort key(s): variable/coordinate name(s) or explicit
-        DataArray(s), exactly as ``xarray.Dataset.sortby``/
-        ``DataArray.sortby`` accepts. When redistribution is needed,
-        each key must be one-dimensional along the partition dimension
-        (a multi-dimensional sort key would need a different global
-        ordering per position along another axis, which this does not
-        support).
+        Sort key(s): variable/coordinate name(s) or explicit DataArray(s), exactly as ``xarray.Dataset.sortby``/ ``DataArray.sortby`` accepts.
     ascending : bool, optional
-        Sort order. Default True.
+        Sort order.
     chunk_info : mapping, optional
-        Reserved for parity with ``repartition``'s signature; not
-        consulted by the redistributing path, which always balances.
+        Reserved for parity with ``repartition``'s signature; not consulted by the redistributing path, which always balances.
     log_partitions : bool, optional
         Currently unused by the redistributing path.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The sorted object: rank-local (metadata preserved) if no sort
-        key varies along a partitioned dimension; freshly,
-        memory-scalably redistributed otherwise -- see
-        ``_shuffle_by_position``.
+        The sorted object: rank-local (metadata preserved) if no sort key varies along a partitioned dimension; freshly, memory-scalably redistributed otherwise -- see ``_shuffle_by_position``.
 
     Raises
     ------
     NotImplementedError
-        If the sort key(s) together vary along more than one active
-        partition dimension under a multi-dimensional (Cartesian)
-        partition, or a key is not one-dimensional along the partition
-        dimension it varies along.
+        If the sort key(s) together vary along more than one active partition dimension under a multi-dimensional (Cartesian) partition, or a key is not one-dimensional along the partition dimension it varies along.
     """
     meta = get_mpi_meta(value)
     if meta is None:
@@ -1065,7 +795,7 @@ def sortby(
     if len(touched) > 1:
         raise NotImplementedError(
             "sortby() cannot yet redistribute when the sort key(s) "
-            + f"together vary along more than one active partition "
+            + "together vary along more than one active partition "
             + f"dimension ({touched!r}); each key must vary along at "
             + "most one of them. Sorting by a key that varies along a "
             + "single active partition dimension already works, even "
@@ -1116,22 +846,10 @@ def sortby(
     )
 
 
-# -- arithmetic -----------------------------------------------------------
 
 
 def _operand_meta(operand: Any) -> dict[str, Any] | None:
-    """Return ``operand``'s MPI distribution metadata, if any.
-
-    Parameters
-    ----------
-    operand : Any
-        The object to inspect for MPI metadata.
-
-    Returns
-    -------
-    dict[str, Any] or None
-        The distribution metadata dictionary if present, otherwise None.
-    """
+    """Return ``operand``'s MPI distribution metadata, if any."""
     if isinstance(operand, (xr.Dataset, xr.DataArray)):
         return get_mpi_meta(operand)
     return None
@@ -1146,12 +864,10 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
         The computation result to be tagged.
     meta : dict[str, Any]
         The distribution metadata dictionary to reattach.
-
     Returns
     -------
     Any
-        The tagged result object if it is an xarray dataset or dataarray,
-        otherwise returned unmodified.
+        The tagged result object if it is an xarray dataset or dataarray, otherwise returned unmodified.
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
         set_mpi_meta(
@@ -1167,37 +883,25 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
 
 
 def check_operands_distribution(
-    runtime, operands: Iterable[Any]
+    runtime: MPIRuntime, operands: Iterable[Any]
 ) -> tuple[dict[str, Any] | None, Any]:
     """Return the mpi_meta to attach to a multi-operand call's result.
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     operands : iterable of Any
         Every positional and keyword argument passed to :meth:`apply`.
-
     Returns
     -------
     tuple[dict[str, Any] | None, Any]
-        ``(meta, reference)``: metadata to reattach to the result (or
-        None when no operand is distributed) together with the first
-        distributed operand itself, used by :meth:`apply` as the
-        coordinate baseline for post-call validation.
+        ``(meta, reference)``: metadata to reattach to the result (or None when no operand is distributed) together with the first distributed operand itself, used by :meth:`apply` as the coordinate baseline for post-call validation.
 
     Raises
     ------
     ValueError
-        If two operands are distributed over different partitions, if a
-        replicated operand carries the distributed dimension at a
-        different length than the partition owns, if a replicated
-        operand's coordinate labels along the distributed dimension do
-        not match the distributed partition's labels for this rank's
-        slice (equal length alone does not imply equal coordinates), or
-        (on more than one rank) if that coordinate check cannot even
-        run because either side has no coordinate for the distributed
-        dimension -- equal length alone is not enough evidence the
-        operand is genuinely this rank's own data rather than another
-        rank's same-length slice by coincidence.
+        If two operands are distributed over different partitions, if a replicated operand carries the distributed dimension at a different length than the partition owns, if a replicated operand's coordinate labels along the distributed dimension do not match the distributed partition's labels for this rank's slice (equal length alone does not imply equal coordinates), or (on more than one rank) if that coordinate check cannot even run because either side has no coordinate for the distributed dimension -- equal length alone is not enough evidence the operand is genuinely this rank's own data rather than another rank's same-length slice by coincidence.
     """
     operands = list(operands)
     metas = [_operand_meta(item) for item in operands]
@@ -1291,30 +995,18 @@ def check_partition_preserved(
 ) -> None:
     """Verify ``result`` still owns the same partition-dimension slice.
 
-    Called after evaluating a callable passed to :meth:`apply`, before
-    distribution metadata is reattached. Catches the case where the
-    callable reduced, resized, reordered, renamed, or otherwise
-    repartitioned the distributed dimension -- silently reattaching the
-    pre-call metadata to such a result would misrepresent which global
-    indices this rank's slice actually holds.
-
     Parameters
     ----------
     result : Any
-        The value returned by the callable. Non-xarray results are not
-        distributed data and pass unconditionally.
+        The value returned by the callable.
     meta : Mapping[str, Any]
         The distribution metadata captured before the call.
     reference : Any
-        The distributed operand the metadata was taken from, used as
-        the coordinate baseline for the label check below.
-
+        The distributed operand the metadata was taken from, used as the coordinate baseline for the label check below.
     Raises
     ------
     ValueError
-        If the distributed dimension is missing from ``result``, its
-        local length changed, or its coordinate labels no longer match
-        this rank's owned interval.
+        If the distributed dimension is missing from ``result``, its local length changed, or its coordinate labels no longer match this rank's owned interval.
     """
     if not isinstance(result, (xr.Dataset, xr.DataArray)):
         return
@@ -1363,70 +1055,30 @@ def check_partition_preserved(
                 ) from exc
 
 
-def apply(runtime, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+def apply(
+    runtime: MPIRuntime, func: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
     """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
-
-    ``func`` must be a partition-preserving, rank-local callable: for
-    the distributed dimension ``d``, ``output[d]`` on rank ``r`` must
-    represent exactly the same global ``[start_r:stop_r)`` indices as
-    the input. Concretely, the callable must not reduce, resize,
-    reorder, rename, repartition, or require values owned by another
-    rank along ``d`` (e.g. ``ds.mean("time")``, ``ds.isel(time=...)``,
-    ``ds.dropna("time")``, ``ds.rename({"time": ...})``, or
-    ``ds.rolling(time=...)`` when ``time`` is the partition dimension);
-    use the corresponding ``mpi.xarray`` reduction, indexing, or
-    groupby method for a dimension-changing operation, or
-    :meth:`rolling_reduce`/:meth:`halo_exchange` for a windowed
-    operation that genuinely needs a neighboring rank's boundary
-    values. This is checked after the call
-    (dimension present, local length unchanged, coordinate labels
-    unchanged) rather than by inspecting ``func``, since arbitrary
-    Python callables cannot be statically verified.
-
-    One exception: ``apply`` recognizes ``operator.matmul``/
-    ``numpy.matmul`` by identity and transparently redirects a
-    two-positional-argument, no-keyword call to :meth:`matmul` instead
-    of running it through the generic path above -- the same
-    redirection :meth:`evaluate` performs for ``@`` -- since a plain
-    rank-local matmul call would either silently drop MPI-owned data
-    (bypassing the post-call check that would otherwise catch it) or,
-    under that check, unconditionally fail whenever the distributed
-    dimension happens to be one of the contracted dimensions, even
-    though that case has a well-defined correct distributed answer
-    (see :meth:`matmul`).
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     func : callable
-        Any partition-preserving, rank-local function of the given
-        ``args`` and ``kwargs``.
+        Any partition-preserving, rank-local function of the given ``args`` and ``kwargs``.
     *args : Any
-        Positional arguments to ``func``: xarray Datasets or DataArrays
-        (distributed or not) or plain scalars and arrays, in any mix.
+        Positional arguments to ``func``: xarray Datasets or DataArrays (distributed or not) or plain scalars and arrays, in any mix.
     **kwargs : Any
-        Keyword arguments to ``func``, checked for distribution
-        metadata exactly like ``args``.
-
+        Keyword arguments to ``func``, checked for distribution metadata exactly like ``args``.
     Returns
     -------
     Any
-        The result of ``func(*args, **kwargs)``. When any argument is
-        distributed, the result is tagged with the same distribution metadata.
+        The result of ``func(*args, **kwargs)``.
 
     Raises
     ------
     ValueError
-        If the xarray arguments are distributed over incompatible
-        partitions or their coordinates disagree, or if the callable's
-        result no longer represents the same owned partition (missing
-        dimension, changed local length, or changed coordinate labels).
-
-    Examples
-    --------
-    >>> apply(operator.add, a, b)
-    >>> apply(xr.where, cond, a, b)
-    >>> apply(lambda x, *, factor: x * factor, a, factor=2.0)
-    >>> apply(operator.matmul, a, b)  # redirected to matmul(), see below
+        If the xarray arguments are distributed over incompatible partitions or their coordinates disagree, or if the callable's result no longer represents the same owned partition (missing dimension, changed local length, or changed coordinate labels).
     """
     if func in _MATMUL_CALLABLES and not kwargs and len(args) == 2:
         return matmul(runtime, *args)
@@ -1435,16 +1087,9 @@ def apply(runtime, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 
 
 def _apply_generic(
-    runtime, func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    runtime: MPIRuntime, func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> Any:
-    """Run the shared partition-preserving callable path.
-
-    Split out from :meth:`apply` so the non-contracted matmul fallback can
-    invoke this
-    validated generic path directly instead of calling
-    ``apply(runtime, operator.matmul, ...)``, which would recurse straight
-    back into :meth:`matmul` via the redirect above.
-    """
+    """Run the shared partition-preserving callable path."""
     meta, reference = check_operands_distribution(runtime, (*args, *kwargs.values()))
 
     _agree(
@@ -1468,7 +1113,6 @@ def _apply_generic(
     return reattach_meta(result, meta)
 
 
-# -- dedicated non-partition-preserving operations -----------------------
 #
 # apply() only accepts callables that leave the partition dimension
 # untouched. The two methods below are the "dedicated implementations"
@@ -1480,52 +1124,28 @@ def _apply_generic(
 # distributed result instead of refusing outright.
 
 
-def matmul(runtime, left: xr.DataArray, right: Any) -> xr.DataArray:
+def matmul(runtime: MPIRuntime, left: xr.DataArray, right: Any) -> xr.DataArray:
     """Matrix multiplication (``left @ right``), correct under MPI.
-
-    ``xarray.DataArray.__matmul__`` (and therefore ``@``) contracts
-    over every dimension common to both operands:
-    ``C = sum_{k in common dims} A_k * B_k``. When the distributed
-    dimension ``d`` is not one of those common dimensions, the
-    contraction never touches data owned by another rank and this is
-    simply routed through :meth:`apply`. When ``d`` is contracted, the
-    sum splits additively over ``d``:
-
-    ``C_ij = sum_k A_ik * B_kj = sum_r (sum_{k in rank r} A_ik * B_kj)``
-    followed by ``sum_r C_ij^(r)``.
-
-    so each rank computes its local partial contraction over its own
-    owned slice of ``d`` (an ordinary rank-local ``dot``), and one
-    ``MPI_Allreduce`` (``MPI.SUM``) combines the partials into the
-    correct, fully-replicated global result.
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     left : xarray.DataArray
         Left operand.
     right : Any
-        Right operand: an ``xarray.DataArray`` (distributed or not) or
-        a plain array/scalar ``left`` can be matrix-multiplied with.
-
+        Right operand: an ``xarray.DataArray`` (distributed or not) or a plain array/scalar ``left`` can be matrix-multiplied with.
     Returns
     -------
     xarray.DataArray
-        The matrix product. Replicated (no ``mpi_meta``) if the
-        distributed dimension was contracted away; otherwise tagged
-        with the same distribution metadata as the input.
+        The matrix product.
 
     Raises
     ------
     ValueError
-        If ``left``/``right`` are distributed over incompatible
-        partitions (see :meth:`apply`).
+        If ``left``/``right`` are distributed over incompatible partitions (see :meth:`apply`).
     TypeError
-        If the dtype involved has no MPI reduction datatype, when the
-        distributed dimension is contracted.
-
-    Examples
-    --------
-    >>> matmul(a, b)  # same as evaluate("a @ b", a=a, b=b)
+        If the dtype involved has no MPI reduction datatype, when the distributed dimension is contracted.
     """
     meta, _reference = check_operands_distribution(runtime, (left, right))
     if meta is None:
@@ -1583,7 +1203,7 @@ def matmul(runtime, left: xr.DataArray, right: Any) -> xr.DataArray:
 
 
 def halo_exchange(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | None = None,
     *,
@@ -1593,94 +1213,27 @@ def halo_exchange(
 ) -> tuple[xr.Dataset | xr.DataArray, int, int]:
     """Pad ``value`` with boundary slices from the adjacent ranks.
 
-    The dedicated primitive for operations that need values owned by a
-    neighboring rank along one partition dimension -- exactly what
-    :meth:`apply` refuses to let a callable do internally, because it
-    cannot verify the callable stayed rank-local. Fetches
-    ``before``/``after`` elements from the rank below/above along
-    ``dim`` with non-blocking point-to-point communication (no
-    collective), and concatenates them onto this rank's own slice.
-
-    Exchanges exactly one axis at a time by design, even under a
-    multi-dimensional partition: a multi-axis stencil is built by
-    calling this once per axis, in sequence, feeding each call's
-    padded result into the next. That sequencing is not just
-    convenient but sufficient on its own to correctly fill a width-1
-    corner/edge ghost cell after two such calls, without this method
-    ever needing to talk to a diagonal neighbor directly -- the same
-    "update overlap" ordering trick NOAA-GFDL's FMS relies on for its
-    own single-width halos (see ``mpp_update_domains``), adopted here
-    instead of FMS's explicit diagonal ``NORTH_EAST``/``SOUTH_WEST``/
-    ... neighbor lookups (``mpp_get_neighbor_pe_2d``) because it needs
-    no extra communication pattern at all: whichever axis is
-    exchanged second simply carries along whatever the first axis's
-    exchange already received.
-
-    At a global edge (no neighbor below for ``before``, none above for
-    ``after``) there is no neighbor to ask, so that side is padded
-    with 0 elements rather than a value invented from nothing; a
-    windowed computation built on the result naturally reports
-    undefined (e.g. via ``min_periods``) there, which matches how
-    ``xarray.DataArray.rolling`` already treats a global boundary.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
-        Distributed object to pad. Must carry MPI metadata.
+        Distributed object to pad.
     dim : Hashable, optional
-        The partition axis to exchange along. Required (no default)
-        once ``value`` has more than one active partition dimension,
-        since there is no longer a single implicit "the" partition
-        dimension to fall back to; for the one-dimensional case it
-        still defaults to that sole dimension, and must equal it if
-        given.
+        The partition axis to exchange along.
     before, after : int
-        Number of elements requested from the neighbor below/above
-        along ``dim``. Must not exceed this rank's own local length
-        along ``dim``, since a rank can only ever forward data it
-        owns -- fetching a window wider than one rank's partition
-        would need a multi-hop relay, which this primitive does not
-        perform.
+        Number of elements requested from the neighbor below/above along ``dim``.
     periodic : bool, optional
-        Wrap the neighbor lookup at the global boundary instead of
-        leaving that side unpadded -- rank 0's "left" neighbor becomes
-        the last rank and vice versa (and symmetrically on the right),
-        mirroring how FMS/``mpp_domains`` treats periodicity purely as
-        a boundary condition on which rank a *bounded* halo exchange
-        talks to (``cyclic``/``x_cyclic_offset``), not as a general
-        block-move primitive. Only changes which rank(s) messages are
-        exchanged with; the exchange itself, and the single-hop
-        ``before``/``after`` <= local-length limit above, are
-        unchanged -- with a single rank, that rank is its own
-        wrapped neighbor on both sides, so the whole exchange
-        collapses to a local no-op copy of this rank's own boundary
-        back onto itself (still correct, still only relevant if
-        ``comm.size > 1`` and this rank is at a true global edge).
-        Default False (existing non-wrapping edge behavior, used by
-        :func:`rolling_reduce`/:func:`diff`/:func:`shift`, which must
-        not wrap).
-
+        Wrap the neighbor lookup at the global boundary instead of leaving that side unpadded -- rank 0's "left" neighbor becomes the last rank and vice versa (and symmetrically on the right), mirroring how FMS/``mpp_domains`` treats periodicity purely as a boundary condition on which rank a *bounded* halo exchange talks to (``cyclic``/``x_cyclic_offset``), not as a general block-move primitive.
     Returns
     -------
     tuple[xarray.Dataset or xarray.DataArray, int, int]
-        ``(padded, left_pad, right_pad)``: the padded object (replicated
-        metadata stripped, since it is no longer a clean partition) and
-        the number of elements actually prepended/appended (equal to
-        ``before``/``after`` except at a global edge, where it is 0).
+        ``(padded, left_pad, right_pad)``: the padded object (replicated metadata stripped, since it is no longer a clean partition) and the number of elements actually prepended/appended (equal to ``before``/``after`` except at a global edge, where it is 0).
 
     Raises
     ------
     ValueError
-        If ``value`` is not distributed, ``dim`` is missing or
-        disagrees with an active partition dimension,
-        ``before``/``after`` are negative, or any rank's local
-        partition along ``dim`` is shorter than ``before``/``after``.
-        That last check is a synchronized ``allgather`` of every
-        rank's local length, so the error (if any) is raised
-        consistently, together, on every rank -- not just the
-        deficient one, which would otherwise leave the other ranks
-        blocked in the point-to-point exchange below, waiting on a
-        rank that already raised and will never reach it.
+        If ``value`` is not distributed, ``dim`` is missing or disagrees with an active partition dimension, ``before``/``after`` are negative, or any rank's local partition along ``dim`` is shorter than ``before``/``after``.
     """
     meta = _operand_meta(value)
     if meta is None:
@@ -1826,7 +1379,7 @@ def halo_exchange(
 
 
 def rolling_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1837,26 +1390,10 @@ def rolling_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Windowed reduction along ``dim``, correct when ``dim`` is distributed.
 
-    Equivalent to
-    ``value.rolling({dim: window}, center=center,
-    min_periods=min_periods).<reduce>()``,
-    but safe to call when ``dim`` is the active MPI partition
-    dimension: plain ``xarray`` rolling only ever sees this rank's own
-    local slice, so a window that spans a partition edge silently
-    computes over the wrong (or, near a rank boundary, insufficient)
-    data -- exactly the ``rolling(...).mean()`` case :meth:`apply`'s
-    docstring warns cannot be done inside a callable. This method
-    fetches the missing boundary values with :meth:`halo_exchange`,
-    rolls over the padded local array, then trims the halo padding
-    back off so the result is partition-preserving and safe to hand
-    back to :meth:`apply`/:meth:`evaluate`.
-
-    When ``dim`` is not the active partition dimension (or ``value``
-    is not distributed), this delegates directly to
-    ``xarray``'s own ``rolling`` with no MPI involvement.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to roll over.
     dim : Hashable
@@ -1865,19 +1402,14 @@ def rolling_reduce(
         Window size, as in ``xarray.DataArray.rolling``.
     reduce : str, optional
         Name of the reduction to call on the rolling object (e.g.
-        ``"mean"``, ``"sum"``, ``"min"``, ``"max"``, ``"std"``). Default
-        ``"mean"``.
     center : bool, optional
-        As in ``xarray.DataArray.rolling``. Default True.
+        As in ``xarray.DataArray.rolling``.
     min_periods : int or None, optional
         As in ``xarray.DataArray.rolling``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The rolled-and-reduced result, with the same local length and
-        distribution metadata as the input when ``dim`` is the
-        partition dimension.
+        The rolled-and-reduced result, with the same local length and distribution metadata as the input when ``dim`` is the partition dimension.
     """
     meta = _operand_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -1905,7 +1437,7 @@ def rolling_reduce(
 
 
 def coarsen_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1917,35 +1449,10 @@ def coarsen_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Block reduction along ``dim``, correct when ``dim`` is distributed.
 
-    Equivalent to ``value.coarsen({dim: window}, boundary=boundary,
-    side=side, coord_func=coord_func).<reduce>()``, but safe when
-    ``dim`` is the active partition dimension: unlike a sliding
-    ``rolling`` window, a coarsen block only ever needs boundary data
-    when this rank's own local range does not start (and, at the true
-    global edge, end) on a multiple of ``window`` -- i.e. only when
-    the block grid genuinely straddles a partition boundary, not on
-    every call regardless of alignment. Borrows just the (at most
-    ``window - 1``-element) remainder needed to complete that
-    boundary block via :func:`~.arithmetic.halo_exchange`, exactly
-    the FMS/``mpp_domains`` principle of moving only what the
-    operation's own footprint requires, then reduces locally.
-
-    A boundary block that straddles two ranks is computed
-    independently by both (each borrows what it is missing from the
-    other), so exactly one of them must report it to avoid double
-    counting in the reconstructed global result: by construction, the
-    block starting at the multiple of ``window`` at or below this
-    rank's own ``start`` is owned by whichever rank's own *unpadded*
-    range contains that start index. When this rank borrowed a
-    nonzero ``before`` amount, that block starts inside the left
-    neighbor's own range (not this rank's), so this rank drops its
-    own first coarsened block; a rank that borrowed nothing there
-    (the true left edge, or a rank whose ``start`` already lands on a
-    block boundary) always owns its own first block outright, with
-    nothing to drop.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to coarsen.
     dim : Hashable
@@ -1954,32 +1461,21 @@ def coarsen_reduce(
         Block size, as in ``xarray.DataArray.coarsen``.
     reduce : str, optional
         Name of the reduction to call on the coarsen object (e.g.
-        ``"mean"``, ``"sum"``, ``"min"``, ``"max"``, ``"construct"``).
-        Default ``"mean"``.
     boundary : {"exact", "trim", "pad"}, optional
-        As in ``xarray.DataArray.coarsen``. ``"exact"`` (the default,
-        matching ``xarray``) raises if the *global* size along
-        ``dim`` is not a multiple of ``window``. Default ``"exact"``.
+        As in ``xarray.DataArray.coarsen``.
     side : {"left"}, optional
-        As in ``xarray.DataArray.coarsen``. Only ``"left"`` (the
-        ``xarray`` default) is currently supported for a distributed
-        dimension; ``"right"`` anchors the block grid from the
-        opposite end, which needs a different (and, so far, untested)
-        edge-block derivation and is not yet implemented here.
+        As in ``xarray.DataArray.coarsen``.
     coord_func : str, optional
         As in ``xarray.DataArray.coarsen``.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The coarsened-and-reduced result, correctly distributed along
-        the now block-reduced ``dim``.
+        The coarsened-and-reduced result, correctly distributed along the now block-reduced ``dim``.
 
     Raises
     ------
     ValueError
-        If ``boundary="exact"`` and the global size is not evenly
-        divisible by ``window``.
+        If ``boundary="exact"`` and the global size is not evenly divisible by ``window``.
     NotImplementedError
         If ``side="right"`` is requested on a distributed ``dim``.
     """
@@ -2101,28 +1597,10 @@ def coarsen_reduce(
     return coarsened
 
 
-def _eval_ast_node(runtime, node: ast.expr, variables: Mapping[str, Any]) -> Any:
-    """Recursively evaluate one parsed expression node.
-
-    Parameters
-    ----------
-    node : ast.expr
-        The AST expression node to evaluate.
-    variables : mapping of str to Any
-        Variable bindings referenced within the expression.
-
-    Returns
-    -------
-    Any
-        The evaluated result of the node.
-
-    Raises
-    ------
-    ValueError
-        If an unsupported operator or unsupported expression node is encountered.
-    NameError
-        If a variable name cannot be found in ``variables``.
-    """
+def _eval_ast_node(
+    runtime: MPIRuntime, node: ast.expr, variables: Mapping[str, Any]
+) -> Any:
+    """Recursively evaluate one parsed expression node."""
     if isinstance(node, ast.BinOp):
         if isinstance(node.op, ast.MatMult):
             left = _eval_ast_node(runtime, node.left, variables)
@@ -2205,39 +1683,28 @@ def _eval_ast_node(runtime, node: ast.expr, variables: Mapping[str, Any]) -> Any
     )
 
 
-def evaluate(runtime, expression: str, /, **variables: Any) -> Any:
+def evaluate(runtime: MPIRuntime, expression: str, /, **variables: Any) -> Any:
     """Evaluate a string expression, respecting normal operator precedence.
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     expression : str
-        A Python expression referencing ``variables`` by name, for
-        example ``"(a + b) * c - d / e"``.
+        A Python expression referencing ``variables`` by name, for example ``"(a + b) * c - d / e"``.
     **variables : Any
-        Values bound to the names used in ``expression``: xarray
-        Datasets/DataArrays (distributed or not) or plain scalars.
-
+        Values bound to the names used in ``expression``: xarray Datasets/DataArrays (distributed or not) or plain scalars.
     Returns
     -------
     Any
-        The expression's value. Distribution metadata propagates
-        through exactly as it would from the equivalent chain of
-        :meth:`apply` calls.
+        The expression's value.
 
     Raises
     ------
     ValueError
-        If ``expression`` fails to parse, uses an unsupported operator
-        or expression element, or chains comparisons.
+        If ``expression`` fails to parse, uses an unsupported operator or expression element, or chains comparisons.
     NameError
-        If ``expression`` references a name not present in
-        ``variables``.
-
-    Examples
-    --------
-    >>> evaluate("a + b - c", a=ds1, b=ds2, c=ds3)
-    >>> evaluate("(a + b) * c", a=ds1, b=ds2, c=ds3)
-    >>> evaluate("anomaly / std", anomaly=a, std=s)
+        If ``expression`` references a name not present in ``variables``.
     """
     try:
         tree = ast.parse(expression, mode="eval")

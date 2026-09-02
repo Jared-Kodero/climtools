@@ -1,4 +1,4 @@
-"""Parallel NetCDF-4 output for MPI-distributed xarray data."""
+"""Provide MPI-aware NetCDF4 output for distributed xarray data."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .encoding import encode_dataset_time, encode_time, is_time_like
 from .meta import get_mpi_meta, strip_export_attrs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from os import PathLike
     from typing import Any, Literal
 
@@ -66,20 +66,7 @@ def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
 
 
 def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray, str | np.dtype[Any]]:
-    """Normalize an xarray variable for NetCDF output.
-
-    Parameters
-    ----------
-    source : xarray.DataArray
-        Variable to normalize.
-
-    Returns
-    -------
-    numpy.ndarray
-        Contiguous normalized values.
-    str or numpy.dtype
-        NetCDF-compatible data type.
-    """
+    """Normalize an xarray variable for NetCDF output."""
     variable = encode_time(source) if is_time_like(source) else source
     values = np.asarray(variable.values)
 
@@ -101,7 +88,7 @@ def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray, str | np.dtyp
 
 
 @contextlib.contextmanager
-def quiet_netcdf4_writes():
+def quiet_netcdf4_writes() -> Iterator[None]:
     """Suppress the netCDF4 NumPy shape-assignment warning.
 
     Yields
@@ -227,7 +214,6 @@ def writer_comm(mpi_runtime: MPIRuntime, has_data: bool) -> MPI.Comm:
         MPI runtime.
     has_data : bool
         Whether the rank owns output data.
-
     Returns
     -------
     mpi4py.MPI.Comm
@@ -269,7 +255,6 @@ def open_in_parallel(
         Output schema.
     comm : mpi4py.MPI.Comm
         Writer communicator.
-
     Returns
     -------
     netCDF4.Dataset
@@ -321,17 +306,6 @@ def write_distributed(
         Rank-local dataset.
     meta : Mapping[str, Any]
         MPI partition metadata.
-
-    Notes
-    -----
-    Generalizes to any number of active partition dimensions with no
-    change to the underlying mechanism: each rank still writes exactly
-    one hyperslab per variable (its own local slice) directly into the
-    shared file via netCDF4's parallel/collective I/O, with no gather to
-    a single rank at any point -- only the ``index`` tuple below grows
-    from checking membership in one partition dimension to checking
-    membership in a set of them, one independent ``slice(start, stop)``
-    per active axis a variable happens to carry.
     """
 
     partition_dims = set(meta["dims"])
@@ -536,7 +510,6 @@ def to_netcdf_parallel(
         Disable NetCDF pre-filling.
     allow_serial : bool, default False
         Permit one-rank execution.
-
     Returns
     -------
     str
@@ -1000,7 +973,6 @@ def resolve_unlimited_dim(
         Dimension name, or an iterable of names of which the first is used.
     sizes : iterable of str
         Dimension names present in the data, used to report a useful error.
-
     Returns
     -------
     str or None
@@ -1012,12 +984,6 @@ def resolve_unlimited_dim(
         If the specification is neither a string nor an iterable of strings.
     ValueError
         If the requested dimension is absent from the data.
-
-    Notes
-    -----
-    Serial output extends exactly one dimension. An iterable is accepted
-    because the public signature advertises it, but only its first entry is
-    meaningful here.
     """
     if unlimited_dim is None:
         return None
@@ -1059,9 +1025,6 @@ def to_netcdf_serial(
 ) -> None:
     """Write a Dataset or DataArray serially to NetCDF.
 
-    Increments are appended along the specified unlimited dimension in
-    discrete batches to manage memory overhead during serial output.
-
     Parameters
     ----------
     data : xarray.Dataset or xarray.DataArray
@@ -1071,8 +1034,7 @@ def to_netcdf_serial(
     unlimited_dim : str or iterable of str, optional
         Dimension(s) designated as unlimited in the NetCDF file structure.
     batch_size : int, default 24
-        Slice count processed per file append along the primary unlimited
-        dimension.
+        Slice count processed per file append along the primary unlimited dimension.
     format : str, default "NETCDF4"
         NetCDF underlying disk format.
     shuffle : bool, default True
@@ -1085,16 +1047,9 @@ def to_netcdf_serial(
         Print incremental progress to output stream.
     stdout : file-like, optional
         Destination stream for progress updates; defaults to sys.stdout.
-
     Returns
     -------
     None
-
-    Notes
-    -----
-    A DataArray is written as a single-variable Dataset when the target file
-    does not yet exist. When it does exist, the array is added to it, or
-    overwritten in place if a variable of the same name is already present.
     """
     if isinstance(data, xr.DataArray) and not Path(file).exists():
         if data.name is None:
@@ -1143,11 +1098,11 @@ def dataset_to_netcdf(
     Parameters
     ----------
     file : str or os.PathLike
-        Output path. An existing file is replaced.
+        Output path.
     data : xarray.Dataset
-        Data to write. The caller's object is not modified.
+        Data to write.
     unlimited_dim : str, iterable of str, or None, optional
-        Dimension extended while appending. Defaults to the first dimension.
+        Dimension extended while appending.
     batch_size : int, default 1
         Slices appended per write along ``unlimited_dim``.
     format : str, default "NETCDF4"
@@ -1162,7 +1117,6 @@ def dataset_to_netcdf(
         Display a progress bar.
     stdout : file-like, optional
         Stream the progress bar is written to.
-
     Returns
     -------
     None
@@ -1226,7 +1180,7 @@ def dataset_to_netcdf(
 def dataarray_to_netcdf(
     file: str | PathLike[str],
     da: xr.DataArray,
-    format="NETCDF4",
+    format: str = "NETCDF4",
     shuffle: bool | None = None,
     zlib: bool | None = None,
     complevel: int | None = None,
@@ -1238,15 +1192,15 @@ def dataarray_to_netcdf(
     file : str or os.PathLike
         Path to a NetCDF4 file opened with read/write access.
     da : xr.DataArray
-        DataArray to write. Must have dimensions that already exist in the file.
+        DataArray to write.
     format : str, optional
         NetCDF format passed to netCDF4.Dataset.
     shuffle : bool, optional
-        Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
+        Whether to apply the shuffle filter to the variable.
     zlib : bool, optional
-        Whether to apply zlib compression to the variable. If None, the default compression settings are used.
+        Whether to apply zlib compression to the variable.
     complevel : int, optional
-        Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
+        Compression level to apply if zlib is True.
     """
 
     if not isinstance(da, xr.DataArray):
@@ -1298,33 +1252,26 @@ def append(
 ) -> None:
     """Append a Dataset along an unlimited dimension.
 
-    Variables containing ``dim`` are extended from the current end of the file.
-    Variables without ``dim`` are written only if not already present.
-    datetime64, timedelta64, and cftime variables are encoded to CF numeric
-    values. When the target variable already exists, the new batch is encoded
-    against the units and calendar already stored in the file so the numeric
-    axis stays consistent across appends.
-
     Parameters
     ----------
     data : xr.Dataset
-        Data to append. All variables containing ``dim`` must share the same
-        length along ``dim``.
+        Data to append.
     file : str or os.PathLike
-        NetCDF4 file with read/write access. ``dim`` must be the unlimited
-        dimension.
+        NetCDF4 file with read/write access.
     dim : str, optional
-        Unlimited dimension to append along. Default "time".
+        Unlimited dimension to append along.
     mode : {"a", "r+"}, optional
         File access mode passed to netCDF4.Dataset.
     format : str, optional
         NetCDF format passed to netCDF4.Dataset.
     shuffle : bool, optional
-        Whether to apply the shuffle filter to the variable. If None, the default compression settings are used.
+        Whether to apply the shuffle filter to the variable.
     zlib : bool, optional
-        Whether to apply zlib compression to the variable. If None, the default compression settings are used.
+        Whether to apply zlib compression to the variable.
     complevel : int, optional
-        Compression level to apply if zlib is True. Must be between 1 and 9. If None, the default compression settings are used.
+        Compression level to apply if zlib is True.
+    encoded_dataset : bool
+        Whether the Dataset has already been CF encoded.
     """
 
     if isinstance(data, xr.DataArray):
@@ -1426,7 +1373,29 @@ def createVariable(
     write_values: bool = False,
 ) -> netCDF4.Variable:
 
-    # we need to use ecoding here
+    """Execute createVariable.
+
+    Parameters
+    ----------
+    ncf : netCDF4.Dataset
+        Open NetCDF dataset.
+    da : xr.DataArray
+        Input DataArray.
+    varname : str
+        Variable name.
+    zlib : bool | None
+        Whether to enable zlib compression.
+    complevel : int | None
+        Compression level.
+    shuffle : bool | None
+        Whether to enable the HDF5 shuffle filter.
+    write_values : bool
+        Whether to write DataArray values immediately.
+    Returns
+    -------
+    netCDF4.Variable
+        Created NetCDF variable.
+    """
     missing = [d for d in da.dims if d not in ncf.dimensions]
     if missing:
         raise ValueError(

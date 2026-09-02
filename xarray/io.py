@@ -49,7 +49,7 @@ _NO_DATA_ATTR = "_climtools_no_data"
 
 
 def _open_dataset_1d(
-    runtime,
+    runtime: MPIRuntime,
     filename_or_obj: Any,
     partition_dim: Hashable | Literal["auto"],
     open_fn: Callable,
@@ -154,7 +154,7 @@ def _open_dataset_1d(
 
 
 def _open_dataset_cartesian(
-    runtime,
+    runtime: MPIRuntime,
     filename_or_obj: Any,
     dims: tuple[Hashable, ...],
     open_fn: Callable,
@@ -162,49 +162,7 @@ def _open_dataset_cartesian(
     log_partitions: bool,
     **kwargs: Any,
 ) -> xr.Dataset:
-    """Open a Dataset lazily on an MPI Cartesian process grid.
-
-    The multi-dimensional counterpart of :func:`_open_dataset_1d`, mirroring
-    :meth:`partition`'s own
-    multi-dimensional path (:meth:`_partition_pieces_nd`) but for a
-    lazy on-disk open rather than an in-memory root-owned object:
-    every rank opens ``filename_or_obj`` itself and computes its own
-    bounds from :func:`~.cartesian.compute_layout` and
-    :func:`~.chunks.get_balanced_bounds` -- the same deterministic,
-    rank-invariant computation :meth:`_partition_pieces_nd` performs
-    once per rank on root's behalf -- so no root-side slicing or
-    point-to-point transfer of the data itself is needed here either;
-    only the small metadata plan (each requested dimension's global
-    length) needs the same single rank-0-computed, broadcast round
-    trip the one-dimensional path above already does.
-
-    Parameters
-    ----------
-    filename_or_obj : str, path-like, file-like, or list of these
-        As in :func:`mpi_open_dataset`.
-    dims : tuple of Hashable
-        Two or more partition dimensions, already validated non-empty
-        by :meth:`_as_partition_dims`.
-    open_fn : callable
-        ``xarray.open_dataset`` or ``xarray.open_mfdataset``, chosen
-        by :func:`mpi_open_dataset` from ``filename_or_obj``'s shape.
-    chunks : Any
-        As in :func:`mpi_open_dataset`.
-    log_partitions : bool
-        As in :func:`mpi_open_dataset`.
-    **kwargs : Any
-        Forwarded to ``open_fn``.
-
-    Returns
-    -------
-    xarray.Dataset
-        Lazy rank-local Dataset carrying Cartesian ``mpi_meta``.
-
-    Raises
-    ------
-    ValueError
-        If any of ``dims`` is not a dimension of the opened dataset.
-    """
+    """Open a Dataset lazily on an MPI Cartesian process grid."""
     comm = runtime.comm
 
     plan: dict[str, Any] | None = None
@@ -286,7 +244,7 @@ _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
 
 
 def partition(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray | None,
     dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
     *,
@@ -296,36 +254,20 @@ def partition(
 ) -> xr.Dataset | xr.DataArray:
     """partition a root-owned xarray object across MPI ranks.
 
-    The root slices the object along ``dim`` and sends each rank only its local
-    piece. Use :meth:`repartition` when the full object already exists on every
-    rank.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset, xarray.DataArray, or None
         Complete object on ``root``; non-root ranks must pass None.
     dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Partition dimension(s). ``"auto"`` selects the single largest
-        dimension (unchanged one-dimensional default). A single
-        dimension, given directly (``"lat"``) or as a length-one
-        sequence (``("lat",)``), takes the same one-dimensional path
-        either way. A sequence of two or more dimensions (e.g.
-        ``("lat", "lon")``) lays ranks out on an MPI Cartesian process
-        grid and partitions every listed dimension simultaneously --
-        see :mod:`.cartesian`. ``"auto"`` does not extend to choosing
-        more than one dimension automatically; request multiple
-        dimensions explicitly.
+        Partition dimension(s).
     root : int, optional
-        Rank that owns ``value``. Default is 0.
+        Rank that owns ``value``.
     chunk_info : mapping of str to int, optional
-        Effective chunk-size hints. Only consulted for the
-        one-dimensional path; a multi-dimensional partition always
-        uses :func:`~.chunks.get_balanced_bounds` per axis (see
-        :func:`~.cartesian.compute_layout`), since native on-disk
-        chunk alignment is inherently a single-axis concept here.
+        Effective chunk-size hints.
     log_partitions : bool, optional
-        Log the resulting rank layout. Default is False.
-
+        Log the resulting rank layout.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -335,11 +277,7 @@ def partition(
     ------
     ValueError
         If ownership, metadata, or ``dim`` is invalid.
-
-    Notes
-    -----
-    Dask-backed inputs remain lazy: the root sends sliced task graphs rather
-    than materializing the full array."""
+    """
     comm = runtime.comm
     is_root = runtime.is_root(root)
     requested_dims = _as_partition_dims(dim)
@@ -452,14 +390,7 @@ def partition(
 def _as_partition_dims(
     dim: Hashable | Sequence[Hashable] | Literal["auto"],
 ) -> Literal["auto"] | tuple[Hashable, ...]:
-    """Normalize ``partition()``'s ``dim`` argument.
-
-    Returns ``"auto"`` unchanged, or a non-empty tuple of dimension names
-    for anything else -- a bare dimension name becomes a length-one
-    tuple, so a caller passing ``dim="lat"`` and one passing
-    ``dim=("lat",)`` are indistinguishable from here on and take the
-    identical one-dimensional code path.
-    """
+    """Normalize ``partition()``'s ``dim`` argument."""
     if dim == "auto":
         return "auto"
     if isinstance(dim, (list, tuple)):
@@ -476,14 +407,7 @@ def _partition_pieces_1d(
     comm_size: int,
     chunk_info: Mapping[str, int] | None,
 ) -> list[Any]:
-    """Slice ``stripped`` into one piece per rank along one dimension.
-
-    Unchanged in every respect from the sole implementation this
-    method was extracted from, other than the extraction itself: the
-    one-dimensional path a caller passing a single ``dim`` (directly
-    or as a length-one sequence) takes is exactly this, with no added
-    indirection or cost.
-    """
+    """Slice ``stripped`` into one piece per rank along one dimension."""
     length = int(stripped.sizes[resolved_dim])
     info = dict(chunk_info or {})
     chunk_size = int(
@@ -527,21 +451,7 @@ def _partition_pieces_nd(
     dims: tuple[Hashable, ...],
     comm_size: int,
 ) -> list[Any]:
-    """Slice ``stripped`` into one piece per rank on a Cartesian grid.
-
-    Every rank's process-grid coordinates and per-axis bounds are
-    computed here purely from ``comm_size`` and each dimension's
-    global length -- the same deterministic, rank-invariant
-    computation :func:`~.cartesian.build_cartesian_topology` performs
-    for a rank's own coordinates, applied here to every rank at once
-    so root can slice and address every piece without needing a live
-    ``Create_cart`` communicator (a collective every rank would have
-    to enter together) just to compute bounds. Each receiving rank
-    builds and caches its own live Cartesian topology lazily, the
-    first time it actually needs one (a collective like a reduction
-    or halo exchange spanning more than one partition axis) --
-    see :func:`~.cartesian.get_cartesian_topology`.
-    """
+    """Slice ``stripped`` into one piece per rank on a Cartesian grid."""
     for d in dims:
         if d not in stripped.dims:
             raise ValueError(f"Distribution dimension {d!r} does not exist.")
@@ -584,17 +494,7 @@ def _partition_pieces_nd(
 def _normalize_create_dim(
     dim: Hashable | int | Sequence[Hashable], dims: Sequence[Hashable]
 ) -> tuple[Hashable, ...]:
-    """Normalize ``create_dataarray``/``create_dataset``'s ``dim`` to a tuple.
-
-    A bare dimension name or axis ``int`` becomes a length-one tuple --
-    the existing single-dimension behavior, unchanged in every respect
-    including accepting an axis index, which a multi-dimension request
-    cannot (there is no unambiguous per-axis ordering to infer an index
-    against once more than one dimension is named). A sequence of two or
-    more dimension names requests a Cartesian-topology partition,
-    mirroring :func:`partition`'s own ``dim`` argument and using the same
-    :func:`~.cartesian.compute_layout` process-grid factorization.
-    """
+    """Normalize ``create_dataarray``/``create_dataset``'s ``dim`` to a tuple."""
     if isinstance(dim, (list, tuple)):
         if not dim:
             raise ValueError("dim sequence must not be empty.")
@@ -611,7 +511,7 @@ def _normalize_create_dim(
 
 
 def create_dataarray(
-    runtime,
+    runtime: MPIRuntime,
     fill: Callable[..., Any],
     dims: Sequence[Hashable],
     *,
@@ -627,24 +527,18 @@ def create_dataarray(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds
-        when ``dim`` names a single dimension. When ``dim`` names two or
-        more dimensions, called instead as
-        ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one
-        ``(start, stop)`` pair per partitioned dimension, in ``dim``'s
-        own order, laid out on an MPI Cartesian process grid exactly like
-        :func:`partition`'s own multi-dimensional support.
+        Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
-        Global dimension sizes. Missing sizes may be inferred from ``coords``.
+        Global dimension sizes.
     dim : Hashable, int, or sequence of Hashable, optional
-        Dimension or axis to partition. Default is 0. A sequence of two
-        or more dimension names requests a Cartesian-topology partition;
-        an axis ``int`` is only valid for a single dimension.
+        Dimension or axis to partition.
     dtype : Any, optional
-        Data type returned by ``fill``. Default is ``numpy.float64``.
+        Data type returned by ``fill``.
     coords : mapping, optional
         Coordinates passed to :class:`xarray.DataArray`.
     name : Hashable, optional
@@ -652,8 +546,7 @@ def create_dataarray(
     attrs : mapping, optional
         DataArray attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout. Default is False.
-
+        Log the resulting rank layout.
     Returns
     -------
     xarray.DataArray
@@ -662,7 +555,8 @@ def create_dataarray(
     Raises
     ------
     ValueError
-        If ``dim`` is invalid or global sizes cannot be resolved."""
+        If ``dim`` is invalid or global sizes cannot be resolved.
+    """
     partition_dims = _normalize_create_dim(dim, dims)
 
     if shape is None or isinstance(shape, Mapping):
@@ -753,7 +647,7 @@ def create_dataarray(
 
 
 def create_dataset(
-    runtime,
+    runtime: MPIRuntime,
     data_vars: Mapping[
         Hashable,
         xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]],
@@ -770,30 +664,22 @@ def create_dataset(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs. A fill function
-        is called with one ``(start, stop)`` pair per partition dimension
-        present in that variable's own ``dims``, in ``dim``'s order (a
-        single pair for the common single-dimension case); a variable
-        whose ``dims`` contain none of the partition dimensions is
-        unpartitioned -- identical on every rank -- and its fill takes no
-        arguments.
+        Variables as DataArrays or ``(dims, fill)`` pairs.
     sizes : mapping, optional
-        Global dimension sizes. Missing sizes may be inferred from ``coords``.
+        Global dimension sizes.
     dim : Hashable or sequence of Hashable
-        Dimension(s) to partition. A sequence of two or more dimension
-        names lays ranks out on an MPI Cartesian process grid and
-        partitions every one simultaneously, exactly like
-        :func:`partition`'s own multi-dimensional support.
+        Dimension(s) to partition.
     dtype : Any or mapping, optional
-        Default or per-variable fill dtype. Default is ``numpy.float64``.
+        Default or per-variable fill dtype.
     coords : mapping, optional
         Coordinates passed to :class:`xarray.Dataset`.
     attrs : mapping, optional
         Dataset attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout. Default is True.
-
+        Log the resulting rank layout.
     Returns
     -------
     xarray.Dataset
@@ -802,8 +688,8 @@ def create_dataset(
     Raises
     ------
     ValueError
-        If sizes cannot be resolved or a partitioned DataArray has the wrong
-        local length."""
+        If sizes cannot be resolved or a partitioned DataArray has the wrong local length.
+    """
     if isinstance(dim, (list, tuple)):
         if not dim:
             raise ValueError("dim sequence must not be empty.")
@@ -931,7 +817,7 @@ def create_dataset(
 
 
 def repartition(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] = "auto",
     *,
@@ -942,16 +828,16 @@ def repartition(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Complete object present on every rank.
     dim : Hashable or {"auto"}, optional
-        New partition dimension. ``"auto"`` selects the largest dimension.
-        Default is ``"auto"``.
+        New partition dimension.
     chunk_info : mapping of str to int, optional
         Effective chunk-size hints.
     log_partitions : bool, optional
-        Log the resulting rank layout. Default is False.
-
+        Log the resulting rank layout.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -960,7 +846,8 @@ def repartition(
     Raises
     ------
     ValueError
-        If ``value`` is already distributed or ``dim`` is invalid."""
+        If ``value`` is already distributed or ``dim`` is invalid.
+    """
     if get_mpi_meta(value) is not None:
         raise ValueError(
             "Cannot repartition an already distributed object. "
@@ -1018,28 +905,26 @@ def repartition(
 
 
 def attach_save_chunks(
-    runtime, value: xr.Dataset | xr.DataArray
+    runtime: MPIRuntime, value: xr.Dataset | xr.DataArray
 ) -> xr.Dataset | xr.DataArray:
     """Attach write-time chunk metadata to a distributed object.
 
-    The save-chunk plan is computed on rank 0 from distribution metadata and
-    broadcast to all ranks. No data are materialized.
-
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed rank-local object.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        ``value`` with ``mpi_meta["save_chunks"]`` attached. Undistributed input
-        is returned unchanged.
+        ``value`` with ``mpi_meta["save_chunks"]`` attached.
 
     Raises
     ------
     ValueError
-        If required partition chunk metadata are missing."""
+        If required partition chunk metadata are missing.
+    """
     meta = get_mpi_meta(value)
     if meta is None:
         return value
@@ -1081,27 +966,18 @@ def mpi_open_dataset(
 
     Parameters
     ----------
-    filename_or_obj : str, path-like, file-like, or list of these
+    filename : str, path-like, file-like, or list of these
         Input accepted by ``xarray.open_dataset``/``xarray.open_mfdataset``.
-        A wildcard string or a list/tuple triggers multi-file loading.
     mpi_runtime : MPIRuntime or mpi4py.MPI.Intracomm
         Runtime whose communicator the result is bound to.
     partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Dimension(s) to partition. "auto" selects the longest dimension
-        (single-dimension only). A sequence of two or more dimensions
-        (e.g. ``("lat", "lon")``) lays ranks out on an MPI Cartesian
-        process grid and distributes every listed dimension at once,
-        exactly like ``mpi_partition_data``'s own multi-dimensional
-        support -- see ``IO.open_dataset``.
+        Dimension(s) to partition.
     chunks : int, dict, "auto" or None, optional
         Passed unchanged to xarray.
     log_partitions : bool, optional
         Print one aligned table showing which global interval each rank received.
     **kwargs : Any
-        Additional arguments passed unchanged to ``xarray.open_dataset``/
-        ``xarray.open_mfdataset`` (e.g. ``engine``, ``decode_times``,
-        ``concat_dim``, ``combine``, ``preprocess``, ``parallel``).
-
+        Additional arguments passed unchanged to ``xarray.open_dataset``/ ``xarray.open_mfdataset`` (e.g.
     Returns
     -------
     MPIXarray
@@ -1168,20 +1044,13 @@ def mpi_create_dataarray(
     runtime : MPIRuntime
         Runtime whose communicator the result is bound to.
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds
-        when ``dim`` names a single dimension, or as
-        ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one pair per
-        partitioned dimension, in ``dim``'s order -- when ``dim`` names
-        two or more.
+        Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension, or as ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one pair per partitioned dimension, in ``dim``'s order -- when ``dim`` names two or more.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
-        Global dimension sizes. Missing sizes may be inferred from ``coords``.
+        Global dimension sizes.
     dim : Hashable, int, or sequence of Hashable, optional
-        Dimension or axis to partition. A sequence of two or more
-        dimension names lays ranks out on an MPI Cartesian process grid
-        and partitions every one simultaneously, exactly like
-        ``mpi_partition_data``'s own multi-dimensional support.
+        Dimension or axis to partition.
     dtype : Any, optional
         Data type returned by ``fill``.
     coords : mapping, optional
@@ -1192,7 +1061,6 @@ def mpi_create_dataarray(
         DataArray attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
-
     Returns
     -------
     MPIXarray
@@ -1235,18 +1103,11 @@ def mpi_create_dataset(
     runtime : MPIRuntime
         Runtime whose communicator the result is bound to.
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs. A fill function
-        receives one ``(start, stop)`` pair per partition dimension present
-        in that variable's own ``dims``, in ``dim``'s order; a variable
-        naming none of the partition dimensions is unpartitioned and its
-        fill takes no arguments.
+        Variables as DataArrays or ``(dims, fill)`` pairs.
     sizes : mapping, optional
-        Global dimension sizes. Missing sizes may be inferred from ``coords``.
+        Global dimension sizes.
     dim : Hashable or sequence of Hashable
-        Dimension(s) to partition. A sequence of two or more dimension
-        names lays ranks out on an MPI Cartesian process grid and
-        partitions every one simultaneously, exactly like
-        ``mpi_partition_data``'s own multi-dimensional support.
+        Dimension(s) to partition.
     dtype : Any or mapping, optional
         Default or per-variable fill dtype.
     coords : mapping, optional
@@ -1255,7 +1116,6 @@ def mpi_create_dataset(
         Dataset attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
-
     Returns
     -------
     MPIXarray
@@ -1294,18 +1154,13 @@ def mpi_partition_data(
     runtime : MPIRuntime
         Runtime whose communicator the result is bound to.
     dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Partition dimension(s). "auto" selects the largest dimension. A
-        sequence of two or more dimensions lays ranks out on an MPI
-        Cartesian process grid and partitions every one simultaneously;
-        see :meth:`~.io.IO.partition`.
+        Partition dimension(s).
     root : int, optional
         Rank that owns ``value``.
     chunk_info : mapping of str to int, optional
-        Effective chunk-size hints. Only consulted for a single partition
-        dimension; see :meth:`~.io.IO.partition`.
+        Effective chunk-size hints.
     log_partitions : bool, optional
         Log the resulting rank layout.
-
     Returns
     -------
     MPIXarray
@@ -1342,7 +1197,6 @@ def dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
     ----------
     data : xarray.Dataset or xarray.DataArray
         Object to inspect.
-
     Returns
     -------
     bool
@@ -1373,11 +1227,6 @@ def to_netcdf(
 ) -> None:
     """Write a Dataset or DataArray to NetCDF.
 
-    Serial output is written incrementally along an unlimited dimension. In
-    parallel mode, an object carrying ``mpi_meta`` is already distributed and
-    every rank writes its existing local slab directly. Otherwise rank 0 owns
-    the complete object and the parallel writer distributes partitioned data.
-
     Parameters
     ----------
     data : xarray.Dataset or xarray.DataArray
@@ -1389,8 +1238,7 @@ def to_netcdf(
     unlimited_dim : str or iterable of str, optional
         Dimension or dimensions made unlimited.
     partition_dim : str, optional
-        MPI partition dimension. For an already distributed object this must
-        agree with ``mpi_meta["dim"]``.
+        MPI partition dimension.
     parallel : bool, default: False
         Use MPI-parallel NetCDF-4 output.
     batch_size : int, default: 24
@@ -1415,7 +1263,6 @@ def to_netcdf(
         Disable NetCDF pre-filling during parallel initialization.
     allow_serial : bool, default: False
         Permit the parallel writer with one MPI rank.
-
     Returns
     -------
     None

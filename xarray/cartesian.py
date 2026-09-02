@@ -1,44 +1,4 @@
-"""Cartesian process-grid topology for multi-dimensional MPI partitioning.
-
-Generalizes the existing single-dimension partitioning (one rank owns one
-contiguous, linearly-indexed slab, with neighbors at ``rank - 1``/
-``rank + 1``) to two or more partition dimensions, using an
-``mpi4py.MPI`` Cartesian communicator so that neighbor discovery and
-multi-axis halo exchange reduce to ``Cartcomm.Shift`` instead of manual
-rank arithmetic.
-
-Design is deliberately narrow and mirrors NOAA-GFDL's FMS ``mpp_domains``
-domain decomposition (see ``mpp_define_layout2D`` and
-``mpp_compute_extent`` in ``FMS/mpp/include/mpp_domains_define.inc``)
-without importing its full generality:
-
-- **Process-grid shape** (:func:`compute_layout`) follows the same
-  aspect-ratio idea as ``mpp_define_layout2D`` -- keep work-per-rank
-  balanced across axes -- generalized from GFDL's closed-form 2D-only
-  formula to a greedy prime-factor assignment that also works for more
-  than two partition dimensions (GFDL's own domain decomposition never
-  needs more than two, since it only ever splits horizontal, not
-  vertical, extent).
-- **Per-axis bounds** reuse :func:`~.chunks.get_balanced_bounds` exactly
-  -- the same near-equal contiguous split already used by the existing
-  one-dimensional path -- applied independently along each Cartesian
-  axis, rather than adopting FMS's mirror-symmetric ``mpp_compute_extent``
-  scheme. climtools's existing balanced split is simpler and already
-  relied upon everywhere else in this codebase; reusing it per-axis
-  maximizes code and test reuse instead of introducing a second,
-  differently-balanced splitting rule.
-- **Neighbor discovery** uses one ``Cartcomm.Shift`` per axis (face
-  neighbors only). Corner/edge (diagonal) ghost values are not fetched by
-  a dedicated diagonal exchange; :meth:`~.arithmetic.Arithmetic.halo_exchange`
-  instead performs the per-axis exchanges in sequence, so a later axis's
-  exchange naturally carries an earlier axis's already-received halo into
-  the corner -- the same "update overlap" ordering trick FMS itself
-  documents relying on for single-width halos, without needing FMS's
-  explicit ``NORTH_EAST``/``SOUTH_WEST``/... diagonal ``pearray`` lookups
-  (see ``mpp_get_neighbor_pe_2d``).
-- Global domains are never periodic here (``periods=(False, ...)``);
-  climtools has no cyclic/folded-domain concept to preserve, unlike FMS.
-"""
+"""Manage Cartesian MPI process-grid topology for multidimensional xarray partitions."""
 
 from __future__ import annotations
 
@@ -54,6 +14,8 @@ if TYPE_CHECKING:
 
     from mpi4py.MPI import Cartcomm, Comm, Intracomm
 
+    from ..mpi.runtime import MPIRuntime
+
 __all__ = [
     "CartesianTopology",
     "build_cartesian_topology",
@@ -65,32 +27,21 @@ __all__ = [
 def compute_layout(extents: Sequence[int], nranks: int) -> tuple[int, ...]:
     """Choose a process-grid shape balancing work per rank across axes.
 
-    Greedily assigns each prime factor of ``nranks`` (largest first) to
-    whichever axis currently has the most global extent per already
-    assigned division -- the same goal as GFDL's
-    ``mpp_define_layout2D`` aspect-ratio factorization
-    (``idiv = nint(sqrt(ndivs*isz/jsz))``, reduced until it divides
-    ``ndivs``), generalized here to an arbitrary number of axes via
-    greedy factor assignment instead of a closed-form 2D-only formula.
-
     Parameters
     ----------
     extents : sequence of int
         Global length of each partition dimension, in axis order.
     nranks : int
         Number of MPI ranks (process-grid cells) to lay out.
-
     Returns
     -------
     tuple of int
-        Process-grid shape, one entry per axis, with
-        ``math.prod(shape) == nranks``.
+        Process-grid shape, one entry per axis, with ``math.prod(shape) == nranks``.
 
     Raises
     ------
     ValueError
-        If ``extents`` is empty, any extent is not positive, or
-        ``nranks`` is not positive.
+        If ``extents`` is empty, any extent is not positive, or ``nranks`` is not positive.
     """
     if not extents:
         raise ValueError("compute_layout() requires at least one extent.")
@@ -157,7 +108,13 @@ class CartesianTopology:
     )
 
     def as_meta_cart(self) -> dict[str, Any]:
-        """Return the ``meta["cart"]`` descriptor for this topology."""
+        """Return the ``meta["cart"]`` descriptor for this topology.
+
+        Returns
+        -------
+        dict[str, Any]
+            Cartesian topology metadata descriptor.
+        """
         return {
             "grid_shape": self.grid_shape,
             "coords": self.coords,
@@ -167,26 +124,10 @@ class CartesianTopology:
     def sub_comm(self, merge_axes: Sequence[str]) -> Comm:
         """Return the communicator grouping ranks for a partial collective.
 
-        The returned communicator spans every coordinate along each axis
-        in ``merge_axes`` (ranks that differ only there are grouped
-        together for the collective) and is restricted to this rank's own
-        coordinate along every other partition axis (ranks that differ
-        there are kept in separate groups, since they own physically
-        different data along that axis). Built with ``Cartcomm.Sub`` and
-        cached per distinct ``merge_axes`` set for the life of this
-        topology object, since ``Sub`` is itself a communicator-creation
-        collective and should not be repeated on every reduction call --
-        see :func:`get_cartesian_topology` for how the topology itself is
-        cached across calls.
-
         Parameters
         ----------
         merge_axes : sequence of str
-            Subset of :attr:`dims` to group ranks across. When it equals
-            the full set of :attr:`dims`, the result spans every rank in
-            :attr:`cart_comm` (equivalent to a full-communicator
-            collective).
-
+            Subset of :attr:`dims` to group ranks across.
         Returns
         -------
         mpi4py.MPI.Comm
@@ -217,15 +158,11 @@ def build_cartesian_topology(
     Parameters
     ----------
     comm : mpi4py.MPI.Intracomm
-        Communicator to lay out. Every rank must call this together.
+        Communicator to lay out.
     dims : sequence of str
-        Partition dimension names, in the order they should be laid out
-        across Cartesian axes. Must have at least two entries -- a single
-        partition dimension should use the existing one-dimensional fast
-        path instead, which needs no Cartesian communicator at all.
+        Partition dimension names, in the order they should be laid out across Cartesian axes.
     sizes : mapping of str to int
         Global length of each dimension in ``dims``.
-
     Returns
     -------
     CartesianTopology
@@ -292,29 +229,14 @@ def get_cartesian_topology(
 ) -> CartesianTopology:
     """Return (building and caching once) a rank's Cartesian topology.
 
-    Every call with the same ``comm`` and ``dims`` returns the identical
-    :class:`CartesianTopology` object (including its already-built
-    ``cart_comm`` and any ``sub_comm`` communicators built so far) instead
-    of repeating the ``Create_cart`` collective -- important since this is
-    called from every distributed reduction, halo exchange, and
-    (re)partition, not just once at startup.
-
     Parameters
     ----------
     comm : mpi4py.MPI.Intracomm
-        Communicator to lay out. Every rank must call this together with
-        the same ``dims``.
+        Communicator to lay out.
     dims : sequence of str
-        Partition dimension names, in Cartesian-axis order. Must have at
-        least two entries; see :func:`build_cartesian_topology`.
+        Partition dimension names, in Cartesian-axis order.
     sizes : mapping of str to int
-        Global length of each dimension in ``dims``. Only consulted the
-        first time a given ``(comm, dims)`` pair is requested -- a
-        mismatched ``sizes`` on a later call with the same ``dims`` is not
-        detected, since the topology (a function of ``dims`` and rank
-        count only, not of ``sizes``' particular values beyond the first
-        build) is already cached.
-
+        Global length of each dimension in ``dims``.
     Returns
     -------
     CartesianTopology
@@ -333,37 +255,23 @@ def get_cartesian_topology(
     return topology
 
 
-def dim_comm(runtime: Any, meta: Mapping[str, Any], dim: str) -> Comm:
+def dim_comm(runtime: MPIRuntime, meta: Mapping[str, Any], dim: str) -> Comm:
     """Return the communicator whose ranks vary along ``dim`` alone.
-
-    Shared by every caller that needs to reason about rank order or rank
-    ownership strictly along one partition axis -- "which rank owns
-    global index/label i along dim", "gather every rank's total along dim
-    in order" -- rather than a value-order-independent collective like a
-    sum or a min/max Allreduce (which any full- or sub-communicator
-    computes identically regardless of member order). Mixing in ranks
-    that vary along a different, unrelated axis would attribute another
-    axis's slice to the wrong position; see
-    :meth:`~.reductions.Reduction._first_last_combine` for the first
-    place this distinction mattered.
 
     Parameters
     ----------
     runtime : MPIRuntime
         Runtime whose communicator this resolves against.
     meta : mapping
-        Distribution metadata (as returned by
-        :func:`~.meta.get_mpi_meta`) of the object being operated on.
+        Distribution metadata (as returned by :func:`~.meta.get_mpi_meta`) of the object being operated on.
     dim : str
         The single partition dimension to resolve a communicator for.
-
     Returns
     -------
     mpi4py.MPI.Comm
-        The full runtime communicator for the one-dimensional case
-        (unchanged behavior), or the cached Cartesian sub-communicator
-        fixed on every other partition axis otherwise -- see
-        :meth:`CartesianTopology.sub_comm`.
+        The full runtime communicator for the one-dimensional case (unchanged behavior),or
+        the cached Cartesian sub-communicator fixed on every other partition axis otherwise
+        -- see :meth:`CartesianTopology.sub_comm`.
     """
     dims = meta["dims"]
     if len(dims) <= 1 or "cart" not in meta:

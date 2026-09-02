@@ -5,13 +5,16 @@ from __future__ import annotations
 import functools
 import warnings
 from collections.abc import Hashable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
 from mpi4py import MPI
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from ..mpi.runtime import MPIRuntime
 
 from .common import extreme_identity, partial_dtype
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
@@ -32,39 +35,7 @@ _GROUP_OPS = ("sum", "mean", "count", "min", "max")
 def _resample_bin_labels(
     timestamps: pd.DatetimeIndex, freq: str, comm: MPI.Comm
 ) -> pd.DatetimeIndex:
-    """Rank-consistent resample bin-start label per element of ``timestamps``.
-
-    Dispatches on whether ``freq`` is a fixed-duration (pandas ``Tick``)
-    offset -- ``"h"``, ``"6min"``, ``"D"``, ``"7D"``, and similar -- or a
-    calendar-anchored one -- ``"MS"``, ``"YS"``, ``"W"``, ``"QS"``, and
-    similar. See :meth:`Groupby.resample_reduce` for why these need
-    different treatment: a calendar frequency's bins are already
-    absolute and rank-independent, but a Tick frequency's are not
-    unless every rank anchors to the same shared origin, which pandas'
-    own ``origin=`` argument cannot be relied on to provide for
-    day-or-coarser Tick frequencies.
-
-    Parameters
-    ----------
-    timestamps : pandas.DatetimeIndex
-        This rank's own local timestamps along the resampled dimension;
-        may be empty on some ranks.
-    freq : str
-        Pandas frequency string, exactly as ``xarray.Dataset.resample``
-        accepts.
-    comm : mpi4py.MPI.Comm
-        Communicator spanning every rank that holds a piece of the
-        resampled dimension; used for exactly one scalar ``Allreduce``
-        when ``freq`` is Tick-based, and not at all otherwise.
-
-    Returns
-    -------
-    pandas.DatetimeIndex
-        One bin-start label per element of ``timestamps``, identical in
-        meaning (though each rank only sees its own labels) to what a
-        single-process ``pandas.Series(...).resample(freq).mean()``
-        would assign that same timestamp.
-    """
+    """Rank-consistent resample bin-start label per element of ``timestamps``."""
     offset = pd.tseries.frequencies.to_offset(freq)
 
     # Fixed-duration ("Tick"-like) frequencies expose a working `.nanos`
@@ -123,7 +94,7 @@ def _resample_bin_labels(
 
 
 def _group_reduce_local(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -131,9 +102,7 @@ def _group_reduce_local(
     op: str,
     skipna: bool | None,
 ) -> xr.DataArray:
-    """Rank-local ``groupby(group).<op>(dim)``; passes a variable through
-    unchanged if it doesn't have ``dim`` (relevant for
-    :meth:`Dataset.map`, which calls this on every data variable)."""
+    """Apply a grouped reduction locally, preserving variables without ``dim``."""
     if dim not in variable.dims:
         return variable
     grouped = variable.groupby(group)
@@ -144,7 +113,7 @@ def _group_reduce_local(
 
 
 def _group_combine(
-    runtime,
+    runtime: MPIRuntime,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -155,20 +124,7 @@ def _group_combine(
     comm: MPI.Comm | None = None,
     replica_count: int = 1,
 ) -> xr.DataArray:
-    """Combine rank-local per-group partials into a global result.
-
-    ``mean`` costs two ``Allreduce`` calls (a sum and a count, divided
-    afterward); every other supported op costs one. ``comm``/
-    ``replica_count`` follow the same convention as
-    :meth:`ReductionPlanningMixin._comm_reduce`: default to the full
-    runtime communicator with no correction (the one-dimensional
-    path, unchanged), or a Cartesian sub-communicator plus its
-    duplication count under a multi-dimensional partition -- see
-    :meth:`ReductionPlanningMixin._resolve_comm`. The min/max branch
-    needs no ``replica_count`` correction, exactly as in
-    :meth:`.reductions.Reduction._combine_extreme`: MIN/MAX are
-    idempotent under duplication.
-    """
+    """Combine rank-local per-group partials into a global result."""
     if op == "mean":
         local_sum = _group_reduce_local(
             runtime, variable, dim, group, op="sum", skipna=skipna
@@ -241,7 +197,7 @@ def _group_combine(
 
 
 def groupby_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     labels: xr.DataArray | np.ndarray,
@@ -255,35 +211,27 @@ def groupby_reduce(
 
     Parameters
     ----------
+    runtime : MPIRuntime
+        MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : Hashable
         Dimension being grouped and reduced.
     labels : array-like
-        Group key for every position along this rank's local ``dim``
-        axis (same length as ``value.sizes[dim]``); need not be sorted
-        or unique.
+        Group key for every position along this rank's local ``dim`` axis (same length as ``value.sizes[dim]``); need not be sorted or unique.
     op : {"sum", "mean", "count", "min", "max"}, optional
-        Reduction applied within each group. Default ``"mean"``.
+        Reduction applied within each group.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after grouping; ``"auto"`` may place the
-        result on the new group dimension. Default is ``"auto"``.
-
+        Partition placement after grouping; ``"auto"`` may place the result on the new group dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced over ``dim``, with a new dimension of the same name
-        indexed by the sorted, global set of group labels.
-
-    Notes
-    -----
-    MPI communication occurs only when ``dim`` is the active partition
-    dimension: one small ``allgather`` of distinct labels, then one
-    ``Allreduce`` per variable (two for ``mean``)."""
+        Reduced over ``dim``, with a new dimension of the same name indexed by the sorted, global set of group labels.
+    """
     if op not in _GROUP_OPS:
         raise ValueError(f"Unsupported groupby op: {op!r}. Supported: {_GROUP_OPS}.")
     dims = (dim,)
@@ -371,7 +319,7 @@ def groupby_reduce(
 
 
 def resample_reduce(
-    runtime,
+    runtime: MPIRuntime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     freq: str,
@@ -383,59 +331,28 @@ def resample_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Resample a datetime dimension to ``freq``, then reduce.
 
-    A thin wrapper over :meth:`groupby_reduce`: group labels are each
-    timestamp's resampled bin-start. Every rank must agree on
-    identical bin edges without gathering the full coordinate, so
-    this splits on frequency kind (see :func:`_resample_bin_labels`):
-
-    - **Fixed-duration (Tick) frequencies** (``"h"``, ``"6min"``,
-      ``"D"``, ``"7D"``, ...): bin edges are computed by direct
-      integer-nanosecond arithmetic against a single shared anchor
-      (an ``MPI.MIN`` reduction of every rank's local minimum
-      timestamp -- one ``int64``, negligible cost), reproducing
-      ``xarray``'s own default ``origin="start_day"`` resample
-      anchor exactly. This is required, not just an optimization:
-      pandas' own ``Series.resample(freq, origin=...)`` silently
-      ignores ``origin`` for any frequency of a day or coarser (its
-      own warning names the frequencies where ``origin`` *does*
-      apply: ``h``, ``m``, ``s``, ``ms``, ``us``, ``ns`` -- ``D`` is
-      not among them), always falling back to anchoring on
-      whatever local slice of timestamps it was called with. Doing
-      the previous, simpler thing -- calling ``.resample(freq)`` on
-      each rank's own local timestamps -- would then silently
-      anchor every rank's bin grid on that rank's own first local
-      timestamp instead of the true global one, so ranks would
-      disagree about where a bin starts. That is not a rounding
-      difference: it fragments what should be one bin into two
-      separate (wrong) labels at every rank boundary that does not
-      already fall on a bin edge -- the common case, not an edge
-      case -- silently corrupting the result with no error raised.
-    - **Calendar-anchored frequencies** (``"MS"``, ``"YS"``,
-      ``"W"``, ``"QS"``, ...): every rank's local
-      ``.resample(freq).count().index`` already agrees, since these
-      bin on the absolute calendar (month/year/week/quarter
-      boundaries) independent of which subset of timestamps a rank
-      happens to hold, so no shared anchor is needed.
-
-    See :meth:`groupby_reduce` for parameters and MPI cost.
-
-    Limitation
+    Parameters
     ----------
-    Pre-existing, not addressed by this pass: this is built on
-    :meth:`groupby_reduce`, which -- like any group-by -- only
-    returns a bin for a label that actually occurs in the data. It
-    cannot materialize an empty bin. Native ``xarray``'s own
-    ``.resample(freq).mean()`` always returns a *complete*, regular
-    grid from the data's first to last timestamp, inserting ``NaN``
-    for any bin with no observations -- e.g. resampling daily data
-    to ``"6h"`` (a target frequency *finer* than the data's own
-    spacing) yields three ``NaN`` bins between every pair of real
-    days in native ``xarray``, and yields nothing at all for those
-    gaps here. This does not affect the ordinary downsampling case
-    (target frequency coarser than or equal to the data's own
-    spacing, e.g. daily -> weekly/monthly), which is unaffected and
-    is what :func:`_resample_bin_labels`'s fix targets; it only
-    matters when upsampling to a finer grid than the source data.
+    runtime : MPIRuntime
+        MPI runtime used for communication.
+    value : xr.Dataset | xr.DataArray
+        Distributed xarray object.
+    dim : Hashable
+        Dimension to operate on.
+    freq : str
+        Resampling frequency.
+    op : Literal['sum', 'mean', 'count', 'min', 'max']
+        Reduction or MPI operation.
+    skipna : bool | None
+        Whether to ignore missing values.
+    keep_attrs : bool | None
+        Whether to preserve xarray attributes.
+    partition_dim : Hashable | Literal['auto'] | None
+        Partition dimension to use for the result.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Resampled distributed reduction.
     """
     timestamps = pd.DatetimeIndex(value[dim].values)
     labels = _resample_bin_labels(timestamps, freq, runtime.comm)

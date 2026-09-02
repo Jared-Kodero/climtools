@@ -1,8 +1,4 @@
-"""Provide the MPI-distributed xarray wrapper.
-
-``MPIXarray`` stores rank-local xarray data and delegates distributed
-operations to :class:`~.ops._MPIXarrayOps`.
-"""
+"""Provide the MPI-distributed xarray wrapper."""
 
 from __future__ import annotations
 
@@ -220,6 +216,7 @@ class MPIXarray:
     def __array_ufunc__(
         self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any
     ) -> Any:
+        """Dispatch NumPy ufuncs through the distributed wrapper."""
         if method != "__call__" or kwargs.get("out") is not None:
             return NotImplemented
         return self.apply(ufunc, *inputs, **kwargs)
@@ -235,6 +232,7 @@ class MPIXarray:
         chunk_info: Mapping[str, int] | None = None,
         log_partitions: bool = False,
     ) -> None:
+        """Initialize a distributed xarray wrapper."""
         if isinstance(data, MPIXarray):
             self.data = data.data
             self.meta = data.meta
@@ -266,9 +264,11 @@ class MPIXarray:
         self.data = mark_partitioned(self.data, self.meta)
 
     def __repr__(self) -> str:
+        """Return the distributed wrapper representation."""
         return repr(self.data)
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attributes to the wrapped xarray object."""
         if name == "data":
             raise AttributeError(name)
         if name in _SAFE_PASSTHROUGH_ATTRS:
@@ -284,27 +284,10 @@ class MPIXarray:
         )
 
     def _safe_method_wrapper(self, name: str) -> Callable[..., Any]:
-        """Return a bound, ``apply()``-based forward of ``self.data.<name>``.
-
-        Backs the :data:`_SAFE_PASSTHROUGH_METHODS` branch of
-        :meth:`__getattr__`: calling the returned callable runs
-        ``self.data.<name>(*args, **kwargs)`` rank-locally through
-        :meth:`apply`, which reattaches/pops ``.meta`` exactly like every
-        other method here and re-validates that the partition dimension
-        (if this object is distributed) survives the call unchanged.
-
-        Parameters
-        ----------
-        name : str
-            A name already confirmed to be in :data:`_SAFE_PASSTHROUGH_METHODS`.
-
-        Returns
-        -------
-        callable
-            ``lambda *args, **kwargs: self.apply(...)`` bound to ``name``.
-        """
+        """Return a bound, ``apply()``-based forward of ``self.data.<name>``."""
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            """Call the wrapped xarray method through MPI-aware apply."""
             return self.apply(
                 lambda d, *a, **kw: getattr(d, name)(*a, **kw), self, *args, **kwargs
             )
@@ -316,7 +299,6 @@ class MPIXarray:
         )
         return call
 
-    # -- Arithmetic dunder methods ------------------------------------------
     #
     # Each redirects to `apply()`, so operand handling is exactly `apply()`'s
     # (and `where()`'s) existing, already-tested contract -- no new rules:
@@ -486,13 +468,7 @@ class MPIXarray:
         return self.apply(_operator.ge, self, other)
 
     def __eq__(self, other: object) -> Any:  # type: ignore[override]
-        """Elementwise ``self == other`` -- returns an array, not a bool.
-
-        Matches ``xarray.DataArray``/``Dataset``'s own ``__eq__``, and
-        carries the same consequence: this makes :class:`MPIXarray`
-        unhashable (see ``__hash__`` below), exactly as xarray's own
-        Dataset/DataArray already are.
-        """
+        """Elementwise ``self == other`` -- returns an array, not a bool."""
         return self.apply(_operator.eq, self, other)
 
     def __ne__(self, other: object) -> Any:  # type: ignore[override]
@@ -507,35 +483,7 @@ class MPIXarray:
     __hash__ = None  # type: ignore[assignment]
 
     def __bool__(self) -> bool:
-        """Truth value (``if mpixarray:``, ``bool(mpixarray)``).
-
-        Raises for a distributed object rather than evaluating this
-        rank's own local slice: different ranks could hold different
-        local data and therefore different local truthiness, so branching
-        on it directly is a way to silently desynchronize ranks -- one
-        rank takes the ``if`` branch and later reaches a collective call
-        another rank, having taken the ``else`` branch, never posts,
-        deadlocking. Reduce to a replicated scalar first (e.g.
-        ``.all()``/``.any()``), or use ``.data`` directly if this rank's
-        own local truthiness is genuinely what is wanted.
-
-        For a replicated (non-distributed) object this delegates to
-        ``bool(self.data)``, which itself still raises for a
-        multi-element array (xarray/numpy's own "truth value is
-        ambiguous" behavior) -- unchanged, not something this class
-        needs to handle specially.
-
-        Returns
-        -------
-        bool
-            The truth value of a replicated, single-element result.
-
-        Raises
-        ------
-        ValueError
-            If this object is distributed, or (via ``self.data``) if it
-            has more than one element.
-        """
+        """Truth value (``if mpixarray:``, ``bool(mpixarray)``)."""
         if self.meta is not None:
             raise ValueError(
                 "The truth value of a distributed MPIXarray is ambiguous "
@@ -549,35 +497,7 @@ class MPIXarray:
         return bool(self.data)
 
     def __getitem__(self, key: Any) -> Any:
-        """Select a Dataset variable by name; mirrors ``xarray.Dataset[key]``.
-
-        Only a string key is supported, which selects a data variable and
-        is always partition-preserving -- it never touches dimension
-        lengths or ordering, so (like the entries in
-        :data:`_SAFE_PASSTHROUGH_METHODS`) it is safe to route through
-        :meth:`apply`. Any other key (integer/slice/boolean positional
-        indexing, as ``xarray.DataArray.__getitem__`` supports) has no
-        dedicated MPI-aware handling here -- it can touch the partition
-        dimension the same way a raw, unvalidated ``isel`` could -- so it
-        raises rather than silently doing something dimension-unsafe. Use
-        :meth:`isel`/:meth:`sel` for that, or ``.data[key]`` directly for
-        xarray's plain, rank-local indexing.
-
-        Parameters
-        ----------
-        key : Any
-            Variable name (str) to select.
-
-        Returns
-        -------
-        MPIXarray
-            The selected variable, with ``.meta`` unchanged.
-
-        Raises
-        ------
-        TypeError
-            If ``key`` is not a string.
-        """
+        """Select a Dataset variable by name; mirrors ``xarray.Dataset[key]``."""
         if isinstance(key, str):
             return self.apply(lambda d, k: d[k], self, key)
         raise TypeError(
@@ -589,13 +509,7 @@ class MPIXarray:
         )
 
     def __matmul__(self, other: Any) -> MPIXarray:
-        """Matrix multiplication (``self @ other``); redirects to :meth:`matmul`.
-
-        Unlike the other dunders above, this does not go through
-        :meth:`apply`: contracting the partition dimension needs an MPI
-        reduction, not a plain elementwise call, which is exactly what
-        :meth:`matmul` (not a generic ``apply``) provides.
-        """
+        """Matrix multiplication (``self @ other``); redirects to :meth:`matmul`."""
         return self.matmul(other)
 
     def __rmatmul__(self, other: Any) -> Any:
@@ -604,29 +518,12 @@ class MPIXarray:
         return finalize(result, self._runtime)
 
     def _prepare(self) -> xr.Dataset | xr.DataArray:
-        """Return ``self.data`` with ``self.meta`` reattached to ``.attrs``.
-
-        The underlying engine (:class:`~.ops._MPIXarrayOps`) reads
-        distribution metadata from ``value.attrs`` (see
-        :func:`~.meta.get_mpi_meta`), but ``self.data`` deliberately never
-        carries it (see class docstring). This reattaches ``self.meta`` to a
-        shallow copy -- ``self.data`` itself is left untouched -- for the
-        duration of a single engine call; the copy is discarded once that
-        call's result is re-wrapped.
-
-        Returns
-        -------
-        xarray.Dataset or xarray.DataArray
-            ``self.data``, unchanged if ``self.meta`` is None, otherwise a
-            shallow copy carrying ``self.meta`` in ``.attrs["mpi_meta"]``.
-        """
+        """Return ``self.data`` with ``self.meta`` reattached to ``.attrs``."""
         if self.meta is None:
             return self.data
         prepared = self.data.copy(deep=False)
         assign_mpi_meta(prepared, self.meta)
         return prepared
-
-    # -- IO --------------------------------------------------------------------
 
     def to_netcdf(
         self,
@@ -681,7 +578,6 @@ class MPIXarray:
             Disable NetCDF pre-filling for parallel output.
         allow_serial : bool, default False
             Allow the parallel writer to run with one MPI rank.
-
         Raises
         ------
         ValueError
@@ -728,8 +624,6 @@ class MPIXarray:
             allow_serial=allow_serial,
         )
 
-    # -- IO: (re)distribution of an existing object --------------------------
-
     def repartition(
         self,
         dim: Hashable | Literal["auto"] = "auto",
@@ -742,12 +636,11 @@ class MPIXarray:
         Parameters
         ----------
         dim : Hashable or {"auto"}, optional
-            New partition dimension. "auto" selects the largest dimension.
+            New partition dimension.
         chunk_info : mapping of str to int, optional
             Effective chunk-size hints.
         log_partitions : bool, optional
             Log the resulting rank layout.
-
         Returns
         -------
         MPIXarray
@@ -764,8 +657,6 @@ class MPIXarray:
             self._runtime,
         )
 
-    # -- Indexing --------------------------------------------------------------
-
     def isel(
         self,
         indexers: Mapping[Any, Any] | None = None,
@@ -775,30 +666,18 @@ class MPIXarray:
     ) -> MPIXarray:
         """Index with global integer coordinates on the partition dimension.
 
-        A scalar integer indexer on the partition dimension (e.g.
-        ``isel(time=5)``) is detected automatically and handled the same
-        way a dedicated ``isel_scalar`` call would: the dimension is
-        dropped entirely, the one rank that owns that global index sends
-        its value, and it is broadcast to every rank -- a replicated
-        result (``.meta`` becomes None). There is no separate method for
-        this; it falls out of the indexer's type.
-
         Parameters
         ----------
         indexers : mapping, optional
             Integer indexers using global coordinates on the partition dimension.
         partition_dim : Hashable or {"auto"} or None, optional
-            Dimension to scatter a resulting single-element partition dimension
-            across, when a slice indexer collapses it to length one. Not
-            consulted for a scalar indexer (see above), which always replicates.
+            Dimension to scatter a resulting single-element partition dimension across, when a slice indexer collapses it to length one.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
-
         Returns
         -------
         MPIXarray
-            Indexed object with ``.meta`` updated. Replicated (``.meta`` is
-            None) if the partition dimension was indexed with a scalar.
+            Indexed object with ``.meta`` updated.
         """
         return finalize(
             isel(
@@ -823,11 +702,6 @@ class MPIXarray:
     ) -> MPIXarray:
         """Index with global coordinate labels on the partition dimension.
 
-        A scalar label indexer on the partition dimension is detected
-        automatically and handled the same way a dedicated ``sel_scalar``
-        call would -- see :meth:`isel`'s equivalent note; the same applies
-        here with labels in place of integer positions.
-
         Parameters
         ----------
         indexers : mapping, optional
@@ -839,17 +713,13 @@ class MPIXarray:
         drop : bool, optional
             Drop selected coordinate variables.
         partition_dim : Hashable or {"auto"} or None, optional
-            Dimension to scatter a resulting single-element partition dimension
-            across, when a label slice collapses it to length one. Not
-            consulted for a scalar label (see above), which always replicates.
+            Dimension to scatter a resulting single-element partition dimension across, when a label slice collapses it to length one.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
-
         Returns
         -------
         MPIXarray
-            Indexed object with ``.meta`` updated. A scalar selection on the
-            partition dimension is replicated on every rank.
+            Indexed object with ``.meta`` updated.
         """
         return finalize(
             sel(
@@ -865,8 +735,6 @@ class MPIXarray:
             self._runtime,
         )
 
-    # -- Reductions --------------------------------------------------------
-
     def sum(
         self,
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -881,7 +749,7 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         min_count : int or None, optional
@@ -889,15 +757,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -930,7 +790,7 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         min_count : int or None, optional
@@ -938,15 +798,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -978,21 +830,13 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1023,21 +867,13 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1068,21 +904,13 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1112,19 +940,11 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1153,19 +973,11 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1201,15 +1013,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1246,15 +1050,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1272,8 +1068,6 @@ class MPIXarray:
             self._runtime,
         )
 
-    # -- Statistics ----------------------------------------------------------
-
     def var(
         self,
         dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -1288,7 +1082,7 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         ddof : int, optional
@@ -1296,15 +1090,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1337,7 +1123,7 @@ class MPIXarray:
         Parameters
         ----------
         dim : str, iterable of Hashable, ..., or None, optional
-            Dimensions to reduce. None or ``...`` reduces all dimensions.
+            Dimensions to reduce.
         skipna : bool or None, optional
             Missing-value behavior, following xarray semantics.
         ddof : int, optional
@@ -1345,15 +1131,7 @@ class MPIXarray:
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
-            Where to (re)partition the result once the active partition
-            dimension is reduced away. The default, "auto", picks the
-            largest surviving dimension and redistributes onto it --
-            the result stays distributed, not replicated, even though
-            the original partition dimension is gone. Pass None
-            instead for a plain replicated result (every rank holds
-            the same value, ``.meta`` becomes None), or a specific
-            dimension name to choose it.
-
+            Where to (re)partition the result once the active partition dimension is reduced away.
         Returns
         -------
         MPIXarray
@@ -1378,24 +1156,16 @@ class MPIXarray:
     def groupby(self, dim: Hashable, labels: xr.DataArray | np.ndarray) -> MPIGroupBy:
         """Group by ``labels`` along ``dim``, mirroring ``xarray.Dataset.groupby``.
 
-        Unlike plain ``xarray`` groupby, this does not return an iterable
-        of ``(label, subset)`` pairs -- only a reduction over each group is
-        supported. Call a reduction method on the returned handle, e.g.
-        ``ds.groupby("time", year).mean()``.
-
         Parameters
         ----------
         dim : Hashable
             Dimension being grouped and reduced.
         labels : array-like
             Group key for every position along this rank's local ``dim`` axis.
-
         Returns
         -------
         MPIGroupBy
-            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
-            ``.min()``, or ``.max()`` on it to get the reduced
-            :class:`MPIXarray`.
+            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``, ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
         """
         return MPIGroupBy(self, dim, labels)
 
@@ -1407,18 +1177,13 @@ class MPIXarray:
         dim : Hashable
             Datetime dimension to resample.
         freq : str
-            Pandas offset alias (e.g. "D", "MS", "YS").
-
+            Pandas offset alias (e.g.
         Returns
         -------
         MPIResample
-            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
-            ``.min()``, or ``.max()`` on it to get the reduced
-            :class:`MPIXarray`.
+            Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``, ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
         """
         return MPIResample(self, dim, freq)
-
-    # -- Arithmetic ------------------------------------------------------------
 
     def align(
         self,
@@ -1435,13 +1200,11 @@ class MPIXarray:
         other : MPIXarray, xarray.Dataset, or xarray.DataArray
             Operand to align against ``self``.
         dim : Hashable or {"auto"} or None, optional
-            Dimension to partition both operands along when neither is yet
-            distributed. Required in that case; ignored otherwise.
+            Dimension to partition both operands along when neither is yet distributed.
         chunk_info : mapping, optional
             Forwarded to ``repartition`` when neither operand is yet distributed.
         log_partitions : bool, optional
             Forwarded to ``repartition`` when neither operand is yet distributed.
-
         Returns
         -------
         tuple of MPIXarray
@@ -1470,30 +1233,22 @@ class MPIXarray:
     ) -> MPIXarray:
         """Reindex onto new coordinate labels, redistributing if needed.
 
-        MPI-aware counterpart to ``xarray.Dataset.reindex``/``DataArray.reindex``.
-        Rank-local (no communication) when the reindexed dimension(s) are not
-        the active partition dimension; otherwise gathers, reindexes, and
-        repartitions. See :meth:`~.arithmetic.Arithmetic.reindex`.
-
         Parameters
         ----------
         indexers : mapping, optional
-            New coordinate labels per dimension. Every rank must pass
-            identical values for any currently partitioned dimension.
+            New coordinate labels per dimension.
         method : str, optional
             Forwarded to xarray's ``reindex``.
         tolerance : float or iterable of float, optional
             Forwarded to xarray's ``reindex``.
         fill_value : Any, optional
-            Value used for labels with no match. Defaults to xarray's own
-            ``reindex`` default (``NaN``) when omitted.
+            Value used for labels with no match.
         chunk_info : mapping, optional
             Forwarded to ``repartition`` when a partition dimension is reindexed.
         log_partitions : bool, optional
             Forwarded to ``repartition`` when a partition dimension is reindexed.
         **indexers_kwargs : Any
             Additional indexers given as keywords.
-
         Returns
         -------
         MPIXarray
@@ -1524,22 +1279,16 @@ class MPIXarray:
     ) -> MPIXarray:
         """Sort by one or more keys, redistributing if needed.
 
-        MPI-aware counterpart to ``xarray.Dataset.sortby``/``DataArray.sortby``.
-        Rank-local (no communication) when no sort key varies along the
-        active partition dimension; otherwise gathers, sorts, and
-        repartitions. See :meth:`~.arithmetic.Arithmetic.sortby`.
-
         Parameters
         ----------
         by : Hashable, DataArray, or sequence of these
             Sort key(s): variable/coordinate name(s) or explicit DataArray(s).
         ascending : bool, optional
-            Sort order. Default True.
+            Sort order.
         chunk_info : mapping, optional
             Forwarded to ``repartition`` when a partition dimension is sorted.
         log_partitions : bool, optional
             Forwarded to ``repartition`` when a partition dimension is sorted.
-
         Returns
         -------
         MPIXarray
@@ -1560,11 +1309,6 @@ class MPIXarray:
     def apply(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
-        Any :class:`MPIXarray` found in ``args``/``kwargs`` is unwrapped to
-        its underlying data (with ``.meta`` reattached) before the call.
-        ``func`` must be partition-preserving; see
-        :meth:`.arithmetic.Arithmetic.apply` for the exact contract.
-
         Parameters
         ----------
         func : callable
@@ -1573,12 +1317,10 @@ class MPIXarray:
             Positional arguments to ``func``.
         **kwargs : Any
             Keyword arguments to ``func``.
-
         Returns
         -------
         MPIXarray or Any
-            ``func``'s result, wrapped if it is an xarray Dataset/DataArray,
-            otherwise returned as-is.
+            ``func``'s result, wrapped if it is an xarray Dataset/DataArray, otherwise returned as-is.
         """
         unwrapped_args = tuple(unwrap(arg) for arg in args)
         unwrapped_kwargs = {name: unwrap(value) for name, value in kwargs.items()}
@@ -1591,14 +1333,11 @@ class MPIXarray:
         Parameters
         ----------
         right : MPIXarray or Any
-            Right operand: an xarray DataArray (distributed or not, wrapped
-            or not) or a plain array/scalar.
-
+            Right operand: an xarray DataArray (distributed or not, wrapped or not) or a plain array/scalar.
         Returns
         -------
         MPIXarray
-            The matrix product. Replicated (``.meta`` is None) if the
-            distributed dimension was contracted away.
+            The matrix product.
         """
         result = matmul(self._runtime, self._prepare(), unwrap(right))
         return finalize(result, self._runtime)
@@ -1606,31 +1345,7 @@ class MPIXarray:
     def _halo_exchange(
         self, dim: Hashable | None = None, *, before: int, after: int
     ) -> tuple[MPIXarray, int, int]:
-        """Pad with boundary slices fetched from the adjacent ranks.
-
-        Private: an implementation primitive for :meth:`rolling_reduce`
-        and (in :mod:`.elementwise`) :meth:`diff`, not something a caller
-        building on :class:`MPIXarray` should need to reach for directly.
-        Point-to-point communication with a fixed neighbor is a much
-        narrower, easier-to-misuse tool than :meth:`apply`; every windowed
-        operation this package supports already has its own MPI-aware
-        method (``rolling_reduce``, ``diff``) built on top of it.
-
-        Parameters
-        ----------
-        dim : Hashable, optional
-            Must equal ``self``'s active partition dimension if given;
-            defaults to it.
-        before : int
-            Number of elements requested from the left neighbor.
-        after : int
-            Number of elements requested from the right neighbor.
-
-        Returns
-        -------
-        tuple[MPIXarray, int, int]
-            ``(padded, left_pad, right_pad)``.
-        """
+        """Pad with boundary slices fetched from the adjacent ranks."""
         padded, left_pad, right_pad = halo_exchange(
             self._runtime, self._prepare(), dim, before=before, after=after
         )
@@ -1655,12 +1370,10 @@ class MPIXarray:
             Window size, as in ``xarray.DataArray.rolling``.
         reduce : str, optional
             Name of the reduction to call on the rolling object (e.g.
-            "mean", "sum", "min", "max", "std").
         center : bool, optional
             As in ``xarray.DataArray.rolling``.
         min_periods : int or None, optional
             As in ``xarray.DataArray.rolling``.
-
         Returns
         -------
         MPIXarray
@@ -1697,22 +1410,16 @@ class MPIXarray:
             Block size, as in ``xarray.DataArray.coarsen``.
         reduce : str, optional
             Name of the reduction to call on the coarsen object (e.g.
-            "mean", "sum", "min", "max").
         boundary : {"exact", "trim", "pad"}, optional
-            As in ``xarray.DataArray.coarsen``. Default "exact" (raises
-            if the global size along ``dim`` is not a multiple of
-            ``window``).
+            As in ``xarray.DataArray.coarsen``.
         side : {"left"}, optional
-            Only "left" (the ``xarray`` default) is supported for a
-            distributed dimension so far.
+            Only "left" (the ``xarray`` default) is supported for a distributed dimension so far.
         coord_func : str, optional
             As in ``xarray.DataArray.coarsen``.
-
         Returns
         -------
         MPIXarray
-            Coarsened-and-reduced object with ``.meta`` updated to
-            match the new, block-reduced length along ``dim``.
+            Coarsened-and-reduced object with ``.meta`` updated to match the new, block-reduced length along ``dim``.
         """
         result = coarsen_reduce(
             self._runtime,
@@ -1736,10 +1443,6 @@ class MPIXarray:
     ) -> MPIRolling:
         """Windowed rolling handle, mirroring ``xarray.DataArray.rolling``.
 
-        Correct even when ``dim`` is the active partition dimension (see
-        :meth:`rolling_reduce`). Call a reduction method on the returned
-        handle, e.g. ``ds.rolling("time", 5).mean()``.
-
         Parameters
         ----------
         dim : Hashable
@@ -1750,41 +1453,30 @@ class MPIXarray:
             As in ``xarray.DataArray.rolling``.
         min_periods : int or None, optional
             As in ``xarray.DataArray.rolling``.
-
         Returns
         -------
         MPIRolling
-            Chainable handle; call ``.mean()``, ``.sum()``, ``.min()``,
-            ``.max()``, ``.std()``, or ``.count()`` on it to get the
-            rolled-and-reduced :class:`MPIXarray`.
+            Chainable handle; call ``.mean()``, ``.sum()``, ``.min()``, ``.max()``, ``.std()``, or ``.count()`` on it to get the rolled-and-reduced :class:`MPIXarray`.
         """
         return MPIRolling(self, dim, window, center=center, min_periods=min_periods)
 
     def evaluate(self, expression: str, /, **variables: Any) -> Any:
         """Evaluate a string expression, respecting normal operator precedence.
 
-        Any :class:`MPIXarray` found in ``variables`` is unwrapped to its
-        underlying data (with ``.meta`` reattached) before evaluation.
-
         Parameters
         ----------
         expression : str
             A Python expression referencing ``variables`` by name, e.g.
-            ``"(a + b) * c - d / e"``.
         **variables : Any
             Values bound to the names used in ``expression``.
-
         Returns
         -------
         MPIXarray or Any
-            The expression's value, wrapped if it is an xarray
-            Dataset/DataArray, otherwise returned as-is.
+            The expression's value, wrapped if it is an xarray Dataset/DataArray, otherwise returned as-is.
         """
         unwrapped = {name: unwrap(value) for name, value in variables.items()}
         result = evaluate(self._runtime, expression, **unwrapped)
         return finalize(result, self._runtime)
-
-    # -- Elementwise, scan, and gather-based operations -------------------
 
     def where(
         self,
@@ -1800,12 +1492,9 @@ class MPIXarray:
         cond : MPIXarray, xarray.Dataset, xarray.DataArray, or Any
             Boolean condition, following ``xarray.DataArray.where``.
         other : MPIXarray, xarray.Dataset, xarray.DataArray, or Any, optional
-            Fill value where ``cond`` is False. Omit for xarray's default
-            (NaN).
+            Fill value where ``cond`` is False.
         drop : bool, optional
-            Must be False when ``self`` is distributed; ``drop=True`` can
-            remove a different number of positions on different ranks.
-
+            Must be False when ``self`` is distributed; ``drop=True`` can remove a different number of positions on different ranks.
         Returns
         -------
         MPIXarray
@@ -1839,7 +1528,6 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-
         Returns
         -------
         MPIXarray
@@ -1865,13 +1553,6 @@ class MPIXarray:
     ) -> MPIXarray:
         """Median over ``dim``, correct when ``dim`` is distributed.
 
-        When ``dim`` is the active partition dimension, this gathers the
-        full dimension onto every rank (``MPI_Allgather``) and reduces
-        locally, since median has no MPI reduction operator the way
-        sum/min/max do -- exact, but not memory-scalable for a large
-        partition dimension. Unlike :meth:`mean`/:meth:`sum`/etc., only a
-        single dimension is supported (not an iterable, ``None``, or ``...``).
-
         Parameters
         ----------
         dim : Hashable
@@ -1880,12 +1561,10 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
-
         Returns
         -------
         MPIXarray
-            Reduced object. Replicated (``.meta`` is None) if ``dim`` was
-            the active partition dimension.
+            Reduced object.
         """
         return finalize(
             median(
@@ -1907,27 +1586,18 @@ class MPIXarray:
     ) -> MPIXarray:
         """``n``-th order difference along ``dim``, correct when ``dim`` is distributed.
 
-        Works along the active partition dimension too: borrows ``n``
-        boundary values from the relevant neighbor
-        (:meth:`halo_exchange`) and recomputes distribution metadata from
-        each rank's new local length -- see
-        :func:`~.elementwise.Elementwise.diff` for the exact mechanism.
-
         Parameters
         ----------
         dim : Hashable
             Dimension to difference along.
         n : int, optional
-            Order of the difference. Must be less than every rank's local
-            length along ``dim`` when ``dim`` is the partition dimension.
+            Order of the difference.
         label : {"upper", "lower"}, optional
             As in ``xarray.DataArray.diff``.
-
         Returns
         -------
         MPIXarray
-            The differenced object, ``n`` elements shorter along ``dim``
-            globally, with ``.meta`` updated to match.
+            The differenced object, ``n`` elements shorter along ``dim`` globally, with ``.meta`` updated to match.
         """
         return finalize(
             diff(self._runtime, self._prepare(), dim, n, label=label), self._runtime
@@ -1942,23 +1612,14 @@ class MPIXarray:
     ) -> MPIXarray:
         """Shift by ``periods`` along ``dim``, correct when ``dim`` is distributed.
 
-        Borrows ``|periods|`` boundary values from the relevant neighbor
-        (:meth:`halo_exchange`) so a shift across a partition boundary
-        sees the same values a non-distributed shift would -- see
-        :meth:`~.elementwise.Elementwise.shift` for the exact mechanism.
-
         Parameters
         ----------
         dim : Hashable
             Dimension to shift along.
         periods : int, optional
-            Number of positions to shift by. Its magnitude must be less
-            than every rank's local length along ``dim`` when ``dim`` is
-            the partition dimension.
+            Number of positions to shift by.
         fill_value : Any, optional
-            As in ``xarray.DataArray.shift``; defaults to xarray's own
-            dtype-aware NA fill when omitted.
-
+            As in ``xarray.DataArray.shift``; defaults to xarray's own dtype-aware NA fill when omitted.
         Returns
         -------
         MPIXarray
@@ -1974,24 +1635,12 @@ class MPIXarray:
     def roll(self, dim: Hashable, shift_by: int) -> MPIXarray:
         """Circularly shift by ``shift_by`` along ``dim``, wrapping at the edge.
 
-        Same mechanism as :meth:`shift` (borrows ``|shift_by|`` boundary
-        values via :meth:`halo_exchange`), except the rank at the true
-        global edge wraps around to the rank at the opposite edge
-        instead of leaving that side unpadded -- see
-        :meth:`~.elementwise.roll` for the exact mechanism. Coordinates
-        are not rolled; only the data is.
-
         Parameters
         ----------
         dim : Hashable
             Dimension to roll along.
         shift_by : int
-            Number of positions to roll by; positive rolls toward
-            higher indices, matching ``xarray.DataArray.roll``. Its
-            magnitude must not exceed every rank's local length along
-            ``dim`` when ``dim`` is the partition dimension (see
-            ``halo_exchange``'s own single-hop limit).
-
+            Number of positions to roll by; positive rolls toward higher indices, matching ``xarray.DataArray.roll``.
         Returns
         -------
         MPIXarray
@@ -2004,27 +1653,16 @@ class MPIXarray:
     def ffill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
         """Forward-fill along ``dim``, correct when ``dim`` is distributed.
 
-        With ``limit`` given, borrows ``limit`` boundary values from
-        the left neighbor (:meth:`halo_exchange`), the same bounded
-        mechanism as :meth:`shift`. With ``limit=None`` (default), the
-        dependency is unbounded (the last valid value may be
-        arbitrarily many ranks back), so this instead runs a
-        gather/scatter "carry the last value seen so far" scan across
-        ranks -- see :meth:`~.elementwise.ffill` for the exact
-        mechanism.
-
         Parameters
         ----------
         dim : Hashable
             Dimension to fill along.
         limit : int or None, optional
             As in ``xarray.DataArray.ffill``.
-
         Returns
         -------
         MPIXarray
-            The forward-filled object, same shape and distribution as
-            ``self``.
+            The forward-filled object, same shape and distribution as ``self``.
         """
         return finalize(
             ffill(self._runtime, self._prepare(), dim, limit), self._runtime
@@ -2033,21 +1671,16 @@ class MPIXarray:
     def bfill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
         """Backward-fill along ``dim``, correct when ``dim`` is distributed.
 
-        Mirror image of :meth:`ffill`; see
-        :meth:`~.elementwise.bfill` for the exact mechanism.
-
         Parameters
         ----------
         dim : Hashable
             Dimension to fill along.
         limit : int or None, optional
             As in ``xarray.DataArray.bfill``.
-
         Returns
         -------
         MPIXarray
-            The backward-filled object, same shape and distribution as
-            ``self``.
+            The backward-filled object, same shape and distribution as ``self``.
         """
         return finalize(
             bfill(self._runtime, self._prepare(), dim, limit), self._runtime
@@ -2058,12 +1691,6 @@ class MPIXarray:
     ) -> MPIXarray:
         """Interpolate onto ``new_coord`` along ``dim``, correct when distributed.
 
-        Unlike :meth:`shift`/:meth:`rolling`, a target point's source
-        dependency is not bounded to a fixed-width halo, so this
-        reconstructs the full source along ``dim`` via an
-        ``Allgather`` and interpolates locally -- see
-        :meth:`~.elementwise.interp` for the full rationale.
-
         Parameters
         ----------
         dim : Hashable
@@ -2071,15 +1698,13 @@ class MPIXarray:
         new_coord : array-like
             This rank's own local slice of the new target coordinate.
         method : str, optional
-            As in ``xarray.DataArray.interp``. Default ``"linear"``.
+            As in ``xarray.DataArray.interp``.
         **kwargs : Any
             Forwarded to ``xarray.DataArray.interp``.
-
         Returns
         -------
         MPIXarray
-            Interpolated result, with ``.meta`` recomputed for the new
-            length along ``dim``.
+            Interpolated result, with ``.meta`` recomputed for the new length along ``dim``.
         """
         return finalize(
             interp(self._runtime, self._prepare(), dim, new_coord, method, **kwargs),
@@ -2094,22 +1719,14 @@ class MPIXarray:
     ) -> MPIXarray:
         """Differentiate along ``coord``, correct when ``coord`` is distributed.
 
-        Borrows a one-element halo from each neighbor
-        (:meth:`halo_exchange`) so the interior centered-difference
-        stencil sees the same values a non-distributed differentiate
-        would at every rank boundary -- see
-        :meth:`~.elementwise.Elementwise.differentiate` for the exact
-        mechanism.
-
         Parameters
         ----------
         coord : Hashable
             Coordinate to differentiate along.
         edge_order : {1, 2}, optional
-            As in ``xarray.DataArray.differentiate``. Default 1.
+            As in ``xarray.DataArray.differentiate``.
         datetime_unit : Any, optional
             As in ``xarray.DataArray.differentiate``.
-
         Returns
         -------
         MPIXarray
@@ -2138,7 +1755,6 @@ def mark_partitioned(
         Object to copy and mark.
     meta : dict or None
         Distribution metadata, or None for replicated data.
-
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -2171,7 +1787,6 @@ def finalize(result: Any, runtime: MPIRuntime) -> Any:
         Result returned by ``_MPIXarrayOps``.
     runtime : MPIRuntime
         Runtime bound to the wrapped result.
-
     Returns
     -------
     MPIXarray or Any
@@ -2189,7 +1804,6 @@ def unwrap(value: Any) -> Any:
     ----------
     value : Any
         Candidate operand.
-
     Returns
     -------
     Any
