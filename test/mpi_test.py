@@ -16,6 +16,7 @@ coherent area rather than everything living in a single file:
                              differentiate, ffill, bfill
   mpi_test_scans.py         NumPy dispatch, isel, cumsum, sortby,
                              reindex, interp, matmul
+  mpi_test_groupby.py       groupby, resample
 
 Every numeric check compares this rank's local slice against the
 matching slice of a plain, non-distributed xarray/numpy computation --
@@ -28,6 +29,7 @@ claim the same range).
 from __future__ import annotations
 
 import mpi_test_construction
+import mpi_test_groupby
 import mpi_test_halo_ops
 import mpi_test_reductions
 import mpi_test_scans
@@ -39,5 +41,6 @@ mpi_test_construction.run(fixtures)
 mpi_test_reductions.run(fixtures)
 mpi_test_halo_ops.run(fixtures)
 mpi_test_scans.run(fixtures)
+mpi_test_groupby.run(fixtures)
 
 report()

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
+
 import xarray as xr
 
 from .arithmetic import (
@@ -30,7 +32,7 @@ def where(
     runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     cond: Any,
-    other: Any = _UNSET,
+    other: Any = np.nan,
     *,
     drop: bool = False,
 ) -> xr.Dataset | xr.DataArray:
@@ -58,7 +60,7 @@ def where(
     ValueError
         If ``drop=True`` is requested on a distributed object, or the operands are distributed over incompatible partitions (see :meth:`~.arithmetic.Arithmetic.apply`).
     """
-    operands = (value, cond) if other is _UNSET else (value, cond, other)
+    operands = (value, cond, other)
     meta, reference = check_operands_distribution(runtime, operands)
     if meta is not None and drop:
         raise ValueError(
