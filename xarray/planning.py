@@ -236,12 +236,10 @@ def reduction_plan(
             # explicitly unsupported for now.
             raise NotImplementedError(
                 f"prod() cannot yet reduce variable {name!r}: it is "
-                + f"replicated along {tuple(str(d) for d in replicated)!r} "
-                + "under this multi-dimensional partition, and undoing a "
-                + "product's duplication has no exact general inverse "
-                + "(unlike sum/count/mean, which divide it back out "
-                + "exactly). Reduce the replicated dimension(s) first, or "
-                + "use sum()/mean() instead."
+                + f"replicated along {tuple(str(d) for d in replicated)!r}, "
+                + "and undoing a product's duplication has no exact "
+                + "general inverse (unlike sum/mean). Reduce the "
+                + "replicated dimension(s) first, or use sum()/mean()."
             )
 
         entries.append(

@@ -32,10 +32,8 @@ def _select_partition_dim(
         return None
     if len(hit) > 1:
         raise NotImplementedError(
-            f"Distributed {caller} cannot yet index more than one active "
-            + f"partition dimension in a single call ({hit!r} under this "
-            + f"multi-dimensional partition); call {caller}() once per "
-            + "partition dimension instead."
+            f"{caller} cannot yet index more than one active partition "
+            + f"dimension in a single call: {hit!r}"
         )
     return hit[0]
 
@@ -134,11 +132,10 @@ def isel(
     if new_global_size == 1 and partition_dim is not None:
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
-                "Distributed isel() cannot yet redistribute a "
-                + f"partition-dimension slice ({dim!r}) that collapsed "
-                + "to a single global element under a multi-dimensional "
-                + "partition; pass partition_dim=None to keep the "
-                + "single-element result where it landed instead."
+                "Distributed isel() cannot yet redistribute a partition "
+                + f"slice ({dim!r}) that collapsed to a single global "
+                + "element under a multi-dimensional partition; pass "
+                + "partition_dim=None to keep it where it landed."
             )
         return _repartition_singleton(runtime, output, dim, counts, partition_dim)
 
@@ -313,11 +310,10 @@ def sel(
     if new_global_size == 1 and partition_dim is not None:
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
-                "Distributed sel() cannot yet redistribute a "
-                + f"partition-dimension slice ({dim!r}) that collapsed "
-                + "to a single global element under a multi-dimensional "
-                + "partition; pass partition_dim=None to keep the "
-                + "single-element result where it landed instead."
+                "Distributed sel() cannot yet redistribute a partition "
+                + f"slice ({dim!r}) that collapsed to a single global "
+                + "element under a multi-dimensional partition; pass "
+                + "partition_dim=None to keep it where it landed."
             )
         return _repartition_singleton(runtime, output, dim, counts, partition_dim)
 

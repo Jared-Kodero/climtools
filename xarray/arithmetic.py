@@ -262,13 +262,8 @@ def _gather_full(
     dim = meta["dim"]
     if len(meta["dims"]) > 1:
         raise NotImplementedError(
-            "align() cannot yet gather a multi-dimensionally partitioned "
-            + f"object onto every rank (dims={meta['dims']!r}); this is a "
-            + "genuine structural redistribution across a Cartesian "
-            + "process grid, not yet implemented. Reduce or reconcile "
-            + "one of the partition dimensions first, or align operands "
-            + "sharing an identical partition (see _partitions_match), "
-            + "which needs no data movement and is unaffected by this."
+            "cannot yet gather a multi-dimensionally partitioned object "
+            + f"onto every rank (dims={meta['dims']!r})"
         )
     pieces = runtime.comm.allgather(value)
     full = (
@@ -298,12 +293,8 @@ def _align_replicated(
         global_size = int(meta["global_sizes"][dim])
         if length != global_size:
             raise ValueError(
-                f"Cannot align: operand carries dimension {dim!r} at length "
-                + f"{length}, but the distributed partner's global size "
-                + f"along {dim!r} is {global_size}. align() only slices a "
-                + "replicated (full-length) operand onto an existing "
-                + "partition; lengths must match the whole distributed "
-                + "dimension."
+                f"cannot align: operand has dimension {dim!r} at length "
+                + f"{length}, expected the partner's global size {global_size}"
             )
         indexers[dim] = slice(meta["starts"][dim], meta["stops"][dim])
     sliced = other.isel(indexers)
@@ -318,11 +309,9 @@ def _align_replicated(
                 xr.align(partner, sliced, join="exact")
             except (ValueError, KeyError) as exc:
                 raise ValueError(
-                    f"Cannot align: the replicated operand's {dim!r} labels "
-                    + "do not match the distributed partner's labels for "
-                    + "this rank's slice, even though both have length "
-                    + f"{meta['stops'][dim] - meta['starts'][dim]}. "
-                    + f"xarray.align(..., join='exact') reports: {exc}"
+                    f"Cannot align: operand's {dim!r} labels don't match "
+                    + "the distributed partner's for this rank's slice, "
+                    + f"despite equal length. xarray.align reports: {exc}"
                 ) from exc
 
     return reattach_meta(sliced, meta)
@@ -683,11 +672,8 @@ def reindex(
     if len(touched) > 1:
         raise NotImplementedError(
             "reindex() cannot yet redistribute more than one active "
-            + f"partition dimension at once (touched={touched!r}); each "
-            + "call may reindex at most one of them. Reindexing a "
-            + "single active partition dimension already works, even "
-            + "under a multi-dimensional partition, as does reindexing "
-            + "any dimension that is not currently partitioned."
+            + f"partition dimension at once (touched={touched!r}). "
+            + "Reindex a dimension at a time instead."
         )
 
     dim = touched[0]
@@ -795,11 +781,9 @@ def sortby(
     if len(touched) > 1:
         raise NotImplementedError(
             "sortby() cannot yet redistribute when the sort key(s) "
-            + "together vary along more than one active partition "
+            + f"together vary along more than one active partition "
             + f"dimension ({touched!r}); each key must vary along at "
-            + "most one of them. Sorting by a key that varies along a "
-            + "single active partition dimension already works, even "
-            + "under a multi-dimensional partition."
+            + "most one of them."
         )
 
     dim = touched[0]
@@ -914,12 +898,11 @@ def check_operands_distribution(
         if other_meta is not None:
             if not _partitions_match(meta, other_meta):
                 raise ValueError(
-                    "Cannot combine operands distributed over "
+                    "cannot combine operands distributed over "
                     + f"different partitions: dims={meta['dims']!r} "
                     + f"bounds={ {d: (meta['starts'][d], meta['stops'][d]) for d in meta['dims']} } vs "
                     + f"dims={other_meta['dims']!r} "
-                    + f"bounds={ {d: (other_meta['starts'][d], other_meta['stops'][d]) for d in other_meta['dims']} }. "
-                    + "Call align(...) first."
+                    + f"bounds={ {d: (other_meta['starts'][d], other_meta['stops'][d]) for d in other_meta['dims']} }"
                 )
             continue
 
@@ -932,10 +915,8 @@ def check_operands_distribution(
             local = int(other.sizes[dim])
             if local != owned:
                 raise ValueError(
-                    f"Operand carries dimension {dim!r} at length "
-                    + f"{local}, which does not match this rank's "
-                    + f"owned partition length {owned}. Call "
-                    + "align(...) first."
+                    f"operand carries dimension {dim!r} at length "
+                    + f"{local}, expected this rank's owned length {owned}"
                 )
             reference_indexed = dim in getattr(reference, "indexes", {})
             other_indexed = dim in getattr(other, "indexes", {})
@@ -944,14 +925,9 @@ def check_operands_distribution(
                     xr.align(reference, other, join="exact")
                 except (ValueError, KeyError) as exc:
                     raise ValueError(
-                        f"Operand carries dimension {dim!r} at the "
-                        + f"expected local length ({owned}), but its "
-                        + "coordinate labels do not match the "
-                        + "distributed partition's labels for this "
-                        + "rank's slice; equal length does not imply "
-                        + "equal coordinates. Call align(...) "
-                        + "first. xarray.align(..., join='exact') "
-                        + f"reports: {exc}"
+                        f"Operand carries dimension {dim!r} at the right "
+                        + "length but its coordinate labels don't match "
+                        + f"this rank's slice. xarray.align reports: {exc}"
                     ) from exc
             elif runtime.comm.size > 1:
                 # Equal length is necessary but not sufficient: without a
@@ -971,19 +947,11 @@ def check_operands_distribution(
                     if not indexed
                 ]
                 raise ValueError(
-                    f"Operand carries dimension {dim!r} at the "
-                    + f"expected local length ({owned}), but its "
-                    + "alignment with this rank's own owned slice "
-                    + f"cannot be verified: {' and '.join(missing)} "
-                    + f"has no coordinate for {dim!r}, so equal length "
-                    + "alone is not enough evidence this is actually "
-                    + "this rank's own data rather than, say, another "
-                    + "rank's same-length slice by coincidence. Add a "
-                    + f"coordinate for {dim!r} to both sides so it can "
-                    + "be checked exactly, or build the operand from "
-                    + "the distributed side directly (e.g. via "
-                    + "isel()/apply() on it) instead of a separately "
-                    + "constructed array."
+                    f"Cannot verify operand alignment for dimension {dim!r}: "
+                    + f"{' and '.join(missing)} has no coordinate for it to "
+                    + "check against equal length alone. Add a coordinate "
+                    + f"for {dim!r}, or build the operand from the "
+                    + "distributed side directly (isel()/apply())."
                 )
     return meta, reference
 
@@ -1014,25 +982,22 @@ def check_partition_preserved(
 
         if dim not in result.dims:
             raise ValueError(
-                "apply(): the callable removed or renamed the distributed "
+                "apply(): the callable removed or renamed distributed "
                 + f"dimension {dim!r} (result dims: {tuple(result.dims)!r}). "
-                + "apply() only supports partition-preserving rank-local "
-                + "callables; use the corresponding mpi.xarray reduction, "
-                + "indexing, or groupby method for operations that change "
-                + "the partition dimension."
+                + "apply() only supports rank-local callables that "
+                + "preserve the partition; use a reduction/indexing/"
+                + "groupby method for anything that changes it."
             )
 
         local = int(result.sizes[dim])
         if local != owned:
             raise ValueError(
-                "apply(): the callable changed the local length of the "
+                "apply(): the callable changed the local length of "
                 + f"distributed dimension {dim!r} from {owned} to {local} "
-                + "on this rank. apply() only supports partition-preserving "
-                + "rank-local callables that leave every rank's owned "
-                + "slice the same length; operations such as slicing, "
-                + "dropping, or windowed reductions along the partition "
-                + "dimension require values from neighboring ranks and "
-                + "must not be done inside apply()."
+                + "on this rank. apply() only supports rank-local "
+                + "callables that preserve each rank's owned length; use "
+                + "isel()/sel()/a halo-aware method for anything that "
+                + "needs neighboring ranks' values."
             )
 
         if (
@@ -1045,11 +1010,8 @@ def check_partition_preserved(
             except (ValueError, KeyError) as exc:
                 raise ValueError(
                     f"apply(): the callable changed the {dim!r} coordinate "
-                    + "labels on this rank, even though the local length "
-                    + f"({local}) is unchanged. apply() only supports "
-                    + "partition-preserving rank-local callables that leave "
-                    + f"each rank's owned {dim!r} interval untouched. "
-                    + f"xarray.align(..., join='exact') reports: {exc}"
+                    + f"on this rank even though the length ({local}) is "
+                    + f"unchanged. xarray.align reports: {exc}"
                 ) from exc
 
 
@@ -1166,11 +1128,9 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     if len(contracted) > 1:
         raise NotImplementedError(
             "matmul() cannot yet contract more than one partition "
-            + f"dimension at once (both {contracted!r} are common to "
-            + "left and right under this multi-dimensional partition). "
-            + "Reduce one of them first (e.g. via a prior matmul/sum "
-            + "restricted to a single-dimension partition), or restructure "
-            + "the contraction to touch only one partition axis."
+            + f"dimension at once ({contracted!r} are common to both "
+            + "operands). Reduce one first, or restructure the "
+            + "contraction to touch only one partition axis."
         )
     dim = contracted[0]
     other_axes = tuple(d for d in meta["dims"] if d != dim)
@@ -1181,13 +1141,10 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     )
     if replicated:
         raise NotImplementedError(
-            "matmul() cannot yet contract dimension "
-            + f"{dim!r} while an operand is replicated along "
-            + f"{replicated!r} under this multi-dimensional partition "
-            + "(the contraction sum would need to be de-duplicated "
-            + "across that replicated axis, which is not yet "
-            + "implemented for matmul -- see sum()/mean(), which do "
-            + "handle this)."
+            f"matmul() cannot yet contract dimension {dim!r} while an "
+            + f"operand is replicated along {replicated!r}: the "
+            + "contraction sum would need de-duplicating across that "
+            + "axis, which isn't implemented here (see sum()/mean())."
         )
 
     _agree(runtime, ("matmul", str(dim), int(meta["global_sizes"][dim])))
@@ -1239,8 +1196,7 @@ def halo_exchange(
     meta = _operand_meta(value)
     if meta is None:
         raise ValueError(
-            "halo_exchange() requires a distributed xarray object; "
-            + "call repartition(...) first."
+            "halo_exchange() requires a distributed xarray object"
         )
     partition_dims = meta["dims"]
     if dim is None:
@@ -1338,9 +1294,7 @@ def halo_exchange(
             f"halo_exchange(): rank(s) {deficient} ([rank, local_length]) "
             + f"have a local partition along {partition_dim!r} shorter "
             + f"than the requested halo (before={before}, after={after}). "
-            + "Each rank can only forward data it owns; repartition "
-            + "with fewer, larger chunks (or a coarser process grid) "
-            + "before requesting this wide a halo."
+            + "Repartition with fewer, larger chunks first."
         )
 
     before_block, after_block = _exchange_halo_blocks(
@@ -1489,10 +1443,8 @@ def coarsen_reduce(
 
     if side != "left":
         raise NotImplementedError(
-            "coarsen_reduce(): side='right' is not yet implemented for a "
-            + "distributed dimension (only the default side='left' is); "
-            + "gather/repartition onto a single rank along this dimension "
-            + "first if side='right' is required."
+            "coarsen_reduce(): side='right' is not yet supported for a "
+            + "distributed dimension (only the default side='left' is)."
         )
 
     _agree(
@@ -1625,12 +1577,8 @@ def _eval_ast_node(
             if isinstance(last_val, (xr.Dataset, xr.DataArray)):
                 raise TypeError(
                     "evaluate(): 'and'/'or' use Python truth-value "
-                    + "checks, which are not defined for xarray "
-                    + "Datasets/DataArrays (no single element is "
-                    + "'the' truth value of a multi-element array). "
-                    + "Use the elementwise bitwise forms instead: '&' "
-                    + "for 'and', '|' for 'or', e.g. "
-                    + '"(a > 0) & (b < 1)".'
+                    + "checks, undefined for a multi-element array. "
+                    + "Use '&'/'|' instead, e.g. \"(a > 0) & (b < 1)\"."
                 )
             if is_and and not last_val:
                 return last_val

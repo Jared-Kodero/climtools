@@ -64,10 +64,9 @@ def where(
     meta, reference = check_operands_distribution(runtime, operands)
     if meta is not None and drop:
         raise ValueError(
-            "where(): drop=True is not supported on a distributed "
-            "object; it can remove a different number of positions on "
-            "different ranks and desynchronize the partition. Select "
-            "with isel()/sel() first, or repartition afterwards."
+            "where(): drop=True is not supported on a distributed object "
+            + "(result length could differ across ranks). Use isel()/sel() "
+            + "first, or repartition afterwards."
         )
 
     _agree(

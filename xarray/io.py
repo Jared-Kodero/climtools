@@ -738,12 +738,10 @@ def create_dataset(
                     expected_len = d_stop - d_start
                     if int(spec.sizes[d]) != expected_len:
                         raise ValueError(
-                            f"data_vars[{var_name!r}] is a DataArray of length "
-                            + f"{spec.sizes[d]} along {d!r}, but this rank "
-                            + f"owns [{d_start}:{d_stop}) ({expected_len} "
-                            + "elements). Pass a DataArray already sized to "
-                            + "this rank's own bounds (e.g. from "
-                            + "create_dataarray), not the full global array."
+                            f"data_vars[{var_name!r}] is a DataArray of "
+                            + f"length {spec.sizes[d]} along {d!r}, but "
+                            + f"this rank owns [{d_start}:{d_stop}) "
+                            + f"({expected_len} elements)"
                         )
             built_vars[var_name] = spec
             continue
@@ -931,13 +929,11 @@ def attach_save_chunks(
         return value
     if len(meta["dims"]) > 1:
         raise NotImplementedError(
-            "attach_save_chunks() (and therefore compute_save_chunks()) "
-            + "only supports a single partition dimension so far "
-            + f"(dims={meta['dims']!r} under this multi-dimensional "
-            + "partition); NetCDF save-chunk planning for more than one "
-            + "partition axis is not yet implemented -- see "
-            + "write_distributed(), which does not need it and already "
-            + "supports any number of partition dimensions."
+            "attach_save_chunks() only supports a single partition "
+            + f"dimension so far (dims={meta['dims']!r}). Pass explicit "
+            + "chunks= to to_netcdf() to skip this and reach "
+            + "write_distributed(), which supports any number of "
+            + "partition dimensions."
         )
 
     save_chunks: dict[str, tuple[int, ...]] | None = None

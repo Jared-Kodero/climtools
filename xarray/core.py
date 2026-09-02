@@ -283,11 +283,10 @@ class MPIXarray:
         if name in _SAFE_PASSTHROUGH_METHODS:
             return self._safe_method_wrapper(name)
         raise AttributeError(
-            f"{name!r} is not an MPI-aware MPIXarray method, a recognized "
-            + "passthrough property, or an allowlisted safe method. Use "
-            + f"`.data.{name}` (or `.data.{name}(...)`) for xarray's plain, "
-            + f"rank-local implementation, or add an MPI-aware `{name}` to "
-            + "MPIXarray if it needs to be distribution-safe."
+            f"{name!r} is not an MPI-aware method or an allowlisted "
+            + f"passthrough. Use `.data.{name}` for xarray's plain, "
+            + f"rank-local version, or add `{name}` to MPIXarray if it "
+            + "needs to be distribution-safe."
         )
 
     def _safe_method_wrapper(self, name: str) -> Callable[..., Any]:
@@ -493,13 +492,11 @@ class MPIXarray:
         """Truth value (``if mpixarray:``, ``bool(mpixarray)``)."""
         if self.meta is not None:
             raise ValueError(
-                "The truth value of a distributed MPIXarray is ambiguous "
-                + "across ranks and unsafe to branch on directly -- "
-                + "different ranks could take different branches and later "
-                + "deadlock on a collective call one of them never posts. "
-                + "Reduce it to a replicated scalar first (e.g. "
-                + ".all()/.any()), or use .data directly if this rank's own "
-                + "local truthiness is genuinely what you want."
+                "The truth value of a distributed MPIXarray is ambiguous: "
+                + "different ranks could take different branches and "
+                + "deadlock on a later collective. Reduce to a replicated "
+                + "scalar first (.all()/.any()), or use .data directly for "
+                + "this rank's own local truthiness."
             )
         return bool(self.data)
 
@@ -508,11 +505,10 @@ class MPIXarray:
         if isinstance(key, str):
             return self.apply(lambda d, k: d[k], self, key)
         raise TypeError(
-            "MPIXarray.__getitem__ only supports selecting a Dataset "
-            + f"variable by name (a str key); got {key!r} "
-            + f"({type(key).__name__}). Use .isel(...)/.sel(...) for "
-            + "label/position-based indexing, or .data[key] for xarray's "
-            + "plain, rank-local indexing."
+            "MPIXarray.__getitem__ only selects a Dataset variable by "
+            + f"name (a str key); got {key!r} ({type(key).__name__}). Use "
+            + ".isel()/.sel() for indexing, or .data[key] for xarray's "
+            + "plain, rank-local version."
         )
 
     def __matmul__(self, other: Any) -> MPIXarray:
@@ -594,14 +590,10 @@ class MPIXarray:
 
         if not parallel and self.meta is not None:
             raise ValueError(
-                "MPIXarray.to_netcdf(): data is distributed but parallel=False "
-                + "(the default). Serial NetCDF output is not rank-aware and "
-                + "expects the complete object already assembled on the calling "
-                + "rank; writing a distributed object this way would silently "
-                + "write only this rank's local slice as the whole file. Pass "
-                + "parallel=True to write the distributed object correctly, or "
-                + "gather/replicate it to a single rank first if serial output "
-                + "is what you want."
+                "to_netcdf(): data is distributed but parallel=False "
+                + "(the default) would silently write only this rank's "
+                + "local slice as the whole file. Pass parallel=True, or "
+                + "gather/replicate to one rank first for serial output."
             )
 
         prepared = self._prepare()

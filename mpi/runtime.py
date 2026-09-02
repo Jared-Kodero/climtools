@@ -24,7 +24,7 @@ R = TypeVar("R")
 T = TypeVar("T")
 
 
-class ToChildrenRuntime:
+class ToChildrenContext:
     """Parent-to-child-group communication namespace.
 
     Accessed through :attr:`MPIContext.to_children` after
@@ -170,7 +170,7 @@ class ToChildrenRuntime:
         )
 
 
-class FromChildrenRuntime:
+class FromChildrenContext:
     """Child-group-to-parent communication namespace.
 
     Accessed through :attr:`MPIContext.from_children` after
@@ -263,21 +263,21 @@ class MPIContext(MPIDiagnostics):
         self.comm: MPI.Intracomm = comm if comm is not None else MPI.COMM_WORLD
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIContext | None = None
-        self._to_children = ToChildrenRuntime(self)
-        self._from_children = FromChildrenRuntime(self)
+        self._to_children = ToChildrenContext(self)
+        self._from_children = FromChildrenContext(self)
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
         self._install_abort_hook()
         self.missing_pnetcdf()
 
     @property
-    def to_children(self) -> ToChildrenRuntime:
-        """ToChildrenRuntime: Parent-to-child-group communication namespace."""
+    def to_children(self) -> ToChildrenContext:
+        """ToChildrenContext: Parent-to-child-group communication namespace."""
         return self._to_children
 
     @property
-    def from_children(self) -> FromChildrenRuntime:
-        """FromChildrenRuntime: Child-group-to-parent communication namespace."""
+    def from_children(self) -> FromChildrenContext:
+        """FromChildrenContext: Child-group-to-parent communication namespace."""
         return self._from_children
 
     @property

@@ -175,9 +175,8 @@ def build_cartesian_topology(
     """
     if len(dims) < 2:
         raise ValueError(
-            "build_cartesian_topology() requires at least two partition "
-            + f"dimensions; got {tuple(dims)!r}. A single partition dimension "
-            + "uses the existing one-dimensional path directly."
+            f"build_cartesian_topology() requires at least two partition "
+            + f"dimensions; got {tuple(dims)!r}"
         )
 
     extents = [int(sizes[dim]) for dim in dims]

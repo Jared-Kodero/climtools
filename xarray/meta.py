@@ -291,11 +291,7 @@ def set_save_chunks(
     """
     meta = get_mpi_meta(value)
     if meta is None:
-        raise ValueError(
-            "value carries no MPI distribution metadata; call set_mpi_meta "
-            + "(e.g. via repartition/open_dataset) before "
-            + "attaching save_chunks."
-        )
+        raise ValueError("value carries no MPI distribution metadata")
     updated = dict(meta)
     updated["save_chunks"] = {
         str(name): tuple(int(length) for length in shape)
