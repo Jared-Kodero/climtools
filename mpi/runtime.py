@@ -11,7 +11,6 @@ from numbers import Integral
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from mpi4py import MPI
-from mpi4py.MPI import Intracomm
 
 from ..core.utils import _LAUNCH_ENV, LockFile, tmp
 from .diagnostics import MPIDiagnostics, MPIError
@@ -28,17 +27,17 @@ T = TypeVar("T")
 class ToChildrenRuntime:
     """Parent-to-child-group communication namespace.
 
-    Accessed through :attr:`MPIRuntime.to_children` after
-    :meth:`MPIRuntime.decompose`. Operations originate on a parent rank and
+    Accessed through :attr:`MPIContext.to_children` after
+    :meth:`MPIContext.decompose`. Operations originate on a parent rank and
     deliver values to the logical child communicators.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         Parent runtime owning the decomposed child communicators.
     """
 
-    def __init__(self, runtime: MPIRuntime) -> None:
+    def __init__(self, runtime: MPIContext) -> None:
         self._runtime = runtime
 
     def broadcast(self, value: T | None, *, root: int = 0) -> T:
@@ -59,7 +58,7 @@ class ToChildrenRuntime:
         Raises
         ------
         RuntimeError
-            If :meth:`MPIRuntime.decompose` has not been called.
+            If :meth:`MPIContext.decompose` has not been called.
         ValueError
             If ``root`` is not a valid parent rank.
         MPIError
@@ -114,7 +113,7 @@ class ToChildrenRuntime:
         Raises
         ------
         RuntimeError
-            If :meth:`MPIRuntime.decompose` has not been called.
+            If :meth:`MPIContext.decompose` has not been called.
         ValueError
             If ``root`` is invalid, ``values`` is None on ``root``, or the
             number of values does not equal the number of children.
@@ -174,17 +173,17 @@ class ToChildrenRuntime:
 class FromChildrenRuntime:
     """Child-group-to-parent communication namespace.
 
-    Accessed through :attr:`MPIRuntime.from_children` after
-    :meth:`MPIRuntime.decompose`. Operations collect one logical result from
+    Accessed through :attr:`MPIContext.from_children` after
+    :meth:`MPIContext.decompose`. Operations collect one logical result from
     each child communicator back onto the parent communicator.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         Parent runtime owning the decomposed child communicators.
     """
 
-    def __init__(self, runtime: MPIRuntime) -> None:
+    def __init__(self, runtime: MPIContext) -> None:
         self._runtime = runtime
 
     def gather(self, value: T, *, root: int = 0) -> list[T] | None:
@@ -209,7 +208,7 @@ class FromChildrenRuntime:
         Raises
         ------
         RuntimeError
-            If :meth:`MPIRuntime.decompose` has not been called.
+            If :meth:`MPIContext.decompose` has not been called.
         ValueError
             If ``root`` is not a valid parent rank.
         MPIError
@@ -243,8 +242,8 @@ class FromChildrenRuntime:
         return [item[1] for item in results]
 
 
-class MPIRuntime(MPIDiagnostics):
-    """User-facing MPI runtime namespace.
+class MPIContext(MPIDiagnostics):
+    """User-facing MPI context  namespace.
 
     Owns one intracommunicator, exposed directly through :attr:`comm`.
 
@@ -260,10 +259,10 @@ class MPIRuntime(MPIDiagnostics):
     # Runtime state and accessors
     # -------------------------------------------------------------------------
 
-    def __init__(self, comm: Intracomm | None = None) -> None:
-        self.comm: Intracomm = comm if comm is not None else MPI.COMM_WORLD
+    def __init__(self, comm: MPI.Intracomm | None = None) -> None:
+        self.comm: MPI.Intracomm = comm if comm is not None else MPI.COMM_WORLD
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
-        self._child: MPIRuntime | None = None
+        self._child: MPIContext | None = None
         self._to_children = ToChildrenRuntime(self)
         self._from_children = FromChildrenRuntime(self)
         self.info: tuple[int, ...] = ()
@@ -282,8 +281,8 @@ class MPIRuntime(MPIDiagnostics):
         return self._from_children
 
     @property
-    def child(self) -> MPIRuntime:
-        """MPIRuntime: Runtime for this rank's child communicator.
+    def child(self) -> MPIContext:
+        """MPIContext: Runtime for this rank's child communicator.
 
         Raises
         ------
@@ -349,7 +348,7 @@ class MPIRuntime(MPIDiagnostics):
         Every rank belongs to exactly one child, available through
         :attr:`child`; ``child.task`` is the zero-based child index and
         ``child.info`` holds the parent ranks belonging to it. The child is a
-        complete :class:`MPIRuntime`, so ordinary operations such as
+        complete :class:`MPIContext`, so ordinary operations such as
         ``child.log()``, ``child.broadcast()``, and ``child.xarray`` operate
         within that child communicator.
 
@@ -404,7 +403,7 @@ class MPIRuntime(MPIDiagnostics):
         stop = start + ranks_per_task
 
         child_comm = comm.Split(color=task, key=comm.rank)
-        child = MPIRuntime(child_comm)
+        child = MPIContext(child_comm)
         child.task = task
         child.info = tuple(range(start, stop))
         self._child = child
@@ -671,7 +670,7 @@ class MPIRuntime(MPIDiagnostics):
         return wrapper
 
 
-mpi: MPIRuntime = MPIRuntime()
+mpi: MPIContext = MPIContext()
 
 
 __all__ = ["mpi"]

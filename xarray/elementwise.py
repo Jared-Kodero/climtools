@@ -20,14 +20,14 @@ from .planning import _agree, guarded
 if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 #: Sentinel distinguishing "no fill value given" from a genuine ``other=None``.
 _UNSET = object()
 
 
 def where(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     cond: Any,
     other: Any = _UNSET,
@@ -38,7 +38,7 @@ def where(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to select from.
@@ -83,7 +83,7 @@ def where(
 
 
 def cumsum(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -94,7 +94,7 @@ def cumsum(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to accumulate.
@@ -151,7 +151,7 @@ def cumsum(
 
 
 def _cumsum_scan(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     meta: Mapping[str, Any],
@@ -193,7 +193,7 @@ def _cumsum_scan(
 
 
 def ffill(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     limit: int | None = None,
@@ -202,7 +202,7 @@ def ffill(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to fill.
@@ -234,7 +234,7 @@ def ffill(
 
 
 def bfill(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     limit: int | None = None,
@@ -243,7 +243,7 @@ def bfill(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to fill.
@@ -275,7 +275,7 @@ def bfill(
 
 
 def _fill_scan(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     meta: Mapping[str, Any],
@@ -321,7 +321,7 @@ def _fill_scan(
 
 
 def interp(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     new_coord: Any,
@@ -332,7 +332,7 @@ def interp(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to interpolate.
@@ -388,7 +388,7 @@ def interp(
 
 
 def median(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -399,7 +399,7 @@ def median(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -477,7 +477,7 @@ def median(
 
 
 def diff(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     n: int = 1,
@@ -488,7 +488,7 @@ def diff(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to difference.
@@ -549,7 +549,7 @@ def diff(
 
 
 def shift(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     periods: int = 1,
@@ -560,7 +560,7 @@ def shift(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to shift.
@@ -595,7 +595,7 @@ def shift(
 
 
 def roll(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     shift: int,
@@ -604,7 +604,7 @@ def roll(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to roll.
@@ -664,7 +664,7 @@ def roll(
 
 
 def differentiate(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     coord: Hashable,
     edge_order: Literal[1, 2] = 1,
@@ -674,7 +674,7 @@ def differentiate(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to differentiate.

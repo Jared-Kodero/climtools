@@ -14,7 +14,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
@@ -157,7 +157,7 @@ def finish_local_reduction(
     return result
 
 
-def _agree(runtime: MPIRuntime, signature: tuple[Any, ...]) -> None:
+def _agree(runtime: MPIContext, signature: tuple[Any, ...]) -> None:
     """Verify that all ranks entered the same reduction plan."""
     if not CHECK_COLLECTIVE_AGREEMENT or runtime.comm.size == 1:
         return
@@ -170,7 +170,7 @@ def _agree(runtime: MPIRuntime, signature: tuple[Any, ...]) -> None:
 
 
 def reduction_plan(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     meta: Mapping[str, Any] | None,
@@ -181,7 +181,7 @@ def reduction_plan(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
@@ -303,13 +303,13 @@ def reduction_plan(
 
 
 def resolve_comm(
-    runtime: MPIRuntime, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
+    runtime: MPIContext, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
 ) -> MPI.Comm:
     """Return the communicator a plan entry's collective should use.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     meta : Mapping[str, Any] | None
         MPI distribution metadata.
@@ -345,10 +345,8 @@ def guarded(function: Any) -> tuple[Any, BaseException | None]:
         return None, exc
 
 
-
-
 def comm_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.DataArray | None,
     op: MPI.Op,
     *,
@@ -362,7 +360,7 @@ def comm_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.DataArray | None
         Distributed DataArray buffer.
@@ -435,13 +433,17 @@ def comm_reduce(
 
 
 def exchange(
-    runtime: MPIRuntime, send: np.ndarray[Any, Any], op: MPI.Op, *, comm: MPI.Comm | None = None
+    runtime: MPIContext,
+    send: np.ndarray[Any, Any],
+    op: MPI.Op,
+    *,
+    comm: MPI.Comm | None = None,
 ) -> np.ndarray[Any, Any]:
     """All-reduce a validated contiguous NumPy buffer over ``comm``.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     send : np.ndarray[Any, Any]
         Local NumPy buffer to reduce.
@@ -461,7 +463,7 @@ def exchange(
 
 
 def count_valid_values(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.DataArray,
     dims: tuple[Hashable, ...],
     *,
@@ -472,7 +474,7 @@ def count_valid_values(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.DataArray
         Distributed xarray object.
@@ -552,7 +554,7 @@ def repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
 
 
 def finish(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     result: xr.Dataset | xr.DataArray,
     *,
     old_meta: Mapping[str, Any] | None,
@@ -563,7 +565,7 @@ def finish(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     result : xr.Dataset | xr.DataArray
         Operation result.

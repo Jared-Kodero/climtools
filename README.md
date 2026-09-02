@@ -1,6 +1,6 @@
 # climtools
 
-Utilities for climate data analysis and plotting: geospatial operations, Cartopy map plotting, statistical analysis, colormaps, and CDO utilities.
+Utilities for climate data analysis and plotting: geospatial operations, Cartopy map plotting, statistical analysis, colormaps, and CDO utilities. MPIXarray mpi communication is based on GFDL Shiedl FMS mpp_d...
 
 - Repository: https://github.com/Jared-Kodero/climtools
 

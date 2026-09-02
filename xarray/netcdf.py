@@ -29,9 +29,7 @@ if TYPE_CHECKING:
     from os import PathLike
     from typing import Any, Literal
 
-    from mpi4py.MPI import Intracomm
-
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
     # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
     # module, so importing `mpi_partition_data` back from `.io` at module
@@ -205,12 +203,12 @@ def create_file(
         set_attrs(nc, schema["attrs"])
 
 
-def writer_comm(mpi_runtime: MPIRuntime, has_data: bool) -> MPI.Comm:
+def writer_comm(mpi_runtime: MPIContext, has_data: bool) -> MPI.Comm:
     """Create the communicator used for collective writes.
 
     Parameters
     ----------
-    mpi_runtime : MPIRuntime
+    mpi_runtime : MPIContext
         MPI runtime.
     has_data : bool
         Whether the rank owns output data.
@@ -226,12 +224,12 @@ def writer_comm(mpi_runtime: MPIRuntime, has_data: bool) -> MPI.Comm:
     )
 
 
-def free_writer_comm(mpi_runtime: MPIRuntime, comm: MPI.Comm) -> None:
+def free_writer_comm(mpi_runtime: MPIContext, comm: MPI.Comm) -> None:
     """Free a writer communicator when required.
 
     Parameters
     ----------
-    mpi_runtime : MPIRuntime
+    mpi_runtime : MPIContext
         MPI runtime.
     comm : mpi4py.MPI.Comm
         Writer communicator.
@@ -286,7 +284,7 @@ def open_in_parallel(
 
 
 def write_distributed(
-    mpi_runtime: MPIRuntime,
+    mpi_runtime: MPIContext,
     path: str,
     schema: Mapping[str, Any],
     ds: xr.Dataset,
@@ -296,7 +294,7 @@ def write_distributed(
 
     Parameters
     ----------
-    mpi_runtime : MPIRuntime
+    mpi_runtime : MPIContext
         MPI runtime.
     path : str
         NetCDF path.
@@ -353,7 +351,7 @@ def write_distributed(
 
 
 def write_partitioned(
-    mpi_runtime: MPIRuntime,
+    mpi_runtime: MPIContext,
     path: str,
     schema: Mapping[str, Any],
     source_ds: xr.Dataset | None,
@@ -362,7 +360,7 @@ def write_partitioned(
 
     Parameters
     ----------
-    mpi_runtime : MPIRuntime
+    mpi_runtime : MPIContext
         MPI runtime.
     path : str
         NetCDF path.
@@ -472,7 +470,7 @@ def write_partitioned(
 
 
 def to_netcdf_parallel(
-    mpi_runtime: MPIRuntime | Intracomm,
+    mpi_runtime: MPIContext,
     data: xr.Dataset | xr.DataArray | None,
     path: str | PathLike[str],
     partition_dim: str | None = None,
@@ -488,7 +486,7 @@ def to_netcdf_parallel(
 
     Parameters
     ----------
-    mpi_runtime : MPIRuntime or mpi4py.MPI.Intracomm
+    mpi_runtime : MPIContext
         MPI runtime used for communication.
     data : xarray.Dataset or xarray.DataArray or None
         Distributed local data or complete rank-0 data.
@@ -1165,7 +1163,7 @@ def dataset_to_netcdf(
     for start in data_slices:
         stop = min(start + batch_size, n_items)
 
-        append(
+        nc_append(
             data.isel({dim0: slice(start, stop)}),
             file,
             dim=dim0,
@@ -1239,7 +1237,7 @@ def dataarray_to_netcdf(
                 ncvar[:] = da.values
 
 
-def append(
+def nc_append(
     data: xr.Dataset,
     file: str | PathLike[str],
     dim: str = "time",
@@ -1372,7 +1370,6 @@ def createVariable(
     shuffle: bool | None = None,
     write_values: bool = False,
 ) -> netCDF4.Variable:
-
     """Execute createVariable.
 
     Parameters
@@ -1425,10 +1422,10 @@ def createVariable(
 
 __all__ = [
     "NetCDFWriteError",
-    "append",
     "createVariable",
     "dataarray_to_netcdf",
     "dataset_to_netcdf",
+    "nc_append",
     "resolve_unlimited_dim",
     "to_netcdf_parallel",
     "to_netcdf_serial",

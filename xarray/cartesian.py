@@ -12,9 +12,9 @@ from .chunks import get_balanced_bounds
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mpi4py.MPI import Cartcomm, Comm, Intracomm
+    from mpi4py.MPI import Cartcomm, Comm
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 __all__ = [
     "CartesianTopology",
@@ -149,7 +149,7 @@ def _no_proc_null(rank: int) -> int | None:
 
 
 def build_cartesian_topology(
-    comm: Intracomm,
+    comm: MPI.Intracomm,
     dims: Sequence[str],
     sizes: Mapping[str, int],
 ) -> CartesianTopology:
@@ -223,7 +223,7 @@ _TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
 
 
 def get_cartesian_topology(
-    comm: Intracomm,
+    comm: MPI.Intracomm,
     dims: Sequence[str],
     sizes: Mapping[str, int],
 ) -> CartesianTopology:
@@ -255,12 +255,12 @@ def get_cartesian_topology(
     return topology
 
 
-def dim_comm(runtime: MPIRuntime, meta: Mapping[str, Any], dim: str) -> Comm:
+def dim_comm(runtime: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
     """Return the communicator whose ranks vary along ``dim`` alone.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         Runtime whose communicator this resolves against.
     meta : mapping
         Distribution metadata (as returned by :func:`~.meta.get_mpi_meta`) of the object being operated on.

@@ -10,7 +10,7 @@ import numpy as np
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 from .cartesian import dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
@@ -69,7 +69,7 @@ def _merge_partition_meta(
 
 
 def isel(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     *,
@@ -80,7 +80,7 @@ def isel(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
@@ -158,7 +158,7 @@ def isel(
 
 
 def isel_scalar(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     index: int,
@@ -168,7 +168,7 @@ def isel_scalar(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
@@ -241,7 +241,7 @@ def isel_scalar(
 
 
 def sel(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     method: str | None = None,
@@ -255,7 +255,7 @@ def sel(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
@@ -337,7 +337,7 @@ def sel(
 
 
 def sel_scalar(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     label: Any,
@@ -351,7 +351,7 @@ def sel_scalar(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
@@ -531,7 +531,7 @@ def sel_scalar(
 
 
 def _repartition_singleton(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     output: xr.Dataset | xr.DataArray,
     old_dim: Hashable,
     counts: list[int],

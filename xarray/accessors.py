@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from IPython.display import DisplayHandle
     from matplotlib.collections import PathCollection
     from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-    from mpi4py.MPI import Intracomm
+    from mpi4py import MPI
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
     from ..viz.plotting import GeoPlot
 
 
@@ -235,12 +235,12 @@ class GeoBase:
         None
         """
         kwargs = exclude_key("self", dict(locals()))
-        return xgeo.append(self._obj, **kwargs)
+        return xgeo.nc_append(self._obj, **kwargs)
 
     def to_netcdf(
         self,
         file: str | Path,
-        mpi_runtime: MPIRuntime | Intracomm = None,
+        mpi_runtime: MPIContext | MPI.Intracomm | None = None,
         unlimited_dim: str | Iterable[str] | None = None,
         partition_dim: str | None = None,
         *,
@@ -263,7 +263,7 @@ class GeoBase:
         ----------
         file : str or pathlib.Path
             Output path.
-        mpi_runtime : MPIRuntime or Intracomm, optional
+        mpi_runtime : MPIContext or mpi4py.MPI.Intracomm, optional
             MPI runtime or communicator.
         unlimited_dim : str or iterable of str, optional
             Dimension(s) made unlimited in the NetCDF schema.

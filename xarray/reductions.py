@@ -13,7 +13,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 from .common import extreme_identity, op_name, partial_dtype
 from .meta import get_mpi_meta
@@ -35,7 +35,7 @@ from .planning import (
 
 
 def _combine_sum_or_prod(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.DataArray,
     partial: xr.DataArray,
     dims: tuple[Hashable, ...],
@@ -78,7 +78,7 @@ def _combine_sum_or_prod(
 
 
 def _combine_mean(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.DataArray,
     partial_sum: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -145,7 +145,7 @@ def _combine_mean(
 
 
 def _local_extreme(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     variable_dims: tuple[Hashable, ...],
     *,
@@ -164,7 +164,7 @@ def _local_extreme(
 
 
 def _combine_extreme(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.DataArray,
     partial: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -267,10 +267,8 @@ def _combine_extreme(
     return template.copy(data=np.asarray(masked, dtype=expect_dtype).reshape(shape))
 
 
-
-
 def sum_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -283,7 +281,7 @@ def sum_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -316,7 +314,7 @@ def sum_reduce(
 
 
 def prod_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -329,7 +327,7 @@ def prod_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -362,7 +360,7 @@ def prod_reduce(
 
 
 def _sum_prod(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -458,7 +456,7 @@ def _sum_prod(
 
 
 def mean_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -470,7 +468,7 @@ def mean_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -560,7 +558,7 @@ def mean_reduce(
 
 
 def min_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -572,7 +570,7 @@ def min_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -601,7 +599,7 @@ def min_reduce(
 
 
 def max_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -613,7 +611,7 @@ def max_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -642,7 +640,7 @@ def max_reduce(
 
 
 def _min_max(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -748,7 +746,7 @@ def _min_max(
 
 
 def any_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -759,7 +757,7 @@ def any_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -786,7 +784,7 @@ def any_reduce(
 
 
 def all_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -797,7 +795,7 @@ def all_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -824,7 +822,7 @@ def all_reduce(
 
 
 def _logical(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -907,10 +905,8 @@ def _logical(
     )
 
 
-
-
 def _first_last_local(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -939,7 +935,7 @@ def _first_last_local(
 
 
 def _first_last_pick(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -954,7 +950,7 @@ def _first_last_pick(
 
 
 def _first_last_combine(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -1010,7 +1006,9 @@ def _first_last_combine(
     # not the value at the true, cross-rank-elected first/last
     # position. It needs the identical owner-election combine the data
     # itself just got.
-    index_coords = {name: coord for name, coord in variable.coords.items() if dim in coord.dims}
+    index_coords = {
+        name: coord for name, coord in variable.coords.items() if dim in coord.dims
+    }
     if index_coords:
         combined_coords: dict[Hashable, xr.DataArray] = {}
         for name, coord in index_coords.items():
@@ -1025,10 +1023,14 @@ def _first_last_combine(
             reducible = local_coord.astype(np.int64) if as_int else local_coord
             reducible_kind = reducible.dtype.kind
             coord_neutral = (
-                False if reducible_kind == "b" else np.zeros((), dtype=reducible.dtype).item()
+                False
+                if reducible_kind == "b"
+                else np.zeros((), dtype=reducible.dtype).item()
             )
             coord_payload, coord_error = guarded(
-                lambda reducible=reducible: reducible.where(is_owner, other=coord_neutral)
+                lambda reducible=reducible: reducible.where(
+                    is_owner, other=coord_neutral
+                )
             )
             coord_combined = comm_reduce(
                 runtime,
@@ -1049,7 +1051,7 @@ def _first_last_combine(
 
 
 def first_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1061,7 +1063,7 @@ def first_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
@@ -1090,7 +1092,7 @@ def first_reduce(
 
 
 def last_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1102,7 +1104,7 @@ def last_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
@@ -1131,7 +1133,7 @@ def last_reduce(
 
 
 def _first_or_last(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,

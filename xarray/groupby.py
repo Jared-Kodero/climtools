@@ -14,7 +14,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 from .common import extreme_identity, partial_dtype
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
@@ -94,7 +94,7 @@ def _resample_bin_labels(
 
 
 def _group_reduce_local(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -113,7 +113,7 @@ def _group_reduce_local(
 
 
 def _group_combine(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -197,7 +197,7 @@ def _group_combine(
 
 
 def groupby_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     labels: xr.DataArray | np.ndarray,
@@ -211,7 +211,7 @@ def groupby_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -319,7 +319,7 @@ def groupby_reduce(
 
 
 def resample_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     freq: str,
@@ -333,7 +333,7 @@ def resample_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.

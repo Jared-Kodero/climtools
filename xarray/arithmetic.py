@@ -22,7 +22,7 @@ from .planning import _agree, comm_reduce, resolve_comm
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
@@ -256,7 +256,7 @@ def _exchange_halo_blocks(
 
 
 def _gather_full(
-    runtime: MPIRuntime, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
+    runtime: MPIContext, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
     """Reconstruct ``value``'s full, replicated extent on every rank."""
     dim = meta["dim"]
@@ -280,7 +280,7 @@ def _gather_full(
 
 
 def _align_replicated(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     other: Any,
     meta: dict[str, Any],
     partner: xr.Dataset | xr.DataArray | None = None,
@@ -329,7 +329,7 @@ def _align_replicated(
 
 
 def align(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     left: xr.Dataset | xr.DataArray,
     right: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] | None = None,
@@ -341,7 +341,7 @@ def align(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     left : xarray.Dataset or xarray.DataArray
         Left operand to align.
@@ -457,7 +457,7 @@ def align(
 
 
 def _shuffle_by_position(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     meta: Mapping[str, Any],
     dim: str,
@@ -607,7 +607,7 @@ def _shuffle_by_position(
 
 
 def reindex(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Hashable, Any] | None = None,
     *,
@@ -622,7 +622,7 @@ def reindex(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reindex; distributed or replicated.
@@ -727,7 +727,7 @@ def reindex(
 
 
 def sortby(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
     *,
@@ -739,7 +739,7 @@ def sortby(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to sort; distributed or replicated.
@@ -846,8 +846,6 @@ def sortby(
     )
 
 
-
-
 def _operand_meta(operand: Any) -> dict[str, Any] | None:
     """Return ``operand``'s MPI distribution metadata, if any."""
     if isinstance(operand, (xr.Dataset, xr.DataArray)):
@@ -883,13 +881,13 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
 
 
 def check_operands_distribution(
-    runtime: MPIRuntime, operands: Iterable[Any]
+    runtime: MPIContext, operands: Iterable[Any]
 ) -> tuple[dict[str, Any] | None, Any]:
     """Return the mpi_meta to attach to a multi-operand call's result.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     operands : iterable of Any
         Every positional and keyword argument passed to :meth:`apply`.
@@ -1056,13 +1054,13 @@ def check_partition_preserved(
 
 
 def apply(
-    runtime: MPIRuntime, func: Callable[..., Any], *args: Any, **kwargs: Any
+    runtime: MPIContext, func: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
     """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     func : callable
         Any partition-preserving, rank-local function of the given ``args`` and ``kwargs``.
@@ -1087,7 +1085,10 @@ def apply(
 
 
 def _apply_generic(
-    runtime: MPIRuntime, func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    runtime: MPIContext,
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> Any:
     """Run the shared partition-preserving callable path."""
     meta, reference = check_operands_distribution(runtime, (*args, *kwargs.values()))
@@ -1124,12 +1125,12 @@ def _apply_generic(
 # distributed result instead of refusing outright.
 
 
-def matmul(runtime: MPIRuntime, left: xr.DataArray, right: Any) -> xr.DataArray:
+def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     """Matrix multiplication (``left @ right``), correct under MPI.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     left : xarray.DataArray
         Left operand.
@@ -1203,7 +1204,7 @@ def matmul(runtime: MPIRuntime, left: xr.DataArray, right: Any) -> xr.DataArray:
 
 
 def halo_exchange(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | None = None,
     *,
@@ -1215,7 +1216,7 @@ def halo_exchange(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object to pad.
@@ -1379,7 +1380,7 @@ def halo_exchange(
 
 
 def rolling_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1392,7 +1393,7 @@ def rolling_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to roll over.
@@ -1437,7 +1438,7 @@ def rolling_reduce(
 
 
 def coarsen_reduce(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1451,7 +1452,7 @@ def coarsen_reduce(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to coarsen.
@@ -1598,7 +1599,7 @@ def coarsen_reduce(
 
 
 def _eval_ast_node(
-    runtime: MPIRuntime, node: ast.expr, variables: Mapping[str, Any]
+    runtime: MPIContext, node: ast.expr, variables: Mapping[str, Any]
 ) -> Any:
     """Recursively evaluate one parsed expression node."""
     if isinstance(node, ast.BinOp):
@@ -1683,12 +1684,12 @@ def _eval_ast_node(
     )
 
 
-def evaluate(runtime: MPIRuntime, expression: str, /, **variables: Any) -> Any:
+def evaluate(runtime: MPIContext, expression: str, /, **variables: Any) -> Any:
     """Evaluate a string expression, respecting normal operator precedence.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     expression : str
         A Python expression referencing ``variables`` by name, for example ``"(a + b) * c - d / e"``.

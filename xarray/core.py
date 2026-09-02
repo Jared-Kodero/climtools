@@ -6,6 +6,8 @@ import operator as _operator
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
+from mpi4py import MPI
+
 import xarray as xr
 
 from .arithmetic import (
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 
 #: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
@@ -171,8 +173,8 @@ class MPIXarray:
     ----------
     data : MPIXarray or xarray.Dataset or xarray.DataArray
         Rank-local data. Existing ``MPIXarray`` instances are adopted unchanged.
-    runtime : MPIRuntime
-        Runtime used by distributed operations.
+    runtime : MPIContext or mpi4py.MPI.Intracomm
+        Runtime or communicator used by distributed operations.
     meta : dict, optional
         Explicit distribution metadata. If omitted, metadata is read from ``data``.
     auto_partition : bool, default True
@@ -224,7 +226,7 @@ class MPIXarray:
     def __init__(
         self,
         data: MPIXarray | xr.Dataset | xr.DataArray,
-        runtime: MPIRuntime,
+        runtime: MPIContext | MPI.Intracomm,
         meta: dict[str, Any] | None = None,
         *,
         auto_partition: bool = True,
@@ -233,6 +235,10 @@ class MPIXarray:
         log_partitions: bool = False,
     ) -> None:
         """Initialize a distributed xarray wrapper."""
+
+        if not isinstance(runtime, MPIContext):
+            runtime = MPIContext(runtime)
+
         if isinstance(data, MPIXarray):
             self.data = data.data
             self.meta = data.meta
@@ -1780,14 +1786,14 @@ def mark_partitioned(
     return marked
 
 
-def finalize(result: Any, runtime: MPIRuntime) -> Any:
+def finalize(result: Any, runtime: MPIContext) -> Any:
     """Wrap an engine result when it is an xarray object.
 
     Parameters
     ----------
     result : Any
         Result returned by ``_MPIXarrayOps``.
-    runtime : MPIRuntime
+    runtime : MPIContext
         Runtime bound to the wrapped result.
     Returns
     -------

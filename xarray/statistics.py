@@ -12,7 +12,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 from .common import partial_dtype
 from .meta import get_mpi_meta
@@ -33,7 +33,7 @@ from .reductions import mean_reduce
 
 
 def _var_or_std(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -54,7 +54,9 @@ def _var_or_std(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation="std" if root else "var")
+    reduce_plan = reduction_plan(
+        runtime, value, dims, old_meta, operation="std" if root else "var"
+    )
 
     def combine(
         variable: xr.DataArray,
@@ -177,7 +179,7 @@ def _var_or_std(
 
 
 def var(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -190,7 +192,7 @@ def var(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
@@ -222,7 +224,7 @@ def var(
 
 
 def std(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -235,7 +237,7 @@ def std(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.

@@ -14,7 +14,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..mpi.runtime import MPIRuntime
+    from ..mpi.runtime import MPIContext
 
 MPI_META = "mpi_meta"
 #: Attrs key for the lightweight boolean partition flag set by
@@ -381,12 +381,12 @@ def format_bytes(count: float) -> str:
     return f"{count:.1f}TiB"
 
 
-def should_log_partitions(runtime: MPIRuntime, log_partitions: bool) -> bool:
+def should_log_partitions(runtime: MPIContext, log_partitions: bool) -> bool:
     """Collectively resolve whether to call :func:`log_partition_report`.
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         Runtime whose communicator backs the collective.
     log_partitions : bool
         This rank's own request.
@@ -399,7 +399,7 @@ def should_log_partitions(runtime: MPIRuntime, log_partitions: bool) -> bool:
 
 
 def log_partition_report(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     data: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -414,7 +414,7 @@ def log_partition_report(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     data : xr.Dataset | xr.DataArray
         Input xarray object.
@@ -514,7 +514,7 @@ def log_partition_report(
 
 
 def log_partition_report_cartesian(
-    runtime: MPIRuntime,
+    runtime: MPIContext,
     data: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     *,
@@ -530,7 +530,7 @@ def log_partition_report_cartesian(
 
     Parameters
     ----------
-    runtime : MPIRuntime
+    runtime : MPIContext
         MPI runtime used for communication.
     data : xr.Dataset | xr.DataArray
         Input xarray object.
