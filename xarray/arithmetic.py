@@ -689,7 +689,12 @@ def _shuffle_by_position(
     value : xarray.Dataset or xarray.DataArray
         This rank's own current local slice along ``dim``.
     meta : mapping
-        ``value``'s current (single-dimension) distribution metadata.
+        ``value``'s current distribution metadata. May describe more
+        than one active partition dimension; every dimension other than
+        ``dim`` is carried through to the result unchanged (this
+        function only ever redistributes along ``dim`` itself, via the
+        sub-communicator that varies along ``dim`` alone -- see
+        :func:`~.cartesian.dim_comm`).
     dim : str
         The partition dimension being redistributed.
     new_coord : numpy.ndarray
@@ -709,7 +714,7 @@ def _shuffle_by_position(
         This rank's new local slice: ``new_coord`` sliced to this
         rank's fresh balanced bounds, with fresh ``mpi_meta`` set.
     """
-    comm = runtime.comm
+    comm = _dim_comm(runtime, meta, dim)
     rank, size = comm.rank, comm.size
 
     old_start = int(meta["starts"][dim])
@@ -818,14 +823,33 @@ def _shuffle_by_position(
 
     result = strip_mpi_meta(result)
     chunk_info = prune_chunk_info(meta["chunk_info"], result)
-    set_mpi_meta(
-        result,
-        dim=dim,
-        global_size=new_length,
-        start=new_start,
-        stop=new_stop,
-        chunk_info=chunk_info,
-    )
+    remaining_dims = tuple(d for d in meta["dims"] if d != dim)
+    if remaining_dims:
+        all_dims = meta["dims"]
+        global_size = {d: int(meta["global_sizes"][d]) for d in remaining_dims}
+        start = {d: int(meta["starts"][d]) for d in remaining_dims}
+        stop = {d: int(meta["stops"][d]) for d in remaining_dims}
+        global_size[dim] = new_length
+        start[dim] = new_start
+        stop[dim] = new_stop
+        set_mpi_meta(
+            result,
+            dim=all_dims,
+            global_size=global_size,
+            start=start,
+            stop=stop,
+            chunk_info=chunk_info,
+            cart=meta.get("cart"),
+        )
+    else:
+        set_mpi_meta(
+            result,
+            dim=dim,
+            global_size=new_length,
+            start=new_start,
+            stop=new_stop,
+            chunk_info=chunk_info,
+        )
     return result
 
 
@@ -882,9 +906,9 @@ def reindex(
     ValueError
         If no indexers are given.
     NotImplementedError
-        If a partitioned dimension is reindexed under a
-        multi-dimensional (Cartesian) partition, or with a non-1D
-        coordinate along that dimension.
+        If more than one active partition dimension is reindexed at
+        once, or a reindexed partition dimension's new coordinate is
+        not one-dimensional.
     """
     indexers = {**(indexers or {}), **indexers_kwargs}
     if not indexers:
@@ -914,14 +938,14 @@ def reindex(
         )
         return result
 
-    if len(partition_dims) > 1:
+    if len(touched) > 1:
         raise NotImplementedError(
-            "reindex() cannot yet redistribute a multi-dimensionally "
-            + f"partitioned object (dims={partition_dims!r}) when the "
-            + f"reindexed dimension(s) {touched!r} include an active "
-            + "partition axis. Reindexing a dimension that is NOT "
-            + "currently partitioned is unaffected by this and already "
-            + "works."
+            "reindex() cannot yet redistribute more than one active "
+            + f"partition dimension at once (touched={touched!r}); each "
+            + "call may reindex at most one of them. Reindexing a "
+            + "single active partition dimension already works, even "
+            + "under a multi-dimensional partition, as does reindexing "
+            + "any dimension that is not currently partitioned."
         )
 
     dim = touched[0]
@@ -942,7 +966,7 @@ def reindex(
         ),
     )
 
-    comm = runtime.comm
+    comm = _dim_comm(runtime, meta, dim)
     old_coord_local = np.asarray(value[dim].values)
     old_full_coord = np.concatenate(comm.allgather(old_coord_local))
     old_index = pd.Index(old_full_coord)
@@ -1002,9 +1026,10 @@ def sortby(
     Raises
     ------
     NotImplementedError
-        If a sort key varies along a partitioned dimension under a
-        multi-dimensional (Cartesian) partition, or is not
-        one-dimensional along that dimension.
+        If the sort key(s) together vary along more than one active
+        partition dimension under a multi-dimensional (Cartesian)
+        partition, or a key is not one-dimensional along the partition
+        dimension it varies along.
     """
     meta = get_mpi_meta(value)
     if meta is None:
@@ -1037,13 +1062,14 @@ def sortby(
         )
         return result
 
-    if len(partition_dims) > 1:
+    if len(touched) > 1:
         raise NotImplementedError(
-            "sortby() cannot yet redistribute a multi-dimensionally "
-            + f"partitioned object (dims={partition_dims!r}) when a sort "
-            + f"key varies along an active partition axis {touched!r}. "
-            + "Sorting by a key that does not vary along any partition "
-            + "dimension is unaffected by this and already works."
+            "sortby() cannot yet redistribute when the sort key(s) "
+            + f"together vary along more than one active partition "
+            + f"dimension ({touched!r}); each key must vary along at "
+            + "most one of them. Sorting by a key that varies along a "
+            + "single active partition dimension already works, even "
+            + "under a multi-dimensional partition."
         )
 
     dim = touched[0]
@@ -1068,7 +1094,7 @@ def sortby(
     )
     _agree(runtime, ("sortby", dim, key_signature, bool(ascending)))
 
-    comm = runtime.comm
+    comm = _dim_comm(runtime, meta, dim)
     full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
     old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
     # np.lexsort sorts by the *last* array primarily; reverse so the

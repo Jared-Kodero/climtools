@@ -461,14 +461,47 @@ def finish(
         # demand, the next time a multi-axis collective needs one.
         assert old_meta is not None  # remaining_dims is empty otherwise
         cart = old_meta.get("cart") if len(remaining_dims) == len(old_dims) else None
+        start = {dim: int(old_meta["starts"][dim]) for dim in remaining_dims}
+        stop = {dim: int(old_meta["stops"][dim]) for dim in remaining_dims}
+
+        reduced_dims = frozenset(old_dims) - frozenset(remaining_dims)
+        if reduced_dims:
+            # Every rank that shared this rank's position along every
+            # surviving dimension but differed only along `reduced_dims`
+            # computed its own local Allreduce over exactly that
+            # sub-communicator, so every one of them already holds an
+            # identical, individually-correct copy of this same
+            # surviving-dimension range -- not a bug in the *values*,
+            # but reattaching that same non-empty range to every one of
+            # them here would claim duplicate, overlapping ownership,
+            # violating the no-overlap invariant every other operation
+            # in this package relies on (summing local sizes across
+            # ranks to recover the global size, writing to disk without
+            # double-counting, a later repartition/shuffle's own
+            # position bookkeeping, ...). Keep the real data on exactly
+            # one rank per distinct surviving-dimension range -- this
+            # sub-communicator's own rank 0 -- and mark every other
+            # member genuinely empty (start == stop) instead, exactly
+            # like a rank :func:`~.chunks.get_balanced_bounds` already
+            # leaves idle when a dimension is shorter than the rank
+            # count. This is a metadata/ownership correction only: the
+            # already-computed values are correct on every rank, so no
+            # extra communication is needed to arrive at this, only to
+            # discard the now-redundant copies' claim to ownership.
+            comm = resolve_comm(runtime, old_meta, reduced_dims)
+            if comm.rank != 0:
+                empty_dim = remaining_dims[0]
+                result = result.isel({empty_dim: slice(0, 0)})
+                stop[empty_dim] = start[empty_dim]
+
         set_mpi_meta(
             result,
             dim=remaining_dims,
             global_size={
                 dim: int(old_meta["global_sizes"][dim]) for dim in remaining_dims
             },
-            start={dim: int(old_meta["starts"][dim]) for dim in remaining_dims},
-            stop={dim: int(old_meta["stops"][dim]) for dim in remaining_dims},
+            start=start,
+            stop=stop,
             chunk_info=prune_chunk_info(old_meta["chunk_info"], result),
             cart=cart,
         )

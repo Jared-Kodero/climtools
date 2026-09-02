@@ -18,7 +18,7 @@ from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Hashable, Mapping
 
 #: Sentinel distinguishing "no fill value given" from a genuine ``other=None``.
 _UNSET = object()
@@ -133,15 +133,6 @@ def cumsum(
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "cumsum() cannot yet scan along a partition dimension "
-            + f"({dim!r}) under a multi-dimensional partition "
-            + f"(dims={meta['dims']!r}); its cross-rank prefix-sum "
-            + "gather/scatter needs the same dimension-scoped "
-            + "communicator generalization diff()/isel() already have, "
-            + "not yet done here."
-        )
 
     _agree(runtime, ("cumsum", str(dim), int(meta["global_size"])))
 
@@ -164,7 +155,7 @@ def cumsum(
             return strip_mpi_meta(value.copy(deep=False))
         untouched = [name for name in value.data_vars if name not in touched]
         scanned = _cumsum_scan(
-            runtime, value[touched], dim, skipna=skipna, keep_attrs=keep_attrs
+            runtime, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
         )
         result = (
             xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
@@ -175,7 +166,8 @@ def cumsum(
         return reattach_meta(result, meta)
 
     return reattach_meta(
-        _cumsum_scan(runtime, value, dim, skipna=skipna, keep_attrs=keep_attrs), meta
+        _cumsum_scan(runtime, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs),
+        meta,
     )
 
 
@@ -183,6 +175,7 @@ def _cumsum_scan(
     runtime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
+    meta: Mapping[str, Any],
     *,
     skipna: bool | None,
     keep_attrs: bool | None,
@@ -195,6 +188,15 @@ def _cumsum_scan(
     every one of them to a same-shaped, rank-local total -- the
     precondition the gather/scatter exclusive-prefix computation below
     requires.
+
+    Scoped to :func:`~.cartesian.dim_comm`'s dimension-only
+    communicator, not the full runtime communicator: under a
+    multi-dimensional partition, ranks that vary along a *different*
+    partition axis (e.g. a different ``lon`` column, when scanning
+    ``lat``) must run entirely independent prefix scans rather than
+    being folded into one flat, axis-blind rank ordering -- the same
+    reasoning :func:`~.cartesian.dim_comm`'s own docstring gives for
+    :meth:`diff`/:meth:`isel`.
     """
 
     def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
@@ -206,9 +208,10 @@ def _cumsum_scan(
     runtime.raise_if_error(error, "MPI xarray cumsum", signature=("cumsum", str(dim)))
     local_cumsum, local_total = locals_or_none
 
-    totals = runtime.gather(local_total, root=0)
+    comm = _dim_comm(runtime, meta, dim)
+    totals = comm.gather(local_total, root=0)
     prefixes = None
-    if runtime.is_root():
+    if comm.rank == 0:
         prefixes = []
         # The additive identity must be a genuine zero, not `totals[0] * 0`:
         # if any rank's local total contains +-inf (routine in real
@@ -221,7 +224,7 @@ def _cumsum_scan(
         for total in totals:
             prefixes.append(running)
             running = running + total
-    exclusive_prefix = runtime.scatter(prefixes, root=0)
+    exclusive_prefix = comm.scatter(prefixes, root=0)
 
     return local_cumsum + exclusive_prefix
 
@@ -284,12 +287,6 @@ def ffill(
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.ffill(dim, limit=limit)
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "ffill() cannot yet fill along a partition dimension "
-            + f"({dim!r}) under a multi-dimensional partition "
-            + f"(dims={meta['dims']!r})."
-        )
 
     if limit is not None:
         _agree(runtime, ("ffill", str(dim), int(limit)))
@@ -302,7 +299,7 @@ def ffill(
         return reattach_meta(trimmed, meta)
 
     _agree(runtime, ("ffill", str(dim), None))
-    return reattach_meta(_fill_scan(runtime, value, dim, forward=True), meta)
+    return reattach_meta(_fill_scan(runtime, value, dim, meta, forward=True), meta)
 
 
 def bfill(
@@ -337,12 +334,6 @@ def bfill(
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.bfill(dim, limit=limit)
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "bfill() cannot yet fill along a partition dimension "
-            + f"({dim!r}) under a multi-dimensional partition "
-            + f"(dims={meta['dims']!r})."
-        )
 
     if limit is not None:
         _agree(runtime, ("bfill", str(dim), int(limit)))
@@ -355,13 +346,14 @@ def bfill(
         return reattach_meta(trimmed, meta)
 
     _agree(runtime, ("bfill", str(dim), None))
-    return reattach_meta(_fill_scan(runtime, value, dim, forward=False), meta)
+    return reattach_meta(_fill_scan(runtime, value, dim, meta, forward=False), meta)
 
 
 def _fill_scan(
     runtime,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
+    meta: Mapping[str, Any],
     *,
     forward: bool,
 ) -> xr.Dataset | xr.DataArray:
@@ -373,8 +365,18 @@ def _fill_scan(
     (bfill). Both are the same "override with whatever was most
     recently seen" associative scan as :func:`~.ffill`'s docstring
     describes, just walked in opposite directions.
+
+    Scoped to :func:`~.cartesian.dim_comm`'s dimension-only
+    communicator, not the full runtime communicator: under a
+    multi-dimensional partition, ranks that vary along a *different*
+    partition axis (e.g. a different ``lon`` column, when filling
+    along ``lat``) must run entirely independent scans rather than
+    being folded into one flat, axis-blind rank ordering -- the same
+    reasoning :func:`~.cartesian.dim_comm`'s own docstring gives for
+    :meth:`diff`/:meth:`isel`, and :func:`_cumsum_scan` already
+    applies to its own gather/scatter prefix scan.
     """
-    comm = runtime.comm
+    comm = _dim_comm(runtime, meta, dim)
     edge_index = -1 if forward else 0
 
     def _local() -> tuple[xr.Dataset | xr.DataArray, Any, bool]:
@@ -388,13 +390,14 @@ def _fill_scan(
         error,
         "MPI xarray ffill/bfill",
         signature=("fill_scan", str(dim), forward),
+        comm=comm,
     )
     local_filled, edge_slice, has_valid = local_or_none
 
     rank_order = range(comm.size) if forward else range(comm.size - 1, -1, -1)
-    gathered = runtime.gather((has_valid, edge_slice), root=0)
+    gathered = comm.gather((has_valid, edge_slice), root=0)
     carries = None
-    if runtime.is_root():
+    if comm.rank == 0:
         carries = [None] * comm.size
         running = None
         for r in rank_order:
@@ -402,7 +405,7 @@ def _fill_scan(
             rank_has_valid, rank_edge = gathered[r]
             if rank_has_valid:
                 running = rank_edge
-    carry_in = runtime.scatter(carries, root=0)
+    carry_in = comm.scatter(carries, root=0)
 
     if carry_in is None:
         return local_filled
@@ -466,12 +469,6 @@ def interp(
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.interp({dim: new_coord}, method=method, **kwargs)
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "interp() cannot yet interpolate along a partition dimension "
-            + f"({dim!r}) under a multi-dimensional partition "
-            + f"(dims={meta['dims']!r})."
-        )
 
     _agree(runtime, ("interp", str(dim), method))
 
@@ -488,14 +485,20 @@ def interp(
     new_global_size = sum(counts)
     new_start = sum(counts[: comm.rank])
     new_stop = new_start + counts[comm.rank]
-    new_chunk_info = prune_chunk_info(meta["chunk_info"], result)
+    chunk_info = prune_chunk_info(meta["chunk_info"], result)
+    global_sizes = dict(meta["global_sizes"])
+    starts = dict(meta["starts"])
+    stops = dict(meta["stops"])
+    global_sizes[dim] = new_global_size
+    starts[dim] = new_start
+    stops[dim] = new_stop
     set_mpi_meta(
         result,
-        dim=dim,
-        global_size=new_global_size,
-        start=new_start,
-        stop=new_stop,
-        chunk_info=new_chunk_info,
+        dim=meta["dims"],
+        global_size=global_sizes,
+        start=starts,
+        stop=stops,
+        chunk_info=chunk_info,
         cart=meta.get("cart"),
     )
     return result
@@ -546,24 +549,27 @@ def median(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object. Replicated (``.meta`` is None) if ``dim`` was
-        the active partition dimension; otherwise ``.meta`` is
-        preserved unchanged.
+        Reduced object. Under a single partition dimension, fully
+        replicated (``.meta`` is None) since nothing remains
+        distributed. Under a multi-dimensional partition, metadata is
+        reattached for whichever partition dimension(s) survive ``dim``
+        being reduced away, with no duplication: exactly one rank per
+        distinct surviving-dimension range keeps the real result
+        (the sub-communicator's own rank 0, from
+        :func:`~.cartesian.dim_comm`); every other rank that shared
+        that same range before the reduction -- differing only along
+        the now-reduced ``dim`` -- is left with a genuinely empty
+        (``start == stop``) slice instead of a redundant copy, exactly
+        like a rank :func:`~.chunks.get_balanced_bounds` already leaves
+        idle when a dimension is shorter than the rank count.
     """
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "median() cannot yet gather along a partition dimension "
-            + f"({dim!r}) under a multi-dimensional partition "
-            + f"(dims={meta['dims']!r}); its gather-to-root needs the "
-            + "same dimension-scoped communicator generalization "
-            + "diff()/isel() already have, not yet done here."
-        )
 
     _agree(runtime, ("median", str(dim), int(meta["global_size"])))
-    pieces = runtime.gather(value, root=0)
+    comm = _dim_comm(runtime, meta, dim)
+    pieces = comm.gather(value, root=0)
 
     def _reduce_on_root() -> xr.Dataset | xr.DataArray:
         full = (
@@ -573,10 +579,49 @@ def median(
         )
         return full.median(dim, skipna=skipna, keep_attrs=keep_attrs)
 
-    result, error = guarded(_reduce_on_root) if runtime.is_root() else (None, None)
-    runtime.raise_if_error(error, "MPI xarray median", signature=("median", str(dim)))
-    result = runtime.broadcast(result, root=0)
-    return strip_mpi_meta(result)
+    result, error = guarded(_reduce_on_root) if comm.rank == 0 else (None, None)
+    runtime.raise_if_error(
+        error, "MPI xarray median", signature=("median", str(dim)), comm=comm
+    )
+    # Every member of this sub-communicator shares identical bounds along
+    # every surviving dimension (they differ only along `dim`, which is
+    # now reduced away), so broadcasting the small, already-reduced
+    # result to all of them and letting every rank keep its own full
+    # copy would leave `comm.size`-many redundant, byte-identical copies
+    # of the same slice -- multiple ranks claiming ownership of the same
+    # range, violating the no-overlap partition invariant every other
+    # operation in this package relies on. Only rank 0 of this
+    # sub-communicator keeps the real data; every other member is
+    # assigned a genuinely empty (start == stop) slice instead, exactly
+    # like a rank `get_balanced_bounds` leaves idle when a dimension is
+    # shorter than the rank count -- not a second copy of someone else's
+    # data. The broadcast itself still reaches everyone, since a
+    # non-owner still needs the result's dtype/other-dims shape to build
+    # its own correctly-typed empty slice.
+    result = comm.bcast(result, root=0)
+    result = strip_mpi_meta(result)
+
+    remaining_dims = tuple(d for d in meta["dims"] if d != dim)
+    if not remaining_dims:
+        return result
+
+    start = {d: int(meta["starts"][d]) for d in remaining_dims}
+    stop = {d: int(meta["stops"][d]) for d in remaining_dims}
+    if comm.rank != 0:
+        empty_dim = remaining_dims[0]
+        result = result.isel({empty_dim: slice(0, 0)})
+        stop[empty_dim] = start[empty_dim]
+
+    set_mpi_meta(
+        result,
+        dim=remaining_dims,
+        global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
+        start=start,
+        stop=stop,
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+        cart=None,
+    )
+    return result
 
 
 def diff(
