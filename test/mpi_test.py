@@ -1,318 +1,43 @@
-"""MPI-vs-native correctness suite for climtools MPIXarray.
+"""MPI-vs-native correctness suite: single entry point.
 
-Run with:
-    mpirun --oversubscribe -n <N> python mpi_test.py     (local testing)
-    srun python mpi_test.py                              (via test.sh, on a cluster)
+The one script test.sh invokes via srun; run locally with:
+    mpirun --oversubscribe -n <N> python mpi_test.py
 
-Executed from within test/ so `mock_dataset` resolves as a sibling module.
-Every check compares this rank's local slice against the matching slice of
-a plain, non-distributed xarray/numpy computation -- never against a
-"rank 0 holds everything" assumption, since an operation that collapses
-the current partition dimension (e.g. a reduction) may re-partition its
-result along a different dimension instead of gathering to one rank.
+Builds the shared fixtures once (mpi_test_common.build_fixtures), then
+imports and runs each mpi_test_*.py module in turn -- each owns one
+coherent area rather than everything living in a single file:
+
+  mpi_test_construction.py  construction: mpi_open_dataset,
+                             mpi_create_dataarray, mpi_create_dataset;
+                             even/uneven/multi-dim partitioning
+  mpi_test_reductions.py    mean/sum/min/max/var/std/median; rank-local,
+                             reconstruction, and multi-dim dedup+coverage
+  mpi_test_halo_ops.py      rolling_reduce, coarsen_reduce, diff, shift,
+                             differentiate, ffill, bfill
+  mpi_test_scans.py         NumPy dispatch, isel, cumsum, sortby,
+                             reindex, interp, matmul
+
+Every numeric check compares this rank's local slice against the
+matching slice of a plain, non-distributed xarray/numpy computation --
+never against a "rank 0 holds everything" assumption. Multi-dimensional
+checks additionally verify reconstruction correctness (exact,
+non-overlapping global coverage) and rank consistency (no two ranks
+claim the same range).
 """
 
 from __future__ import annotations
 
-import numpy as np
-import xarray as xr
+import mpi_test_construction
+import mpi_test_halo_ops
+import mpi_test_reductions
+import mpi_test_scans
+from mpi_test_common import build_fixtures, report
 
-from climtools import mpi, xgeo
-from climtools.xarray.core import MPIXarray
-from mock_dataset import _path, create_dataset
+fixtures = build_fixtures()
 
-RESULTS: list[tuple[str, bool, str]] = []
+mpi_test_construction.run(fixtures)
+mpi_test_reductions.run(fixtures)
+mpi_test_halo_ops.run(fixtures)
+mpi_test_scans.run(fixtures)
 
-
-def record(name: str, ok: bool, msg: str = "") -> None:
-    RESULTS.append((name, ok, msg))
-
-
-def local_of(value):
-    """Materialize this rank's local slice, whether MPIXarray or plain xarray."""
-    return value._prepare().load() if isinstance(value, MPIXarray) else value
-
-
-# ---------------------------------------------------------------------------
-# 1. mpi_open_dataset vs native, single partition dimension
-# ---------------------------------------------------------------------------
-create_dataset(n_time=8, resolution_deg=10, plev_step=-250)
-mpi.comm.barrier()
-native = xr.open_dataset(_path).load()
-
-dist = xgeo.mpi_open_dataset(_path, mpi, partition_dim="time", log_partitions=False)
-start, stop = dist.meta["start"], dist.meta["stop"]
-try:
-    xr.testing.assert_allclose(local_of(dist), native.isel(time=slice(start, stop)), rtol=1e-6)
-    record("mpi_open_dataset (dim='time') vs native", True)
-except Exception as e:
-    record("mpi_open_dataset (dim='time') vs native", False, str(e)[:200])
-
-# ---------------------------------------------------------------------------
-# 2. Rank-local op, cross-rank reduction (with auto-repartition), ufunc
-#    dispatch, and isel -- all against the same fixture.
-# ---------------------------------------------------------------------------
-try:
-    local_mean = local_of(dist.mean(dim="lat"))
-    expected = native.isel(time=slice(start, stop)).mean(dim="lat")
-    xr.testing.assert_allclose(local_mean, expected, rtol=1e-5)
-    record("mean(dim='lat') [rank-local]", True)
-except Exception as e:
-    record("mean(dim='lat') [rank-local]", False, str(e)[:200])
-
-try:
-    global_mean = dist.mean(dim="time")  # collapses 'time'; re-partitions onto 'lon'
-    new_dim = global_mean.meta["dim"]
-    s2, e2 = global_mean.meta["start"], global_mean.meta["stop"]
-    expected = native.mean(dim="time").isel({new_dim: slice(s2, e2)})
-    xr.testing.assert_allclose(local_of(global_mean), expected, rtol=1e-5)
-    record("mean(dim='time') [reduction + auto-repartition]", True)
-except Exception as e:
-    record("mean(dim='time') [reduction + auto-repartition]", False, str(e)[:200])
-
-try:
-    logged = np.log(dist.data["pr"])
-    expected = np.log(native["pr"]).isel(time=slice(start, stop))
-    xr.testing.assert_allclose(local_of(logged), expected, rtol=1e-5)
-    record("np.log(pr) [ufunc dispatch]", True)
-except Exception as e:
-    record("np.log(pr) [ufunc dispatch]", False, str(e)[:200])
-
-try:
-    sub = local_of(dist.isel(time=slice(0, 3)))
-    record("isel(time=slice(0,3))", True, str(dict(sub.sizes)))
-except Exception as e:
-    record("isel(time=slice(0,3))", False, str(e)[:200])
-
-mpi.comm.barrier()
-
-
-# ---------------------------------------------------------------------------
-# 3. Balanced-bounds partitioning: even, remainder>0, length<ranks, 0, 1.
-#    Checked via mpi_create_dataarray's own single-dim path.
-# ---------------------------------------------------------------------------
-def _check_bounds_case(global_size: int, label: str) -> None:
-    def fill(a, b):
-        idx = np.arange(a, b)
-        return (idx[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
-
-    da = xgeo.mpi_create_dataarray(
-        mpi, fill, dims=("x", "y"), shape={"x": global_size, "y": 3},
-        dim="x", log_partitions=False,
-    )
-    s, e = da.meta["start"], da.meta["stop"]
-    local = local_of(da)
-    idx_global = np.arange(global_size)
-    expected_global = (idx_global[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
-    shape_ok = local.shape[0] == (e - s)
-    val_ok = np.array_equal(local.values, expected_global[s:e]) if local.shape[0] else True
-
-    bounds = mpi.comm.gather((s, e), root=0)
-    coverage_ok = None
-    if mpi.comm.rank == 0:
-        bounds_sorted = sorted(bounds)
-        coverage_ok = bounds_sorted[0][0] == 0 and bounds_sorted[-1][1] == global_size
-        for i in range(1, len(bounds_sorted)):
-            if bounds_sorted[i][0] != bounds_sorted[i - 1][1]:
-                coverage_ok = False
-
-    all_ok = mpi.comm.gather(shape_ok and val_ok, root=0)
-    if mpi.comm.rank == 0:
-        record(
-            f"balanced_bounds: {label} (size={global_size})",
-            all(all_ok) and bool(coverage_ok),
-        )
-
-
-_check_bounds_case(21, "uneven, remainder>0")
-_check_bounds_case(20, "even, control")
-_check_bounds_case(2, "length < ranks")
-_check_bounds_case(1, "length == 1")
-_check_bounds_case(0, "length == 0")
-mpi.comm.barrier()
-
-
-# ---------------------------------------------------------------------------
-# 4. Weighted (Allreduce sum/count) mean over an unevenly-partitioned dim.
-# ---------------------------------------------------------------------------
-def fill_uneven(a, b):
-    idx = np.arange(a, b)
-    return (np.sin(idx.astype(np.float64))[:, None] * (idx[:, None] + 1)
-            + np.arange(3)[None, :]).astype(np.float64)
-
-
-GLOBAL = 21  # 21 / N ranks is uneven for any N in {2,3,4,5,6} except divisors
-da_uneven = xgeo.mpi_create_dataarray(
-    mpi, fill_uneven, dims=("x", "y"), shape={"x": GLOBAL, "y": 3},
-    dim="x", log_partitions=False, name="v",
-)
-gmean = da_uneven.mean(dim="x")
-idx_global = np.arange(GLOBAL)
-full = (np.sin(idx_global.astype(np.float64))[:, None] * (idx_global[:, None] + 1)
-        + np.arange(3)[None, :]).astype(np.float64)
-expected_mean = full.mean(axis=0)
-try:
-    if isinstance(gmean, MPIXarray) and gmean.meta is not None:
-        s3, e3 = gmean.meta["start"], gmean.meta["stop"]
-        ok = np.allclose(local_of(gmean).values, expected_mean[s3:e3], rtol=1e-10)
-    else:
-        ok = np.allclose(np.asarray(local_of(gmean)), expected_mean, rtol=1e-10)
-    all_ok = mpi.comm.gather(ok, root=0)
-    if mpi.comm.rank == 0:
-        record("weighted mean, uneven partition (exact vs naive average)", all(all_ok))
-except Exception as e:
-    record("weighted mean, uneven partition (exact vs naive average)", False, str(e)[:200])
-mpi.comm.barrier()
-
-
-# ---------------------------------------------------------------------------
-# 5. Multi-dimensional (Cartesian) partitioning: mpi_open_dataset, and
-#    mpi_create_dataarray/mpi_create_dataset with mixed-dim variables.
-# ---------------------------------------------------------------------------
-dist2d = xgeo.mpi_open_dataset(_path, mpi, partition_dim=("lat", "lon"), log_partitions=False)
-m2 = dist2d.meta
-lat_s, lat_e = m2["starts"]["lat"], m2["stops"]["lat"]
-lon_s, lon_e = m2["starts"]["lon"], m2["stops"]["lon"]
-try:
-    expected = native.isel(lat=slice(lat_s, lat_e), lon=slice(lon_s, lon_e))
-    xr.testing.assert_allclose(local_of(dist2d), expected, rtol=1e-6)
-    ok = True
-except Exception:
-    ok = False
-bounds2d = mpi.comm.gather((lat_s, lat_e, lon_s, lon_e, ok), root=0)
-if mpi.comm.rank == 0:
-    lat_n, lon_n = native.sizes["lat"], native.sizes["lon"]
-    grid = np.zeros((lat_n, lon_n), dtype=int)
-    all_ok = True
-    for b in bounds2d:
-        grid[b[0]:b[1], b[2]:b[3]] += 1
-        all_ok = all_ok and b[4]
-    record(
-        "mpi_open_dataset (dim=('lat','lon')) vs native + full coverage",
-        all_ok and bool(np.all(grid == 1)),
-    )
-mpi.comm.barrier()
-
-GX, GY = 19, 36
-
-
-def fill2d(x_start, x_stop, y_start, y_stop):
-    xs = np.arange(x_start, x_stop)
-    ys = np.arange(y_start, y_stop)
-    return (xs[:, None] * 1000 + ys[None, :]).astype(np.float64)
-
-
-da2d = xgeo.mpi_create_dataarray(
-    mpi, fill2d, dims=("x", "y"), shape={"x": GX, "y": GY},
-    dim=("x", "y"), log_partitions=False, name="v",
-)
-m3 = da2d.meta
-xs, xe = m3["starts"]["x"], m3["stops"]["x"]
-ys, ye = m3["starts"]["y"], m3["stops"]["y"]
-expected_global = (np.arange(GX)[:, None] * 1000 + np.arange(GY)[None, :]).astype(np.float64)
-local2d = local_of(da2d)
-ok_val = np.array_equal(local2d.values, expected_global[xs:xe, ys:ye])
-ok_shape = local2d.shape == (xe - xs, ye - ys)
-bounds2 = mpi.comm.gather((xs, xe, ys, ye, ok_val and ok_shape), root=0)
-if mpi.comm.rank == 0:
-    grid = np.zeros((GX, GY), dtype=int)
-    all_ok = True
-    for b in bounds2:
-        grid[b[0]:b[1], b[2]:b[3]] += 1
-        all_ok = all_ok and b[4]
-    record(
-        "mpi_create_dataarray (dim=('x','y')) vs direct computation + coverage",
-        all_ok and bool(np.all(grid == 1)),
-    )
-mpi.comm.barrier()
-
-
-def fill_x_only(a, b):
-    return np.arange(a, b, dtype=np.float64) * 7.0
-
-
-def fill_const():
-    return np.full((3,), 42.0)
-
-
-ds2d = xgeo.mpi_create_dataset(
-    mpi,
-    data_vars={
-        "full2d": (("x", "y"), fill2d),
-        "x_only": (("x",), fill_x_only),
-        "const": (("z",), fill_const),
-    },
-    sizes={"x": GX, "y": GY, "z": 3},
-    dim=("x", "y"),
-    log_partitions=False,
-)
-local_ds = local_of(ds2d)
-ok = (
-    np.array_equal(local_ds["full2d"].values, expected_global[xs:xe, ys:ye])
-    and np.array_equal(local_ds["x_only"].values, np.arange(xs, xe, dtype=np.float64) * 7.0)
-    and np.array_equal(local_ds["const"].values, np.full((3,), 42.0))
-    and local_ds.sizes["z"] == 3
-)
-all_ok = mpi.comm.gather(ok, root=0)
-if mpi.comm.rank == 0:
-    record("mpi_create_dataset, mixed both/one/no-partition-dim variables", all(all_ok))
-mpi.comm.barrier()
-
-
-# ---------------------------------------------------------------------------
-# 6. Multi-dim DataArray shape validation: correct shape accepted, a
-#    mismatch on either partition dimension independently rejected.
-# ---------------------------------------------------------------------------
-correct_da = xr.DataArray(np.zeros((xe - xs, ye - ys)), dims=("x", "y"))
-try:
-    check_ds = xgeo.mpi_create_dataset(
-        mpi,
-        data_vars={"pre_built": correct_da, "other": (("x", "y"), fill2d)},
-        sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
-    )
-    local_of(check_ds)
-    ok_a = True
-except Exception:
-    ok_a = False
-
-wrong_y = xr.DataArray(np.zeros((xe - xs, (ye - ys) + 1)), dims=("x", "y"))
-try:
-    xgeo.mpi_create_dataset(
-        mpi, data_vars={"wrong_y": wrong_y, "other": (("x", "y"), fill2d)},
-        sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
-    )
-    ok_b = False  # should have raised
-except ValueError:
-    ok_b = True
-except Exception:
-    ok_b = False
-
-wrong_x = xr.DataArray(np.zeros(((xe - xs) + 1, ye - ys)), dims=("x", "y"))
-try:
-    xgeo.mpi_create_dataset(
-        mpi, data_vars={"wrong_x": wrong_x, "other": (("x", "y"), fill2d)},
-        sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
-    )
-    ok_c = False  # should have raised
-except ValueError:
-    ok_c = True
-except Exception:
-    ok_c = False
-
-all_ok = mpi.comm.gather((ok_a, ok_b, ok_c), root=0)
-if mpi.comm.rank == 0:
-    record("mpi_create_dataset multi-dim DataArray shape validation", all(all(t) for t in all_ok))
-
-
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
-gathered = mpi.comm.gather(RESULTS if mpi.comm.rank == 0 else None, root=0)
-if mpi.comm.rank == 0:
-    print(f"\n=== mpi_test.py results ({mpi.comm.size} ranks) ===")
-    n_pass = 0
-    for name, ok, msg in RESULTS:
-        status = "PASS" if ok else "FAIL"
-        n_pass += int(ok)
-        print(f"[{status}] {name}" + (f"  {msg}" if msg else ""))
-    print(f"--- {n_pass}/{len(RESULTS)} passed ---")
+report()

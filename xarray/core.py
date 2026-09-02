@@ -235,6 +235,7 @@ class MPIXarray:
         log_partitions: bool = False,
     ) -> None:
         """Initialize a distributed xarray wrapper."""
+        from ..mpi.runtime import MPIContext
 
         if not isinstance(runtime, MPIContext):
             runtime = MPIContext(runtime)

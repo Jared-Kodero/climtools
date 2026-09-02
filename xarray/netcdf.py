@@ -23,6 +23,7 @@ from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
 from .meta import get_mpi_meta, strip_export_attrs
+from .planning import resolve_comm
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -155,6 +156,11 @@ def create_file(
         Rank-0 variable metadata and data.
     """
     partition_dim = schema["partition_dim"]
+    partition_dims = (
+        () if partition_dim is None
+        else (partition_dim,) if isinstance(partition_dim, str)
+        else tuple(partition_dim)
+    )
     unlimited = set(schema["unlimited_dim"])
     chunks = schema["chunks"]
     prewritten = set(schema.get("prewritten", ()))
@@ -190,8 +196,8 @@ def create_file(
             set_attrs(ncvar, attrs)
 
             partitioned = (
-                partition_dim is not None
-                and partition_dim in dims
+                bool(partition_dims)
+                and any(d in dims for d in partition_dims)
                 and name not in prewritten
             )
             if not partitioned:
@@ -606,24 +612,33 @@ def to_netcdf_parallel(
         if local_ds is None or local_meta is None:
             raise AssertionError("Distributed data and metadata are missing.")
 
-        distributed_dim = str(local_meta["dim"])
-        if len(local_meta["dims"]) > 1:
+        distributed_dims = tuple(str(d) for d in local_meta["dims"])
+        if len(distributed_dims) > 1 and chunks is None:
             error = NotImplementedError(
-                "to_netcdf()'s dask-aware schema/chunk-alignment orchestration "
-                + "does not yet support a multi-dimensional partition (dims="
-                + f"{local_meta['dims']!r}). The lower-level hyperslab writer "
-                + "(write_distributed) is generalized and works for any number "
-                + "of partition dimensions; reaching it directly (e.g. by "
-                + "giving explicit `chunks=` so no dask auto-chunking/schema "
-                + "inference is needed) is the supported path for now."
+                "to_netcdf()'s dask-aware auto-chunk inference "
+                + "(attach_save_chunks) does not yet support a "
+                + f"multi-dimensional partition (dims={distributed_dims!r}) "
+                + "without explicit chunks. write_distributed itself is "
+                + "fully generalized for any number of partition "
+                + "dimensions; pass explicit `chunks={varname: shape, ...}` "
+                + "to skip auto-inference and reach it."
             )
-        elif partition_dim is not None and partition_dim != distributed_dim:
-            error = ValueError(
-                f"partition_dim {partition_dim!r} does not match "
-                + f"distributed dimension {distributed_dim!r}."
-            )
+        elif len(distributed_dims) == 1:
+            distributed_dim = distributed_dims[0]
+            if partition_dim is not None and partition_dim != distributed_dim:
+                error = ValueError(
+                    f"partition_dim {partition_dim!r} does not match "
+                    + f"distributed dimension {distributed_dim!r}."
+                )
+            partition_dim = distributed_dim
+        else:
+            if partition_dim is not None and partition_dim not in distributed_dims:
+                error = ValueError(
+                    f"partition_dim {partition_dim!r} does not match any of "
+                    + f"the distributed dimensions {distributed_dims!r}."
+                )
+            partition_dim = distributed_dims
         mpi_runtime.raise_if_error(error, "parallel NetCDF partition dimension")
-        partition_dim = distributed_dim
 
         # Plan save_chunks collectively before any rank-0-only work below,
         # so the schema-construction branch can align the partition-
@@ -651,27 +666,46 @@ def to_netcdf_parallel(
                     "attach_save_chunks unexpectedly cleared mpi_meta."
                 )
 
-        # Coordinates that carry partition_dim (a distributed "time" axis is
-        # the common case) are genuinely different per rank, unlike lat/lon/
-        # plev, so rank 0 cannot just read them off its own local_ds. Gather
-        # every rank's piece, verify the pieces tile the global interval with
-        # no gap or overlap, and concatenate in start order. This also means
-        # such a coordinate is CF-encoded exactly once (one units/calendar
-        # pair for the whole axis) instead of once per rank, and it can then
-        # be written serially in create_file alongside lat/lon/plev rather
+        # Coordinates that carry a partition dimension (a distributed
+        # "time" axis is the common case) are genuinely different per
+        # rank, unlike lat/lon/plev, so rank 0 cannot just read them off
+        # its own local_ds. Gather every rank's piece, verify the pieces
+        # tile the global interval with no gap or overlap, and
+        # concatenate in start order. This also means such a coordinate
+        # is CF-encoded exactly once (one units/calendar pair for the
+        # whole axis) instead of once per rank, and it can then be
+        # written serially in create_file alongside lat/lon/plev rather
         # than through the collective phase -- sidestepping netCDF4's
-        # default chunk size for that variable entirely, not just working
-        # around it with an explicit override.
-        start = int(local_meta["start"])
-        stop = int(local_meta["stop"])
-        global_size = int(local_meta["global_size"])
+        # default chunk size for that variable entirely, not just
+        # working around it with an explicit override.
+        #
+        # Under a multi-dimensional partition, each coordinate's gather
+        # is scoped to the sub-communicator for the ONE dimension it
+        # varies along (via dim_comm), not the full communicator: ranks
+        # that differ only along a DIFFERENT partition axis (e.g. a
+        # different lon-group, when gathering "lat") must not be folded
+        # into the same gather, or their independent, equally-valid
+        # lat ranges would collide as spurious duplicates/overlaps.
+        partition_dims_tuple = (
+            (partition_dim,) if isinstance(partition_dim, str) else tuple(partition_dim)
+        )
+        starts_map = local_meta["starts"]
+        stops_map = local_meta["stops"]
+        global_sizes_map = local_meta["global_sizes"]
         prewritten_coords: dict[str, xr.DataArray] = {}
         try:
-            coord_names = [
-                name
-                for name, coord in local_ds.coords.items()
-                if partition_dim in coord.dims
-            ]
+            coord_names = []
+            for name, coord in local_ds.coords.items():
+                touched = [d for d in partition_dims_tuple if d in coord.dims]
+                if not touched:
+                    continue
+                if len(touched) > 1:
+                    raise NetCDFWriteError(
+                        f"Coordinate {name!r} varies along more than one "
+                        + f"active partition dimension {tuple(touched)!r}; "
+                        + "parallel NetCDF output does not yet support that."
+                    )
+                coord_names.append((name, touched[0]))
         except BaseException as exc:
             coord_names = []
             error = exc
@@ -681,12 +715,20 @@ def to_netcdf_parallel(
             signature=tuple(coord_names),
         )
 
-        for coord_name in coord_names:
+        for coord_name, coord_dim in coord_names:
             coordinate = local_ds[coord_name]
-            axis = coordinate.get_axis_num(partition_dim)
+            axis = coordinate.get_axis_num(coord_dim)
             local_values = np.asarray(coordinate.values)
-            pieces = mpi_runtime.comm.gather((start, stop, local_values), root=0)
-            if mpi_runtime.comm.rank == 0:
+            dim_comm = (
+                mpi_runtime.comm
+                if len(partition_dims_tuple) == 1
+                else resolve_comm(mpi_runtime, local_meta, (coord_dim,))
+            )
+            start = int(starts_map[coord_dim])
+            stop = int(stops_map[coord_dim])
+            global_size = int(global_sizes_map[coord_dim])
+            pieces = dim_comm.gather((start, stop, local_values), root=0)
+            if dim_comm.rank == 0:
                 try:
                     ordered = sorted(pieces, key=lambda item: item[0])
                     cursor = 0
@@ -702,7 +744,7 @@ def to_netcdf_parallel(
                             raise NetCDFWriteError(
                                 f"Partitioned coordinate {coord_name!r} rank piece "
                                 + f"[{piece_start}:{piece_stop}) has length "
-                                + f"{values.shape[axis]} along {partition_dim!r}; "
+                                + f"{values.shape[axis]} along {coord_dim!r}; "
                                 + f"expected {expected}."
                             )
                         cursor = piece_stop
@@ -746,7 +788,8 @@ def to_netcdf_parallel(
                     unlimited = tuple(unlimited_dim)
 
                 sizes = dict(ds.sizes)
-                sizes[partition_dim] = int(local_meta["global_size"])
+                for d in partition_dims_tuple:
+                    sizes[d] = int(global_sizes_map[d])
                 missing = set(unlimited) - set(sizes)
                 if missing:
                     raise ValueError(
@@ -754,7 +797,12 @@ def to_netcdf_parallel(
                     )
 
                 chunk_map = (
-                    get_chunks(ds, chunks, partition_dim, sizes[partition_dim])
+                    get_chunks(
+                        ds,
+                        chunks,
+                        partition_dim if len(partition_dims_tuple) == 1 else None,
+                        sizes[partition_dim] if len(partition_dims_tuple) == 1 else None,
+                    )
                     if chunks is not None
                     else local_meta["save_chunks"]
                 )
@@ -768,8 +816,9 @@ def to_netcdf_parallel(
                     attrs = strip_export_attrs(variable.attrs)
                     dims = tuple(variable.dims)
                     shape = list(values.shape)
-                    if partition_dim in dims:
-                        shape[dims.index(partition_dim)] = sizes[partition_dim]
+                    for d in partition_dims_tuple:
+                        if d in dims:
+                            shape[dims.index(d)] = sizes[d]
 
                     root_data[name] = {
                         "attrs": attrs,
