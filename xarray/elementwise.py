@@ -933,6 +933,19 @@ def differentiate(
     padded, left_pad, _right_pad = halo_exchange(
         runtime, value, coord, before=1, after=1
     )
+    # dask's gradient (unlike every other halo_exchange consumer -- shift,
+    # diff, rolling_reduce, coarsen_reduce, ffill/bfill) requires every
+    # individual chunk along the differentiated axis, not just the total
+    # local length, to exceed edge_order + 1. halo_exchange's padding
+    # arrives as its own separate, unconsolidated 1-element chunk (e.g.
+    # local shape 125000 pads to chunks (125000, 1), not one (125002,)
+    # chunk), which is too small on its own regardless of how large the
+    # rank's real local data is. Consolidating to a single chunk here
+    # only touches this local, already-fully-materialized-by-halo_exchange
+    # piece -- it does not change halo_exchange's own chunking for any of
+    # its other, unaffected callers.
+    if padded.chunks:
+        padded = padded.chunk({coord: -1})
     derivative = padded.differentiate(
         coord, edge_order=edge_order, datetime_unit=datetime_unit
     )
