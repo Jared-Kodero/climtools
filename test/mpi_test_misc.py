@@ -6,11 +6,11 @@ align, evaluate, roll, repartition, apply.
 from __future__ import annotations
 
 import numpy as np
-import xarray as xr
-
-from climtools import mpi, xgeo
+from climtools import mpi
 from climtools.xarray.core import MPIXarray
-from mpi_test_common import Fixtures, local_of, record
+from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
+
+import xarray as xr
 
 
 def run(fx: Fixtures) -> None:
@@ -28,7 +28,9 @@ def run(fx: Fixtures) -> None:
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
-                xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-5)
+                xr.testing.assert_allclose(
+                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-5
+                )
             record(op_name, case, True)
         except Exception as e:
             record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
@@ -64,10 +66,16 @@ def run(fx: Fixtures) -> None:
     #    distributed along, the same "reduction+reconstruction" case
     #    mpi_test_reductions.py's mean(dim='time') deliberately tests)
     #    had never been exercised for any of these three. -------------
-    check_reduce_1d("prod", lambda: dist.prod(dim="lat"), lambda: native.prod(dim="lat"))
-    check_reduce_2d("prod", "lat", lambda: dist2d.prod(dim="lat"), lambda: native.prod(dim="lat"))
     check_reduce_1d(
-        "prod", lambda: dist.prod(dim="time"), lambda: native.prod(dim="time"),
+        "prod", lambda: dist.prod(dim="lat"), lambda: native.prod(dim="lat")
+    )
+    check_reduce_2d(
+        "prod", "lat", lambda: dist2d.prod(dim="lat"), lambda: native.prod(dim="lat")
+    )
+    check_reduce_1d(
+        "prod",
+        lambda: dist.prod(dim="time"),
+        lambda: native.prod(dim="time"),
         case="1d(time), reduction+reconstruction",
     )
     mpi.comm.barrier()
@@ -85,15 +93,21 @@ def run(fx: Fixtures) -> None:
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
-                xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-5)
+                xr.testing.assert_allclose(
+                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-5
+                )
             record(op_name, case, True)
         except Exception as e:
             record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
 
     check_bool_reduce_1d("any", "any")
     check_bool_reduce_1d("all", "all")
-    check_bool_reduce_1d("any", "any", reduce_dim="time", case="1d(time), reduction+reconstruction")
-    check_bool_reduce_1d("all", "all", reduce_dim="time", case="1d(time), reduction+reconstruction")
+    check_bool_reduce_1d(
+        "any", "any", reduce_dim="time", case="1d(time), reduction+reconstruction"
+    )
+    check_bool_reduce_1d(
+        "all", "all", reduce_dim="time", case="1d(time), reduction+reconstruction"
+    )
     mpi.comm.barrier()
 
     # -- prod on the shared deliberately-uneven 1D fixture --------------
@@ -103,7 +117,8 @@ def run(fx: Fixtures) -> None:
         expected = fx.native_uneven.prod(dim="x")
         xr.testing.assert_allclose(
             local if isinstance(local, xr.DataArray) else xr.DataArray(local),
-            expected, rtol=1e-5,
+            expected,
+            rtol=1e-5,
         )
         record("prod", "1d(x), uneven", True)
     except Exception as e:
@@ -125,7 +140,9 @@ def run(fx: Fixtures) -> None:
             local = local_of(result)
             lat_coord_ok = True
             if "lat" in getattr(local, "coords", {}):
-                lat_coord_ok = bool(np.all(local.coords["lat"].values == expected_lat_value))
+                lat_coord_ok = bool(
+                    np.all(local.coords["lat"].values == expected_lat_value)
+                )
                 local = local.drop_vars("lat")
             m = result.meta if isinstance(result, MPIXarray) else None
             expected_full = native_fn()
@@ -136,18 +153,27 @@ def run(fx: Fixtures) -> None:
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
-                xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-5)
-            record(op_name, "1d(time)", lat_coord_ok, "" if lat_coord_ok else "retained lat coordinate has wrong value")
+                xr.testing.assert_allclose(
+                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-5
+                )
+            record(
+                op_name,
+                "1d(time)",
+                lat_coord_ok,
+                "" if lat_coord_ok else "retained lat coordinate has wrong value",
+            )
         except Exception as e:
             record(op_name, "1d(time)", False, f"{type(e).__name__}: {str(e)[:200]}")
 
     check_first_last(
-        "first", lambda: dist.first("lat"),
+        "first",
+        lambda: dist.first("lat"),
         lambda: native.isel(lat=0, drop=True),
         float(native.lat.values[0]),
     )
     check_first_last(
-        "last", lambda: dist.last("lat"),
+        "last",
+        lambda: dist.last("lat"),
         lambda: native.isel(lat=-1, drop=True),
         float(native.lat.values[-1]),
     )
@@ -169,7 +195,9 @@ def run(fx: Fixtures) -> None:
     #    normalization in roll()'s own docstring/comments). -------------
     try:
         result_lat = local_of(dist.roll("lat", shift_by=2))
-        expected_lat = native.isel(time=slice(start, stop)).roll(lat=2, roll_coords=False)
+        expected_lat = native.isel(time=slice(start, stop)).roll(
+            lat=2, roll_coords=False
+        )
         xr.testing.assert_allclose(result_lat, expected_lat, rtol=1e-6)
         record("roll", "1d(time)/lat", True)
     except Exception as e:
@@ -202,18 +230,29 @@ def run(fx: Fixtures) -> None:
             # rank locally holds -- recorded as a declared, expected
             # refusal (SKIP), the same convention used elsewhere in this
             # suite for a declared NotImplementedError, rather than
-            # mischaracterized as a failure of roll() itself.
-            if "shorter than the requested halo" in str(e):
-                record("roll", case_label, None, f"declared refusal (expected): {str(e)[:150]}")
+            # mischaracterized as a failure of roll() itself. See
+            # mpi_test_common.is_declared_halo_refusal, shared with every
+            # other halo-based op's identical refusal path.
+            if is_declared_halo_refusal(e):
+                record(
+                    "roll",
+                    case_label,
+                    None,
+                    f"declared refusal (expected): {str(e)[:150]}",
+                )
             else:
-                record("roll", case_label, False, f"unexpected ValueError: {str(e)[:200]}")
+                record(
+                    "roll", case_label, False, f"unexpected ValueError: {str(e)[:200]}"
+                )
         except Exception as e:
             record("roll", case_label, False, f"{type(e).__name__}: {str(e)[:200]}")
         mpi.comm.barrier()
 
     # -- evaluate: string-expression evaluation, rank-local ------------------
     try:
-        result = local_of(dist.evaluate("a + b * 2", a=dist.data["pr"], b=dist.data["t2m"]))
+        result = local_of(
+            dist.evaluate("a + b * 2", a=dist.data["pr"], b=dist.data["t2m"])
+        )
         expected = (
             native["pr"].isel(time=slice(start, stop))
             + native["t2m"].isel(time=slice(start, stop)) * 2
@@ -221,7 +260,12 @@ def run(fx: Fixtures) -> None:
         xr.testing.assert_allclose(result, expected, rtol=1e-5)
         record("evaluate", "1d(time), rank-local", True)
     except Exception as e:
-        record("evaluate", "1d(time), rank-local", False, f"{type(e).__name__}: {str(e)[:200]}")
+        record(
+            "evaluate",
+            "1d(time), rank-local",
+            False,
+            f"{type(e).__name__}: {str(e)[:200]}",
+        )
     mpi.comm.barrier()
 
     # -- apply: call a rank-local callable, propagating MPI metadata --------
@@ -231,9 +275,19 @@ def run(fx: Fixtures) -> None:
         expected = native.isel(time=slice(start, stop)) * 2.0
         xr.testing.assert_allclose(local, expected, rtol=1e-6)
         meta_ok = isinstance(result, MPIXarray) and result.meta is not None
-        record("apply", "1d(time), rank-local", meta_ok, "" if meta_ok else "meta did not propagate")
+        record(
+            "apply",
+            "1d(time), rank-local",
+            meta_ok,
+            "" if meta_ok else "meta did not propagate",
+        )
     except Exception as e:
-        record("apply", "1d(time), rank-local", False, f"{type(e).__name__}: {str(e)[:200]}")
+        record(
+            "apply",
+            "1d(time), rank-local",
+            False,
+            f"{type(e).__name__}: {str(e)[:200]}",
+        )
     mpi.comm.barrier()
 
     # -- repartition: distribute an object every rank already holds fully ---
@@ -258,13 +312,17 @@ def run(fx: Fixtures) -> None:
         xr.testing.assert_allclose(local2, expected2, rtol=1e-10)
         record("repartition", "1d(z), uneven", True)
     except Exception as e:
-        record("repartition", "1d(z), uneven", False, f"{type(e).__name__}: {str(e)[:200]}")
+        record(
+            "repartition", "1d(z), uneven", False, f"{type(e).__name__}: {str(e)[:200]}"
+        )
     mpi.comm.barrier()
 
     # -- align: partition two operands identically ---------------------------
     try:
         other_full = fill_replicated(GZ) * 3.0
-        left, right = MPIXarray(replicated, mpi, auto_partition=False).align(other_full, dim="z")
+        left, right = MPIXarray(replicated, mpi, auto_partition=False).align(
+            other_full, dim="z"
+        )
         m_left, m_right = left.meta, right.meta
         same_partition = (
             m_left["dims"] == m_right["dims"]
@@ -278,4 +336,9 @@ def run(fx: Fixtures) -> None:
         xr.testing.assert_allclose(local_of(right), expected_right, rtol=1e-10)
         record("align", "1d(z), matching partitions", same_partition)
     except Exception as e:
-        record("align", "1d(z), matching partitions", False, f"{type(e).__name__}: {str(e)[:200]}")
+        record(
+            "align",
+            "1d(z), matching partitions",
+            False,
+            f"{type(e).__name__}: {str(e)[:200]}",
+        )

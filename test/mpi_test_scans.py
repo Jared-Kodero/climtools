@@ -34,6 +34,32 @@ def run(fx: Fixtures) -> None:
         record("isel", "1d(time), indexing", False, str(e)[:200])
     mpi.comm.barrier()
 
+    # sel(): label-based counterpart of isel() above, on the partition
+    # dimension -- never previously exercised anywhere in this suite.
+    # native.time carries a CF "hours since ..." units attribute, so
+    # xr.open_dataset (mpi_test_common.build_fixtures) decodes it to
+    # datetime64 on load; slice on the actual (decoded) coordinate
+    # values, exactly as a real caller would, not on the raw pre-decode
+    # float hours.
+    try:
+        t0 = native.time.values[2]
+        t1 = native.time.values[6]
+        result = dist.sel(time=slice(t0, t1))
+        local = local_of(result)
+        expected_full = native.sel(time=slice(t0, t1))
+        m = result.meta if isinstance(result, MPIXarray) else None
+        if m is None:
+            expected = expected_full
+        else:
+            d = m["dims"][0]
+            s, e = m["starts"][d], m["stops"][d]
+            expected = expected_full.isel({d: slice(s, e)})
+        xr.testing.assert_allclose(local, expected, rtol=1e-6)
+        record("sel", "1d(time), label slice", True)
+    except Exception as e:
+        record("sel", "1d(time), label slice", False, f"{type(e).__name__}: {str(e)[:200]}")
+    mpi.comm.barrier()
+
     # -- where(): elementwise selection, single-dim and multi-dim, plus
     #    the drop=True guard (unsupported on a distributed object since
     #    it could remove a different number of positions per rank) -------

@@ -1280,7 +1280,24 @@ def halo_exchange(
         raise ValueError(
             f"rank(s) {deficient} ([rank, local_length]) have a local "
             + f"partition along {partition_dim!r} shorter than the "
-            + f"requested halo (before={before}, after={after})"
+            + f"requested halo (before={before}, after={after}). Fix by "
+            + "one of: (1) run with fewer ranks so each one's slab along "
+            + f"{partition_dim!r} grows past {max(before, after)}; (2) "
+            + "partition a different, longer dimension instead; or (3) "
+            + "if the object was built with mpi_create_dataarray or "
+            + "mpi_create_dataset (not yet supported by "
+            + "mpi_open_dataset), pass "
+            + f"min_partition_size={max(before, after)} (or higher) for "
+            + f"{partition_dim!r} -- this only clears this error "
+            + "completely if it also keeps every rank active (i.e. "
+            + f"global size // rank count >= min_partition_size for "
+            + f"{partition_dim!r}); if it instead leaves some "
+            + "highest-numbered ranks with an empty slice, a halo op "
+            + "spanning the active/empty boundary still raises this same "
+            + "error today (halo_exchange does not yet route around a "
+            + "zero-length neighbor as if it were a global edge), so "
+            + "option (1) or (2) is the only complete fix in that case. "
+            + "See get_balanced_bounds's min_chunk parameter."
         )
 
     before_block, after_block = _exchange_halo_blocks(

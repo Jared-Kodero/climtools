@@ -10,69 +10,90 @@ assuming either way).
 from __future__ import annotations
 
 import numpy as np
-import xarray as xr
-
 from climtools import mpi
 from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, local_of, record
+
+import xarray as xr
 
 
 def run(fx: Fixtures) -> None:
     native, dist, dist2d = fx.native, fx.dist, fx.dist2d
 
-    # -- resample('time', freq).mean(): single-dim, the natural case ------
-    try:
-        result = dist.resample("time", "3h").mean()
-        local = local_of(result)
-        m = result.meta if hasattr(result, "meta") else None
-        expected_full = native.resample(time="3h").mean()
-        if m is not None:
-            d = m["dims"][0]
-            s, e = m["starts"][d], m["stops"][d]
-            expected_full = expected_full.isel({d: slice(s, e)})
-        # Compare only variables that genuinely depend on 'time': native's
-        # own .resample(...).mean() broadcasts a variable lacking 'time'
-        # (e.g. 'slmsk') across the new bins with different, non-constant
-        # values per bin (confirmed directly, not assumed) -- an xarray
-        # resample quirk, not a meaningful reference for a variable this
-        # operation never touched.
-        time_vars = [v for v in native.data_vars if "time" in native[v].dims]
-        for var in time_vars:
-            xr.testing.assert_allclose(local[var], expected_full[var], rtol=1e-5)
-        record("resample", "1d(time), mean", True)
-    except Exception as e:
-        record("resample", "1d(time), mean", False, f"{type(e).__name__}: {str(e)[:200]}")
-    mpi.comm.barrier()
+    # -- resample('time', freq).<reduce>(): single-dim, the natural case.
+    #    Every MPIResample reduction method (sum/mean/count/min/max) --
+    #    previously only mean() was ever exercised anywhere in this
+    #    suite, leaving the other four genuinely unverified. ---------------
+    for reduce_name in ("sum", "mean", "count", "min", "max"):
+        try:
+            result = getattr(dist.resample("time", "3h"), reduce_name)()
+            local = local_of(result)
+            m = result.meta if hasattr(result, "meta") else None
+            expected_full = getattr(native.resample(time="3h"), reduce_name)()
+            if m is not None:
+                d = m["dims"][0]
+                s, e = m["starts"][d], m["stops"][d]
+                expected_full = expected_full.isel({d: slice(s, e)})
+            # Compare only variables that genuinely depend on 'time':
+            # native's own .resample(...).<reduce>() broadcasts a variable
+            # lacking 'time' (e.g. 'slmsk') across the new bins with
+            # different, non-constant values per bin (confirmed directly,
+            # not assumed) -- an xarray resample quirk, not a meaningful
+            # reference for a variable this operation never touched.
+            time_vars = [v for v in native.data_vars if "time" in native[v].dims]
+            for var in time_vars:
+                xr.testing.assert_allclose(local[var], expected_full[var], rtol=1e-5)
+            record("resample", f"1d(time), {reduce_name}", True)
+        except Exception as e:
+            record(
+                "resample",
+                f"1d(time), {reduce_name}",
+                False,
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
+        mpi.comm.barrier()
 
-    # -- groupby('time', labels).mean(): single-dim ------------------------
+    # -- groupby('time', labels).<reduce>(): single-dim, every MPIGroupBy
+    #    reduction method -- same previously-mean()-only gap as resample
+    #    above. ---------------------------------------------------------
     m0 = dist.meta
     start, stop = m0["start"], m0["stop"]
     global_labels = (native.time.values.astype("int64") // 4) % 3  # 3 arbitrary bins
     local_labels = global_labels[start:stop]
-    try:
-        result = dist.groupby("time", local_labels).mean()
-        local = local_of(result)
-        native_labeled = native.assign_coords(_grp=("time", global_labels))
-        expected_full = native_labeled.groupby("_grp").mean()
-        m = result.meta if hasattr(result, "meta") else None
-        if m is not None:
-            d = m["dims"][0]
-            s, e = m["starts"][d], m["stops"][d]
-            expected_full = expected_full.isel({d: slice(s, e)})
-        time_vars = [v for v in native.data_vars if "time" in native[v].dims]
-        group_dim = [dd for dd in local.dims if dd not in expected_full.dims]
-        if group_dim:
-            local = local.rename({group_dim[0]: "_grp"})
-        local = local.sortby("_grp") if "_grp" in getattr(local, "dims", ()) else local
-        expected_full = expected_full.sortby("_grp")
-        for var in time_vars:
-            xr.testing.assert_allclose(
-                local[var].transpose(*expected_full[var].dims), expected_full[var], rtol=1e-5
+    for reduce_name in ("sum", "mean", "count", "min", "max"):
+        try:
+            result = getattr(dist.groupby("time", local_labels), reduce_name)()
+            local = local_of(result)
+            native_labeled = native.assign_coords(_grp=("time", global_labels))
+            expected_full = getattr(native_labeled.groupby("_grp"), reduce_name)()
+            m = result.meta if hasattr(result, "meta") else None
+            if m is not None:
+                d = m["dims"][0]
+                s, e = m["starts"][d], m["stops"][d]
+                expected_full = expected_full.isel({d: slice(s, e)})
+            time_vars = [v for v in native.data_vars if "time" in native[v].dims]
+            group_dim = [dd for dd in local.dims if dd not in expected_full.dims]
+            if group_dim:
+                local = local.rename({group_dim[0]: "_grp"})
+            local = (
+                local.sortby("_grp") if "_grp" in getattr(local, "dims", ()) else local
             )
-        record("groupby", "1d(time), mean", True)
-    except Exception as e:
-        record("groupby", "1d(time), mean", False, f"{type(e).__name__}: {str(e)[:200]}")
-    mpi.comm.barrier()
+            expected_full = expected_full.sortby("_grp")
+            for var in time_vars:
+                xr.testing.assert_allclose(
+                    local[var].transpose(*expected_full[var].dims),
+                    expected_full[var],
+                    rtol=1e-5,
+                )
+            record("groupby", f"1d(time), {reduce_name}", True)
+        except Exception as e:
+            record(
+                "groupby",
+                f"1d(time), {reduce_name}",
+                False,
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
+        mpi.comm.barrier()
 
     # -- groupby('lat', labels).mean(): multi-dim, status genuinely
     #    unverified prior to this check (no guard exists either way) -------
@@ -110,7 +131,12 @@ def run(fx: Fixtures) -> None:
         if all(o is None for o in all_ok):
             record("groupby", "2d(lat,lon), mean", None, msg)
         else:
-            record("groupby", "2d(lat,lon), mean", all(o for o in all_ok if o is not None), msg)
+            record(
+                "groupby",
+                "2d(lat,lon), mean",
+                all(o for o in all_ok if o is not None),
+                msg,
+            )
     mpi.comm.barrier()
 
     # -- groupby('x', labels).mean(): single-dim, on the shared
@@ -151,7 +177,9 @@ def run(fx: Fixtures) -> None:
             s, e = rm["starts"][d], rm["stops"][d]
             expected_full = expected_full.isel(_grp=slice(s, e))
         else:
-            local = local.sortby("_grp") if "_grp" in getattr(local, "dims", ()) else local
+            local = (
+                local.sortby("_grp") if "_grp" in getattr(local, "dims", ()) else local
+            )
         xr.testing.assert_allclose(local, expected_full, rtol=1e-5)
         record("groupby", "1d(x), uneven", True)
     except Exception as e:

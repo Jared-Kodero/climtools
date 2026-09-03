@@ -522,6 +522,7 @@ def create_dataarray(
     name: Hashable | None = None,
     attrs: Mapping[str, Any] | None = None,
     log_partitions: bool = False,
+    min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> xr.DataArray:
     """Create a distributed DataArray from a rank-local fill function.
 
@@ -547,6 +548,22 @@ def create_dataarray(
         DataArray attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
+    min_partition_size : int, mapping, or None, optional
+        Guaranteed minimum local length for any rank that receives data
+        along a partitioned dimension, or a per-dimension mapping of the
+        same (missing dimensions get no minimum). When the requested rank
+        count would otherwise leave some rank with fewer elements than
+        this along a given dimension, that dimension's data is instead
+        spread across only as many ranks as keep every active rank at or
+        above the minimum -- the remaining, highest-numbered ranks get an
+        empty local slice for that dimension, the same outcome already
+        used when the global size is smaller than the rank count. Set
+        this to the widest halo width, ``rolling_reduce``/``coarsen_reduce``
+        window, or ``ffill``/``bfill`` ``limit`` you plan to call on the
+        result, so :func:`~.arithmetic.halo_exchange` never raises its
+        "local partition shorter than the requested halo" ``ValueError``
+        for that dimension regardless of rank count. See
+        :func:`~.chunks.get_balanced_bounds`.
     Returns
     -------
     xarray.DataArray
@@ -558,6 +575,13 @@ def create_dataarray(
         If ``dim`` is invalid or global sizes cannot be resolved.
     """
     partition_dims = _normalize_create_dim(dim, dims)
+    min_chunk_map = (
+        dict(min_partition_size)
+        if isinstance(min_partition_size, Mapping)
+        else dict.fromkeys(partition_dims, min_partition_size)
+        if min_partition_size is not None
+        else {}
+    )
 
     if shape is None or isinstance(shape, Mapping):
         explicit_sizes = dict(shape) if shape else None
@@ -577,7 +601,12 @@ def create_dataarray(
         grid_shape = compute_layout(extents, comm.size)
         cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
         bounds = {
-            d: get_balanced_bounds(extents[axis], cart_coords[axis], grid_shape[axis])
+            d: get_balanced_bounds(
+                extents[axis],
+                cart_coords[axis],
+                grid_shape[axis],
+                min_chunk_map.get(d),
+            )
             for axis, d in enumerate(partition_dims)
         }
         cart = {
@@ -586,7 +615,9 @@ def create_dataarray(
             "periods": (False,) * len(partition_dims),
         }
     else:
-        start, stop = get_balanced_bounds(extents[0], comm.rank, comm.size)
+        start, stop = get_balanced_bounds(
+            extents[0], comm.rank, comm.size, min_chunk_map.get(partition_dims[0])
+        )
         bounds = {partition_dims[0]: (start, stop)}
 
     local_shape = tuple(
@@ -660,6 +691,7 @@ def create_dataset(
     coords: Mapping[Hashable, Any] | None = None,
     attrs: Mapping[str, Any] | None = None,
     log_partitions: bool = True,
+    min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> xr.Dataset:
     """Create a distributed Dataset from rank-local variables.
 
@@ -681,6 +713,11 @@ def create_dataset(
         Dataset attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
+    min_partition_size : int, mapping, or None, optional
+        Guaranteed minimum local length for any rank that receives data
+        along a partitioned dimension, or a per-dimension mapping of the
+        same. See :func:`create_dataarray`'s parameter of the same name
+        and :func:`~.chunks.get_balanced_bounds`.
     Returns
     -------
     xarray.Dataset
@@ -699,6 +736,13 @@ def create_dataset(
         partition_dims = tuple(dim)
     else:
         partition_dims = (dim,)
+    min_chunk_map = (
+        dict(min_partition_size)
+        if isinstance(min_partition_size, Mapping)
+        else dict.fromkeys(partition_dims, min_partition_size)
+        if min_partition_size is not None
+        else {}
+    )
 
     required_dims: set[Hashable] = set(partition_dims)
     for spec in data_vars.values():
@@ -715,7 +759,12 @@ def create_dataset(
         grid_shape = compute_layout(extents, comm.size)
         cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
         bounds = {
-            d: get_balanced_bounds(extents[axis], cart_coords[axis], grid_shape[axis])
+            d: get_balanced_bounds(
+                extents[axis],
+                cart_coords[axis],
+                grid_shape[axis],
+                min_chunk_map.get(d),
+            )
             for axis, d in enumerate(partition_dims)
         }
         cart = {
@@ -724,7 +773,9 @@ def create_dataset(
             "periods": (False,) * len(partition_dims),
         }
     else:
-        start, stop = get_balanced_bounds(extents[0], comm.rank, comm.size)
+        start, stop = get_balanced_bounds(
+            extents[0], comm.rank, comm.size, min_chunk_map.get(partition_dims[0])
+        )
         bounds = {partition_dims[0]: (start, stop)}
 
     dtype_map = dtype if isinstance(dtype, Mapping) else None
@@ -1025,6 +1076,7 @@ def mpi_create_dataarray(
     name: Hashable | None = None,
     attrs: Mapping[str, Any] | None = None,
     log_partitions: bool = False,
+    min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> MPIXarray:
     """Create a distributed DataArray from a rank-local fill function.
 
@@ -1050,6 +1102,12 @@ def mpi_create_dataarray(
         DataArray attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
+    min_partition_size : int, mapping, or None, optional
+        Guaranteed minimum local length per partitioned dimension, or a
+        per-dimension mapping of the same; ranks beyond however many keep
+        every active rank at or above the minimum get an empty local
+        slice for that dimension instead. See
+        :func:`~.chunks.get_balanced_bounds`.
     Returns
     -------
     MPIXarray
@@ -1071,6 +1129,7 @@ def mpi_create_dataarray(
         name=name,
         attrs=attrs,
         log_partitions=log_partitions,
+        min_partition_size=min_partition_size,
     )
     return MPIXarray(data, mpi_context)
 
@@ -1087,6 +1146,7 @@ def mpi_create_dataset(
     coords: Mapping[Hashable, Any] | None = None,
     attrs: Mapping[str, Any] | None = None,
     log_partitions: bool = True,
+    min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> MPIXarray:
     """Create a distributed Dataset from rank-local variables.
 
@@ -1108,6 +1168,11 @@ def mpi_create_dataset(
         Dataset attributes.
     log_partitions : bool, optional
         Log the resulting rank layout.
+    min_partition_size : int, mapping, or None, optional
+        Guaranteed minimum local length per partitioned dimension, or a
+        per-dimension mapping of the same. See
+        :func:`mpi_create_dataarray`'s parameter of the same name and
+        :func:`~.chunks.get_balanced_bounds`.
     Returns
     -------
     MPIXarray
@@ -1128,6 +1193,7 @@ def mpi_create_dataset(
         coords=coords,
         attrs=attrs,
         log_partitions=log_partitions,
+        min_partition_size=min_partition_size,
     )
     return MPIXarray(data, mpi_context)
 

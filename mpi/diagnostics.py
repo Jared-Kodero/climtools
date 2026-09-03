@@ -239,6 +239,45 @@ class MPIDiagnostics:
 
         return f"{noun} " + ", ".join(parts)
 
+    @staticmethod
+    def _format_exception(
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        tb: Any,
+    ) -> tuple[str, str, str]:
+        """Format an exception without repeating an identical cleanup error."""
+        current = exc_value
+        current_tb = tb
+
+        while True:
+            chained = current.__cause__
+
+            if chained is None and not current.__suppress_context__:
+                chained = current.__context__
+
+            if chained is None:
+                break
+
+            current_key = (type(current), str(current))
+            chained_key = (type(chained), str(chained))
+
+            if chained_key != current_key:
+                break
+
+            current = chained
+            current_tb = chained.__traceback__
+
+        current_type = type(current) if current is not exc_value else exc_type
+        traceback_text = "".join(
+            traceback.format_exception(
+                current_type,
+                current,
+                current_tb,
+            )
+        )
+
+        return current_type.__name__, str(current), traceback_text
+
     def _install_abort_hook(self) -> bool:
         """Install deduplicated reporting for uncaught MPI exceptions."""
         if getattr(sys.excepthook, "_climtools_mpi_abort", False):
@@ -259,17 +298,16 @@ class MPIDiagnostics:
             exc_value: BaseException,
             tb: Any,
         ) -> None:
+            name, message, traceback_text = self._format_exception(
+                exc_type,
+                exc_value,
+                tb,
+            )
             record = {
                 "rank": MPI.COMM_WORLD.rank,
-                "type": exc_type.__name__,
-                "message": str(exc_value),
-                "traceback": "".join(
-                    traceback.format_exception(
-                        exc_type,
-                        exc_value,
-                        tb,
-                    )
-                ),
+                "type": name,
+                "message": message,
+                "traceback": traceback_text,
             }
 
             try:
@@ -343,28 +381,3 @@ class MPIDiagnostics:
         sys.excepthook = _abort_excepthook
 
         return True
-
-    def missing_pnetcdf(self) -> None:
-        """Print a one-time root-only hint if parallel NetCDF-4 is missing."""
-        comm = self.comm
-
-        if comm.Get_size() <= 1 or comm.Get_rank() != 0:
-            return
-
-        try:
-            import netCDF4
-
-            if netCDF4.__has_parallel4_support__:
-                return
-        except Exception:
-            return
-
-        sys.stderr.write(
-            "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
-            + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
-            + f"this {comm.Get_size()}-rank run. mpi.xarray and the rest of the "
-            + "MPI context are unaffected. To build the parallel stack, "
-            + "run `env/setup_env.sh` from the climtools repository (see the "
-            + "README's Installation section); nothing else needs it.\n"
-        )
-        sys.stderr.flush()

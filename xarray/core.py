@@ -6,9 +6,8 @@ import operator as _operator
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
-from mpi4py import MPI
-
 import xarray as xr
+from mpi4py import MPI
 
 from .arithmetic import (
     align,
@@ -235,10 +234,13 @@ class MPIXarray:
         log_partitions: bool = False,
     ) -> None:
         """Initialize a distributed xarray wrapper."""
+
         from ..mpi.context import MPIContext
 
         if not isinstance(mpi_context, MPIContext):
             mpi_context = MPIContext(mpi_context)
+
+        self._missing_pnetcdf()
 
         if isinstance(data, MPIXarray):
             self.data = data.data
@@ -304,6 +306,16 @@ class MPIXarray:
             f"See MPIXarray's `_SAFE_PASSTHROUGH_METHODS`."
         )
         return call
+
+    def _missing_pnetcdf(self) -> None:
+        """Raise an error if parallel NetCDF-4 support is missing on root rank."""
+
+        import netCDF4
+
+        if netCDF4.__has_parallel4_support__:
+            return
+        else:
+            raise RuntimeError("netCDF4 lacks parallel support.")
 
     #
     # Each redirects to `apply()`, so operand handling is exactly `apply()`'s

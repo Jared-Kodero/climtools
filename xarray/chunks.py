@@ -148,7 +148,9 @@ def get_chunk_overrides(
     }
 
 
-def get_balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
+def get_balanced_bounds(
+    length: int, rank: int, size: int, min_chunk: int | None = None
+) -> tuple[int, int]:
     """Split ``length`` into ``size`` contiguous, near-equal ``[start, stop)`` slabs.
 
     Parameters
@@ -159,11 +161,35 @@ def get_balanced_bounds(length: int, rank: int, size: int) -> tuple[int, int]:
         Current MPI rank.
     size : int
         Total number of MPI ranks.
+    min_chunk : int or None, optional
+        Guaranteed minimum local length for every rank that receives any
+        data. When set, at most ``max(1, length // min_chunk)`` ranks
+        (never more than ``size``) are given a non-empty slab; the
+        remaining highest-numbered ranks each get an empty ``(length,
+        length)`` slab, exactly as already happens here when ``length <
+        size`` with no ``min_chunk`` set. This does not itself guarantee
+        every downstream halo-based operation will fit -- it only
+        guarantees the *partition*, not any later ``before``/``after``
+        halo width a caller might request on top of it -- but choosing
+        ``min_chunk`` at or above the widest halo/limit/window a
+        distributed dimension will ever see (e.g. the largest
+        ``rolling_reduce`` window or ``ffill``/``bfill`` limit planned
+        for it) rules out ``halo_exchange``'s "local partition shorter
+        than the requested halo" ``ValueError`` for that dimension
+        entirely, rather than discovering it at call time on some rank
+        count. See ``halo_exchange``'s own docstring for that error.
     Returns
     -------
     tuple of int
         Start and stop indices for the given rank.
     """
+    if min_chunk is not None and min_chunk > 0 and size > 1 and length > 0:
+        active = max(1, min(size, length // min_chunk))
+        if active < size:
+            if rank >= active:
+                return length, length
+            return get_balanced_bounds(length, rank, active)
+
     quotient, remainder = divmod(length, size)
     start = rank * quotient + min(rank, remainder)
     return start, start + quotient + int(rank < remainder)

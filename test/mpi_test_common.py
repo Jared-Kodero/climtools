@@ -12,11 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from climtools import mpi, xgeo
-from climtools.xarray.core import MPIXarray
+import xarray as xr
 from mock_dataset import PATH, PATH2D, create_dataset
 
-import xarray as xr
+from climtools import mpi, xgeo
+from climtools.xarray.core import MPIXarray
 
 RESULTS: list[tuple[str, str, bool | None, str]] = []
 
@@ -37,6 +37,29 @@ def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
     NotImplementedError under an unsupported partition shape -- reported
     as SKIP, not FAIL."""
     RESULTS.append((op, case, ok, msg))
+
+
+#: Substring of the ValueError halo_exchange() raises when some rank's
+#: local partition along the requested dimension is shorter than the
+#: before/after halo width being asked of it (see
+#: climtools.xarray.arithmetic.halo_exchange's docstring). Every
+#: halo-based op -- rolling_reduce, coarsen_reduce, diff, shift,
+#: differentiate, ffill, bfill, roll, ... -- funnels through the same
+#: halo_exchange() and so can hit this identical, deliberate refusal
+#: whenever a fixture's uneven/undersized partition (see UNEVEN_GLOBAL
+#: above) meets a large enough halo width at a given rank count; it is
+#: not a bug in the op itself. `is_declared_halo_refusal` is the single
+#: place that recognizes this pattern, used by every mpi_test_*.py
+#: module's run/except logic so a genuine architectural refusal is
+#: always classified as a SKIP (`record(..., None, ...)`), never
+#: mischaracterized as a FAIL, regardless of which module raised it.
+_DECLARED_HALO_REFUSAL = "shorter than the requested halo"
+
+
+def is_declared_halo_refusal(exc: Exception) -> bool:
+    """True if `exc` is halo_exchange()'s declared undersized-partition
+    ValueError rather than a genuine, unexpected failure."""
+    return isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
 
 
 def local_of(value):
@@ -62,7 +85,7 @@ def build_fixtures() -> Fixtures:
     'lon')) -- every test module compares against the same underlying
     data, just partitioned differently. Also builds a small, separate,
     deliberately-uneven 1D DataArray fixture (see `UNEVEN_GLOBAL`)."""
-    create_dataset(n_time=24 * 30, resolution_deg=0.25, plev_step=-100)
+    create_dataset(n_time=24 * 30, resolution_deg=0.25, plev_step=100)
 
     native = xr.open_dataset(PATH).load()
     dist = xgeo.mpi_open_dataset(PATH, mpi, partition_dim="time", log_partitions=True)

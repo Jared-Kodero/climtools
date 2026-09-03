@@ -7,11 +7,12 @@ import shutil
 from pathlib import Path
 
 import numpy as np
-from climtools import mpi
-
+import pandas as pd
 import xarray as xr
 
-OUTPUT_DIR = (Path.home() / "jobtmp" / "mpi_test").resolve()
+from climtools import mpi
+
+OUTPUT_DIR = (Path.home() / "scratch" / "mpi_test").resolve()
 PATH = OUTPUT_DIR / "mock_data.nc"
 PATH2D = OUTPUT_DIR / "mock_data2d.nc"
 
@@ -19,6 +20,9 @@ PATH2D = OUTPUT_DIR / "mock_data2d.nc"
 # ---------------------------------------------------------------------------
 # Shared, whole-suite geophysical mock dataset
 # ---------------------------------------------------------------------------
+
+
+from pathlib import Path
 
 
 def build_dataset(
@@ -40,51 +44,33 @@ def build_dataset(
     if isinstance(n_time, bool) or not isinstance(n_time, int) or n_time < 1:
         raise ValueError("n_time must be a positive integer.")
 
-    time = np.arange(n_time, dtype=np.float64)
     n_lat = int(180 / resolution_deg) + 1
-    lat = np.linspace(-90, 90, n_lat, dtype=np.float32)
     n_lon = int(360 / resolution_deg)
+
+    time_dt = pd.date_range(start="1970-01-01 00:00:00", periods=n_time, freq="h")
+    plev = np.arange(1000.0, -1.0, -plev_step, dtype=np.float32)
+    lat = np.linspace(-90, 90, n_lat, dtype=np.float32)
     lon = np.linspace(-180, 180, n_lon, endpoint=False, dtype=np.float32)
-    plev = np.arange(1000.0, -1.0, plev_step, dtype=np.float32)
 
-    lat_rad = np.deg2rad(lat)[None, :, None]
-    lon_rad = np.deg2rad(lon)[None, None, :]
-    time_phase = (time % 24.0)[:, None, None]
-
+    # Generate mock precipitation from 0 up to 50 mm/hr max intensity
+    max_precipitation_mm_hr = 50.0
     precipitation = (
-        1.0e-4
-        * (1.25 + np.cos(lat_rad) ** 2)
-        * (1.0 + 0.15 * np.sin(lon_rad))
-        * (1.0 + 0.01 * time_phase)
-    ).astype(np.float32)
-
-    surface_temperature_base = (
-        288.0 - 42.0 * np.sin(lat_rad) ** 2 + 2.0 * np.cos(lon_rad)
-    ).astype(np.float32)
-    surface_temperature = (surface_temperature_base + 0.05 * time_phase).astype(
-        np.float32
+        np.random.rand(n_time, n_lat, n_lon).astype(np.float32)
+        * max_precipitation_mm_hr
     )
 
-    pressure_cooling = (
-        7.0 * np.log(1000.0 / np.clip(plev.astype(np.float64), 1.0, None))
-    ).astype(np.float32)[:, None, None]
-    air_temperature = surface_temperature_base[0][None, :, :] - pressure_cooling
+    air_temperature = (
+        200.0 + np.random.rand(len(plev), n_lat, n_lon).astype(np.float32) * 100.0
+    )
 
-    lat_index = np.arange(n_lat)[:, None]
-    lon_index = np.arange(n_lon)[None, :]
-    sea_land_mask = ((lat_index + lon_index) % 3).astype(np.int8)
+    sea_land_mask = np.random.randint(0, 2, size=(n_lat, n_lon), dtype=np.int8)
 
     ds = xr.Dataset(
         data_vars={
             "pr": (
                 ("time", "lat", "lon"),
                 precipitation,
-                {"units": "kg m-2 s-1", "long_name": "precipitation rate"},
-            ),
-            "t2m": (
-                ("time", "lat", "lon"),
-                surface_temperature,
-                {"units": "K", "long_name": "2 m air temperature"},
+                {"units": "mm/hr", "long_name": "precipitation rate"},
             ),
             "t": (
                 ("plev", "lat", "lon"),
@@ -98,17 +84,15 @@ def build_dataset(
             ),
         },
         coords={
-            "time": (
-                "time",
-                time.astype(np.float64),
-                {"units": "hours since 1970-01-01 00:00:00"},
-            ),
+            "time": time_dt,
             "plev": ("plev", plev, {"units": "hPa", "positive": "down"}),
             "lat": ("lat", lat, {"units": "degrees_north"}),
             "lon": ("lon", lon, {"units": "degrees_east"}),
         },
         attrs={"title": "climtools MPI test suite mock dataset"},
     )
+
+    ds = ds.chunk("auto")
     ds.to_netcdf(path)
 
 
@@ -124,7 +108,7 @@ def create_dataset(
     path2d = path2d or PATH2D
 
     if mpi.comm.rank == 0:
-        shutil.rmtree(path.parent)
+        shutil.rmtree(path.parent, ignore_errors=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         build_dataset(path, n_time, resolution_deg, plev_step)
 

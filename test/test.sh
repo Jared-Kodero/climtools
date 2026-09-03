@@ -23,3 +23,5 @@ for n in 4 8 16 "$SLURM_NTASKS"; do
     echo "Running benchmarks with n=$n..."
     srun -n "$n" python benchmark.py --size 20000000 --reps 5 --warmup 2
 done
+
+python summarize_benchmarks.py

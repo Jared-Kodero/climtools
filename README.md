@@ -1,7 +1,7 @@
 # climtools
 
 <p align="center">
-  <strong>Climate-data analysis, geospatial processing, and visualization built around Xarray.</strong>
+  <strong>Climate-data analysis, geospatial processing, visualization, and distributed Xarray workflows.</strong>
 </p>
 
 <p align="center">
@@ -13,23 +13,26 @@
 
 <p align="center">
   <a href="#installation">Installation</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#xarray-accessor">Xarray accessor</a> ·
   <a href="#plotting">Plotting</a> ·
-  <a href="#geospatial-tools">Geospatial tools</a> ·
-  <a href="#statistics-and-colormaps">Statistics & colormaps</a> ·
   <a href="#mpi-xarray">MPI-Xarray</a> ·
   <a href="#testing">Testing</a>
 </p>
 
-`climtools` is a compact toolkit for climate and geoscience workflows. It provides Cartopy-based plotting, geospatial operations, statistical analysis, scientific colormaps, CDO integration, NetCDF utilities, and optional MPI-parallel Xarray workflows for larger datasets.
+`climtools` is a compact toolkit for climate and geoscience workflows built around [Xarray](https://xarray.dev/). It combines geospatial processing, Cartopy-based visualization, statistical analysis, scientific colormaps, NetCDF utilities, CDO integration, and an MPI-parallel Xarray layer for distributed-memory workloads.
+
+A central design feature is the `.xgeo` Xarray accessor. After importing `climtools`, common operations can be called directly from `xarray.DataArray` and `xarray.Dataset` objects instead of repeatedly passing the object into standalone helper functions.
 
 ## Highlights
 
-- **Geospatial analysis**: regridding, masking, transects, local solar time, and NetCDF output.
-- **Climate visualization**: Cartopy maps, faceting, overlays, vector fields, significance masks, and map features.
-- **Statistics**: trends, correlations, and difference-of-means testing.
-- **Scientific colormaps**: local IPCC tables, Matplotlib, and cmocean palettes.
-- **CDO utilities**: a thin Python interface to Climate Data Operators.
-- **Distributed Xarray**: MPI-based partitioning, halo-aware operations, reductions, redistribution, and parallel NetCDF output.
+* **Xarray-native API** through `da.xgeo` and `ds.xgeo`.
+* **Geospatial analysis** including regridding, masking, transects, longitude handling, and local solar time.
+* **Publication-oriented maps** with Cartopy projections, faceting, overlays, vector fields, significance masks, and animation.
+* **Statistics** for trends, correlations, and difference-of-means testing.
+* **Scientific colormaps** from local IPCC tables, Matplotlib, and cmocean.
+* **NetCDF and CDO workflows** for common climate-data processing tasks.
+* **MPI-Xarray** for distributed partitioning, halo-aware operations, reductions, redistribution, and parallel NetCDF output.
 
 ## Installation
 
@@ -39,7 +42,7 @@ Install from PyPI:
 pip install climtools
 ```
 
-Install optional regridding support:
+Optional regridding support uses `xesmf`:
 
 ```bash
 pip install "climtools[regrid]"
@@ -55,19 +58,38 @@ pip install -e .
 
 Python **3.12 or newer** is required.
 
-Some features use external command-line tools:
+For MPI-collective parallel NetCDF-4 output across multiple ranks, `netCDF4` and `mpi4py` must be linked against a parallel-enabled MPI/HDF5/NetCDF-C stack. The repository includes [`env/setup_env.sh`](env/setup_env.sh) and [`env/environment.yml`](env/environment.yml) for this environment.
 
-- `climtools.cdo`: `cdo` / `nco`
-- `xgeo.plot.animate`: `ffmpeg`
+Some features also require external executables on `PATH`:
 
-See [`env/environment.yml`](env/environment.yml) for the conda-forge environment used by the project.
+* `climtools.cdo`: `cdo` and `nco`
+* `da.xgeo.plot.animate(...)`: `ffmpeg`
 
-## Plotting
+## Quick start
 
-Geographic plotting is available through `climtools.xgeo.plot`.
+Importing `climtools` registers the `.xgeo` accessor on Xarray objects.
 
 ```python
+import xarray as xr
+
+import climtools
 from climtools import cmaps
+
+
+ds = xr.open_dataset("climate.nc")
+t2m = ds["t2m"]
+
+plot = t2m.xgeo.plot.geo(
+    method="contourf",
+    cmap=cmaps.temp_div(),
+    levels=21,
+    gridlines=True,
+)
+```
+
+The same plotting operation is also available through the functional API:
+
+```python
 from climtools import xgeo as xg
 
 plot = xg.plot.geo(
@@ -79,12 +101,37 @@ plot = xg.plot.geo(
 )
 ```
 
-`GeoPlot` supports chainable overlays, making it straightforward to combine scalar fields, contours, vectors, and significance masks.
+## Xarray accessor
+
+Most day-to-day geospatial operations can be called directly on Xarray objects. The bound `DataArray` or `Dataset` is supplied automatically.
+
+| Task                 | Xarray-style API                       | Functional API                                |
+| -------------------- | -------------------------------------- | --------------------------------------------- |
+| Plot a field         | `da.xgeo.plot.geo(...)`                | `xgeo.plot.geo(da, ...)`                      |
+| Animate a field      | `da.xgeo.plot.animate(...)`            | `xgeo.plot.animate(da, ...)`                  |
+| Regrid               | `ds.xgeo.remap(target)`                | `xgeo.remap(ds, target)`                      |
+| Apply a mask         | `ds.xgeo.mask(...)`                    | `xgeo.mask(ds, ...)`                          |
+| Select a transect    | `da.xgeo.sel_transect(...)`            | `xgeo.sel_transect(da, ...)`                  |
+| Convert longitude    | `ds.xgeo.to_lon180()`                  | `xgeo.to_lon180(ds)`                          |
+| Add local solar time | `ds.xgeo.add_local_solar_time()`       | `xgeo.add_local_solar_time(ds)`               |
+| Write NetCDF         | `ds.xgeo.to_netcdf(...)`               | `xgeo.to_netcdf(ds, ...)`                     |
+| Compute trends       | `da.xgeo.calc.trends(...)`             | `climtools.stats.trends(da, ...)`             |
+| Correlate fields     | `da.xgeo.calc.corr(other, dim="time")` | `climtools.stats.corr(da, other, dim="time")` |
+| Preprocess ERA5      | `ds.xgeo.preprocess.era5()`            | `xgeo.preprocess.era5(ds)`                    |
+
+Plotting and single-field statistics are defined on `DataArray`, while shared geospatial and NetCDF operations are available on both `DataArray` and `Dataset`. For a variable stored in a dataset, use for example:
+
+```python
+ds["pr"].xgeo.plot.geo(method="contourf")
+```
+
+## Plotting
+
+`da.xgeo.plot.geo(...)` returns a `GeoPlot`, which can be extended with chainable overlays.
 
 ```python
 (
-    xg.plot.geo(
-        t2m,
+    t2m.xgeo.plot.geo(
         method="contourf",
         cmap=cmaps.temp_div(),
         levels=21,
@@ -101,131 +148,128 @@ Available overlays include `contour`, `contourf`, `pcolormesh`, `imshow`, `scatt
 Faceting follows Xarray-style dimensions:
 
 ```python
-xg.plot.geo(monthly, col="month", col_wrap=4, method="contourf")
+monthly.xgeo.plot.geo(
+    col="month",
+    col_wrap=4,
+    method="contourf",
+)
 ```
 
-Input coordinates are interpreted in Plate Carrée. The display projection can be supplied explicitly or inferred from the data extent.
+The plotting accessor also exposes animation and vector/significance helpers:
 
-See [`viz/plotting.py`](viz/plotting.py) for the plotting implementation and [`viz/cmaps.py`](viz/cmaps.py) for the colormap catalog.
+```python
+monthly.xgeo.plot.animate(dim="time", outfile="animation.mp4")
+u10.xgeo.plot.quiver(v10, subsample=4)
+p_value.xgeo.plot.significance(level=0.05)
+```
 
-## Geospatial tools
+Input coordinates are interpreted in Plate Carrée. The display projection can be supplied explicitly or inferred from the data extent. See [`viz/plotting.py`](viz/plotting.py) for the complete plotting API and [`viz/cmaps.py`](viz/cmaps.py) for the colormap catalog.
 
-`climtools.xgeo` collects geospatial utilities used in climate-analysis workflows, including:
+## Geospatial and statistical tools
 
-- regridding
-- masking
-- transects
-- local solar time
-- NetCDF output
+The `.xgeo` accessor keeps common transformations close to the data:
 
-Regridding imports `xesmf` only when required, so the rest of the package can be used without the optional regridding dependency.
+```python
+# Regrid a Dataset to another horizontal grid.
+regridded = ds.xgeo.remap(target_grid, method="bilinear")
 
-## Statistics and colormaps
+# Convert longitudes to [-180, 180).
+wrapped = ds.xgeo.to_lon180()
 
-`climtools.stats` provides common statistical operations for geophysical data, including trends, correlations, and difference-of-means testing.
+# Add mean local solar time.
+with_lst = ds.xgeo.add_local_solar_time()
 
-`climtools.cmaps` provides scientific colormaps from local IPCC tables, Matplotlib, and cmocean.
+# Select a geographic transect.
+section = ds["t2m"].xgeo.sel_transect(
+    x=-75.0,
+    y=35.0,
+    orientation=45.0,
+    width=2.0,
+)
+
+# Pointwise trend statistics.
+trend = ds["t2m"].xgeo.calc.trends(dim="time")
+```
+
+`climtools.stats` provides the corresponding statistical functions directly, including correlations, pointwise trend estimation, and difference-of-means significance testing.
+
+## Colormaps
+
+`climtools.cmaps` collects scientific palettes from local IPCC color tables, Matplotlib, and cmocean.
+
+```python
+from climtools import cmaps
+
+cmap = cmaps.temp_div()
+```
 
 ## CDO utilities
 
-`climtools.cdo` provides a thin Python wrapper around the CDO command-line tool for workflows that combine Python analysis with Climate Data Operators.
-
-The `cdo` and `nco` executables must be available on `PATH`.
-
-## Package overview
-
-| Namespace | Purpose | Source |
-| --- | --- | --- |
-| `climtools.xgeo` | Geospatial operations, plotting access, NetCDF output, and MPI-Xarray entry points | [`core/xgeo.py`](core/xgeo.py), [`xarray/io.py`](xarray/io.py) |
-| `climtools.plotting` | Cartopy-based geographic plotting | [`viz/plotting.py`](viz/plotting.py) |
-| `climtools.stats` | Statistical analysis | [`core/stats.py`](core/stats.py) |
-| `climtools.cmaps` | Scientific colormaps | [`viz/cmaps.py`](viz/cmaps.py) |
-| `climtools.cdo` | CDO command-line wrapper | [`cdo/pycdo.py`](cdo/pycdo.py) |
-| `climtools.mpi` | Shared MPI context and communicator | [`mpi/context.py`](mpi/context.py) |
+`climtools.cdo` is a thin Python interface to Climate Data Operators for workflows that mix Xarray analysis with command-line CDO/NCO processing. The required executables must be available on `PATH`.
 
 ## MPI-Xarray
 
-For distributed workloads, `climtools.xgeo` exposes an MPI-parallel layer for Xarray `Dataset` and `DataArray` objects. Each rank owns a non-overlapping portion of the global object and can use mostly ordinary Xarray-style operations.
+For workloads that exceed convenient single-process memory or justify distributed computation, `climtools.xgeo` provides an MPI-parallel Xarray layer. Each rank owns a non-overlapping partition of the global object while retaining an Xarray-like interface.
 
 ```python
 import numpy as np
 
 from climtools import mpi, xgeo
 
-# Each rank reads only its own time slice.
-dist = xgeo.mpi_open_dataset("data.nc", mpi, partition_dim="time")
 
-# Rank-local operations.
+dist = xgeo.mpi_open_dataset(
+    "data.nc",
+    mpi,
+    partition_dim="time",
+)
+
 logged = np.log(dist["pr"])
 rolled = dist.rolling_reduce("time", window=5, reduce="mean")
-
-# Cross-rank reduction.
 global_mean = dist.mean(dim="time")
 ```
 
+Primary constructors are:
 
-### Creating distributed objects
+| Function                    | Purpose                                               |
+| --------------------------- | ----------------------------------------------------- |
+| `mpi_open_dataset(...)`     | Open a NetCDF file with rank-local partitioned reads. |
+| `mpi_partition_data(...)`   | Partition an already materialized Xarray object.      |
+| `mpi_create_dataarray(...)` | Construct a distributed `DataArray`.                  |
+| `mpi_create_dataset(...)`   | Construct a distributed multi-variable `Dataset`.     |
 
-| Function | Purpose |
-| --- | --- |
-| `mpi_open_dataset(...)` | Open a NetCDF file and load only each rank's assigned slice. |
-| `mpi_partition_data(...)` | Partition an already materialized Xarray object. |
-| `mpi_create_dataarray(...)` | Construct a distributed `DataArray` without creating the full global array. |
-| `mpi_create_dataset(...)` | Construct a distributed multi-variable `Dataset`. |
+Supported distributed operations include rank-local NumPy ufuncs, halo-aware rolling and finite-difference operations, collective reductions, grouped reductions, scans, interpolation, redistribution, and collective NetCDF output.
 
-### Partitioning
+Halo-aware operations exchange only the neighboring data required by the operation. For constructors that support `min_partition_size`, set it at least as large as the widest halo required by downstream operations when partitions may become very small.
 
-Partitions can span one dimension or multiple dimensions using an MPI Cartesian topology. Ranks receive balanced, non-overlapping slices whose union covers the global domain exactly once.
+Parallel output is available with:
 
-Distributed objects retain partition metadata including local bounds, global sizes, partition dimensions, and Cartesian-grid information where applicable.
-
-### Distributed operations
-
-| Category | Examples | Communication |
-| --- | --- | --- |
-| Rank-local | NumPy ufuncs, `where`, `evaluate`, `apply` | None when local |
-| Halo-aware | `rolling_reduce`, `coarsen_reduce`, `diff`, `shift`, `differentiate`, `roll`, bounded `ffill` / `bfill` | Neighbor exchange |
-| Reductions | `mean`, `sum`, `min`, `max`, `var`, `std`, `prod`, `median`, `any`, `all`, `first`, `last` | Collective communication |
-| Grouped reductions | `groupby(...).mean/sum/min/max/count` | Cross-rank reduction |
-| Scans | `cumsum`, unbounded `ffill` / `bfill` | Dimension-scoped propagation |
-| Redistribution | `sortby`, `reindex`, `align`, `repartition` | Point-to-point redistribution |
-| Interpolation | `interp` | Dimension-scoped `Allgather` |
-| Parallel output | `to_netcdf(..., parallel=True)` | Collective HDF5 write |
-
-Halo-aware operations exchange only the neighboring data required by the operation. Neighbor topology is cached per communicator and partition layout, while halo values are exchanged fresh for each operation.
-
-### Performance
-
-MPI-Xarray is designed for workloads where distributed memory or sufficiently large computations justify MPI communication and metadata overhead. Most operations keep memory proportional to each rank's local partition plus bounded halo data rather than reconstructing the full global array.
-
-## Testing
-
-Run the MPI-Xarray correctness suite:
-
-```bash
-mpirun --oversubscribe -n 4 python test/mpi_test.py
+```python
+dist.to_netcdf("output.nc", parallel=True)
 ```
 
-The suite reports `[PASS]`, `[FAIL]`, and `[SKIP]` per check and exits nonzero on failure. On SLURM systems, [`test/test.sh`](test/test.sh) provides the corresponding cluster entry point.
+Multi-rank collective NetCDF output requires the parallel-enabled NetCDF/HDF5 stack described in [Installation](#installation).
 
-Run the benchmark suite:
+## Package overview
 
-```bash
-mpirun --oversubscribe -n 4 python test/benchmark.py --size 2000000 --reps 5
-```
-
-Benchmark results are printed as Markdown and written to `benchmark_results_n<ranks>.json`.
+| Namespace            | Purpose                                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `climtools.xgeo`     | Geospatial operations, plotting entry points, preprocessing, NetCDF utilities, and MPI-Xarray constructors. |
+| `climtools.plotting` | Cartopy-based geographic plotting implementation.                                                           |
+| `climtools.stats`    | Trends, correlations, and significance testing.                                                             |
+| `climtools.cmaps`    | Scientific colormap catalog.                                                                                |
+| `climtools.cdo`      | CDO/NCO command-line wrapper.                                                                               |
+| `climtools.mpi`      | Shared MPI context and communicator.                                                                        |
 
 ## Links
 
-- [GitHub repository](https://github.com/Jared-Kodero/climtools)
-- [PyPI package](https://pypi.org/project/climtools/)
-- [Environment specification](env/environment.yml)
-- [Plotting source](viz/plotting.py)
-- [Colormaps](viz/cmaps.py)
-- [MPI-Xarray tests](test/mpi_test.py)
-- [Benchmarks](test/benchmark.py)
-- [License](LICENSE)
+* [GitHub repository](https://github.com/Jared-Kodero/climtools)
+* [PyPI package](https://pypi.org/project/climtools/)
+* [Environment specification](env/environment.yml)
+* [Plotting source](viz/plotting.py)
+* [Xarray accessors](xarray/accessors.py)
+* [MPI-Xarray tests](test/mpi_test.py)
+* [Benchmarks](test/benchmark.py)
+* [License](LICENSE)
 
 ## License
 

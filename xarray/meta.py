@@ -7,9 +7,8 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
+from mpi4py import MPI
 
 if TYPE_CHECKING:
     from collections.abc import Callable

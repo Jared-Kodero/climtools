@@ -274,7 +274,6 @@ class MPIContext(MPIDiagnostics):
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
         self._install_abort_hook()
-        self.missing_pnetcdf()
 
     @property
     def to_children(self) -> ToChildrenContext:
