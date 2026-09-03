@@ -370,6 +370,22 @@ bench(
     check_native_fn=lambda: native_full(NC).isel(x=slice(0, NC // 2)),
 )
 
+# mpi_partition_data: redistributing data every rank already holds in
+# full (e.g. after a broadcast, or independently computed identically
+# everywhere) into a genuine, non-overlapping MPI partition. This has no
+# native-Xarray counterpart at all -- plain xarray has no notion of
+# "which rank owns which slice" to redistribute in the first place, so
+# forcing a native comparison here would be meaningless rather than
+# just unfavorable. Marked no_native_counterpart=True instead of
+# comparing against nothing.
+replicated_full = native_full(N) if mpi.comm.rank == 0 else None
+bench(
+    "mpi_partition_data",
+    lambda: local_of(xgeo.mpi_partition_data(replicated_full, mpi, dim="x", log_partitions=False)),
+    lambda: None,
+    no_native_counterpart=True,
+)
+
 rprint("\nrunning native-only timings (rank 0 alone)...")
 if not args.mpi_only:
     run_native_phase()
