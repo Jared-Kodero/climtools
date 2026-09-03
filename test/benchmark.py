@@ -509,7 +509,18 @@ if mpi.comm.rank == 0:
             )
             continue
         nat = f"{r['native_s']:.4f} s" if r["native_s"] is not None else "n/a"
-        sp = f"{r['speedup']:.2f}x" if r["speedup"] is not None else "n/a"
+        # Slower-than-native is flagged inline, not left for the reader to
+        # infer from a sub-1x number: speedup<1 at a realistic (--size,
+        # not --check-size) problem size is a genuine open optimization
+        # question for this op at this rank count, so it is marked the
+        # same way a FAIL would be, not silently reported as a plain
+        # figure among the others.
+        if r["speedup"] is not None:
+            sp = f"{r['speedup']:.2f}x"
+            if r["speedup"] < 1.0:
+                sp += " SLOWER"
+        else:
+            sp = "n/a"
         print(
             f"| `{r['op']}` | {r['ranks']} | {nat} | {r['mpi_s']:.4f} s | {sp} | "
             f"{r['accuracy']} | {r['dtype']} |"

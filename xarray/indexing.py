@@ -211,6 +211,11 @@ def isel_scalar(
     if dim_comm.rank == owner:
         local_index = normalized - int(meta["starts"][dim])
         result = strip_mpi_meta(value).isel({dim: local_index, **other_indexers})
+        # Materialize before it gets pickled by bcast below, for the same
+        # reason median()/cumsum()/the unbounded fill scan do: an isel
+        # slice of a still-lazy `value` stays lazy, and a lazy dask
+        # graph is not guaranteed picklable.
+        result = result.load()
     result = dim_comm.bcast(result, root=owner)
     remaining_dims = tuple(
         d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
@@ -460,6 +465,9 @@ def sel_scalar(
                         tolerance=tolerance,
                         drop=drop,
                     )
+                # Materialize before it gets pickled by bcast below (same
+                # reasoning as the sibling scalar-selection function above).
+                result = result.load()
             except BaseException as exc:
                 error = exc
         mpi_context.raise_if_error(error, "distributed scalar selection", comm=dim_comm)
@@ -506,6 +514,10 @@ def sel_scalar(
         )
     owner = owners[0]
     payload = result if dim_comm.rank == owner else None
+    # Materialize before it gets pickled by bcast below (same reasoning as
+    # the sibling scalar-selection functions above).
+    if payload is not None:
+        payload = payload.load()
     result = dim_comm.bcast(payload, root=owner)
     if meta is not None:
         remaining_dims = tuple(

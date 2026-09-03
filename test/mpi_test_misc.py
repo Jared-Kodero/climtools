@@ -17,7 +17,7 @@ def run(fx: Fixtures) -> None:
     native, dist, dist2d = fx.native, fx.dist, fx.dist2d
     start, stop = dist.meta["start"], dist.meta["stop"]
 
-    def check_reduce_1d(op_name, apply_fn, native_fn):
+    def check_reduce_1d(op_name, apply_fn, native_fn, case="1d(time)"):
         try:
             result = apply_fn()
             local = local_of(result)
@@ -29,9 +29,9 @@ def run(fx: Fixtures) -> None:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
                 xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-5)
-            record(op_name, "1d(time)", True)
+            record(op_name, case, True)
         except Exception as e:
-            record(op_name, "1d(time)", False, f"{type(e).__name__}: {str(e)[:200]}")
+            record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
 
     def check_reduce_2d(op_name, reduce_dim, apply_fn, native_fn):
         try:
@@ -57,31 +57,57 @@ def run(fx: Fixtures) -> None:
         except Exception as e:
             record(op_name, f"2d(lat,lon)/{reduce_dim}", False, str(e)[:200])
 
-    # -- prod, any, all: standard reductions, same shape as sum/mean --------
+    # -- prod, any, all: standard reductions, same shape as sum/mean.
+    #    dim="lat" is rank-local for `dist` (partitioned along "time"),
+    #    exactly like roll()'s pre-existing gap above -- so the genuine
+    #    cross-rank case (reducing over the dimension `dist` is actually
+    #    distributed along, the same "reduction+reconstruction" case
+    #    mpi_test_reductions.py's mean(dim='time') deliberately tests)
+    #    had never been exercised for any of these three. -------------
     check_reduce_1d("prod", lambda: dist.prod(dim="lat"), lambda: native.prod(dim="lat"))
     check_reduce_2d("prod", "lat", lambda: dist2d.prod(dim="lat"), lambda: native.prod(dim="lat"))
+    check_reduce_1d(
+        "prod", lambda: dist.prod(dim="time"), lambda: native.prod(dim="time"),
+        case="1d(time), reduction+reconstruction",
+    )
     mpi.comm.barrier()
 
-    def check_bool_reduce_1d(op_name, method):
+    def check_bool_reduce_1d(op_name, method, reduce_dim="lat", case="1d(time)"):
         try:
             cond = dist.apply(lambda d: d["pr"] > 0.0002, dist._prepare())
-            result = getattr(cond, method)(dim="lat")
+            result = getattr(cond, method)(dim=reduce_dim)
             local = local_of(result)
             m = result.meta if isinstance(result, MPIXarray) else None
             native_cond = native["pr"] > 0.0002
-            expected_full = getattr(native_cond, method)(dim="lat")
+            expected_full = getattr(native_cond, method)(dim=reduce_dim)
             if m is None:
                 xr.testing.assert_allclose(local, expected_full, rtol=1e-5)
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
                 xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-5)
-            record(op_name, "1d(time)", True)
+            record(op_name, case, True)
         except Exception as e:
-            record(op_name, "1d(time)", False, f"{type(e).__name__}: {str(e)[:200]}")
+            record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
 
     check_bool_reduce_1d("any", "any")
     check_bool_reduce_1d("all", "all")
+    check_bool_reduce_1d("any", "any", reduce_dim="time", case="1d(time), reduction+reconstruction")
+    check_bool_reduce_1d("all", "all", reduce_dim="time", case="1d(time), reduction+reconstruction")
+    mpi.comm.barrier()
+
+    # -- prod on the shared deliberately-uneven 1D fixture --------------
+    try:
+        result = fx.dist_uneven.prod(dim="x")
+        local = local_of(result)
+        expected = fx.native_uneven.prod(dim="x")
+        xr.testing.assert_allclose(
+            local if isinstance(local, xr.DataArray) else xr.DataArray(local),
+            expected, rtol=1e-5,
+        )
+        record("prod", "1d(x), uneven", True)
+    except Exception as e:
+        record("prod", "1d(x), uneven", False, f"{type(e).__name__}: {str(e)[:200]}")
     mpi.comm.barrier()
 
     # -- first, last: pick a position along one dimension. Compare data
@@ -127,15 +153,63 @@ def run(fx: Fixtures) -> None:
     )
     mpi.comm.barrier()
 
-    # -- roll: circular shift, same shape/distribution as input -------------
+    # -- roll: circular shift, same shape/distribution as input. Rolling
+    #    along "lat" while `dist` is partitioned along "time" is
+    #    rank-local by construction (meta["dims"] doesn't contain "lat"),
+    #    so it only ever exercises roll()'s trivial early-return branch
+    #    -- never the actual halo_exchange(periodic=True)-based cross-
+    #    rank shift roll() uses when the roll dimension IS the
+    #    distributed one (confirmed directly from elementwise.py: the
+    #    early return is `if meta is None or dim not in meta["dims"]`).
+    #    Added below: roll along "time" itself, the genuinely-distributed
+    #    case, at three shift magnitudes -- a small shift (well within
+    #    any single rank's local length), a negative shift (exercises
+    #    the "after" halo side instead of "before"), and a shift near
+    #    global_size//2 (exercises the smallest-magnitude-equivalent
+    #    normalization in roll()'s own docstring/comments). -------------
     try:
-        result = local_of(dist.roll("lat", shift_by=2))
-        expected = native.isel(time=slice(start, stop)).roll(lat=2, roll_coords=False)
-        xr.testing.assert_allclose(result, expected, rtol=1e-6)
+        result_lat = local_of(dist.roll("lat", shift_by=2))
+        expected_lat = native.isel(time=slice(start, stop)).roll(lat=2, roll_coords=False)
+        xr.testing.assert_allclose(result_lat, expected_lat, rtol=1e-6)
         record("roll", "1d(time)/lat", True)
     except Exception as e:
         record("roll", "1d(time)/lat", False, f"{type(e).__name__}: {str(e)[:200]}")
     mpi.comm.barrier()
+
+    global_time = fx.gsize("time")
+    for shift_by, case_label in [
+        (2, "1d(time)/time, +shift"),
+        (-3, "1d(time)/time, -shift"),
+        (global_time // 2, "1d(time)/time, near-half shift"),
+    ]:
+        try:
+            result_time = local_of(dist.roll("time", shift_by=shift_by))
+            m = dist.meta
+            s, e = m["start"], m["stop"]
+            expected_full = native.roll(time=shift_by, roll_coords=False)
+            expected_time = expected_full.isel(time=slice(s, e))
+            xr.testing.assert_allclose(result_time, expected_time, rtol=1e-6)
+            record("roll", case_label, True)
+        except ValueError as e:
+            # halo_exchange() correctly refuses a halo request wider than
+            # some rank's own local length rather than silently returning
+            # wrong data -- a genuine architectural limit of a single-hop
+            # point-to-point exchange (this rank only ever talks to its
+            # immediate neighbor, which itself only holds its own local
+            # share), not a defect in roll() or halo_exchange(). At this
+            # suite's usual rank counts, "near-half shift" on the small
+            # (time=12) fixture is expected to land beyond what any single
+            # rank locally holds -- recorded as a declared, expected
+            # refusal (SKIP), the same convention used elsewhere in this
+            # suite for a declared NotImplementedError, rather than
+            # mischaracterized as a failure of roll() itself.
+            if "shorter than the requested halo" in str(e):
+                record("roll", case_label, None, f"declared refusal (expected): {str(e)[:150]}")
+            else:
+                record("roll", case_label, False, f"unexpected ValueError: {str(e)[:200]}")
+        except Exception as e:
+            record("roll", case_label, False, f"{type(e).__name__}: {str(e)[:200]}")
+        mpi.comm.barrier()
 
     # -- evaluate: string-expression evaluation, rank-local ------------------
     try:

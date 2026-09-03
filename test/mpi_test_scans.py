@@ -150,6 +150,18 @@ def run(fx: Fixtures) -> None:
 
     check_single_dim("cumsum", lambda: dist.cumsum("time"), lambda: native.cumsum("time"))
     check_multidim("cumsum", lambda: dist2d.cumsum("lat"), lambda: native.cumsum("lat"), moved_dim="lat")
+    # cumsum carries a running total forward across ranks (each rank's
+    # start value depends on an Exscan/prefix-sum over every rank before
+    # it), so a rank holding very few -- or, at the extreme, zero --
+    # elements is exactly the case most likely to expose an off-by-one in
+    # that carry. dist/time=12 and dist2d/lat=19 both happen to give
+    # every rank at least a couple of elements at the suite's usual rank
+    # counts; the shared uneven fixture (mpi_test_common.UNEVEN_GLOBAL=21)
+    # is deliberately not guaranteed to.
+    check_single_dim(
+        "cumsum", lambda: fx.dist_uneven.cumsum("x"), lambda: fx.native_uneven.cumsum("x"),
+        case="1d(x), uneven",
+    )
     mpi.comm.barrier()
 
     check_single_dim(

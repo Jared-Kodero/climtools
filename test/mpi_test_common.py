@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import xarray as xr
 
 from climtools import mpi, xgeo
@@ -18,6 +19,17 @@ from climtools.xarray.core import MPIXarray
 from mock_dataset import _path, create_dataset
 
 RESULTS: list[tuple[str, str, bool | None, str]] = []
+
+#: A 1D length that is not divisible by 2, 3, 4, 5, or 6 -- uneven for any
+#: rank count in that range except an exact divisor, and (unlike the
+#: shared 1D `dist` fixture's time=12, which divides evenly at every rank
+#: count the suite normally runs at) genuinely exercises the deficient
+#: (some rank(s) hold none/less than a halo width) code path deliberately
+#: rather than by incidental luck of a 2D Cartesian factorization. Every
+#: module that wants a deterministically-uneven 1D case should use
+#: `Fixtures.dist_uneven`/`native_uneven` rather than building its own --
+#: this was previously duplicated ad hoc inside mpi_test_halo_ops.py.
+UNEVEN_GLOBAL = 21
 
 
 def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
@@ -37,6 +49,8 @@ class Fixtures:
     native: xr.Dataset
     dist: MPIXarray
     dist2d: MPIXarray
+    native_uneven: xr.DataArray
+    dist_uneven: MPIXarray
 
     def gsize(self, dim: str) -> int:
         return self.native.sizes[dim]
@@ -46,7 +60,8 @@ def build_fixtures() -> Fixtures:
     """Generate the shared mock dataset once and open it two ways: a 1D
     partition (dim='time') and a 2D Cartesian partition (dims=('lat',
     'lon')) -- every test module compares against the same underlying
-    data, just partitioned differently."""
+    data, just partitioned differently. Also builds a small, separate,
+    deliberately-uneven 1D DataArray fixture (see `UNEVEN_GLOBAL`)."""
     create_dataset(n_time=12, resolution_deg=10, plev_step=-250)
     mpi.comm.barrier()
     native = xr.open_dataset(_path).load()
@@ -54,7 +69,23 @@ def build_fixtures() -> Fixtures:
     dist2d = xgeo.mpi_open_dataset(
         _path, mpi, partition_dim=("lat", "lon"), log_partitions=False
     )
-    return Fixtures(native=native, dist=dist, dist2d=dist2d)
+
+    def fill_uneven(a, b):
+        idx = np.arange(a, b, dtype=np.float64)
+        return np.sin(idx) * (idx + 1.0)
+
+    dist_uneven = xgeo.mpi_create_dataarray(
+        mpi, fill_uneven, dims=("x",), shape={"x": UNEVEN_GLOBAL},
+        dim="x", log_partitions=False, name="v",
+    )
+    idx_global = np.arange(UNEVEN_GLOBAL, dtype=np.float64)
+    native_uneven = xr.DataArray(
+        np.sin(idx_global) * (idx_global + 1.0), dims=("x",), name="v"
+    )
+    return Fixtures(
+        native=native, dist=dist, dist2d=dist2d,
+        native_uneven=native_uneven, dist_uneven=dist_uneven,
+    )
 
 
 def report() -> None:

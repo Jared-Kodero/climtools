@@ -174,6 +174,16 @@ def _cumsum_scan(
         error, "MPI xarray cumsum", signature=("cumsum", str(dim))
     )
     local_cumsum, local_total = locals_or_none
+    # Materialize before gathering, for the same reason median() does:
+    # `.sum(dim)` alone does not force a still-lazy dask-backed `value` to
+    # compute, so `local_total` can still be lazy here, and `comm.gather`
+    # pickles it as-is -- a lazy graph is not guaranteed picklable (e.g. a
+    # local-closure `fill` passed to `mpi_create_dataarray`, as in this
+    # project's own test fixtures). `local_cumsum` does not need the same
+    # treatment: it is never pickled, only added to `exclusive_prefix`
+    # below, and whatever laziness it still carries is resolved by
+    # whatever later materializes the final returned result.
+    local_total = local_total.load()
 
     comm = _dim_comm(mpi_context, meta, dim)
     totals = comm.gather(local_total, root=0)
@@ -295,7 +305,11 @@ def _fill_scan(
         local_filled = value.ffill(dim) if forward else value.bfill(dim)
         edge_slice = local_filled.isel({dim: edge_index}, drop=True)
         has_valid = bool(edge_slice.notnull().all())
-        return local_filled, edge_slice, has_valid
+        # Materialize before it gets pickled by comm.gather() below, for
+        # the same reason median()/cumsum() do: computing has_valid above
+        # forces *that* particular reduction, not edge_slice itself, which
+        # can still carry a lazy dask graph when `value` does.
+        return local_filled, edge_slice.load(), has_valid
 
     local_or_none, error = guarded(_local)
     mpi_context.raise_if_error(
@@ -432,6 +446,19 @@ def median(
 
     _agree(mpi_context, ("median", str(dim), int(meta["global_size"])))
     comm = _dim_comm(mpi_context, meta, dim)
+    # Materialize before gathering: `comm.gather` (unlike the small-scalar
+    # Allreduce every other reduction in this module uses) pickles `value`
+    # itself, and a still-lazy dask-backed array's graph is not guaranteed
+    # picklable in general -- in particular, `mpi_create_dataarray`'s public
+    # `fill` callable is commonly a local closure (as in this project's own
+    # test fixtures), which the standard `pickle` module cannot serialize at
+    # all. `.load()` forces exactly the same local computation every other
+    # reduction here already forces implicitly when it extracts a plain
+    # scalar/small array from `value` before its own Allreduce, so this
+    # costs nothing extra other operations don't already pay, and it makes
+    # median() robust to any construction pattern rather than only ones
+    # whose graph happens to be picklable.
+    value = value.load()
     pieces = comm.gather(value, root=0)
 
     def _reduce_on_root() -> xr.Dataset | xr.DataArray:

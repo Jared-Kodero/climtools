@@ -78,3 +78,34 @@ def run(fx: Fixtures) -> None:
     ]:
         check_reduction_2d(op_name, "lat", apply_fn, native_fn)
         mpi.comm.barrier()
+
+    # -- reductions on the shared *1D* deliberately-uneven fixture
+    #    (mpi_test_common.UNEVEN_GLOBAL=21): mean's uneven-1D case is
+    #    already covered separately in mpi_test_construction.py (the
+    #    weighted-vs-naive-average check), but sum/min/max/var/std/median
+    #    were, until now, only ever exercised uneven via dist2d's *2D*
+    #    Cartesian split above -- a different code path (reductions.py's
+    #    multi-dim branch vs its single-partition-dim branch) that a 1D
+    #    partition never reached at an uneven length. -------------------
+    native_uneven, dist_uneven = fx.native_uneven, fx.dist_uneven
+
+    for op_name, apply_fn, native_fn in [
+        ("sum", lambda: dist_uneven.sum(dim="x"), lambda: native_uneven.sum(dim="x")),
+        ("min", lambda: dist_uneven.min(dim="x"), lambda: native_uneven.min(dim="x")),
+        ("max", lambda: dist_uneven.max(dim="x"), lambda: native_uneven.max(dim="x")),
+        ("var", lambda: dist_uneven.var(dim="x"), lambda: native_uneven.var(dim="x")),
+        ("std", lambda: dist_uneven.std(dim="x"), lambda: native_uneven.std(dim="x")),
+        ("median", lambda: dist_uneven.median("x"), lambda: native_uneven.median("x")),
+    ]:
+        try:
+            result = apply_fn()
+            expected = native_fn()
+            local = local_of(result)
+            xr.testing.assert_allclose(
+                local if isinstance(local, xr.DataArray) else xr.DataArray(local),
+                expected, rtol=1e-5,
+            )
+            record(op_name, "1d(x), uneven", True)
+        except Exception as e:
+            record(op_name, "1d(x), uneven", False, str(e)[:200])
+        mpi.comm.barrier()

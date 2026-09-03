@@ -13,6 +13,7 @@ import numpy as np
 import xarray as xr
 
 from climtools import mpi
+from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, local_of, record
 
 
@@ -110,3 +111,48 @@ def run(fx: Fixtures) -> None:
             record("groupby", "2d(lat,lon), mean", None, msg)
         else:
             record("groupby", "2d(lat,lon), mean", all(o for o in all_ok if o is not None), msg)
+    mpi.comm.barrier()
+
+    # -- groupby('x', labels).mean(): single-dim, on the shared
+    #    deliberately-uneven fixture (mpi_test_common.UNEVEN_GLOBAL=21).
+    #    groupby's own local-vs-global label bookkeeping is exactly the
+    #    kind of thing that could quietly assume every rank holds at
+    #    least one of every label, or holds a "typical" number of
+    #    elements -- neither of which the 1d(time)/2d(lat,lon) cases
+    #    above actually test, since time=12 and lat=19 both give every
+    #    rank a comfortable, non-degenerate share at this suite's usual
+    #    rank counts. -------------------------------------------------
+    dist_uneven, native_uneven = fx.dist_uneven, fx.native_uneven
+    mu = dist_uneven.meta
+    xs, xe = mu["start"], mu["stop"]
+    global_x_labels = (np.arange(21, dtype="int64") // 4) % 3  # 3 arbitrary bins
+    local_x_labels = global_x_labels[xs:xe]
+    try:
+        result = dist_uneven.groupby("x", local_x_labels).mean()
+        local = local_of(result)
+        native_labeled = native_uneven.assign_coords(_grp=("x", global_x_labels))
+        # Sorted ascending by group label to match the ascending
+        # group-label-to-rank-position assignment the "1d(x)" case's
+        # result.meta below encodes (verified directly, not assumed: with
+        # only 3 output groups spread across 4 ranks here, this
+        # genuinely stays *distributed* -- unlike the "1d(time)" case
+        # above, whose particular group/rank arrangement happens to
+        # collapse to a fully-replicated, non-distributed result
+        # instead, meta=None -- one group position per rank, ranks
+        # beyond the group count left with a genuinely empty share,
+        # exactly like get_balanced_bounds's own "length < ranks" case).
+        expected_full = native_labeled.groupby("_grp").mean().sortby("_grp")
+        rm = result.meta if isinstance(result, MPIXarray) else None
+        group_dim = [dd for dd in local.dims if dd not in expected_full.dims]
+        if group_dim:
+            local = local.rename({group_dim[0]: "_grp"})
+        if rm is not None:
+            d = rm["dims"][0]
+            s, e = rm["starts"][d], rm["stops"][d]
+            expected_full = expected_full.isel(_grp=slice(s, e))
+        else:
+            local = local.sortby("_grp") if "_grp" in getattr(local, "dims", ()) else local
+        xr.testing.assert_allclose(local, expected_full, rtol=1e-5)
+        record("groupby", "1d(x), uneven", True)
+    except Exception as e:
+        record("groupby", "1d(x), uneven", False, f"{type(e).__name__}: {str(e)[:200]}")

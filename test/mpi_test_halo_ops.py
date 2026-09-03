@@ -1,6 +1,7 @@
 """Halo-dependent operation correctness: rolling_reduce, coarsen_reduce,
 diff, shift, differentiate, ffill, bfill -- under a single partition
-dimension and a two-dimensional (Cartesian) partition.
+dimension, a two-dimensional (Cartesian) partition, and the shared
+deliberately-uneven single-dimension partition (see mpi_test_common).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from mpi_test_common import Fixtures, local_of, record
 
 def run(fx: Fixtures) -> None:
     native, dist, dist2d = fx.native, fx.dist, fx.dist2d
+    native_uneven, dist_uneven = fx.native_uneven, fx.dist_uneven
 
     def run_op(op_name, fn, native_fn, case):
         try:
@@ -42,23 +44,25 @@ def run(fx: Fixtures) -> None:
         ("1d(time)", dist, "time"),
         ("2d(lat,lon)/lat", dist2d, "lat"),
         ("2d(lat,lon)/lon", dist2d, "lon"),
+        ("1d(x), uneven", dist_uneven, "x"),
     ]:
+        native_here = native_uneven if dm == "x" else native
         run_op(
             "rolling_reduce", lambda d=d, dm=dm: d.rolling_reduce(dm, window=3, reduce="mean"),
-            lambda dm=dm: native.rolling({dm: 3}, center=True).mean(), case_label,
+            lambda dm=dm: native_here.rolling({dm: 3}, center=True).mean(), case_label,
         )
         run_op(
             "coarsen_reduce",
             lambda d=d, dm=dm: d.coarsen_reduce(dm, window=2, reduce="mean", boundary="trim"),
-            lambda dm=dm: native.coarsen({dm: 2}, boundary="trim").mean(), case_label,
+            lambda dm=dm: native_here.coarsen({dm: 2}, boundary="trim").mean(), case_label,
         )
         run_op(
             "diff", lambda d=d, dm=dm: d.diff(dm, n=1),
-            lambda dm=dm: native.diff(dm, n=1), case_label,
+            lambda dm=dm: native_here.diff(dm, n=1), case_label,
         )
         run_op(
             "shift", lambda d=d, dm=dm: d.shift(dm, periods=1),
-            lambda dm=dm: native.shift({dm: 1}), case_label,
+            lambda dm=dm: native_here.shift({dm: 1}), case_label,
         )
         run_op(
             "differentiate",
@@ -66,17 +70,17 @@ def run(fx: Fixtures) -> None:
                 d.differentiate(dm) if dm != "time" else d.differentiate(dm, datetime_unit="s")
             ),
             lambda dm=dm: (
-                native.differentiate(dm) if dm != "time"
-                else native.differentiate(dm, datetime_unit="s")
+                native_here.differentiate(dm) if dm != "time"
+                else native_here.differentiate(dm, datetime_unit="s")
             ),
             case_label,
         )
         run_op(
             "ffill", lambda d=d, dm=dm: d.ffill(dm, limit=2),
-            lambda dm=dm: native.ffill(dm, limit=2), case_label,
+            lambda dm=dm: native_here.ffill(dm, limit=2), case_label,
         )
         run_op(
             "bfill", lambda d=d, dm=dm: d.bfill(dm, limit=2),
-            lambda dm=dm: native.bfill(dm, limit=2), case_label,
+            lambda dm=dm: native_here.bfill(dm, limit=2), case_label,
         )
         mpi.comm.barrier()
