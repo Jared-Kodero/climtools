@@ -14,7 +14,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 from .common import extreme_identity, partial_dtype
 from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta

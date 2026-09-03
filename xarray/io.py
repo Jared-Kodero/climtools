@@ -14,7 +14,7 @@ from mpi4py import MPI
 
 import xarray as xr
 
-from ..mpi.runtime import MPIContext
+from ..mpi.context import MPIContext
 
 if TYPE_CHECKING:
     from .core import MPIXarray
@@ -1275,7 +1275,7 @@ def to_netcdf(
 
     if parallel:
         if not mpi_runtime:
-            from ..mpi.runtime import mpi
+            from ..mpi.context import mpi
 
             mpi_runtime = mpi
         if not isinstance(mpi_runtime, MPIContext):

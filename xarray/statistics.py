@@ -12,7 +12,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 from .common import partial_dtype
 from .meta import get_mpi_meta
@@ -209,7 +209,8 @@ def var(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _var_or_std(
         runtime,
@@ -254,7 +255,8 @@ def std(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _var_or_std(
         runtime,

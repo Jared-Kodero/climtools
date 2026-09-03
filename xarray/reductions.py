@@ -13,7 +13,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 from .common import extreme_identity, op_name, partial_dtype
 from .meta import get_mpi_meta
@@ -298,7 +298,8 @@ def sum_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _sum_prod(
         runtime,
@@ -344,7 +345,8 @@ def prod_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _sum_prod(
         runtime,
@@ -483,7 +485,8 @@ def mean_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     local_dim, dims = normalize_dim(value, dim)
     old_meta = get_mpi_meta(value)
@@ -585,7 +588,8 @@ def min_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _min_max(
         runtime,
@@ -626,7 +630,8 @@ def max_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object -- see :func:`~.planning.finish` for the exact
+        replication/no-duplication guarantee this carries.
     """
     return _min_max(
         runtime,
@@ -770,7 +775,9 @@ def any_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Logical OR over the requested dimensions.
+        Logical OR over the requested dimensions -- see
+        :func:`~.planning.finish` for the exact replication/
+        no-duplication guarantee this carries.
     """
     return _logical(
         runtime,
@@ -808,7 +815,9 @@ def all_reduce(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Logical AND over the requested dimensions.
+        Logical AND over the requested dimensions -- see
+        :func:`~.planning.finish` for the exact replication/
+        no-duplication guarantee this carries.
     """
     return _logical(
         runtime,
@@ -1078,7 +1087,9 @@ def first_reduce(
     Returns
     -------
     xr.Dataset | xr.DataArray
-        First valid value along the requested dimension.
+        First valid value along the requested dimension -- see
+        :func:`~.planning.finish` for the exact replication/
+        no-duplication guarantee this carries.
     """
     return _first_or_last(
         runtime,
@@ -1119,7 +1130,9 @@ def last_reduce(
     Returns
     -------
     xr.Dataset | xr.DataArray
-        Last valid value along the requested dimension.
+        Last valid value along the requested dimension -- see
+        :func:`~.planning.finish` for the exact replication/
+        no-duplication guarantee this carries.
     """
     return _first_or_last(
         runtime,

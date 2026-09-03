@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mpi4py.MPI import Cartcomm, Comm
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 __all__ = [
     "CartesianTopology",
@@ -175,8 +175,7 @@ def build_cartesian_topology(
     """
     if len(dims) < 2:
         raise ValueError(
-            f"requires at least two partition dimensions; got "
-            + f"{tuple(dims)!r}"
+            "requires at least two partition dimensions; got " + f"{tuple(dims)!r}"
         )
 
     extents = [int(sizes[dim]) for dim in dims]

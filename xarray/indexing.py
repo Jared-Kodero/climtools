@@ -10,7 +10,7 @@ import numpy as np
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 from .cartesian import dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info

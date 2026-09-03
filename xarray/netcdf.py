@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from os import PathLike
     from typing import Any, Literal
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
     # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
     # module, so importing `mpi_partition_data` back from `.io` at module
@@ -157,8 +157,10 @@ def create_file(
     """
     partition_dim = schema["partition_dim"]
     partition_dims = (
-        () if partition_dim is None
-        else (partition_dim,) if isinstance(partition_dim, str)
+        ()
+        if partition_dim is None
+        else (partition_dim,)
+        if isinstance(partition_dim, str)
         else tuple(partition_dim)
     )
     unlimited = set(schema["unlimited_dim"])
@@ -791,7 +793,9 @@ def to_netcdf_parallel(
                         ds,
                         chunks,
                         partition_dim if len(partition_dims_tuple) == 1 else None,
-                        sizes[partition_dim] if len(partition_dims_tuple) == 1 else None,
+                        sizes[partition_dim]
+                        if len(partition_dims_tuple) == 1
+                        else None,
                     )
                     if chunks is not None
                     else local_meta["save_chunks"]

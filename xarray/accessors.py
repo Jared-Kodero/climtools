@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from matplotlib.colors import LinearSegmentedColormap, ListedColormap
     from mpi4py import MPI
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
     from ..viz.plotting import GeoPlot
 
 

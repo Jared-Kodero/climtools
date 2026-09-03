@@ -22,7 +22,7 @@ from .planning import _agree, guarded
 if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 #: Sentinel distinguishing "no fill value given" from a genuine ``other=None``.
 _UNSET = object()
@@ -412,7 +412,15 @@ def median(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced object.
+        Reduced object. Under a single partition dimension, fully
+        replicated (``.meta`` is None) since nothing remains
+        distributed. Under a multi-dimensional partition, metadata is
+        reattached for whichever dimension(s) survive ``dim`` being
+        reduced away, with no duplicated ownership: exactly one rank
+        per distinct surviving range keeps the real result; every
+        other rank that shared that range before the reduction is left
+        with a genuinely empty (``start == stop``) slice instead of a
+        redundant copy.
     """
     meta = get_mpi_meta(value)
     if meta is None or dim not in meta["dims"]:

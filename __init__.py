@@ -58,7 +58,7 @@ if TYPE_CHECKING:
         exclude_key,
         locked_print,
     )
-    from .mpi.runtime import mpi
+    from .mpi.context import mpi
     from .viz import cmaps, plotting
 
 warnings.filterwarnings("ignore")
@@ -90,7 +90,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "operator": (".core.operator", None),
     "plotting": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
-    "mpi": (".mpi.runtime", "mpi"),
+    "mpi": (".mpi.context", "mpi"),
     "LockedLogger": (".core.utils", "LockedLogger"),
     "LockFile": (".core.utils", "LockFile"),
     "RedirectStreams": (".core.utils", "RedirectStreams"),

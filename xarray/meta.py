@@ -14,7 +14,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 MPI_META = "mpi_meta"
 #: Attrs key for the lightweight boolean partition flag set by

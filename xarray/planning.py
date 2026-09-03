@@ -14,7 +14,7 @@ from mpi4py import MPI
 import xarray as xr
 
 if TYPE_CHECKING:
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
@@ -575,7 +575,14 @@ def finish(
     Returns
     -------
     xr.Dataset | xr.DataArray
-        Finalized distributed result.
+        Finalized distributed result. Fully replicated (``.meta`` is
+        None) if every previous partition dimension was reduced away.
+        Otherwise, metadata is reattached for whichever dimension(s)
+        survive, with no duplicated ownership: exactly one rank per
+        distinct surviving range keeps the real result; every other
+        rank that shared that range before the reduction is left with
+        a genuinely empty (``start == stop``) slice instead of a
+        redundant copy.
     """
     result = strip_mpi_meta(result)
     old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]

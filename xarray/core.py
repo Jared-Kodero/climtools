@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 
 #: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
@@ -235,7 +235,7 @@ class MPIXarray:
         log_partitions: bool = False,
     ) -> None:
         """Initialize a distributed xarray wrapper."""
-        from ..mpi.runtime import MPIContext
+        from ..mpi.context import MPIContext
 
         if not isinstance(runtime, MPIContext):
             runtime = MPIContext(runtime)
@@ -503,7 +503,7 @@ class MPIXarray:
         if isinstance(key, str):
             return self.apply(lambda d, k: d[k], self, key)
         raise TypeError(
-            f"only a str key is supported to select a Dataset variable "
+            "only a str key is supported to select a Dataset variable "
             + f"by name; got {key!r} ({type(key).__name__})"
         )
 

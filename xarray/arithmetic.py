@@ -22,7 +22,7 @@ from .planning import _agree, comm_reduce, resolve_comm
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
-    from ..mpi.runtime import MPIContext
+    from ..mpi.context import MPIContext
 
 # Callables apply() recognizes and transparently redirects to their
 # dedicated implementation, so apply() is MPI-aware for them the same way
@@ -780,7 +780,7 @@ def sortby(
     if len(touched) > 1:
         raise NotImplementedError(
             "cannot yet redistribute when the sort key(s) together vary "
-            + f"along more than one active partition dimension "
+            + "along more than one active partition dimension "
             + f"({touched!r})"
         )
 
@@ -976,7 +976,7 @@ def check_partition_preserved(
 
         if dim not in result.dims:
             raise ValueError(
-                f"the callable removed or renamed distributed dimension "
+                "the callable removed or renamed distributed dimension "
                 + f"{dim!r} (result dims: {tuple(result.dims)!r})"
             )
 
@@ -1184,7 +1184,7 @@ def halo_exchange(
         if len(partition_dims) > 1:
             raise ValueError(
                 "dim is required once more than one dimension is "
-                + f"partitioned; pick one of "
+                + "partitioned; pick one of "
                 + f"{tuple(str(d) for d in partition_dims)!r}"
             )
         partition_dim = partition_dims[0]
