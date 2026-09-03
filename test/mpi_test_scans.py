@@ -34,6 +34,52 @@ def run(fx: Fixtures) -> None:
         record("isel", "1d(time), indexing", False, str(e)[:200])
     mpi.comm.barrier()
 
+    # -- where(): elementwise selection, single-dim and multi-dim, plus
+    #    the drop=True guard (unsupported on a distributed object since
+    #    it could remove a different number of positions per rank) -------
+    try:
+        threshold = 0.0002  # fixed threshold; avoids any local-vs-global mean ambiguity
+        cond = dist.data["pr"] > threshold
+        result = local_of(dist.where(cond, other=-1.0))
+        native_cond = native["pr"].isel(time=slice(start, stop)) > threshold
+        expected = native.isel(time=slice(start, stop)).where(native_cond, other=-1.0)
+        xr.testing.assert_allclose(result, expected, rtol=1e-5)
+        record("where", "1d(time)", True)
+    except Exception as e:
+        record("where", "1d(time)", False, f"{type(e).__name__}: {str(e)[:200]}")
+
+    try:
+        dist.where(dist.data["pr"] > 0, drop=True)
+        ok = False
+        msg = "no exception raised -- silently wrong?"
+    except ValueError:
+        ok = True
+        msg = ""
+    except Exception as e:
+        ok = False
+        msg = f"wrong exception type {type(e).__name__}: {e}"
+    record("where", "1d(time), drop=True guard", ok, msg)
+    mpi.comm.barrier()
+
+    m2 = dist2d.meta
+    lat_s, lat_e = m2["starts"]["lat"], m2["stops"]["lat"]
+    lon_s, lon_e = m2["starts"]["lon"], m2["stops"]["lon"]
+    try:
+        cond2d = dist2d.data["pr"] > threshold
+        result2d = local_of(dist2d.where(cond2d, other=-1.0))
+        native_cond2d = (
+            native["pr"].isel(lat=slice(lat_s, lat_e), lon=slice(lon_s, lon_e))
+            > threshold
+        )
+        expected2d = native.isel(
+            lat=slice(lat_s, lat_e), lon=slice(lon_s, lon_e)
+        ).where(native_cond2d, other=-1.0)
+        xr.testing.assert_allclose(result2d, expected2d, rtol=1e-5)
+        record("where", "2d(lat,lon)", True)
+    except Exception as e:
+        record("where", "2d(lat,lon)", False, f"{type(e).__name__}: {str(e)[:200]}")
+    mpi.comm.barrier()
+
     # -- scans and redistribution --------------------------------------------
     def check_single_dim(op_name, fn, native_fn, case="1d(time)"):
         try:
