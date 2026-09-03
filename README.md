@@ -243,8 +243,13 @@ never escapes as a still-padded, unlabeled object.
 ### Reductions, scans, and redistribution
 
 Cross-rank reductions (`mean`, `sum`, `min`, `max`, `var`, `std`,
-`prod`, `median`, `any`, `all`, and `groupby(dim, labels).mean()`/
-`.sum()`/`.min()`/`.max()`/`.count()`) that
+`prod`, `median`, `any`, `all`, `groupby(dim, labels).mean()`/
+`.sum()`/`.min()`/`.max()`/`.count()` -- verified under both single-
+and multi-dimensional partitions -- and
+`resample(dim, freq).mean()`/`.sum()`/`.min()`/`.max()`/`.count()` --
+verified under a single partition dimension only; its behavior under
+a multi-dimensional partition combining a datetime axis with another
+partitioned dimension is untested) that
 remove a partition dimension either replicate the (now small) result
 to every rank -- if that was the only partition dimension -- or, under
 a multi-dimensional partition, reattach metadata for whichever
@@ -281,6 +286,15 @@ partition -- every rank ends up with the full source along that one
 dimension and interpolates locally onto its own slice of the *new*
 target coordinate (which the caller supplies pre-split per rank, not
 the global target grid).
+
+`to_netcdf(..., parallel=True)` writes a distributed object as a
+single NetCDF file via a real collective HDF5 write, one hyperslab per
+rank -- correct under any number of partition dimensions. Explicit
+per-variable chunk shapes (`chunks={"varname": shape, ...}`) are
+always honored; without them, chunk shapes are inferred automatically
+for any partition dimensionality, each partition axis independently
+aligned to rank boundaries (via that axis's own division count on the
+Cartesian process grid) and capped to the HDF5 4 GiB per-chunk limit.
 
 A few operations still support only a single active partition dimension
 at a time and raise `NotImplementedError` explicitly, rather than
@@ -322,15 +336,18 @@ beyond your CPU count need `--oversubscribe`):
 
 ```bash
 mpirun --oversubscribe -n 4 python test/mpi_test.py
-mpirun --oversubscribe -n 4 python test/mpi_test_halo_ops.py
-mpirun --oversubscribe -n 4 python test/mpi_test_single_dim_ops.py
 ```
 
-Each prints a `[PASS]`/`[FAIL]`/`[SKIP]` line per check (`SKIP` marks an
-operation's own declared `NotImplementedError` under an unsupported
-partition shape, not a test failure) and a final pass count. On an HPC
-cluster, `test/test.sh` submits the same idea through SLURM/`srun`
-instead.
+`mpi_test.py` is the single entry point: it builds the shared fixtures
+once, then imports and runs each `test/mpi_test_*.py` module in turn
+(`mpi_test_construction.py`, `mpi_test_reductions.py`,
+`mpi_test_halo_ops.py`, `mpi_test_scans.py`, `mpi_test_groupby.py` --
+each owns one coherent area rather than everything living in one
+file). It prints a `[PASS]`/`[FAIL]`/`[SKIP]` line per check (`SKIP`
+marks an operation's own declared `NotImplementedError` under an
+unsupported partition shape, not a test failure), a final pass count,
+and exits nonzero on any `[FAIL]`. On an HPC cluster, `test/test.sh`
+submits the same idea through SLURM/`srun` instead.
 
 Run the benchmark suite (compares MPI-Xarray against native Xarray on a
 synthetic 1D field; see [`test/benchmark.py`](test/benchmark.py) for
