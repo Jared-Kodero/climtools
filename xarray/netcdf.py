@@ -613,29 +613,19 @@ def to_netcdf_parallel(
             raise AssertionError("Distributed data and metadata are missing.")
 
         distributed_dims = tuple(str(d) for d in local_meta["dims"])
-        if len(distributed_dims) > 1 and chunks is None:
-            error = NotImplementedError(
-                "to_netcdf()'s dask-aware auto-chunk inference "
-                + "(attach_save_chunks) does not yet support a "
-                + f"multi-dimensional partition (dims={distributed_dims!r}) "
-                + "without explicit chunks. write_distributed itself is "
-                + "fully generalized for any number of partition "
-                + "dimensions; pass explicit `chunks={varname: shape, ...}` "
-                + "to skip auto-inference and reach it."
-            )
-        elif len(distributed_dims) == 1:
+        if len(distributed_dims) == 1:
             distributed_dim = distributed_dims[0]
             if partition_dim is not None and partition_dim != distributed_dim:
                 error = ValueError(
                     f"partition_dim {partition_dim!r} does not match "
-                    + f"distributed dimension {distributed_dim!r}."
+                    + f"distributed dimension {distributed_dim!r}"
                 )
             partition_dim = distributed_dim
         else:
             if partition_dim is not None and partition_dim not in distributed_dims:
                 error = ValueError(
                     f"partition_dim {partition_dim!r} does not match any of "
-                    + f"the distributed dimensions {distributed_dims!r}."
+                    + f"the distributed dimensions {distributed_dims!r}"
                 )
             partition_dim = distributed_dims
         mpi_runtime.raise_if_error(error, "parallel NetCDF partition dimension")

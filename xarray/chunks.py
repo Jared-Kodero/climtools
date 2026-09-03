@@ -385,7 +385,13 @@ def compute_save_chunks(
     value : xarray.Dataset or xarray.DataArray
         Local slice of a distributed object on the current MPI rank.
     meta : mapping
-        Distribution metadata returned by ``get_mpi_meta``.
+        Distribution metadata returned by ``get_mpi_meta``. May describe
+        one or several active partition dimensions (a Cartesian
+        partition); each is handled independently, using that axis's
+        own division count from ``meta["cart"]["grid_shape"]`` (falling
+        back to ``mpi_size`` when there is no Cartesian grid, i.e. the
+        single-dimension case, which reproduces the prior behavior
+        exactly).
     mpi_size : int
         Number of MPI ranks the data is distributed across.
     Returns
@@ -396,29 +402,37 @@ def compute_save_chunks(
     Raises
     ------
     ValueError
-        If ``meta["chunk_info"]`` lacks the partition dimension.
+        If ``meta["chunk_info"]`` lacks a partition dimension.
     """
-    dim = str(meta["dim"])
-    global_size = int(meta["global_size"])
+    dims = tuple(str(d) for d in meta["dims"])
+    global_sizes = {str(d): int(sz) for d, sz in meta["global_sizes"].items()}
     chunk_info = meta["chunk_info"]
-    if dim not in chunk_info:
+    missing = [d for d in dims if d not in chunk_info]
+    if missing:
         raise ValueError(
-            "mpi_meta['chunk_info'] does not include the partition "
-            + f"dimension {dim!r}; cannot bound save_chunks against "
-            + "distribution_chunks without it."
+            "mpi_meta['chunk_info'] does not include partition "
+            + f"dimension(s) {missing!r}; cannot bound save_chunks "
+            + "against distribution_chunks without it."
         )
 
-    distribution_chunk = int(chunk_info[dim])
-    aligned = chunk_alignment_holds(global_size, distribution_chunk, mpi_size)
+    cart = meta.get("cart")
+    divisor_source: dict[str, int] = {}
+    for axis, d in enumerate(dims):
+        global_size = global_sizes[d]
+        distribution_chunk = int(chunk_info[d])
+        divisions = int(cart["grid_shape"][axis]) if cart is not None else mpi_size
+        aligned = chunk_alignment_holds(global_size, distribution_chunk, divisions)
 
-    boundary_gcd = global_size
-    if not aligned and mpi_size > 1:
-        boundaries = [
-            get_balanced_bounds(global_size, rank, mpi_size)[1]
-            for rank in range(mpi_size - 1)
-        ]
-        if boundaries:
-            boundary_gcd = math.gcd(*boundaries)
+        boundary_gcd = global_size
+        if not aligned and divisions > 1:
+            boundaries = [
+                get_balanced_bounds(global_size, i, divisions)[1]
+                for i in range(divisions - 1)
+            ]
+            if boundaries:
+                boundary_gcd = math.gcd(*boundaries)
+
+        divisor_source[d] = distribution_chunk if aligned else boundary_gcd
 
     if isinstance(value, xr.Dataset):
         variables = list(value.variables.items())
@@ -432,27 +446,37 @@ def compute_save_chunks(
         if variable.ndim == 0 or any(int(length) == 0 for length in variable.shape):
             continue
 
+        var_dims = tuple(str(d) for d in variable.dims)
         shape = tuple(
-            global_size if var_dim == dim else int(length)
-            for var_dim, length in zip(variable.dims, variable.shape, strict=True)
+            global_sizes[var_dim] if var_dim in dims else int(length)
+            for var_dim, length in zip(var_dims, variable.shape, strict=True)
         )
         mock = dask_array.zeros(shape, dtype=variable.dtype, chunks="auto")
-        other_bytes = _other_dims_bytes(
-            variable.dtype.itemsize, variable.dims, shape, dim
-        )
 
         save_chunk: list[int] = []
-        for var_dim, length, blocks in zip(
-            variable.dims, shape, mock.chunks, strict=True
-        ):
+        for var_dim, length, blocks in zip(var_dims, shape, mock.chunks, strict=True):
             proposed = int(max(blocks)) if blocks else int(length)
-            if var_dim != dim:
+            if var_dim not in dims:
                 save_chunk.append(proposed)
                 continue
 
+            # A safe (if occasionally conservative) upper bound on the
+            # bytes every other axis of this chunk could contribute:
+            # non-partition axes at their own proposed chunk size, and
+            # any *other* partition axis at its full global size (since
+            # that axis's own cap, computed in this same loop, isn't
+            # available yet to tighten this).
+            other_bytes = variable.dtype.itemsize * math.prod(
+                (
+                    global_sizes[d]
+                    if d in dims and d != var_dim
+                    else int(blk_length)
+                )
+                for d, blk_length in zip(var_dims, shape, strict=True)
+                if d != var_dim
+            )
             capped = _cap_partition_chunk_to_hdf5_limit(proposed, other_bytes)
-            divisor_source = distribution_chunk if aligned else boundary_gcd
-            save_chunk.append(_largest_divisor_at_most(divisor_source, capped))
+            save_chunk.append(_largest_divisor_at_most(divisor_source[var_dim], capped))
 
         output[str(name)] = tuple(save_chunk)
 

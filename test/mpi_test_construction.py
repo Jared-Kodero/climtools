@@ -262,15 +262,22 @@ def run(fx: Fixtures) -> None:
                 record("to_netcdf(parallel=True)", "2d(lat,lon), explicit chunks", all(all_ok))
         mpi.comm.barrier()
 
-        out_2d_auto = f"{tmpdir}/should_not_exist.nc"
+        out_2d_auto = f"{tmpdir}/parallel_2d_auto.nc"
         try:
-            xgeo.to_netcdf(dist2d._prepare(), out_2d_auto, mpi, parallel=True, allow_serial=(mpi.comm.size == 1))
-            ok = False
-        except NotImplementedError:
+            xgeo.to_netcdf(
+                dist2d._prepare(), out_2d_auto, mpi, parallel=True,
+                allow_serial=(mpi.comm.size == 1),
+            )
+            mpi.comm.barrier()
             ok = True
-        except Exception:
+            if mpi.comm.rank == 0:
+                written = xr.open_dataset(out_2d_auto).load()
+                xr.testing.assert_allclose(written, native, rtol=1e-6)
+        except Exception as e:
             ok = False
-        all_ok = mpi.comm.gather(ok, root=0)
-        if mpi.comm.rank == 0:
-            record("to_netcdf(parallel=True)", "2d(lat,lon), no chunks (declared limit)", all(all_ok))
+            record("to_netcdf(parallel=True)", "2d(lat,lon), auto chunks", False, str(e)[:200])
+        else:
+            all_ok = mpi.comm.gather(ok, root=0)
+            if mpi.comm.rank == 0:
+                record("to_netcdf(parallel=True)", "2d(lat,lon), auto chunks", all(all_ok))
         mpi.comm.barrier()

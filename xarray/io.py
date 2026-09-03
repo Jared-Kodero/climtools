@@ -927,12 +927,6 @@ def attach_save_chunks(
     meta = get_mpi_meta(value)
     if meta is None:
         return value
-    if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "only supports a single partition dimension so far "
-            + f"(dims={meta['dims']!r}); pass explicit save chunks to "
-            + "skip this"
-        )
 
     save_chunks: dict[str, tuple[int, ...]] | None = None
     error: BaseException | None = None
