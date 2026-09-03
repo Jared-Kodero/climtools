@@ -10,7 +10,7 @@ gridded climate data with xarray:
 - ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib,
   and cmocean.
 - ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
-- ``mpi``       MPI runtime: ``mpi.comm`` for the raw communicator and
+- ``mpi``       MPI context: ``mpi.comm`` for the raw communicator and
   ``mpi.reduce`` for collective reductions.
 
 Two access patterns are supported and are equivalent::

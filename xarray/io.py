@@ -49,7 +49,7 @@ _NO_DATA_ATTR = "_climtools_no_data"
 
 
 def _open_dataset_1d(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     filename_or_obj: Any,
     partition_dim: Hashable | Literal["auto"],
     open_fn: Callable,
@@ -63,21 +63,21 @@ def _open_dataset_1d(
     # Build the metadata plan on rank 0.
     plan: dict[str, Any] | None = None
     error: BaseException | None = None
-    if runtime.is_root():
+    if mpi_context.is_root():
         try:
             with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
                 if automatic:
                     partition_dim = choose_partition_dim(
                         metadata.sizes,
-                        runtime.comm.size,
-                        rank=runtime.comm.rank,
+                        mpi_context.comm.size,
+                        rank=mpi_context.comm.rank,
                     )
                 if partition_dim not in metadata.dims:
                     raise ValueError(
                         f"partition_dim {partition_dim!r} is not in "
                         + f"{list(metadata.dims)!r}."
                     )
-                chunk_info = get_chunk_info(metadata, runtime.comm.size)
+                chunk_info = get_chunk_info(metadata, mpi_context.comm.size)
                 global_size = int(metadata.sizes[partition_dim])
                 longest_size = max(int(length) for length in metadata.sizes.values())
 
@@ -106,10 +106,10 @@ def _open_dataset_1d(
             error = exc
 
     # Synchronize rank-0 planning failures before broadcasting the plan.
-    runtime.raise_if_error(error, "open_dataset planning")
+    mpi_context.raise_if_error(error, "open_dataset planning")
 
     # Broadcast the plan.
-    plan = runtime.broadcast(plan, root=0)
+    plan = mpi_context.broadcast(plan, root=0)
 
     partition_dim = plan["partition_dim"]
     chunk_info = plan["chunk_info"]
@@ -120,12 +120,12 @@ def _open_dataset_1d(
     start, stop = get_chunk_bounds(
         global_size,
         partition_chunk,
-        runtime.comm.rank,
-        runtime.comm.size,
+        mpi_context.comm.rank,
+        mpi_context.comm.size,
     )
 
     # Synchronize before opening the dataset.
-    runtime.comm.Barrier()
+    mpi_context.comm.Barrier()
 
     # Open this rank's lazy slice.
     data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
@@ -139,9 +139,9 @@ def _open_dataset_1d(
         stop=stop,
         chunk_info=chunk_info,
     )
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         log_partition_report(
-            runtime,
+            mpi_context,
             data,
             partition_dim,
             origin="open_dataset",
@@ -154,7 +154,7 @@ def _open_dataset_1d(
 
 
 def _open_dataset_cartesian(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     filename_or_obj: Any,
     dims: tuple[Hashable, ...],
     open_fn: Callable,
@@ -163,11 +163,11 @@ def _open_dataset_cartesian(
     **kwargs: Any,
 ) -> xr.Dataset:
     """Open a Dataset lazily on an MPI Cartesian process grid."""
-    comm = runtime.comm
+    comm = mpi_context.comm
 
     plan: dict[str, Any] | None = None
     error: BaseException | None = None
-    if runtime.is_root():
+    if mpi_context.is_root():
         try:
             with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
                 for d in dims:
@@ -181,10 +181,10 @@ def _open_dataset_cartesian(
             error = exc
 
     # Synchronize rank-0 planning failures before broadcasting the plan.
-    runtime.raise_if_error(error, "open_dataset planning")
+    mpi_context.raise_if_error(error, "open_dataset planning")
 
     # Broadcast the plan (just the per-dimension global lengths).
-    plan = runtime.broadcast(plan, root=0)
+    plan = mpi_context.broadcast(plan, root=0)
     extents = plan["extents"]
 
     # Every rank derives its own Cartesian coordinates and per-axis
@@ -222,9 +222,9 @@ def _open_dataset_cartesian(
             "periods": (False,) * len(dims),
         },
     )
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         log_partition_report_cartesian(
-            runtime,
+            mpi_context,
             data,
             dims,
             origin="open_dataset",
@@ -244,7 +244,7 @@ _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
 
 
 def partition(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray | None,
     dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
     *,
@@ -256,8 +256,8 @@ def partition(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset, xarray.DataArray, or None
         Complete object on ``root``; non-root ranks must pass None.
     dim : Hashable, sequence of Hashable, or {"auto"}, optional
@@ -278,8 +278,8 @@ def partition(
     ValueError
         If ownership, metadata, or ``dim`` is invalid.
     """
-    comm = runtime.comm
-    is_root = runtime.is_root(root)
+    comm = mpi_context.comm
+    is_root = mpi_context.is_root(root)
     requested_dims = _as_partition_dims(dim)
     multi_dim = isinstance(requested_dims, tuple) and len(requested_dims) > 1
 
@@ -335,10 +335,10 @@ def partition(
             )
     except BaseException as exc:
         error = exc
-    runtime.raise_if_error(error, "partition")
+    mpi_context.raise_if_error(error, "partition")
 
     # Broadcast which transfer path root prepared.
-    dimensionless = runtime.broadcast(
+    dimensionless = mpi_context.broadcast(
         replicated_value is not None if is_root else None, root=root
     )
 
@@ -346,7 +346,7 @@ def partition(
     if dimensionless:
         # Nothing to partition: same small object broadcast to every
         # rank, no per-rank slicing or point-to-point send needed.
-        output = runtime.broadcast(replicated_value if is_root else None, root=root)
+        output = mpi_context.broadcast(replicated_value if is_root else None, root=root)
         return cast("xr.Dataset | xr.DataArray", output)
 
     if is_root:
@@ -355,15 +355,15 @@ def partition(
             if rank == root:
                 output = piece
             else:
-                runtime.send(piece, dest=rank, tag=_DISTRIBUTE_TAG)
+                mpi_context.send(piece, dest=rank, tag=_DISTRIBUTE_TAG)
     else:
-        output = runtime.receive(source=root, tag=_DISTRIBUTE_TAG)
+        output = mpi_context.receive(source=root, tag=_DISTRIBUTE_TAG)
 
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         meta = get_mpi_meta(output)
         if meta is not None and "cart" in meta:
             log_partition_report_cartesian(
-                runtime,
+                mpi_context,
                 output,
                 meta["dims"],
                 origin="partition",
@@ -375,7 +375,7 @@ def partition(
             )
         elif meta is not None:
             log_partition_report(
-                runtime,
+                mpi_context,
                 output,
                 meta["dim"],
                 origin="partition",
@@ -511,7 +511,7 @@ def _normalize_create_dim(
 
 
 def create_dataarray(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     fill: Callable[..., Any],
     dims: Sequence[Hashable],
     *,
@@ -527,8 +527,8 @@ def create_dataarray(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     fill : callable
         Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension.
     dims : sequence of Hashable
@@ -569,7 +569,7 @@ def create_dataarray(
         explicit_sizes = dict(zip(dims, shape, strict=True))
     resolved_sizes = resolve_sizes(dims, explicit_sizes, coords)
 
-    comm = runtime.comm
+    comm = mpi_context.comm
     extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
 
     cart: dict[str, Any] | None = None
@@ -620,10 +620,10 @@ def create_dataarray(
         chunk_info=chunk_info,
         cart=cart,
     )
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
             log_partition_report_cartesian(
-                runtime,
+                mpi_context,
                 da,
                 partition_dims,
                 origin="create_dataarray",
@@ -636,7 +636,7 @@ def create_dataarray(
         else:
             d0 = partition_dims[0]
             log_partition_report(
-                runtime,
+                mpi_context,
                 da,
                 d0,
                 origin="create_dataarray",
@@ -648,7 +648,7 @@ def create_dataarray(
 
 
 def create_dataset(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     data_vars: Mapping[
         Hashable,
         xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]],
@@ -665,8 +665,8 @@ def create_dataset(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     data_vars : mapping
         Variables as DataArrays or ``(dims, fill)`` pairs.
     sizes : mapping, optional
@@ -707,7 +707,7 @@ def create_dataset(
             required_dims.update(var_dims)
     resolved_sizes = resolve_sizes(required_dims, sizes, coords)
 
-    comm = runtime.comm
+    comm = mpi_context.comm
     extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
 
     cart: dict[str, Any] | None = None
@@ -788,10 +788,10 @@ def create_dataset(
         chunk_info=chunk_info,
         cart=cart,
     )
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
             log_partition_report_cartesian(
-                runtime,
+                mpi_context,
                 ds,
                 partition_dims,
                 origin="create_dataset",
@@ -804,7 +804,7 @@ def create_dataset(
         else:
             d0 = partition_dims[0]
             log_partition_report(
-                runtime,
+                mpi_context,
                 ds,
                 d0,
                 origin="create_dataset",
@@ -816,7 +816,7 @@ def create_dataset(
 
 
 def repartition(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] = "auto",
     *,
@@ -827,8 +827,8 @@ def repartition(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Complete object present on every rank.
     dim : Hashable or {"auto"}, optional
@@ -858,7 +858,7 @@ def repartition(
         if not value.dims:
             return strip_mpi_meta(value)
         dim = choose_partition_dim(
-            value.sizes, runtime.comm.size, rank=runtime.comm.rank
+            value.sizes, mpi_context.comm.size, rank=mpi_context.comm.rank
         )
 
     if dim not in value.dims:
@@ -869,29 +869,29 @@ def repartition(
     chunk_size = int(
         info.get(
             str(dim),
-            get_effective_chunk_size(length, None, runtime.comm.size),
+            get_effective_chunk_size(length, None, mpi_context.comm.size),
         )
     )
-    chunk_size = get_effective_chunk_size(length, chunk_size, runtime.comm.size)
+    chunk_size = get_effective_chunk_size(length, chunk_size, mpi_context.comm.size)
     info[str(dim)] = chunk_size
 
     start, stop = get_chunk_bounds(
-        length, chunk_size, runtime.comm.rank, runtime.comm.size
+        length, chunk_size, mpi_context.comm.rank, mpi_context.comm.size
     )
     output = strip_mpi_meta(value).isel({dim: slice(start, stop)})
     info = prune_chunk_info(info, output)
     for other_dim, other_length in output.sizes.items():
         info.setdefault(
             str(other_dim),
-            get_effective_chunk_size(int(other_length), None, runtime.comm.size),
+            get_effective_chunk_size(int(other_length), None, mpi_context.comm.size),
         )
 
     set_mpi_meta(
         output, dim=dim, global_size=length, start=start, stop=stop, chunk_info=info
     )
-    if should_log_partitions(runtime, log_partitions):
+    if should_log_partitions(mpi_context, log_partitions):
         log_partition_report(
-            runtime,
+            mpi_context,
             output,
             dim,
             origin="repartition",
@@ -904,14 +904,14 @@ def repartition(
 
 
 def attach_save_chunks(
-    runtime: MPIContext, value: xr.Dataset | xr.DataArray
+    mpi_context: MPIContext, value: xr.Dataset | xr.DataArray
 ) -> xr.Dataset | xr.DataArray:
     """Attach write-time chunk metadata to a distributed object.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed rank-local object.
     Returns
@@ -930,21 +930,21 @@ def attach_save_chunks(
 
     save_chunks: dict[str, tuple[int, ...]] | None = None
     error: BaseException | None = None
-    if runtime.is_root():
+    if mpi_context.is_root():
         try:
-            save_chunks = compute_save_chunks(value, meta, runtime.comm.size)
+            save_chunks = compute_save_chunks(value, meta, mpi_context.comm.size)
         except BaseException as exc:
             error = exc
-    runtime.raise_if_error(error, "attach_save_chunks planning")
+    mpi_context.raise_if_error(error, "attach_save_chunks planning")
 
-    save_chunks = runtime.broadcast(save_chunks, root=0)
+    save_chunks = mpi_context.broadcast(save_chunks, root=0)
     set_save_chunks(value, cast("dict[str, tuple[int, ...]]", save_chunks))
     return value
 
 
 def mpi_open_dataset(
     filename: Path | str | PathLike,
-    mpi_runtime: MPIContext | MPI.Intracomm,
+    mpi_context: MPIContext | MPI.Intracomm,
     *,
     partition_dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
     chunks: Any = None,
@@ -957,7 +957,7 @@ def mpi_open_dataset(
     ----------
     filename : str, path-like, file-like, or list of these
         Input accepted by ``xarray.open_dataset``/``xarray.open_mfdataset``.
-    mpi_runtime : MPIContext or mpi4py.MPI.Intracomm
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm
         Runtime whose communicator the result is bound to.
     partition_dim : Hashable, sequence of Hashable, or {"auto"}, optional
         Dimension(s) to partition.
@@ -973,8 +973,8 @@ def mpi_open_dataset(
         Lazy rank-local Dataset with ``.meta`` set.
     """
 
-    if not isinstance(mpi_runtime, MPIContext):
-        mpi_runtime = MPIContext(mpi_runtime)
+    if not isinstance(mpi_context, MPIContext):
+        mpi_context = MPIContext(mpi_context)
 
     xr.set_options(keep_attrs=True)
 
@@ -986,7 +986,7 @@ def mpi_open_dataset(
     requested_dims = _as_partition_dims(partition_dim)
     if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
         data = _open_dataset_cartesian(
-            mpi_runtime,
+            mpi_context,
             filename,
             requested_dims,
             open_fn,
@@ -999,7 +999,7 @@ def mpi_open_dataset(
             requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
         )
         data = _open_dataset_1d(
-            mpi_runtime,
+            mpi_context,
             filename,
             resolved_dim,
             open_fn,
@@ -1010,11 +1010,11 @@ def mpi_open_dataset(
 
     from .core import MPIXarray
 
-    return MPIXarray(data, mpi_runtime)
+    return MPIXarray(data, mpi_context)
 
 
 def mpi_create_dataarray(
-    mpi_runtime: MPIContext | MPI.Intracomm,
+    mpi_context: MPIContext | MPI.Intracomm,
     fill: Callable[..., Any],
     dims: Sequence[Hashable],
     *,
@@ -1030,7 +1030,7 @@ def mpi_create_dataarray(
 
     Parameters
     ----------
-    runtime : MPIContext or mpi4py.MPI.Intracomm
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm
         Runtime or communicator the result is bound to.
     fill : callable
         Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension, or as ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one pair per partitioned dimension, in ``dim``'s order -- when ``dim`` names two or more.
@@ -1057,11 +1057,11 @@ def mpi_create_dataarray(
     """
     from .core import MPIXarray
 
-    if not isinstance(mpi_runtime, MPIContext):
-        mpi_runtime = MPIContext(mpi_runtime)
+    if not isinstance(mpi_context, MPIContext):
+        mpi_context = MPIContext(mpi_context)
 
     data = create_dataarray(
-        mpi_runtime,
+        mpi_context,
         fill,
         dims,
         shape=shape,
@@ -1072,11 +1072,11 @@ def mpi_create_dataarray(
         attrs=attrs,
         log_partitions=log_partitions,
     )
-    return MPIXarray(data, mpi_runtime)
+    return MPIXarray(data, mpi_context)
 
 
 def mpi_create_dataset(
-    runtime: MPIContext | MPI.Intracomm,
+    mpi_context: MPIContext | MPI.Intracomm,
     data_vars: Mapping[
         Hashable, xr.DataArray | tuple[Sequence[Hashable], Callable[..., Any]]
     ],
@@ -1092,7 +1092,7 @@ def mpi_create_dataset(
 
     Parameters
     ----------
-    runtime : MPIContext or mpi4py.MPI.Intracomm
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm
         Runtime or communicator the result is bound to.
     data_vars : mapping
         Variables as DataArrays or ``(dims, fill)`` pairs.
@@ -1115,12 +1115,12 @@ def mpi_create_dataset(
     """
     from .core import MPIXarray
 
-    mpi_runtime = runtime
-    if not isinstance(mpi_runtime, MPIContext):
-        mpi_runtime = MPIContext(mpi_runtime)
+    mpi_context = mpi_context
+    if not isinstance(mpi_context, MPIContext):
+        mpi_context = MPIContext(mpi_context)
 
     data = create_dataset(
-        mpi_runtime,
+        mpi_context,
         data_vars,
         sizes,
         dim=dim,
@@ -1129,12 +1129,12 @@ def mpi_create_dataset(
         attrs=attrs,
         log_partitions=log_partitions,
     )
-    return MPIXarray(data, mpi_runtime)
+    return MPIXarray(data, mpi_context)
 
 
 def mpi_partition_data(
     value: MPIXarray | xr.Dataset | xr.DataArray | None,
-    runtime: MPIContext | MPI.Intracomm,
+    mpi_context: MPIContext | MPI.Intracomm,
     dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
     *,
     root: int = 0,
@@ -1147,7 +1147,7 @@ def mpi_partition_data(
     ----------
     value : MPIXarray, xarray.Dataset, xarray.DataArray, or None
         Complete object on ``root``; non-root ranks must pass None.
-    runtime : MPIContext or mpi4py.MPI.Intracomm
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm
         Runtime or communicator the result is bound to.
     dim : Hashable, sequence of Hashable, or {"auto"}, optional
         Partition dimension(s).
@@ -1164,19 +1164,19 @@ def mpi_partition_data(
     """
     from .core import MPIXarray, unwrap
 
-    mpi_runtime = runtime
-    if not isinstance(mpi_runtime, MPIContext):
-        mpi_runtime = MPIContext(mpi_runtime)
+    mpi_context = mpi_context
+    if not isinstance(mpi_context, MPIContext):
+        mpi_context = MPIContext(mpi_context)
 
     data = partition(
-        mpi_runtime,
+        mpi_context,
         unwrap(value),
         dim,
         root=root,
         chunk_info=chunk_info,
         log_partitions=log_partitions,
     )
-    return MPIXarray(data, mpi_runtime)
+    return MPIXarray(data, mpi_context)
 
 
 def mpi_empty_dataset() -> xr.Dataset:
@@ -1208,7 +1208,7 @@ def mpi_dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
 def to_netcdf(
     data: xr.Dataset | xr.DataArray,
     file: str | PathLike[str],
-    mpi_runtime: MPIContext | MPI.Intracomm | None = None,
+    mpi_context: MPIContext | MPI.Intracomm | None = None,
     unlimited_dim: str | Iterable[str] | None = None,
     partition_dim: str | None = None,
     *,
@@ -1233,8 +1233,8 @@ def to_netcdf(
         Object to write.
     file : str or os.PathLike
         Output path.
-    mpi_runtime : MPIContext or mpi4py.MPI.Intracomm, optional
-        MPI runtime or communicator.
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm, optional
+        MPI context or communicator.
     unlimited_dim : str or iterable of str, optional
         Dimension or dimensions made unlimited.
     partition_dim : str, optional
@@ -1274,12 +1274,12 @@ def to_netcdf(
     target_path = Path(file)
 
     if parallel:
-        if not mpi_runtime:
+        if not mpi_context:
             from ..mpi.context import mpi
 
-            mpi_runtime = mpi
-        if not isinstance(mpi_runtime, MPIContext):
-            mpi_runtime = MPIContext(mpi_runtime)
+            mpi_context = mpi
+        if not isinstance(mpi_context, MPIContext):
+            mpi_context = MPIContext(mpi_context)
 
         mpi_meta = get_mpi_meta(data)
         distributed = mpi_meta is not None
@@ -1287,12 +1287,12 @@ def to_netcdf(
         # Ranks must agree on the write path. If one rank saw valid mpi_meta
         # and another did not, the two paths post different collectives and
         # the writer would block instead of reporting the inconsistency.
-        agreed = mpi_runtime.comm.allgather(distributed)
+        agreed = mpi_context.comm.allgather(distributed)
         if any(agreed) and not all(agreed):
             disagreeing = [
                 rank for rank, state in enumerate(agreed) if state != agreed[0]
             ]
-            raise mpi_runtime.MPIError(
+            raise mpi_context.MPIError(
                 "MPI ranks disagree about whether the object is distributed; "
                 + f"ranks {disagreeing} differ from rank 0. Parallel NetCDF "
                 + "output requires the same distribution state on every rank."
@@ -1306,11 +1306,11 @@ def to_netcdf(
                     + f"distributed dimension {distributed_dim!r}."
                 )
             partition_dim = distributed_dim
-        elif mpi_runtime.comm.rank != 0:
+        elif mpi_context.comm.rank != 0:
             data = mpi_empty_dataset()
 
         to_netcdf_parallel(
-            mpi_runtime,
+            mpi_context,
             data,
             target_path,
             partition_dim=partition_dim,

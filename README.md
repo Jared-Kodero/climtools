@@ -141,7 +141,7 @@ The `cdo` and `nco` executables must be available on `PATH`.
 | `climtools.stats` | Statistical analysis | [`core/stats.py`](core/stats.py) |
 | `climtools.cmaps` | Scientific colormaps | [`viz/cmaps.py`](viz/cmaps.py) |
 | `climtools.cdo` | CDO command-line wrapper | [`cdo/pycdo.py`](cdo/pycdo.py) |
-| `climtools.mpi` | Shared MPI runtime and communicator | [`mpi/context.py`](mpi/context.py) |
+| `climtools.mpi` | Shared MPI context and communicator | [`mpi/context.py`](mpi/context.py) |
 
 ## MPI-Xarray
 

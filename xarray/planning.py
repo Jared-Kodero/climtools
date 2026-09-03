@@ -157,12 +157,12 @@ def finish_local_reduction(
     return result
 
 
-def _agree(runtime: MPIContext, signature: tuple[Any, ...]) -> None:
+def _agree(mpi_context: MPIContext, signature: tuple[Any, ...]) -> None:
     """Verify that all ranks entered the same reduction plan."""
-    if not CHECK_COLLECTIVE_AGREEMENT or runtime.comm.size == 1:
+    if not CHECK_COLLECTIVE_AGREEMENT or mpi_context.comm.size == 1:
         return
     digest = hashlib.blake2b(repr(signature).encode(), digest_size=16).digest()
-    runtime.raise_if_error(
+    mpi_context.raise_if_error(
         None,
         "MPI xarray reduction planning",
         signature=("xarray_reduction_plan", digest),
@@ -170,7 +170,7 @@ def _agree(runtime: MPIContext, signature: tuple[Any, ...]) -> None:
 
 
 def reduction_plan(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     meta: Mapping[str, Any] | None,
@@ -181,8 +181,8 @@ def reduction_plan(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
     dims : tuple[Hashable, ...]
@@ -278,7 +278,7 @@ def reduction_plan(
 
     plan = tuple(entries)
     _agree(
-        runtime,
+        mpi_context,
         (
             operation,
             tuple(str(dim) for dim in dims),
@@ -300,14 +300,16 @@ def reduction_plan(
 
 
 def resolve_comm(
-    runtime: MPIContext, meta: Mapping[str, Any] | None, comm_axes: Iterable[Hashable]
+    mpi_context: MPIContext,
+    meta: Mapping[str, Any] | None,
+    comm_axes: Iterable[Hashable],
 ) -> MPI.Comm:
     """Return the communicator a plan entry's collective should use.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     meta : Mapping[str, Any] | None
         MPI distribution metadata.
     comm_axes : Iterable[Hashable]
@@ -319,8 +321,10 @@ def resolve_comm(
     """
     axes = frozenset(comm_axes)
     if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
-        return runtime.comm
-    topology = get_cartesian_topology(runtime.comm, meta["dims"], meta["global_sizes"])
+        return mpi_context.comm
+    topology = get_cartesian_topology(
+        mpi_context.comm, meta["dims"], meta["global_sizes"]
+    )
     return topology.sub_comm(axes)
 
 
@@ -343,7 +347,7 @@ def guarded(function: Any) -> tuple[Any, BaseException | None]:
 
 
 def comm_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.DataArray | None,
     op: MPI.Op,
     *,
@@ -357,8 +361,8 @@ def comm_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.DataArray | None
         Distributed DataArray buffer.
     op : MPI.Op
@@ -408,11 +412,11 @@ def comm_reduce(
             tuple(int(length) for length in send.shape),
         )
     )
-    runtime.raise_if_error(error, phase, signature, comm=comm)
+    mpi_context.raise_if_error(error, phase, signature, comm=comm)
     if send is None or value is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = exchange(runtime, send, op, comm=comm)
+    recv = exchange(mpi_context, send, op, comm=comm)
     result = value.copy(data=recv)
     if replica_count != 1 and op == MPI.SUM:
         # Every one of the replica_count duplicate copies contributed to
@@ -430,7 +434,7 @@ def comm_reduce(
 
 
 def exchange(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     send: np.ndarray[Any, Any],
     op: MPI.Op,
     *,
@@ -440,8 +444,8 @@ def exchange(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     send : np.ndarray[Any, Any]
         Local NumPy buffer to reduce.
     op : MPI.Op
@@ -454,13 +458,13 @@ def exchange(
         Globally reduced NumPy buffer.
     """
     recv = np.empty(send.shape, dtype=send.dtype)
-    active_comm = runtime.comm if comm is None else comm
+    active_comm = mpi_context.comm if comm is None else comm
     active_comm.Allreduce(send, recv, op=op)
     return recv
 
 
 def count_valid_values(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.DataArray,
     dims: tuple[Hashable, ...],
     *,
@@ -471,8 +475,8 @@ def count_valid_values(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.DataArray
         Distributed xarray object.
     dims : tuple[Hashable, ...]
@@ -493,7 +497,7 @@ def count_valid_values(
     except BaseException as exc:
         error = exc
     return comm_reduce(
-        runtime,
+        mpi_context,
         count,
         MPI.SUM,
         expect_dtype=partial_dtype(value.dtype.str, "count", None),
@@ -551,7 +555,7 @@ def repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
 
 
 def finish(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     result: xr.Dataset | xr.DataArray,
     *,
     old_meta: Mapping[str, Any] | None,
@@ -562,8 +566,8 @@ def finish(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     result : xr.Dataset | xr.DataArray
         Operation result.
     old_meta : Mapping[str, Any] | None
@@ -635,7 +639,7 @@ def finish(
             # already-computed values are correct on every rank, so no
             # extra communication is needed to arrive at this, only to
             # discard the now-redundant copies' claim to ownership.
-            comm = resolve_comm(runtime, old_meta, reduced_dims)
+            comm = resolve_comm(mpi_context, old_meta, reduced_dims)
             if comm.rank != 0:
                 empty_dim = remaining_dims[0]
                 result = result.isel({empty_dim: slice(0, 0)})
@@ -665,7 +669,9 @@ def finish(
         }
         if not any(int(length) > 1 for length in sizes.values()):
             return result
-        target = choose_partition_dim(sizes, runtime.comm.size, rank=runtime.comm.rank)
+        target = choose_partition_dim(
+            sizes, mpi_context.comm.size, rank=mpi_context.comm.rank
+        )
     elif partition_dim not in auto_candidates:
         raise ValueError(
             f"partition_dim={partition_dim!r} is not a dimension of any "
@@ -679,4 +685,4 @@ def finish(
     )
     from .io import repartition
 
-    return repartition(runtime, result, target, chunk_info=chunk_info)
+    return repartition(mpi_context, result, target, chunk_info=chunk_info)

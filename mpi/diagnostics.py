@@ -18,11 +18,11 @@ from ..core.utils import LockFile, tmp
 
 
 class MPIError(Exception):
-    """MPI runtime or synchronized distributed-execution error."""
+    """MPI context or synchronized distributed-execution error."""
 
 
 class MPIDiagnostics:
-    """Diagnostics and error-handling utilities for an MPI runtime."""
+    """Diagnostics and error-handling utilities for an MPI context."""
 
     def log(
         self,
@@ -178,7 +178,7 @@ class MPIDiagnostics:
             Communicator whose ranks must agree, e.g. a Cartesian
             sub-communicator under a multi-dimensional partition (see
             :meth:`~.planning.ReductionPlanningMixin._resolve_comm`).
-            Defaults to ``self.comm``, the full runtime communicator --
+            Defaults to ``self.comm``, the full mpi_context communicator --
             unchanged behavior for every single-partition-dimension caller.
         """
         active_comm = self.comm if comm is None else comm
@@ -363,7 +363,7 @@ class MPIDiagnostics:
             "[climtools] netCDF4 is not built with parallel NetCDF-4/HDF5 "
             + "support, so xgeo.to_netcdf(..., parallel=True) will raise on "
             + f"this {comm.Get_size()}-rank run. mpi.xarray and the rest of the "
-            + "MPI runtime are unaffected. To build the parallel stack, "
+            + "MPI context are unaffected. To build the parallel stack, "
             + "run `env/setup_env.sh` from the climtools repository (see the "
             + "README's Installation section); nothing else needs it.\n"
         )

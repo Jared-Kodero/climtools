@@ -256,7 +256,7 @@ def _exchange_halo_blocks(
 
 
 def _gather_full(
-    runtime: MPIContext, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
+    mpi_context: MPIContext, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
     """Reconstruct ``value``'s full, replicated extent on every rank."""
     dim = meta["dim"]
@@ -265,7 +265,7 @@ def _gather_full(
             "cannot yet gather a multi-dimensionally partitioned object "
             + f"onto every rank (dims={meta['dims']!r})"
         )
-    pieces = runtime.comm.allgather(value)
+    pieces = mpi_context.comm.allgather(value)
     full = (
         xr.concat(pieces, dim=dim, data_vars="minimal")
         if isinstance(value, xr.Dataset)
@@ -275,7 +275,7 @@ def _gather_full(
 
 
 def _align_replicated(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     other: Any,
     meta: dict[str, Any],
     partner: xr.Dataset | xr.DataArray | None = None,
@@ -318,7 +318,7 @@ def _align_replicated(
 
 
 def align(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     left: xr.Dataset | xr.DataArray,
     right: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] | None = None,
@@ -330,8 +330,8 @@ def align(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     left : xarray.Dataset or xarray.DataArray
         Left operand to align.
     right : xarray.Dataset or xarray.DataArray
@@ -361,18 +361,18 @@ def align(
         if _partitions_match(left_meta, right_meta):
             return left, right
         target_dim = dim if dim is not None else left_meta["dim"]
-        full_left = _gather_full(runtime, left, left_meta)
-        full_right = _gather_full(runtime, right, right_meta)
+        full_left = _gather_full(mpi_context, left, left_meta)
+        full_right = _gather_full(mpi_context, right, right_meta)
         return (
             repartition(
-                runtime,
+                mpi_context,
                 full_left,
                 target_dim,
                 chunk_info=chunk_info,
                 log_partitions=log_partitions,
             ),
             repartition(
-                runtime,
+                mpi_context,
                 full_right,
                 target_dim,
                 chunk_info=chunk_info,
@@ -381,10 +381,10 @@ def align(
         )
 
     if left_meta is not None:
-        return left, _align_replicated(runtime, right, left_meta, partner=left)
+        return left, _align_replicated(mpi_context, right, left_meta, partner=left)
 
     if right_meta is not None:
-        return _align_replicated(runtime, left, right_meta, partner=right), right
+        return _align_replicated(mpi_context, left, right_meta, partner=right), right
 
     if dim is None:
         return left, right
@@ -407,10 +407,14 @@ def align(
 
     return (
         repartition(
-            runtime, left, dim, chunk_info=chunk_info, log_partitions=log_partitions
+            mpi_context, left, dim, chunk_info=chunk_info, log_partitions=log_partitions
         ),
         repartition(
-            runtime, right, dim, chunk_info=chunk_info, log_partitions=log_partitions
+            mpi_context,
+            right,
+            dim,
+            chunk_info=chunk_info,
+            log_partitions=log_partitions,
         ),
     )
 
@@ -446,7 +450,7 @@ def align(
 
 
 def _shuffle_by_position(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     meta: Mapping[str, Any],
     dim: str,
@@ -456,7 +460,7 @@ def _shuffle_by_position(
     fill_value: Any,
 ) -> xr.Dataset | xr.DataArray:
     """Redistribute ``value`` along ``dim`` to match ``old_pos``."""
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     rank, size = comm.rank, comm.size
 
     old_start = int(meta["starts"][dim])
@@ -596,7 +600,7 @@ def _shuffle_by_position(
 
 
 def reindex(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Hashable, Any] | None = None,
     *,
@@ -611,8 +615,8 @@ def reindex(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reindex; distributed or replicated.
     indexers : mapping, optional
@@ -683,7 +687,7 @@ def reindex(
             + f"redistribute; got shape {new_labels.shape!r}"
         )
     _agree(
-        runtime,
+        mpi_context,
         (
             "reindex",
             dim,
@@ -693,7 +697,7 @@ def reindex(
         ),
     )
 
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     old_coord_local = np.asarray(value[dim].values)
     old_full_coord = np.concatenate(comm.allgather(old_coord_local))
     old_index = pd.Index(old_full_coord)
@@ -701,7 +705,7 @@ def reindex(
     old_pos = old_pos.astype(np.int64)
 
     return _shuffle_by_position(
-        runtime,
+        mpi_context,
         value,
         meta,
         dim,
@@ -712,7 +716,7 @@ def reindex(
 
 
 def sortby(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
     *,
@@ -724,8 +728,8 @@ def sortby(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to sort; distributed or replicated.
     by : Hashable, DataArray, or sequence of these
@@ -802,9 +806,9 @@ def sortby(
     key_signature = tuple(
         "<dataarray>" if isinstance(key, xr.DataArray) else str(key) for key in keys
     )
-    _agree(runtime, ("sortby", dim, key_signature, bool(ascending)))
+    _agree(mpi_context, ("sortby", dim, key_signature, bool(ascending)))
 
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
     old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
     # np.lexsort sorts by the *last* array primarily; reverse so the
@@ -816,7 +820,7 @@ def sortby(
     new_coord = old_full_coord[order]
 
     return _shuffle_by_position(
-        runtime,
+        mpi_context,
         value,
         meta,
         dim,
@@ -861,14 +865,14 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
 
 
 def check_operands_distribution(
-    runtime: MPIContext, operands: Iterable[Any]
+    mpi_context: MPIContext, operands: Iterable[Any]
 ) -> tuple[dict[str, Any] | None, Any]:
     """Return the mpi_meta to attach to a multi-operand call's result.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     operands : iterable of Any
         Every positional and keyword argument passed to :meth:`apply`.
     Returns
@@ -925,7 +929,7 @@ def check_operands_distribution(
                         + "length but its coordinate labels don't match "
                         + f"this rank's slice. xarray.align reports: {exc}"
                     ) from exc
-            elif runtime.comm.size > 1:
+            elif mpi_context.comm.size > 1:
                 # Equal length is necessary but not sufficient: without a
                 # coordinate on dim to check exactly (the branch above),
                 # there is no way to tell this rank's own correctly
@@ -1003,14 +1007,14 @@ def check_partition_preserved(
 
 
 def apply(
-    runtime: MPIContext, func: Callable[..., Any], *args: Any, **kwargs: Any
+    mpi_context: MPIContext, func: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
     """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     func : callable
         Any partition-preserving, rank-local function of the given ``args`` and ``kwargs``.
     *args : Any
@@ -1028,22 +1032,24 @@ def apply(
         If the xarray arguments are distributed over incompatible partitions or their coordinates disagree, or if the callable's result no longer represents the same owned partition (missing dimension, changed local length, or changed coordinate labels).
     """
     if func in _MATMUL_CALLABLES and not kwargs and len(args) == 2:
-        return matmul(runtime, *args)
+        return matmul(mpi_context, *args)
 
-    return _apply_generic(runtime, func, args, kwargs)
+    return _apply_generic(mpi_context, func, args, kwargs)
 
 
 def _apply_generic(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     func: Callable[..., Any],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> Any:
     """Run the shared partition-preserving callable path."""
-    meta, reference = check_operands_distribution(runtime, (*args, *kwargs.values()))
+    meta, reference = check_operands_distribution(
+        mpi_context, (*args, *kwargs.values())
+    )
 
     _agree(
-        runtime,
+        mpi_context,
         (
             "apply",
             getattr(func, "__name__", repr(func)),
@@ -1074,13 +1080,13 @@ def _apply_generic(
 # distributed result instead of refusing outright.
 
 
-def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
+def matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     """Matrix multiplication (``left @ right``), correct under MPI.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     left : xarray.DataArray
         Left operand.
     right : Any
@@ -1097,9 +1103,9 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     TypeError
         If the dtype involved has no MPI reduction datatype, when the distributed dimension is contracted.
     """
-    meta, _reference = check_operands_distribution(runtime, (left, right))
+    meta, _reference = check_operands_distribution(mpi_context, (left, right))
     if meta is None:
-        return _apply_generic(runtime, operator.matmul, (left, right), {})
+        return _apply_generic(mpi_context, operator.matmul, (left, right), {})
 
     contracted = tuple(
         d
@@ -1111,7 +1117,7 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
         # common dimensions, so none are ever contracted: the operation
         # only reads this rank's own owned slice and apply()'s post-call
         # check confirms it.
-        return _apply_generic(runtime, operator.matmul, (left, right), {})
+        return _apply_generic(mpi_context, operator.matmul, (left, right), {})
     if len(contracted) > 1:
         raise NotImplementedError(
             "cannot yet contract more than one partition dimension at "
@@ -1130,21 +1136,21 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
             + f"replicated along {replicated!r}"
         )
 
-    _agree(runtime, ("matmul", str(dim), int(meta["global_sizes"][dim])))
+    _agree(mpi_context, ("matmul", str(dim), int(meta["global_sizes"][dim])))
 
     partial = operator.matmul(left, right)
     total = comm_reduce(
-        runtime,
+        mpi_context,
         partial,
         MPI.SUM,
         phase="MPI xarray distributed matrix multiplication",
-        comm=resolve_comm(runtime, meta, (dim,)),
+        comm=resolve_comm(mpi_context, meta, (dim,)),
     )
     return strip_mpi_meta(total)
 
 
 def halo_exchange(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | None = None,
     *,
@@ -1156,8 +1162,8 @@ def halo_exchange(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object to pad.
     dim : Hashable, optional
@@ -1199,7 +1205,7 @@ def halo_exchange(
         raise ValueError("before and after must be >= 0")
 
     _agree(
-        runtime,
+        mpi_context,
         ("halo_exchange", str(partition_dim), int(before), int(after), bool(periodic)),
     )
 
@@ -1217,7 +1223,7 @@ def halo_exchange(
         # halo) get correct output at zero communication cost instead.
         return value, 0, 0
 
-    comm = runtime.comm
+    comm = mpi_context.comm
     rank = comm.rank
     if len(partition_dims) > 1:
         # Multi-dimensional partition: the rank below/above along
@@ -1314,7 +1320,7 @@ def halo_exchange(
 
 
 def rolling_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1327,8 +1333,8 @@ def rolling_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to roll over.
     dim : Hashable
@@ -1361,7 +1367,7 @@ def rolling_reduce(
     after = (window - 1) - before if center else 0
 
     padded, left_pad, _right_pad = halo_exchange(
-        runtime, value, dim, before=before, after=after
+        mpi_context, value, dim, before=before, after=after
     )
     rolled = padded.rolling({dim: window}, center=center, min_periods=min_periods)
     reduced = getattr(rolled, reduce)()
@@ -1372,7 +1378,7 @@ def rolling_reduce(
 
 
 def coarsen_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     window: int,
@@ -1386,8 +1392,8 @@ def coarsen_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to coarsen.
     dim : Hashable
@@ -1428,7 +1434,7 @@ def coarsen_reduce(
         )
 
     _agree(
-        runtime,
+        mpi_context,
         ("coarsen_reduce", str(dim), int(window), boundary, side),
     )
 
@@ -1465,7 +1471,7 @@ def coarsen_reduce(
     # halo width itself.
     request = max(window - 1, 0)
     padded, left_pad, right_pad = halo_exchange(
-        runtime, value, dim, before=request, after=request
+        mpi_context, value, dim, before=request, after=request
     )
     # left_pad/right_pad are what was actually fetched (0 at a true
     # global edge, `request` everywhere else); keep only the slice
@@ -1506,7 +1512,7 @@ def coarsen_reduce(
     # own length-changing case -- start/stop/global_size are recomputed
     # from an allgather of each rank's new local length, not carried
     # over from the (now stale) pre-coarsen meta.
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     counts = comm.allgather(int(coarsened.sizes[dim]))
     new_global_size = sum(counts)
     new_start = sum(counts[: comm.rank])
@@ -1531,29 +1537,29 @@ def coarsen_reduce(
 
 
 def _eval_ast_node(
-    runtime: MPIContext, node: ast.expr, variables: Mapping[str, Any]
+    mpi_context: MPIContext, node: ast.expr, variables: Mapping[str, Any]
 ) -> Any:
     """Recursively evaluate one parsed expression node."""
     if isinstance(node, ast.BinOp):
         if isinstance(node.op, ast.MatMult):
-            left = _eval_ast_node(runtime, node.left, variables)
-            right = _eval_ast_node(runtime, node.right, variables)
-            return matmul(runtime, left, right)
+            left = _eval_ast_node(mpi_context, node.left, variables)
+            right = _eval_ast_node(mpi_context, node.right, variables)
+            return matmul(mpi_context, left, right)
 
         function = _AST_BINARY_OPS.get(type(node.op))
         if function is None:
             raise ValueError(
                 f"Unsupported operator {type(node.op).__name__!r} in " + "expression."
             )
-        left = _eval_ast_node(runtime, node.left, variables)
-        right = _eval_ast_node(runtime, node.right, variables)
-        return apply(runtime, function, left, right)
+        left = _eval_ast_node(mpi_context, node.left, variables)
+        right = _eval_ast_node(mpi_context, node.right, variables)
+        return apply(mpi_context, function, left, right)
 
     if isinstance(node, ast.BoolOp):
         is_and = isinstance(node.op, ast.And)
         last_val = None
         for val_node in node.values:
-            last_val = _eval_ast_node(runtime, val_node, variables)
+            last_val = _eval_ast_node(mpi_context, val_node, variables)
             if isinstance(last_val, (xr.Dataset, xr.DataArray)):
                 raise TypeError(
                     "'and'/'or' use Python truth-value checks, undefined "
@@ -1578,9 +1584,9 @@ def _eval_ast_node(
                 f"Unsupported comparison {type(node.ops[0]).__name__!r} "
                 + "in expression."
             )
-        left = _eval_ast_node(runtime, node.left, variables)
-        right = _eval_ast_node(runtime, node.comparators[0], variables)
-        return apply(runtime, function, left, right)
+        left = _eval_ast_node(mpi_context, node.left, variables)
+        right = _eval_ast_node(mpi_context, node.comparators[0], variables)
+        return apply(mpi_context, function, left, right)
 
     if isinstance(node, ast.UnaryOp):
         function = _AST_UNARY_OPS.get(type(node.op))
@@ -1589,8 +1595,8 @@ def _eval_ast_node(
                 f"Unsupported unary operator {type(node.op).__name__!r} "
                 + "in expression."
             )
-        operand = _eval_ast_node(runtime, node.operand, variables)
-        return apply(runtime, function, operand)
+        operand = _eval_ast_node(mpi_context, node.operand, variables)
+        return apply(mpi_context, function, operand)
 
     if isinstance(node, ast.Name):
         try:
@@ -1612,13 +1618,13 @@ def _eval_ast_node(
     )
 
 
-def evaluate(runtime: MPIContext, expression: str, /, **variables: Any) -> Any:
+def evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) -> Any:
     """Evaluate a string expression, respecting normal operator precedence.
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     expression : str
         A Python expression referencing ``variables`` by name, for example ``"(a + b) * c - d / e"``.
     **variables : Any
@@ -1639,4 +1645,4 @@ def evaluate(runtime: MPIContext, expression: str, /, **variables: Any) -> Any:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
         raise ValueError(f"Could not parse expression {expression!r}: {exc}") from exc
-    return _eval_ast_node(runtime, tree.body, variables)
+    return _eval_ast_node(mpi_context, tree.body, variables)

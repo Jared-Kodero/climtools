@@ -67,7 +67,7 @@ def _merge_partition_meta(
 
 
 def isel(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     *,
@@ -78,8 +78,8 @@ def isel(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
     indexers : mapping, optional
@@ -105,7 +105,7 @@ def isel(
 
     distributed_indexer = supplied.pop(dim)
     if indexer_is_scalar(distributed_indexer):
-        return isel_scalar(runtime, value, dim, int(distributed_indexer), supplied)
+        return isel_scalar(mpi_context, value, dim, int(distributed_indexer), supplied)
 
     if not isinstance(distributed_indexer, slice):
         raise NotImplementedError(
@@ -126,7 +126,7 @@ def isel(
     local_indexers[dim] = slice(local_start, local_stop)
     output = value.isel(local_indexers)
 
-    dim_comm = _dim_comm(runtime, meta, dim)
+    dim_comm = _dim_comm(mpi_context, meta, dim)
     counts = dim_comm.allgather(int(output.sizes[dim]))
     new_global_size = sum(counts)
     if new_global_size == 1 and partition_dim is not None:
@@ -137,7 +137,7 @@ def isel(
                 + "under a multi-dimensional partition; pass "
                 + "partition_dim=None to keep it where it landed."
             )
-        return _repartition_singleton(runtime, output, dim, counts, partition_dim)
+        return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_start = sum(counts[: dim_comm.rank])
     new_stop = new_start + counts[dim_comm.rank]
@@ -155,7 +155,7 @@ def isel(
 
 
 def isel_scalar(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     index: int,
@@ -165,8 +165,8 @@ def isel_scalar(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
     dim : Hashable
@@ -197,7 +197,7 @@ def isel_scalar(
             + f"with size {global_size}."
         )
 
-    dim_comm = _dim_comm(runtime, meta, dim)
+    dim_comm = _dim_comm(mpi_context, meta, dim)
     owner = None
     parts = dim_comm.allgather((int(meta["starts"][dim]), int(meta["stops"][dim])))
     for candidate_rank, (start, stop) in enumerate(parts):
@@ -238,7 +238,7 @@ def isel_scalar(
 
 
 def sel(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
     method: str | None = None,
@@ -252,8 +252,8 @@ def sel(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to index.
     indexers : mapping, optional
@@ -286,7 +286,7 @@ def sel(
     distributed_indexer = supplied.pop(dim)
     if indexer_is_scalar(distributed_indexer):
         return sel_scalar(
-            runtime,
+            mpi_context,
             value,
             dim,
             distributed_indexer,
@@ -304,7 +304,7 @@ def sel(
     local_indexers = dict(supplied)
     local_indexers[dim] = distributed_indexer
     output = value.sel(local_indexers, method=method, tolerance=tolerance, drop=drop)
-    dim_comm = _dim_comm(runtime, meta, dim)
+    dim_comm = _dim_comm(mpi_context, meta, dim)
     counts = dim_comm.allgather(int(output.sizes[dim]))
     new_global_size = sum(counts)
     if new_global_size == 1 and partition_dim is not None:
@@ -315,7 +315,7 @@ def sel(
                 + "under a multi-dimensional partition; pass "
                 + "partition_dim=None to keep it where it landed."
             )
-        return _repartition_singleton(runtime, output, dim, counts, partition_dim)
+        return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_start = sum(counts[: dim_comm.rank])
     new_stop = new_start + counts[dim_comm.rank]
@@ -333,7 +333,7 @@ def sel(
 
 
 def sel_scalar(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     label: Any,
@@ -347,8 +347,8 @@ def sel_scalar(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed object.
     dim : Hashable
@@ -378,7 +378,7 @@ def sel_scalar(
                 drop=drop,
             )
 
-        dim_comm = _dim_comm(runtime, meta, dim)
+        dim_comm = _dim_comm(mpi_context, meta, dim)
         if dim in value.coords:
             local_coord = np.asarray(value[dim].values)
         else:
@@ -462,7 +462,7 @@ def sel_scalar(
                     )
             except BaseException as exc:
                 error = exc
-        runtime.raise_if_error(error, "distributed scalar selection", comm=dim_comm)
+        mpi_context.raise_if_error(error, "distributed scalar selection", comm=dim_comm)
         result = dim_comm.bcast(result, root=owner)
         remaining_dims = tuple(
             d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
@@ -495,7 +495,7 @@ def sel_scalar(
         pass
 
     meta = get_mpi_meta(value)
-    dim_comm = runtime.comm if meta is None else _dim_comm(runtime, meta, dim)
+    dim_comm = mpi_context.comm if meta is None else _dim_comm(mpi_context, meta, dim)
     found_ranks = dim_comm.allgather(found)
     owners = [rank for rank, state in enumerate(found_ranks) if state]
     if not owners:
@@ -527,7 +527,7 @@ def sel_scalar(
 
 
 def _repartition_singleton(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     output: xr.Dataset | xr.DataArray,
     old_dim: Hashable,
     counts: list[int],
@@ -536,7 +536,7 @@ def _repartition_singleton(
     """Scatter a slice-``isel``/``sel`` result stranded on one rank."""
     owner = counts.index(1)
     stripped = strip_mpi_meta(output)
-    comm = runtime.comm
+    comm = mpi_context.comm
 
     def _keep_single_owner() -> xr.Dataset | xr.DataArray:
         """Keep the singleton result on one owning rank."""
@@ -594,9 +594,9 @@ def _repartition_singleton(
             ]
         except BaseException as exc:
             error = exc
-    runtime.raise_if_error(error, "isel/sel partition_dim scatter")
+    mpi_context.raise_if_error(error, "isel/sel partition_dim scatter")
 
-    local = runtime.scatter(parts if comm.rank == owner else None, root=owner)
+    local = mpi_context.scatter(parts if comm.rank == owner else None, root=owner)
 
     start, stop = get_chunk_bounds(target_length, chunk_size, comm.rank, comm.size)
     info = {str(target): chunk_size}

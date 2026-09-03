@@ -33,12 +33,12 @@ class ToChildrenContext:
 
     Parameters
     ----------
-    runtime : MPIContext
-        Parent runtime owning the decomposed child communicators.
+    mpi_context : MPIContext
+        Parent mpi_context owning the decomposed child communicators.
     """
 
-    def __init__(self, runtime: MPIContext) -> None:
-        self._runtime = runtime
+    def __init__(self, mpi_context: MPIContext) -> None:
+        self._runtime = mpi_context
 
     def broadcast(self, value: T | None, *, root: int = 0) -> T:
         """Broadcast one parent-root value to every rank in every child.
@@ -64,9 +64,9 @@ class ToChildrenContext:
         MPIError
             If ranks disagree on the collective call.
         """
-        runtime = self._runtime
-        _ = runtime.child
-        comm = runtime.comm
+        mpi_context = self._runtime
+        _ = mpi_context.child
+        comm = mpi_context.comm
 
         error: BaseException | None = None
         signature: tuple[str, int] | None = None
@@ -79,14 +79,14 @@ class ToChildrenContext:
         except BaseException as exc:
             error = exc
 
-        runtime.raise_if_error(
+        mpi_context.raise_if_error(
             error,
             "mpi.to_children.broadcast",
             signature=signature,
         )
         return cast(
             "T",
-            comm.bcast(value if runtime.is_root(root) else None, root=root),
+            comm.bcast(value if mpi_context.is_root(root) else None, root=root),
         )
 
     def scatter(self, values: Sequence[T] | None, *, root: int = 0) -> T:
@@ -121,9 +121,9 @@ class ToChildrenContext:
             If ranks disagree on the collective call or root-side validation
             fails on only a subset of ranks.
         """
-        runtime = self._runtime
-        child = runtime.child
-        comm = runtime.comm
+        mpi_context = self._runtime
+        child = mpi_context.child
+        comm = mpi_context.comm
         ranks_per_child = child.comm.size
         ntasks = comm.size // ranks_per_child
 
@@ -137,7 +137,7 @@ class ToChildrenContext:
             if root < 0 or root >= comm.size:
                 raise ValueError(f"root {root} is outside [0, {comm.size}).")
 
-            if runtime.is_root(root):
+            if mpi_context.is_root(root):
                 if values is None:
                     raise ValueError("values cannot be None on the parent root.")
                 if len(values) != ntasks:
@@ -154,7 +154,7 @@ class ToChildrenContext:
         except BaseException as exc:
             error = exc
 
-        runtime.raise_if_error(
+        mpi_context.raise_if_error(
             error,
             "mpi.to_children.scatter",
             signature=signature,
@@ -179,12 +179,12 @@ class FromChildrenContext:
 
     Parameters
     ----------
-    runtime : MPIContext
-        Parent runtime owning the decomposed child communicators.
+    mpi_context : MPIContext
+        Parent mpi_context owning the decomposed child communicators.
     """
 
-    def __init__(self, runtime: MPIContext) -> None:
-        self._runtime = runtime
+    def __init__(self, mpi_context: MPIContext) -> None:
+        self._runtime = mpi_context
 
     def gather(self, value: T, *, root: int = 0) -> list[T] | None:
         """Gather one child result onto one parent rank.
@@ -214,9 +214,9 @@ class FromChildrenContext:
         MPIError
             If ranks disagree on the collective call.
         """
-        runtime = self._runtime
-        child = runtime.child
-        comm = runtime.comm
+        mpi_context = self._runtime
+        child = mpi_context.child
+        comm = mpi_context.comm
 
         error: BaseException | None = None
         signature: tuple[str, int] | None = None
@@ -229,12 +229,14 @@ class FromChildrenContext:
         except BaseException as exc:
             error = exc
 
-        runtime.raise_if_error(error, "mpi.from_children.gather", signature=signature)
+        mpi_context.raise_if_error(
+            error, "mpi.from_children.gather", signature=signature
+        )
 
         payload = (cast("int", child.task), value) if child.is_root() else None
         gathered = comm.gather(payload, root=root)
 
-        if not runtime.is_root(root):
+        if not mpi_context.is_root(root):
             return None
 
         results = [item for item in gathered if item is not None]
@@ -250,7 +252,7 @@ class MPIContext(MPIDiagnostics):
     Parameters
     ----------
     comm : mpi4py.MPI.Intracomm or None, optional
-        Communicator used by the runtime. None uses ``MPI.COMM_WORLD``.
+        Communicator used by the mpi_context. None uses ``MPI.COMM_WORLD``.
     """
 
     MPIError = MPIError
@@ -290,7 +292,7 @@ class MPIContext(MPIDiagnostics):
             If :meth:`decompose` has not been called.
         """
         if self._child is None:
-            raise RuntimeError("MPI runtime has not been decomposed.")
+            raise RuntimeError("MPI context has not been decomposed.")
 
         return self._child
 

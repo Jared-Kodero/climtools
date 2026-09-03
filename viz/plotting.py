@@ -159,7 +159,7 @@ class Theme:
         Parameters
         ----------
         rc_params: dict
-            Matplotlib runtime configuration parameters to apply to ``mpl.rcParams``.
+            Matplotlib mpi_context configuration parameters to apply to ``mpl.rcParams``.
         """
 
         interactive_backend(self.interactive)
@@ -323,7 +323,7 @@ def theme(
     grid : bool, optional
         Whether to display background grid lines. Default is False.
     rc_params: dict
-            Matplotlib runtime configuration parameters to apply to ``mpl.rcParams``.
+            Matplotlib mpi_context configuration parameters to apply to ``mpl.rcParams``.
 
     Returns
     -------

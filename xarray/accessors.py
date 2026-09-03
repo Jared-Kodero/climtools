@@ -240,7 +240,7 @@ class GeoBase:
     def to_netcdf(
         self,
         file: str | Path,
-        mpi_runtime: MPIContext | MPI.Intracomm | None = None,
+        mpi_context: MPIContext | MPI.Intracomm | None = None,
         unlimited_dim: str | Iterable[str] | None = None,
         partition_dim: str | None = None,
         *,
@@ -263,8 +263,8 @@ class GeoBase:
         ----------
         file : str or pathlib.Path
             Output path.
-        mpi_runtime : MPIContext or mpi4py.MPI.Intracomm, optional
-            MPI runtime or communicator.
+        mpi_context : MPIContext or mpi4py.MPI.Intracomm, optional
+            MPI context or communicator.
         unlimited_dim : str or iterable of str, optional
             Dimension(s) made unlimited in the NetCDF schema.
         partition_dim : str, optional

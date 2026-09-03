@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
     # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
     # module, so importing `mpi_partition_data` back from `.io` at module
-    # scope would be circular. Call sites that need it at runtime import
+    # scope would be circular. Call sites that need it at mpi_context import
     # locally.
 
 
@@ -211,13 +211,13 @@ def create_file(
         set_attrs(nc, schema["attrs"])
 
 
-def writer_comm(mpi_runtime: MPIContext, has_data: bool) -> MPI.Comm:
+def writer_comm(mpi_context: MPIContext, has_data: bool) -> MPI.Comm:
     """Create the communicator used for collective writes.
 
     Parameters
     ----------
-    mpi_runtime : MPIContext
-        MPI runtime.
+    mpi_context : MPIContext
+        MPI context.
     has_data : bool
         Whether the rank owns output data.
     Returns
@@ -225,24 +225,24 @@ def writer_comm(mpi_runtime: MPIContext, has_data: bool) -> MPI.Comm:
     mpi4py.MPI.Comm
         Writer communicator or ``MPI.COMM_NULL``.
     """
-    if mpi_runtime.comm.size == 1:
-        return mpi_runtime.comm if has_data else MPI.COMM_NULL
-    return mpi_runtime.comm.Split(
-        1 if has_data else MPI.UNDEFINED, mpi_runtime.comm.rank
+    if mpi_context.comm.size == 1:
+        return mpi_context.comm if has_data else MPI.COMM_NULL
+    return mpi_context.comm.Split(
+        1 if has_data else MPI.UNDEFINED, mpi_context.comm.rank
     )
 
 
-def free_writer_comm(mpi_runtime: MPIContext, comm: MPI.Comm) -> None:
+def free_writer_comm(mpi_context: MPIContext, comm: MPI.Comm) -> None:
     """Free a writer communicator when required.
 
     Parameters
     ----------
-    mpi_runtime : MPIContext
-        MPI runtime.
+    mpi_context : MPIContext
+        MPI context.
     comm : mpi4py.MPI.Comm
         Writer communicator.
     """
-    if comm != MPI.COMM_NULL and comm != mpi_runtime.comm:
+    if comm != MPI.COMM_NULL and comm != mpi_context.comm:
         comm.Free()
 
 
@@ -292,7 +292,7 @@ def open_in_parallel(
 
 
 def write_distributed(
-    mpi_runtime: MPIContext,
+    mpi_context: MPIContext,
     path: str,
     schema: Mapping[str, Any],
     ds: xr.Dataset,
@@ -302,8 +302,8 @@ def write_distributed(
 
     Parameters
     ----------
-    mpi_runtime : MPIContext
-        MPI runtime.
+    mpi_context : MPIContext
+        MPI context.
     path : str
         NetCDF path.
     schema : Mapping[str, Any]
@@ -320,7 +320,7 @@ def write_distributed(
     has_data = all(stops[dim] > starts[dim] for dim in partition_dims)
     prewritten = set(schema.get("prewritten", ()))
 
-    comm = writer_comm(mpi_runtime, has_data)
+    comm = writer_comm(mpi_context, has_data)
     nc: netCDF4.Dataset | None = None
     try:
         if comm == MPI.COMM_NULL:
@@ -350,16 +350,16 @@ def write_distributed(
     finally:
         if nc is not None:
             nc.close()
-        free_writer_comm(mpi_runtime, comm)
+        free_writer_comm(mpi_context, comm)
         # Every rank reaches this barrier -- including the COMM_NULL/no-data
         # ranks that returned above -- so nothing downstream (a different
         # communicator, a non-parallel reopen for validation, ...) can run
         # ahead of a writer rank that is still inside nc.close().
-        mpi_runtime.comm.Barrier()
+        mpi_context.comm.Barrier()
 
 
 def write_partitioned(
-    mpi_runtime: MPIContext,
+    mpi_context: MPIContext,
     path: str,
     schema: Mapping[str, Any],
     source_ds: xr.Dataset | None,
@@ -368,8 +368,8 @@ def write_partitioned(
 
     Parameters
     ----------
-    mpi_runtime : MPIContext
-        MPI runtime.
+    mpi_context : MPIContext
+        MPI context.
     path : str
         NetCDF path.
     schema : Mapping[str, Any]
@@ -393,16 +393,16 @@ def write_partitioned(
     # partition boundaries exist yet.
     chunk_size = int(
         schema.get("partition_chunk_size")
-        or max(1, math.ceil(length / mpi_runtime.comm.size))
+        or max(1, math.ceil(length / mpi_context.comm.size))
     )
     bounds = [
-        get_chunk_bounds(length, chunk_size, rank, mpi_runtime.comm.size)
-        for rank in range(mpi_runtime.comm.size)
+        get_chunk_bounds(length, chunk_size, rank, mpi_context.comm.size)
+        for rank in range(mpi_context.comm.size)
     ]
     counts = np.array([stop - start for start, stop in bounds], dtype=np.int64)
-    start, stop = bounds[mpi_runtime.comm.rank]
+    start, stop = bounds[mpi_context.comm.rank]
 
-    comm = writer_comm(mpi_runtime, stop > start)
+    comm = writer_comm(mpi_context, stop > start)
     nc: netCDF4.Dataset | None = None
     try:
         if comm != MPI.COMM_NULL:
@@ -421,11 +421,11 @@ def write_partitioned(
             axis = dims.index(partition_dim)
             shape = tuple(int(value) for value in spec["shape"])
             moved_shape = (shape[axis], *shape[:axis], *shape[axis + 1 :])
-            local_shape = (int(counts[mpi_runtime.comm.rank]), *moved_shape[1:])
+            local_shape = (int(counts[mpi_context.comm.rank]), *moved_shape[1:])
             dtype = np.dtype(spec["dtype"])
 
             send = None
-            if mpi_runtime.comm.rank == 0:
+            if mpi_context.comm.rank == 0:
                 if source_ds is None:
                     raise AssertionError("Rank 0 source Dataset is missing.")
                 variable = source_ds[name]
@@ -435,10 +435,10 @@ def write_partitioned(
                     dtype=dtype,
                 )
 
-            local = mpi_runtime.scatterv(send, counts, local_shape, dtype)
+            local = mpi_context.scatterv(send, counts, local_shape, dtype)
             # `send = None` (not `del send` + `gc.collect()`) is deliberate
             # and sufficient: CPython reclaims a non-cyclic object the
-            # moment its refcount hits zero, and mpi_runtime.scatterv's own Scatterv
+            # moment its refcount hits zero, and mpi_context.scatterv's own Scatterv
             # call is synchronous and keeps no reference to `send` after it
             # returns, so dropping this one binding is enough. An explicit
             # gc.collect() here would only add a full generational GC pass
@@ -470,15 +470,15 @@ def write_partitioned(
     finally:
         if nc is not None:
             nc.close()
-        free_writer_comm(mpi_runtime, comm)
+        free_writer_comm(mpi_context, comm)
         # See the matching comment in write_distributed: guarantees every
         # rank waits for every writer rank's close() before anything
         # downstream reopens the file.
-        mpi_runtime.comm.Barrier()
+        mpi_context.comm.Barrier()
 
 
 def to_netcdf_parallel(
-    mpi_runtime: MPIContext,
+    mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray | None,
     path: str | PathLike[str],
     partition_dim: str | None = None,
@@ -494,8 +494,8 @@ def to_netcdf_parallel(
 
     Parameters
     ----------
-    mpi_runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     data : xarray.Dataset or xarray.DataArray or None
         Distributed local data or complete rank-0 data.
     path : str or os.PathLike
@@ -521,12 +521,12 @@ def to_netcdf_parallel(
     str
         Absolute output path.
     """
-    if mpi_runtime.comm.size == 1 and not allow_serial:
+    if mpi_context.comm.size == 1 and not allow_serial:
         raise NetCDFWriteError(
             "MPI_COMM_WORLD contains one process. Launch with mpirun/mpiexec/srun "
             + "or pass allow_serial=True."
         )
-    if mpi_runtime.comm.size > 1 and not getattr(
+    if mpi_context.comm.size > 1 and not getattr(
         netCDF4, "__has_parallel4_support__", False
     ):
         raise NetCDFWriteError(
@@ -553,14 +553,14 @@ def to_netcdf_parallel(
             raise TypeError("data must be an xarray Dataset, DataArray, or None.")
     except BaseException as exc:
         error = exc
-    mpi_runtime.raise_if_error(error, "parallel NetCDF input validation")
+    mpi_context.raise_if_error(error, "parallel NetCDF input validation")
 
     local_meta = get_mpi_meta(local_ds) if local_ds is not None else None
     distributed = local_meta is not None
 
     # The distributed and scatter paths post different collectives, so every
     # rank must take the same one. Disagreement is reported instead of hanging.
-    agreed = mpi_runtime.comm.allgather(distributed)
+    agreed = mpi_context.comm.allgather(distributed)
     if any(agreed) and not all(agreed):
         disagreeing = [rank for rank, state in enumerate(agreed) if state != agreed[0]]
         raise NetCDFWriteError(
@@ -588,22 +588,22 @@ def to_netcdf_parallel(
         # broadcast rather than each rank guessing from an empty one.
         is_dask_backed = False
         try:
-            if mpi_runtime.comm.rank == 0 and local_ds is not None:
+            if mpi_context.comm.rank == 0 and local_ds is not None:
                 is_dask_backed = any(
                     dask.is_dask_collection(variable.data)
                     for variable in local_ds.variables.values()
                 )
         except BaseException as exc:
             error = exc
-        mpi_runtime.raise_if_error(error, "parallel NetCDF dask-backed detection")
-        is_dask_backed = mpi_runtime.comm.bcast(is_dask_backed, root=0)
+        mpi_context.raise_if_error(error, "parallel NetCDF dask-backed detection")
+        is_dask_backed = mpi_context.comm.bcast(is_dask_backed, root=0)
 
         if is_dask_backed:
             from .io import mpi_partition_data
 
             local_ds = mpi_partition_data(
-                local_ds if mpi_runtime.comm.rank == 0 else None,
-                mpi_runtime,
+                local_ds if mpi_context.comm.rank == 0 else None,
+                mpi_context,
                 dim=partition_dim if partition_dim is not None else "auto",
                 root=0,
             )
@@ -630,7 +630,7 @@ def to_netcdf_parallel(
                     + f"the distributed dimensions {distributed_dims!r}"
                 )
             partition_dim = distributed_dims
-        mpi_runtime.raise_if_error(error, "parallel NetCDF partition dimension")
+        mpi_context.raise_if_error(error, "parallel NetCDF partition dimension")
 
         # Plan save_chunks collectively before any rank-0-only work below,
         # so the schema-construction branch can align the partition-
@@ -651,7 +651,7 @@ def to_netcdf_parallel(
             # the same object, so its return value is intentionally unused.
             from .io import attach_save_chunks
 
-            attach_save_chunks(mpi_runtime, local_ds)
+            attach_save_chunks(mpi_context, local_ds)
             local_meta = get_mpi_meta(local_ds)
             if local_meta is None:
                 raise AssertionError(
@@ -701,7 +701,7 @@ def to_netcdf_parallel(
         except BaseException as exc:
             coord_names = []
             error = exc
-        mpi_runtime.raise_if_error(
+        mpi_context.raise_if_error(
             error,
             "parallel NetCDF coordinate discovery",
             signature=tuple(coord_names),
@@ -712,9 +712,9 @@ def to_netcdf_parallel(
             axis = coordinate.get_axis_num(coord_dim)
             local_values = np.asarray(coordinate.values)
             dim_comm = (
-                mpi_runtime.comm
+                mpi_context.comm
                 if len(partition_dims_tuple) == 1
-                else resolve_comm(mpi_runtime, local_meta, (coord_dim,))
+                else resolve_comm(mpi_context, local_meta, (coord_dim,))
             )
             start = int(starts_map[coord_dim])
             stop = int(stops_map[coord_dim])
@@ -759,13 +759,13 @@ def to_netcdf_parallel(
                     prewritten_coords[coord_name] = rebuilt
                 except BaseException as exc:
                     error = exc
-            mpi_runtime.raise_if_error(
+            mpi_context.raise_if_error(
                 error, f"parallel NetCDF coordinate gather ({coord_name})"
             )
 
         # No data gather/scatter. Rank 0 only constructs the schema from its
         # local metadata and mpi_meta's global partition length.
-        if mpi_runtime.comm.rank == 0:
+        if mpi_context.comm.rank == 0:
             try:
                 ds = local_ds
                 if deflate is not None and not 0 <= int(deflate) <= 9:
@@ -844,7 +844,7 @@ def to_netcdf_parallel(
                 }
             except BaseException as exc:
                 error = exc
-    elif mpi_runtime.comm.rank == 0:
+    elif mpi_context.comm.rank == 0:
         try:
             if local_ds is None:
                 raise TypeError("Rank 0 must provide an xarray Dataset or DataArray.")
@@ -872,7 +872,7 @@ def to_netcdf_parallel(
                 raise ValueError(f"Unknown unlimited dimensions: {sorted(missing)}.")
 
             partition_chunk_size = get_partition_chunk_size(
-                ds, partition_dim, mpi_runtime.comm.size
+                ds, partition_dim, mpi_context.comm.size
             )
             chunk_map = get_chunks(ds, chunks, partition_dim, partition_chunk_size)
             # Rank 0 already holds the complete global array for every
@@ -967,39 +967,39 @@ def to_netcdf_parallel(
         except BaseException as exc:
             error = exc
 
-    mpi_runtime.raise_if_error(error, "parallel NetCDF preparation")
-    output_path, schema = mpi_runtime.comm.bcast((output_path, schema), root=0)
+    mpi_context.raise_if_error(error, "parallel NetCDF preparation")
+    output_path, schema = mpi_context.comm.bcast((output_path, schema), root=0)
     if output_path is None or schema is None:
         raise AssertionError("Rank 0 did not broadcast the NetCDF schema.")
 
     error = None
-    if mpi_runtime.comm.rank == 0:
+    if mpi_context.comm.rank == 0:
         try:
             if root_data is None:
                 raise AssertionError("Rank 0 data buffers are missing.")
             create_file(output_path, schema, root_data)
         except BaseException as exc:
             error = exc
-    mpi_runtime.raise_if_error(error, "serial NetCDF schema creation")
-    mpi_runtime.comm.barrier()
+    mpi_context.raise_if_error(error, "serial NetCDF schema creation")
+    mpi_context.comm.barrier()
 
     try:
         if distributed:
             if local_ds is None or local_meta is None:
                 raise AssertionError("Distributed rank-local data are missing.")
-            write_distributed(mpi_runtime, output_path, schema, local_ds, local_meta)
+            write_distributed(mpi_context, output_path, schema, local_ds, local_meta)
         else:
-            write_partitioned(mpi_runtime, output_path, schema, local_ds)
+            write_partitioned(mpi_context, output_path, schema, local_ds)
     except BaseException:
         # Aborting without a diagnostic leaves the job log with nothing but
         # "MPI_ABORT was invoked", so the failure is reported first.
         traceback.print_exc()
         sys.stderr.flush()
-        if mpi_runtime.comm.size > 1:
-            mpi_runtime.comm.Abort(1)
+        if mpi_context.comm.size > 1:
+            mpi_context.comm.Abort(1)
         raise
 
-    mpi_runtime.comm.barrier()
+    mpi_context.comm.barrier()
     return output_path
 
 

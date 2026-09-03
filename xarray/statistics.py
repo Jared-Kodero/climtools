@@ -33,7 +33,7 @@ from .reductions import mean_reduce
 
 
 def _var_or_std(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -55,7 +55,7 @@ def _var_or_std(
         return finish_local_reduction(local_result, old_meta=local_meta)
 
     reduce_plan = reduction_plan(
-        runtime, value, dims, old_meta, operation="std" if root else "var"
+        mpi_context, value, dims, old_meta, operation="std" if root else "var"
     )
 
     def combine(
@@ -81,7 +81,7 @@ def _var_or_std(
             )
         )
         global_sq_sum = comm_reduce(
-            runtime,
+            mpi_context,
             partial_sq_sum,
             MPI.SUM,
             expect_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
@@ -92,7 +92,11 @@ def _var_or_std(
         )
         denominator = (
             count_valid_values(
-                runtime, variable, variable_dims, comm=comm, replica_count=replica_count
+                mpi_context,
+                variable,
+                variable_dims,
+                comm=comm,
+                replica_count=replica_count,
             )
             - ddof
         )
@@ -120,7 +124,7 @@ def _var_or_std(
                 dim=local_dim, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
             )
         mean = mean_reduce(
-            runtime,  # type: ignore[attr-defined]
+            mpi_context,  # type: ignore[attr-defined]
             value,
             dim,
             skipna=skipna,
@@ -131,11 +135,11 @@ def _var_or_std(
             value,
             dims,
             mean,
-            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -143,7 +147,7 @@ def _var_or_std(
         )
 
     mean_ds = mean_reduce(
-        runtime,  # type: ignore[attr-defined]
+        mpi_context,  # type: ignore[attr-defined]
         value,
         dim,
         skipna=skipna,
@@ -166,11 +170,11 @@ def _var_or_std(
             variable,
             entry.dims,
             mean_ds[entry.name],
-            comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
@@ -179,7 +183,7 @@ def _var_or_std(
 
 
 def var(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -192,8 +196,8 @@ def var(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -213,7 +217,7 @@ def var(
         replication/no-duplication guarantee this carries.
     """
     return _var_or_std(
-        runtime,
+        mpi_context,
         value,
         dim,
         skipna=skipna,
@@ -225,7 +229,7 @@ def var(
 
 
 def std(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -238,8 +242,8 @@ def std(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -259,7 +263,7 @@ def std(
         replication/no-duplication guarantee this carries.
     """
     return _var_or_std(
-        runtime,
+        mpi_context,
         value,
         dim,
         skipna=skipna,

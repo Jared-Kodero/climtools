@@ -253,12 +253,12 @@ def get_cartesian_topology(
     return topology
 
 
-def dim_comm(runtime: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
+def dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
     """Return the communicator whose ranks vary along ``dim`` alone.
 
     Parameters
     ----------
-    runtime : MPIContext
+    mpi_context : MPIContext
         Runtime whose communicator this resolves against.
     meta : mapping
         Distribution metadata (as returned by :func:`~.meta.get_mpi_meta`) of the object being operated on.
@@ -267,12 +267,12 @@ def dim_comm(runtime: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
     Returns
     -------
     mpi4py.MPI.Comm
-        The full runtime communicator for the one-dimensional case (unchanged behavior),or
+        The full mpi_context communicator for the one-dimensional case (unchanged behavior),or
         the cached Cartesian sub-communicator fixed on every other partition axis otherwise
         -- see :meth:`CartesianTopology.sub_comm`.
     """
     dims = meta["dims"]
     if len(dims) <= 1 or "cart" not in meta:
-        return cast("Comm", runtime.comm)
-    topology = get_cartesian_topology(runtime.comm, dims, meta["global_sizes"])
+        return cast("Comm", mpi_context.comm)
+    topology = get_cartesian_topology(mpi_context.comm, dims, meta["global_sizes"])
     return topology.sub_comm((dim,))

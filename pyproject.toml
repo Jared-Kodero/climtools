@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "climtools"
 version = "0.1.0"
-description = "Utilities for climate data analysis and plotting, with an MPI runtime for distributed xarray reductions and parallel NetCDF-4 output."
+description = "Utilities for climate data analysis and plotting, with an MPI context for distributed xarray reductions and parallel NetCDF-4 output."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -82,7 +82,7 @@ regrid = ["xesmf"]
 # bottleneck: test/_sweep-style checks build their serial reference for
 # first()/last() with xarray's DataArray.bfill()/.ffill(), which xarray
 # routes through `bottleneck.push` (core/duck_array_ops.py::_push) and raises
-# ModuleNotFoundError without. Not a runtime dependency of climtools itself
+# ModuleNotFoundError without. Not a mpi_context dependency of climtools itself
 # (first/last never calls bfill/ffill), only of the test suite.
 dev = ["typing_extensions", "build", "twine", "pytest", "bottleneck"]
 

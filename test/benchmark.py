@@ -48,19 +48,29 @@ import resource
 import time
 
 import numpy as np
-import xarray as xr
-
-from mpi4py import MPI
 from climtools import mpi, xgeo
 from climtools.xarray.core import MPIXarray
+from mpi4py import MPI
+
+import xarray as xr
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--size", type=int, default=2_000_000, help="global array length for timing")
-parser.add_argument("--check-size", type=int, default=2_000, help="global array length for the accuracy pass")
+parser.add_argument(
+    "--size", type=int, default=2_000_000, help="global array length for timing"
+)
+parser.add_argument(
+    "--check-size",
+    type=int,
+    default=2_000,
+    help="global array length for the accuracy pass",
+)
 parser.add_argument("--reps", type=int, default=5, help="timed repetitions per op")
 parser.add_argument("--warmup", type=int, default=2, help="untimed warm-up runs")
-parser.add_argument("--mpi-only", action="store_true",
-                     help="skip the native-only timing comparison (accuracy pass still runs)")
+parser.add_argument(
+    "--mpi-only",
+    action="store_true",
+    help="skip the native-only timing comparison (accuracy pass still runs)",
+)
 args, _ = parser.parse_known_args()
 
 SCRIPT_T0 = time.perf_counter()
@@ -151,8 +161,16 @@ def check_accuracy(name, dist_fn, native_full_fn):
 PENDING: list[dict] = []
 
 
-def bench(name, dist_fn, native_fn, *, check_dist_fn=None, check_native_fn=None,
-          has_native=True, no_native_counterpart=False):
+def bench(
+    name,
+    dist_fn,
+    native_fn,
+    *,
+    check_dist_fn=None,
+    check_native_fn=None,
+    has_native=True,
+    no_native_counterpart=False,
+):
     """Phase 1: accuracy check (cheap, every rank), then time the MPI-side
     op (large N, fully synchronized across every rank). The native-only
     *timing* comparison is deliberately NOT run here -- see
@@ -181,9 +199,16 @@ def bench(name, dist_fn, native_fn, *, check_dist_fn=None, check_native_fn=None,
     if any_failed:
         if mpi.comm.rank == 0:
             msgs = [m for m in mpi.comm.gather(err_msg, root=0) if m]
-            PENDING.append({"op": name, "native_fn": None, "mpi_s": None,
-                             "error": msgs[0] if msgs else "unknown",
-                             "accuracy": accuracy_ok, "dtype": dtype_ok})
+            PENDING.append(
+                {
+                    "op": name,
+                    "native_fn": None,
+                    "mpi_s": None,
+                    "error": msgs[0] if msgs else "unknown",
+                    "accuracy": accuracy_ok,
+                    "dtype": dtype_ok,
+                }
+            )
             print(f"  {name:<16} FAILED: {msgs[0] if msgs else 'unknown'}")
         else:
             mpi.comm.gather(err_msg, root=0)
@@ -191,17 +216,23 @@ def bench(name, dist_fn, native_fn, *, check_dist_fn=None, check_native_fn=None,
     mpi_time = slowest_rank_median(mpi_times)
     peak_mb = mpi.comm.reduce(mem_after, op=MPI.MAX, root=0)
     if mpi.comm.rank == 0:
-        PENDING.append({
-            "op": name,
-            "native_fn": native_fn if (has_native and not no_native_counterpart) else None,
-            "mpi_s": mpi_time,
-            "accuracy": accuracy_ok,
-            "dtype": dtype_ok,
-            "peak_rss_mb": peak_mb,
-            "no_native_counterpart": no_native_counterpart,
-        })
+        PENDING.append(
+            {
+                "op": name,
+                "native_fn": native_fn
+                if (has_native and not no_native_counterpart)
+                else None,
+                "mpi_s": mpi_time,
+                "accuracy": accuracy_ok,
+                "dtype": dtype_ok,
+                "peak_rss_mb": peak_mb,
+                "no_native_counterpart": no_native_counterpart,
+            }
+        )
         acc_str = "PASS" if accuracy_ok else ("FAIL" if accuracy_ok is False else "n/a")
-        print(f"  {name:<16} mpi={mpi_time:.4f}s  accuracy={acc_str}  peak_rss={peak_mb:.1f}MiB")
+        print(
+            f"  {name:<16} mpi={mpi_time:.4f}s  accuracy={acc_str}  peak_rss={peak_mb:.1f}MiB"
+        )
 
 
 def run_native_phase():
@@ -216,7 +247,7 @@ def run_native_phase():
     harmless -- they just sit idle at their next barrier. On this
     single-core sandbox it is not: idle ranks waiting on a barrier still
     contend for the one available core (however cooperative the MPI
-    runtime's idle-wait is), and that contention was measured to slow
+    mpi_context's idle-wait is), and that contention was measured to slow
     rank 0's own trivial numpy work by well over 100x, to the point of
     looking like an outright hang. Doing every native timing in one
     block, with the other ranks parked at a single barrier before and
@@ -236,28 +267,49 @@ def run_native_phase():
         for entry in PENDING:
             acc = entry.get("accuracy")
             dt = entry.get("dtype")
-            acc_str = "PASS" if acc else ("FAIL" if acc is False else "n/a (no native counterpart)")
+            acc_str = (
+                "PASS"
+                if acc
+                else ("FAIL" if acc is False else "n/a (no native counterpart)")
+            )
             dt_str = "PASS" if dt else ("FAIL" if dt is False else "n/a")
             if entry.get("error") is not None:
-                RESULTS.append({"op": entry["op"], "ranks": mpi.comm.size,
-                                 "native_s": None, "mpi_s": None, "speedup": None,
-                                 "accuracy": acc_str, "dtype": dt_str,
-                                 "peak_rss_mb": entry.get("peak_rss_mb"),
-                                 "error": entry["error"]})
+                RESULTS.append(
+                    {
+                        "op": entry["op"],
+                        "ranks": mpi.comm.size,
+                        "native_s": None,
+                        "mpi_s": None,
+                        "speedup": None,
+                        "accuracy": acc_str,
+                        "dtype": dt_str,
+                        "peak_rss_mb": entry.get("peak_rss_mb"),
+                        "error": entry["error"],
+                    }
+                )
                 continue
             native_s = entry.get("native_s")
             mpi_s = entry["mpi_s"]
             speedup = (native_s / mpi_s) if (native_s and mpi_s > 0) else None
-            RESULTS.append({
-                "op": entry["op"], "ranks": mpi.comm.size, "native_s": native_s,
-                "mpi_s": mpi_s, "speedup": speedup, "accuracy": acc_str, "dtype": dt_str,
-                "peak_rss_mb": entry.get("peak_rss_mb"),
-                "no_native_counterpart": entry.get("no_native_counterpart", False),
-            })
+            RESULTS.append(
+                {
+                    "op": entry["op"],
+                    "ranks": mpi.comm.size,
+                    "native_s": native_s,
+                    "mpi_s": mpi_s,
+                    "speedup": speedup,
+                    "accuracy": acc_str,
+                    "dtype": dt_str,
+                    "peak_rss_mb": entry.get("peak_rss_mb"),
+                    "no_native_counterpart": entry.get("no_native_counterpart", False),
+                }
+            )
             nat_str = f"{native_s:.4f}s" if native_s is not None else "n/a"
             sp_str = f"{speedup:.2f}x" if speedup is not None else "n/a"
-            print(f"  {entry['op']:<16} native={nat_str:>10}  mpi={mpi_s:.4f}s  "
-                  f"speedup={sp_str}  accuracy={acc_str}  dtype={dt_str}")
+            print(
+                f"  {entry['op']:<16} native={nat_str:>10}  mpi={mpi_s:.4f}s  "
+                f"speedup={sp_str}  accuracy={acc_str}  dtype={dt_str}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -265,12 +317,16 @@ def run_native_phase():
 # ---------------------------------------------------------------------------
 N = args.size
 NC = args.check_size
-rprint(f"\n=== climtools MPI-Xarray benchmark: N={N} (timing), "
-       f"N={NC} (accuracy check), ranks={mpi.comm.size}, "
-       f"reps={args.reps}, warmup={args.warmup} ===")
-rprint("(single-core-sandbox caveat: see module docstring -- speedup "
-       "numbers at ranks>1 measure oversubscription overhead, not true "
-       "parallel scaling; see benchmark_results_n*.json for raw numbers)\n")
+rprint(
+    f"\n=== climtools MPI-Xarray benchmark: N={N} (timing), "
+    f"N={NC} (accuracy check), ranks={mpi.comm.size}, "
+    f"reps={args.reps}, warmup={args.warmup} ==="
+)
+rprint(
+    "(single-core-sandbox caveat: see module docstring -- speedup "
+    "numbers at ranks>1 measure oversubscription overhead, not true "
+    "parallel scaling; see benchmark_results_n*.json for raw numbers)\n"
+)
 
 
 def fill(a, b):
@@ -280,10 +336,22 @@ def fill(a, b):
 
 t_setup0 = time.perf_counter()
 dist = xgeo.mpi_create_dataarray(
-    mpi, fill, dims=("x",), shape={"x": N}, dim="x", log_partitions=False, name="v",
+    mpi,
+    fill,
+    dims=("x",),
+    shape={"x": N},
+    dim="x",
+    log_partitions=False,
+    name="v",
 )
 dist_check = xgeo.mpi_create_dataarray(
-    mpi, fill, dims=("x",), shape={"x": NC}, dim="x", log_partitions=False, name="v",
+    mpi,
+    fill,
+    dims=("x",),
+    shape={"x": NC},
+    dim="x",
+    log_partitions=False,
+    name="v",
 )
 mpi.comm.barrier()
 t_setup1 = time.perf_counter()
@@ -308,22 +376,30 @@ if mpi.comm.rank == 0:
 # instead of forced into this native-comparison table.
 # ---------------------------------------------------------------------------
 bench(
-    "mean", lambda: local_of(dist.mean(dim="x")), lambda: native.mean(dim="x"),
+    "mean",
+    lambda: local_of(dist.mean(dim="x")),
+    lambda: native.mean(dim="x"),
     check_dist_fn=lambda: dist_check.mean(dim="x"),
     check_native_fn=lambda: native_full(NC).mean(dim="x"),
 )
 bench(
-    "sum", lambda: local_of(dist.sum(dim="x")), lambda: native.sum(dim="x"),
+    "sum",
+    lambda: local_of(dist.sum(dim="x")),
+    lambda: native.sum(dim="x"),
     check_dist_fn=lambda: dist_check.sum(dim="x"),
     check_native_fn=lambda: native_full(NC).sum(dim="x"),
 )
 bench(
-    "np.log", lambda: local_of(np.log(np.abs(dist) + 1)), lambda: np.log(np.abs(native) + 1),
+    "np.log",
+    lambda: local_of(np.log(np.abs(dist) + 1)),
+    lambda: np.log(np.abs(native) + 1),
     check_dist_fn=lambda: np.log(np.abs(dist_check) + 1),
     check_native_fn=lambda: np.log(np.abs(native_full(NC)) + 1),
 )
 bench(
-    "np.sqrt", lambda: local_of(np.sqrt(np.abs(dist))), lambda: np.sqrt(np.abs(native)),
+    "np.sqrt",
+    lambda: local_of(np.sqrt(np.abs(dist))),
+    lambda: np.sqrt(np.abs(native)),
     check_dist_fn=lambda: np.sqrt(np.abs(dist_check)),
     check_native_fn=lambda: np.sqrt(np.abs(native_full(NC))),
 )
@@ -342,7 +418,9 @@ bench(
     check_native_fn=lambda: native_full(NC).rolling({"x": 5}, center=True).mean(),
 )
 bench(
-    "diff", lambda: local_of(dist.diff("x", n=1)), lambda: native.diff("x", n=1),
+    "diff",
+    lambda: local_of(dist.diff("x", n=1)),
+    lambda: native.diff("x", n=1),
     check_dist_fn=lambda: dist_check.diff("x", n=1),
     check_native_fn=lambda: native_full(NC).diff("x", n=1),
 )
@@ -355,7 +433,9 @@ bench(
 )
 bench(
     "coarsen_mean",
-    lambda: local_of(dist.coarsen_reduce("x", window=10, reduce="mean", boundary="trim")),
+    lambda: local_of(
+        dist.coarsen_reduce("x", window=10, reduce="mean", boundary="trim")
+    ),
     lambda: native.coarsen({"x": 10}, boundary="trim").mean(),
     check_dist_fn=lambda: dist_check.coarsen_reduce(
         "x", window=10, reduce="mean", boundary="trim"
@@ -381,7 +461,9 @@ bench(
 replicated_full = native_full(N) if mpi.comm.rank == 0 else None
 bench(
     "mpi_partition_data",
-    lambda: local_of(xgeo.mpi_partition_data(replicated_full, mpi, dim="x", log_partitions=False)),
+    lambda: local_of(
+        xgeo.mpi_partition_data(replicated_full, mpi, dim="x", log_partitions=False)
+    ),
     lambda: None,
     no_native_counterpart=True,
 )
@@ -394,14 +476,19 @@ else:
         for entry in PENDING:
             acc = entry.get("accuracy")
             dt = entry.get("dtype")
-            RESULTS.append({
-                "op": entry["op"], "ranks": mpi.comm.size,
-                "native_s": None, "mpi_s": entry.get("mpi_s"), "speedup": None,
-                "accuracy": "PASS" if acc else ("FAIL" if acc is False else "n/a"),
-                "dtype": "PASS" if dt else ("FAIL" if dt is False else "n/a"),
-                "peak_rss_mb": entry.get("peak_rss_mb"),
-                "error": entry.get("error"),
-            })
+            RESULTS.append(
+                {
+                    "op": entry["op"],
+                    "ranks": mpi.comm.size,
+                    "native_s": None,
+                    "mpi_s": entry.get("mpi_s"),
+                    "speedup": None,
+                    "accuracy": "PASS" if acc else ("FAIL" if acc is False else "n/a"),
+                    "dtype": "PASS" if dt else ("FAIL" if dt is False else "n/a"),
+                    "peak_rss_mb": entry.get("peak_rss_mb"),
+                    "error": entry.get("error"),
+                }
+            )
 
 # ---------------------------------------------------------------------------
 # Summary table + raw JSON
@@ -410,21 +497,40 @@ SCRIPT_T1 = time.perf_counter()
 end_to_end = mpi.comm.reduce(SCRIPT_T1 - SCRIPT_T0, op=MPI.MAX, root=0)
 
 if mpi.comm.rank == 0:
-    print("\n| Method | Ranks | Native Xarray | MPI Xarray | Speedup | Accuracy | Dtype |")
+    print(
+        "\n| Method | Ranks | Native Xarray | MPI Xarray | Speedup | Accuracy | Dtype |"
+    )
     print("| --- | ---: | ---: | ---: | ---: | --- | --- |")
     for r in RESULTS:
         if r.get("error") is not None:
-            print(f"| `{r['op']}` | {r['ranks']} | FAILED | FAILED | n/a | "
-                  f"{r['accuracy']} | {r['dtype']} |  <!-- {r['error']} -->")
+            print(
+                f"| `{r['op']}` | {r['ranks']} | FAILED | FAILED | n/a | "
+                f"{r['accuracy']} | {r['dtype']} |  <!-- {r['error']} -->"
+            )
             continue
         nat = f"{r['native_s']:.4f} s" if r["native_s"] is not None else "n/a"
         sp = f"{r['speedup']:.2f}x" if r["speedup"] is not None else "n/a"
-        print(f"| `{r['op']}` | {r['ranks']} | {nat} | {r['mpi_s']:.4f} s | {sp} | "
-              f"{r['accuracy']} | {r['dtype']} |")
-    print(f"\nend-to-end wall time (slowest rank, this whole script): {end_to_end:.4f}s")
+        print(
+            f"| `{r['op']}` | {r['ranks']} | {nat} | {r['mpi_s']:.4f} s | {sp} | "
+            f"{r['accuracy']} | {r['dtype']} |"
+        )
+    print(
+        f"\nend-to-end wall time (slowest rank, this whole script): {end_to_end:.4f}s"
+    )
     peaks = [r["peak_rss_mb"] for r in RESULTS if r.get("peak_rss_mb") is not None]
     if peaks:
-        print(f"peak RSS observed across all ops (slowest/largest rank): {max(peaks):.1f} MiB")
+        print(
+            f"peak RSS observed across all ops (slowest/largest rank): {max(peaks):.1f} MiB"
+        )
     with open(f"benchmark_results_n{mpi.comm.size}.json", "w") as f:
-        json.dump({"results": RESULTS, "end_to_end_s": end_to_end,
-                   "ranks": mpi.comm.size, "size": N, "check_size": NC}, f, indent=2)
+        json.dump(
+            {
+                "results": RESULTS,
+                "end_to_end_s": end_to_end,
+                "ranks": mpi.comm.size,
+                "size": N,
+                "check_size": NC,
+            },
+            f,
+            indent=2,
+        )

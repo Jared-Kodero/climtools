@@ -94,7 +94,7 @@ def _resample_bin_labels(
 
 
 def _group_reduce_local(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -113,7 +113,7 @@ def _group_reduce_local(
 
 
 def _group_combine(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
@@ -127,15 +127,15 @@ def _group_combine(
     """Combine rank-local per-group partials into a global result."""
     if op == "mean":
         local_sum = _group_reduce_local(
-            runtime, variable, dim, group, op="sum", skipna=skipna
+            mpi_context, variable, dim, group, op="sum", skipna=skipna
         )
         local_count = _group_reduce_local(
-            runtime, variable, dim, group, op="count", skipna=None
+            mpi_context, variable, dim, group, op="count", skipna=None
         )
         local_sum = local_sum.reindex({_GROUP_DIM: global_labels}, fill_value=0)
         local_count = local_count.reindex({_GROUP_DIM: global_labels}, fill_value=0)
         global_sum = comm_reduce(
-            runtime,
+            mpi_context,
             local_sum,
             MPI.SUM,
             expect_dtype=partial_dtype(variable.dtype.str, "sum", skipna),
@@ -144,7 +144,7 @@ def _group_combine(
             replica_count=replica_count,
         )
         global_count = comm_reduce(
-            runtime,
+            mpi_context,
             local_count,
             MPI.SUM,
             expect_dtype=partial_dtype(variable.dtype.str, "count", None),
@@ -170,10 +170,12 @@ def _group_combine(
         return result.where(global_count > 0)
 
     if op in ("sum", "count"):
-        local = _group_reduce_local(runtime, variable, dim, group, op=op, skipna=skipna)
+        local = _group_reduce_local(
+            mpi_context, variable, dim, group, op=op, skipna=skipna
+        )
         local = local.reindex({_GROUP_DIM: global_labels}, fill_value=0)
         return comm_reduce(
-            runtime,
+            mpi_context,
             local,
             MPI.SUM,
             expect_dtype=partial_dtype(variable.dtype.str, op, skipna),
@@ -183,11 +185,11 @@ def _group_combine(
         )
 
     minimum = op == "min"
-    local = _group_reduce_local(runtime, variable, dim, group, op=op, skipna=skipna)
+    local = _group_reduce_local(mpi_context, variable, dim, group, op=op, skipna=skipna)
     identity = extreme_identity(variable.dtype, minimum=minimum)
     local = local.reindex({_GROUP_DIM: global_labels}, fill_value=identity)
     return comm_reduce(
-        runtime,
+        mpi_context,
         local,
         MPI.MIN if minimum else MPI.MAX,
         expect_dtype=variable.dtype,
@@ -197,7 +199,7 @@ def _group_combine(
 
 
 def groupby_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     labels: xr.DataArray | np.ndarray,
@@ -211,8 +213,8 @@ def groupby_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : Hashable
@@ -242,13 +244,13 @@ def groupby_reduce(
     if local_meta is not None:
         if isinstance(value, xr.DataArray):
             result = _group_reduce_local(
-                runtime, value, dim, group, op=op, skipna=skipna
+                mpi_context, value, dim, group, op=op, skipna=skipna
             )
             if keep_attrs:
                 result.attrs.update(value.attrs)
         else:
             result = value.map(
-                functools.partial(_group_reduce_local, runtime),
+                functools.partial(_group_reduce_local, mpi_context),
                 dim=dim,
                 group=group,
                 op=op,
@@ -257,27 +259,27 @@ def groupby_reduce(
             )
         return finish_local_reduction(result, old_meta=local_meta)
 
-    plan = reduction_plan(runtime, value, dims, old_meta, operation=op)
+    plan = reduction_plan(mpi_context, value, dims, old_meta, operation=op)
     local_labels = np.unique(group.values)
-    labels_comm = resolve_comm(runtime, old_meta, (dim,))
+    labels_comm = resolve_comm(mpi_context, old_meta, (dim,))
     global_labels = np.unique(np.concatenate(labels_comm.allgather(local_labels)))
 
     if isinstance(value, xr.DataArray):
         result = _group_combine(
-            runtime,
+            mpi_context,
             value,
             dim,
             group,
             global_labels,
             op=op,
             skipna=skipna,
-            comm=resolve_comm(runtime, old_meta, plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, plan[0].comm_axes),
             replica_count=plan[0].replica_count,
         )
         if keep_attrs:
             result.attrs.update(value.attrs)
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -292,25 +294,25 @@ def groupby_reduce(
             continue
         if entry.distributed:
             result = _group_combine(
-                runtime,
+                mpi_context,
                 variable,
                 dim,
                 group,
                 global_labels,
                 op=op,
                 skipna=skipna,
-                comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+                comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
                 replica_count=entry.replica_count,
             )
         else:
             result = _group_reduce_local(
-                runtime, variable, dim, group, op=op, skipna=skipna
+                mpi_context, variable, dim, group, op=op, skipna=skipna
             )
         if keep_attrs:
             result.attrs.update(variable.attrs)
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
@@ -319,7 +321,7 @@ def groupby_reduce(
 
 
 def resample_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     freq: str,
@@ -333,8 +335,8 @@ def resample_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
     dim : Hashable
@@ -355,9 +357,9 @@ def resample_reduce(
         Resampled distributed reduction.
     """
     timestamps = pd.DatetimeIndex(value[dim].values)
-    labels = _resample_bin_labels(timestamps, freq, runtime.comm)
+    labels = _resample_bin_labels(timestamps, freq, mpi_context.comm)
     result = groupby_reduce(
-        runtime,
+        mpi_context,
         value,
         dim,
         labels,

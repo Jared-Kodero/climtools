@@ -29,7 +29,7 @@ _UNSET = object()
 
 
 def where(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     cond: Any,
     other: Any = np.nan,
@@ -40,8 +40,8 @@ def where(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to select from.
     cond : Any
@@ -61,7 +61,7 @@ def where(
         If ``drop=True`` is requested on a distributed object, or the operands are distributed over incompatible partitions (see :meth:`~.arithmetic.Arithmetic.apply`).
     """
     operands = (value, cond, other)
-    meta, reference = check_operands_distribution(runtime, operands)
+    meta, reference = check_operands_distribution(mpi_context, operands)
     if meta is not None and drop:
         raise ValueError(
             "drop=True is not supported on a distributed object "
@@ -69,7 +69,7 @@ def where(
         )
 
     _agree(
-        runtime,
+        mpi_context,
         (
             "where",
             None if meta is None else (str(meta["dim"]), int(meta["global_size"])),
@@ -83,7 +83,7 @@ def where(
 
 
 def cumsum(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -94,8 +94,8 @@ def cumsum(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to accumulate.
     dim : Hashable
@@ -113,7 +113,7 @@ def cumsum(
     if meta is None or dim not in meta["dims"]:
         return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
 
-    _agree(runtime, ("cumsum", str(dim), int(meta["global_size"])))
+    _agree(mpi_context, ("cumsum", str(dim), int(meta["global_size"])))
 
     if isinstance(value, xr.Dataset):
         # Only data variables that actually carry `dim` may enter the
@@ -134,7 +134,7 @@ def cumsum(
             return strip_mpi_meta(value.copy(deep=False))
         untouched = [name for name in value.data_vars if name not in touched]
         scanned = _cumsum_scan(
-            runtime, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
+            mpi_context, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
         )
         result = (
             xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
@@ -145,13 +145,15 @@ def cumsum(
         return reattach_meta(result, meta)
 
     return reattach_meta(
-        _cumsum_scan(runtime, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs),
+        _cumsum_scan(
+            mpi_context, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs
+        ),
         meta,
     )
 
 
 def _cumsum_scan(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     meta: Mapping[str, Any],
@@ -168,10 +170,12 @@ def _cumsum_scan(
         return local_cumsum, local_total
 
     locals_or_none, error = guarded(_locals)
-    runtime.raise_if_error(error, "MPI xarray cumsum", signature=("cumsum", str(dim)))
+    mpi_context.raise_if_error(
+        error, "MPI xarray cumsum", signature=("cumsum", str(dim))
+    )
     local_cumsum, local_total = locals_or_none
 
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     totals = comm.gather(local_total, root=0)
     prefixes = None
     if comm.rank == 0:
@@ -193,7 +197,7 @@ def _cumsum_scan(
 
 
 def ffill(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     limit: int | None = None,
@@ -202,8 +206,8 @@ def ffill(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to fill.
     dim : Hashable
@@ -220,21 +224,21 @@ def ffill(
         return value.ffill(dim, limit=limit)
 
     if limit is not None:
-        _agree(runtime, ("ffill", str(dim), int(limit)))
+        _agree(mpi_context, ("ffill", str(dim), int(limit)))
         padded, left_pad, _right_pad = halo_exchange(
-            runtime, value, dim, before=limit, after=0
+            mpi_context, value, dim, before=limit, after=0
         )
         filled = padded.ffill(dim, limit=limit)
         local_len = int(value.sizes[dim])
         trimmed = filled.isel({dim: slice(left_pad, left_pad + local_len)})
         return reattach_meta(trimmed, meta)
 
-    _agree(runtime, ("ffill", str(dim), None))
-    return reattach_meta(_fill_scan(runtime, value, dim, meta, forward=True), meta)
+    _agree(mpi_context, ("ffill", str(dim), None))
+    return reattach_meta(_fill_scan(mpi_context, value, dim, meta, forward=True), meta)
 
 
 def bfill(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     limit: int | None = None,
@@ -243,8 +247,8 @@ def bfill(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to fill.
     dim : Hashable
@@ -261,21 +265,21 @@ def bfill(
         return value.bfill(dim, limit=limit)
 
     if limit is not None:
-        _agree(runtime, ("bfill", str(dim), int(limit)))
+        _agree(mpi_context, ("bfill", str(dim), int(limit)))
         padded, _left_pad, right_pad = halo_exchange(
-            runtime, value, dim, before=0, after=limit
+            mpi_context, value, dim, before=0, after=limit
         )
         filled = padded.bfill(dim, limit=limit)
         local_len = int(value.sizes[dim])
         trimmed = filled.isel({dim: slice(0, local_len)})
         return reattach_meta(trimmed, meta)
 
-    _agree(runtime, ("bfill", str(dim), None))
-    return reattach_meta(_fill_scan(runtime, value, dim, meta, forward=False), meta)
+    _agree(mpi_context, ("bfill", str(dim), None))
+    return reattach_meta(_fill_scan(mpi_context, value, dim, meta, forward=False), meta)
 
 
 def _fill_scan(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     meta: Mapping[str, Any],
@@ -283,7 +287,7 @@ def _fill_scan(
     forward: bool,
 ) -> xr.Dataset | xr.DataArray:
     """Unbounded ffill/bfill core: a gather/scatter last-value-seen scan."""
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     edge_index = -1 if forward else 0
 
     def _local() -> tuple[xr.Dataset | xr.DataArray, Any, bool]:
@@ -294,7 +298,7 @@ def _fill_scan(
         return local_filled, edge_slice, has_valid
 
     local_or_none, error = guarded(_local)
-    runtime.raise_if_error(
+    mpi_context.raise_if_error(
         error,
         "MPI xarray ffill/bfill",
         signature=("fill_scan", str(dim), forward),
@@ -321,7 +325,7 @@ def _fill_scan(
 
 
 def interp(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     new_coord: Any,
@@ -332,8 +336,8 @@ def interp(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to interpolate.
     dim : Hashable
@@ -353,9 +357,9 @@ def interp(
     if meta is None or dim not in meta["dims"]:
         return value.interp({dim: new_coord}, method=method, **kwargs)
 
-    _agree(runtime, ("interp", str(dim), method))
+    _agree(mpi_context, ("interp", str(dim), method))
 
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     pieces = comm.allgather(value)
     full = (
         xr.concat(pieces, dim=dim, data_vars="minimal")
@@ -388,7 +392,7 @@ def interp(
 
 
 def median(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -399,8 +403,8 @@ def median(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : Hashable
@@ -426,8 +430,8 @@ def median(
     if meta is None or dim not in meta["dims"]:
         return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
 
-    _agree(runtime, ("median", str(dim), int(meta["global_size"])))
-    comm = _dim_comm(runtime, meta, dim)
+    _agree(mpi_context, ("median", str(dim), int(meta["global_size"])))
+    comm = _dim_comm(mpi_context, meta, dim)
     pieces = comm.gather(value, root=0)
 
     def _reduce_on_root() -> xr.Dataset | xr.DataArray:
@@ -440,7 +444,7 @@ def median(
         return full.median(dim, skipna=skipna, keep_attrs=keep_attrs)
 
     result, error = guarded(_reduce_on_root) if comm.rank == 0 else (None, None)
-    runtime.raise_if_error(
+    mpi_context.raise_if_error(
         error, "MPI xarray median", signature=("median", str(dim)), comm=comm
     )
     # Every member of this sub-communicator shares identical bounds along
@@ -485,7 +489,7 @@ def median(
 
 
 def diff(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     n: int = 1,
@@ -496,8 +500,8 @@ def diff(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to difference.
     dim : Hashable
@@ -528,11 +532,11 @@ def diff(
 
     before, after = (n, 0) if label == "upper" else (0, n)
     padded, _left_pad, _right_pad = halo_exchange(
-        runtime, value, dim, before=before, after=after
+        mpi_context, value, dim, before=before, after=after
     )
     diffed = padded.diff(dim, n=n, label=label)
 
-    comm = _dim_comm(runtime, meta, dim)
+    comm = _dim_comm(mpi_context, meta, dim)
     counts = comm.allgather(int(diffed.sizes[dim]))
     new_global_size = sum(counts)
     new_start = sum(counts[: comm.rank])
@@ -557,7 +561,7 @@ def diff(
 
 
 def shift(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     periods: int = 1,
@@ -568,8 +572,8 @@ def shift(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to shift.
     dim : Hashable
@@ -592,7 +596,7 @@ def shift(
 
     before, after = (periods, 0) if periods > 0 else (0, -periods)
     padded, left_pad, _right_pad = halo_exchange(
-        runtime, value, dim, before=before, after=after
+        mpi_context, value, dim, before=before, after=after
     )
     kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
     shifted = padded.shift({dim: periods}, **kwargs)
@@ -603,7 +607,7 @@ def shift(
 
 
 def roll(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
     shift: int,
@@ -612,8 +616,8 @@ def roll(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to roll.
     dim : Hashable
@@ -646,7 +650,7 @@ def roll(
 
     before, after = (shift, 0) if shift > 0 else (0, -shift)
     padded, left_pad, _right_pad = halo_exchange(
-        runtime, value, dim, before=before, after=after, periodic=True
+        mpi_context, value, dim, before=before, after=after, periodic=True
     )
     shifted = padded.shift({dim: shift})
 
@@ -672,7 +676,7 @@ def roll(
 
 
 def differentiate(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     coord: Hashable,
     edge_order: Literal[1, 2] = 1,
@@ -682,8 +686,8 @@ def differentiate(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to differentiate.
     coord : Hashable
@@ -709,7 +713,7 @@ def differentiate(
         )
 
     padded, left_pad, _right_pad = halo_exchange(
-        runtime, value, coord, before=1, after=1
+        mpi_context, value, coord, before=1, after=1
     )
     # dask's gradient (unlike every other halo_exchange consumer -- shift,
     # diff, rolling_reduce, coarsen_reduce, ffill/bfill) requires every

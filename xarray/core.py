@@ -173,7 +173,7 @@ class MPIXarray:
     ----------
     data : MPIXarray or xarray.Dataset or xarray.DataArray
         Rank-local data. Existing ``MPIXarray`` instances are adopted unchanged.
-    runtime : MPIContext or mpi4py.MPI.Intracomm
+    mpi_context : MPIContext or mpi4py.MPI.Intracomm
         Runtime or communicator used by distributed operations.
     meta : dict, optional
         Explicit distribution metadata. If omitted, metadata is read from ``data``.
@@ -226,7 +226,7 @@ class MPIXarray:
     def __init__(
         self,
         data: MPIXarray | xr.Dataset | xr.DataArray,
-        runtime: MPIContext | MPI.Intracomm,
+        mpi_context: MPIContext | MPI.Intracomm,
         meta: dict[str, Any] | None = None,
         *,
         auto_partition: bool = True,
@@ -237,8 +237,8 @@ class MPIXarray:
         """Initialize a distributed xarray wrapper."""
         from ..mpi.context import MPIContext
 
-        if not isinstance(runtime, MPIContext):
-            runtime = MPIContext(runtime)
+        if not isinstance(mpi_context, MPIContext):
+            mpi_context = MPIContext(mpi_context)
 
         if isinstance(data, MPIXarray):
             self.data = data.data
@@ -252,11 +252,11 @@ class MPIXarray:
                 data = strip_mpi_meta(data)
         self.data = data
         self.meta = meta
-        self._runtime = runtime
+        self._runtime = mpi_context
 
         if self.meta is None and auto_partition:
             partitioned = repartition(
-                runtime,
+                mpi_context,
                 self.data,
                 dim,
                 chunk_info=chunk_info,
@@ -317,7 +317,7 @@ class MPIXarray:
     #   index, exactly labeled -- to match this rank's own local slice, or
     #   raises pointing at `.align()`. A *replicated* full-size object is
     #   not auto-repartitioned to fit -- that would be a silent guess
-    #   about intent; wrap it first (`MPIXarray(full_array, runtime)`,
+    #   about intent; wrap it first (`MPIXarray(full_array, mpi_context)`,
     #   which auto-partitions replicated input) if that is what you want.
     # - MPIXarray + a plain scalar or numpy array: never carries
     #   distribution info, so it is never partition-checked at all --
@@ -1775,14 +1775,14 @@ def mark_partitioned(
     return marked
 
 
-def finalize(result: Any, runtime: MPIContext) -> Any:
+def finalize(result: Any, mpi_context: MPIContext) -> Any:
     """Wrap an engine result when it is an xarray object.
 
     Parameters
     ----------
     result : Any
         Result returned by ``_MPIXarrayOps``.
-    runtime : MPIContext
+    mpi_context : MPIContext
         Runtime bound to the wrapped result.
     Returns
     -------
@@ -1790,7 +1790,7 @@ def finalize(result: Any, runtime: MPIContext) -> Any:
         Wrapped xarray result, or the original non-xarray value.
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
-        return MPIXarray(result, runtime, auto_partition=False)
+        return MPIXarray(result, mpi_context, auto_partition=False)
     return result
 
 

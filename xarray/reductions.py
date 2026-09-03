@@ -35,7 +35,7 @@ from .planning import (
 
 
 def _combine_sum_or_prod(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.DataArray,
     partial: xr.DataArray,
     dims: tuple[Hashable, ...],
@@ -49,7 +49,7 @@ def _combine_sum_or_prod(
 ) -> xr.DataArray:
     """Combine rank-local sum or product partials."""
     result = comm_reduce(
-        runtime,
+        mpi_context,
         partial,
         op,
         expect_dtype=partial_dtype(
@@ -63,7 +63,7 @@ def _combine_sum_or_prod(
     global_count = None
     if min_count is not None and skipna_enabled(value.dtype, skipna):
         global_count = count_valid_values(
-            runtime, value, dims, comm=comm, replica_count=replica_count
+            mpi_context, value, dims, comm=comm, replica_count=replica_count
         )
     if global_count is not None:
         # where() introduces NaN, which requires a floating result. Restore
@@ -78,7 +78,7 @@ def _combine_sum_or_prod(
 
 
 def _combine_mean(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.DataArray,
     partial_sum: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -90,7 +90,7 @@ def _combine_mean(
 ) -> xr.DataArray:
     """Combine rank-local sums and counts into a global mean."""
     global_sum = comm_reduce(
-        runtime,
+        mpi_context,
         partial_sum,
         MPI.SUM,
         expect_dtype=partial_dtype(value.dtype.str, "sum", skipna),
@@ -100,7 +100,7 @@ def _combine_mean(
         replica_count=replica_count,
     )
     global_count = count_valid_values(
-        runtime, value, dims, comm=comm, replica_count=replica_count
+        mpi_context, value, dims, comm=comm, replica_count=replica_count
     )
     # Divide in the dtype xarray's own .mean() would produce for this
     # input. This is genuinely shape-dependent, not just dtype-dependent:
@@ -145,7 +145,7 @@ def _combine_mean(
 
 
 def _local_extreme(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     variable_dims: tuple[Hashable, ...],
     *,
@@ -164,7 +164,7 @@ def _local_extreme(
 
 
 def _combine_extreme(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.DataArray,
     partial: xr.DataArray | None,
     dims: tuple[Hashable, ...],
@@ -184,7 +184,7 @@ def _combine_extreme(
     kind = value.dtype.kind
     if kind == "b":
         return comm_reduce(
-            runtime,
+            mpi_context,
             partial,
             MPI.LAND if minimum else MPI.LOR,
             expect_dtype=expect_dtype,
@@ -196,7 +196,7 @@ def _combine_extreme(
     op = MPI.MIN if minimum else MPI.MAX
     if kind != "f":
         return comm_reduce(
-            runtime,
+            mpi_context,
             partial,
             op,
             expect_dtype=expect_dtype,
@@ -252,13 +252,13 @@ def _combine_extreme(
             tuple(int(length) for length in send.shape),
         )
     )
-    runtime.raise_if_error(
+    mpi_context.raise_if_error(
         error, f"MPI xarray {operation} reduction", signature, comm=comm
     )
     if send is None or template is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = exchange(runtime, send, op, comm=comm)
+    recv = exchange(mpi_context, send, op, comm=comm)
 
     shape = tuple(int(length) for length in template.shape)
     combined = np.asarray(recv[0]).reshape(shape)
@@ -268,7 +268,7 @@ def _combine_extreme(
 
 
 def sum_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -281,8 +281,8 @@ def sum_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -302,7 +302,7 @@ def sum_reduce(
         replication/no-duplication guarantee this carries.
     """
     return _sum_prod(
-        runtime,
+        mpi_context,
         value,
         dim,
         op=MPI.SUM,
@@ -315,7 +315,7 @@ def sum_reduce(
 
 
 def prod_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -328,8 +328,8 @@ def prod_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -349,7 +349,7 @@ def prod_reduce(
         replication/no-duplication guarantee this carries.
     """
     return _sum_prod(
-        runtime,
+        mpi_context,
         value,
         dim,
         op=MPI.PROD,
@@ -362,7 +362,7 @@ def prod_reduce(
 
 
 def _sum_prod(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -385,7 +385,9 @@ def _sum_prod(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(
+        mpi_context, value, dims, old_meta, operation=operation
+    )
 
     if isinstance(value, xr.DataArray):
         method = value.prod if product else value.sum
@@ -399,7 +401,7 @@ def _sum_prod(
                 raise local_error
             return local
         result = _combine_sum_or_prod(
-            runtime,
+            mpi_context,
             value,
             local,
             dims,
@@ -407,11 +409,11 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -436,7 +438,7 @@ def _sum_prod(
             variables[entry.name] = local
             continue
         result = _combine_sum_or_prod(
-            runtime,
+            mpi_context,
             variable,
             local,
             entry.dims,
@@ -444,12 +446,12 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
@@ -458,7 +460,7 @@ def _sum_prod(
 
 
 def mean_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -470,8 +472,8 @@ def mean_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -495,7 +497,7 @@ def mean_reduce(
         local_result = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation="mean")
+    reduce_plan = reduction_plan(mpi_context, value, dims, old_meta, operation="mean")
 
     if isinstance(value, xr.DataArray):
         if not dims:
@@ -507,17 +509,17 @@ def mean_reduce(
             )
         )
         result = _combine_mean(
-            runtime,
+            mpi_context,
             value,
             local_sum,
             dims,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -541,18 +543,18 @@ def mean_reduce(
             )
         )
         result = _combine_mean(
-            runtime,
+            mpi_context,
             variable,
             local_sum,
             entry.dims,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
@@ -561,7 +563,7 @@ def mean_reduce(
 
 
 def min_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -573,8 +575,8 @@ def min_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -592,7 +594,7 @@ def min_reduce(
         replication/no-duplication guarantee this carries.
     """
     return _min_max(
-        runtime,
+        mpi_context,
         value,
         dim,
         minimum=True,
@@ -603,7 +605,7 @@ def min_reduce(
 
 
 def max_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -615,8 +617,8 @@ def max_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -634,7 +636,7 @@ def max_reduce(
         replication/no-duplication guarantee this carries.
     """
     return _min_max(
-        runtime,
+        mpi_context,
         value,
         dim,
         minimum=False,
@@ -645,7 +647,7 @@ def max_reduce(
 
 
 def _min_max(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -664,7 +666,9 @@ def _min_max(
         local_result = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(
+        mpi_context, value, dims, old_meta, operation=operation
+    )
 
     def locally_empty(variable: xr.DataArray) -> bool:
         """Return whether the local variable is empty along any owned partition axis."""
@@ -681,7 +685,7 @@ def _min_max(
             return method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         local, local_error = guarded(
             lambda: _local_extreme(
-                runtime,
+                mpi_context,
                 value,
                 dims,
                 empty=locally_empty(value),
@@ -691,17 +695,17 @@ def _min_max(
             )
         )
         result = _combine_extreme(
-            runtime,
+            mpi_context,
             value,
             local,
             dims,
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
         )
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -716,7 +720,7 @@ def _min_max(
             continue
         local, local_error = guarded(
             lambda variable=variable, entry=entry: _local_extreme(
-                runtime,
+                mpi_context,
                 variable,
                 entry.dims,
                 empty=locally_empty(variable) and entry.distributed,
@@ -731,18 +735,18 @@ def _min_max(
             variables[entry.name] = local
             continue
         result = _combine_extreme(
-            runtime,
+            mpi_context,
             variable,
             local,
             entry.dims,
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
         )
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         partition_dim=partition_dim,
@@ -751,7 +755,7 @@ def _min_max(
 
 
 def any_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -762,8 +766,8 @@ def any_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -780,7 +784,7 @@ def any_reduce(
         no-duplication guarantee this carries.
     """
     return _logical(
-        runtime,
+        mpi_context,
         value,
         dim,
         op=MPI.LOR,
@@ -791,7 +795,7 @@ def any_reduce(
 
 
 def all_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
     *,
@@ -802,8 +806,8 @@ def all_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Object to reduce.
     dim : str, iterable of Hashable, ..., or None, optional
@@ -820,7 +824,7 @@ def all_reduce(
         no-duplication guarantee this carries.
     """
     return _logical(
-        runtime,
+        mpi_context,
         value,
         dim,
         op=MPI.LAND,
@@ -831,7 +835,7 @@ def all_reduce(
 
 
 def _logical(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
     *,
@@ -850,7 +854,9 @@ def _logical(
         local_result = method(dim=local_dim, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(runtime, value, dims, old_meta, operation=operation)
+    reduce_plan = reduction_plan(
+        mpi_context, value, dims, old_meta, operation=operation
+    )
 
     if isinstance(value, xr.DataArray):
         method = value.all if all_values else value.any
@@ -862,16 +868,16 @@ def _logical(
                 raise local_error
             return local
         result = comm_reduce(
-            runtime,
+            mpi_context,
             local,
             op,
             expect_dtype=partial_dtype(value.dtype.str, operation, None),
             error=local_error,
             phase=f"MPI xarray {operation} reduction",
-            comm=resolve_comm(runtime, old_meta, reduce_plan[0].comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
         )
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -896,17 +902,17 @@ def _logical(
             variables[entry.name] = local
             continue
         result = comm_reduce(
-            runtime,
+            mpi_context,
             local,
             op,
             expect_dtype=partial_dtype(variable.dtype.str, operation, None),
             error=local_error,
             phase=f"MPI xarray {operation} reduction",
-            comm=resolve_comm(runtime, old_meta, entry.comm_axes),
+            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
         )
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         auto_candidates=repartition_candidates(reduce_plan),
@@ -915,7 +921,7 @@ def _logical(
 
 
 def _first_last_local(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -944,7 +950,7 @@ def _first_last_local(
 
 
 def _first_last_pick(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -953,13 +959,13 @@ def _first_last_pick(
 ) -> xr.DataArray:
     """Rank-local first/last, used when ``dim`` is not the partition dimension."""
     picked, any_valid = _first_last_local(
-        runtime, variable, dim, skipna=skipna, want_first=want_first
+        mpi_context, variable, dim, skipna=skipna, want_first=want_first
     )
     return picked.where(any_valid) if variable.dtype.kind in "fc" else picked
 
 
 def _first_last_combine(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
     *,
@@ -969,14 +975,14 @@ def _first_last_combine(
 ) -> xr.DataArray:
     """Combine rank-local first/last candidates into a global result."""
     candidate, any_valid = _first_last_local(
-        runtime, variable, dim, skipna=skipna, want_first=want_first
+        mpi_context, variable, dim, skipna=skipna, want_first=want_first
     )
-    active_comm = runtime.comm if comm is None else comm
+    active_comm = mpi_context.comm if comm is None else comm
     rank, size = active_comm.rank, active_comm.size
     sentinel = size if want_first else -1
     owner, error = guarded(lambda: xr.where(any_valid, rank, sentinel).astype(np.int32))
     owner = comm_reduce(
-        runtime,
+        mpi_context,
         owner,
         MPI.MIN if want_first else MPI.MAX,
         expect_dtype=np.dtype(np.int32),
@@ -990,7 +996,7 @@ def _first_last_combine(
     neutral = False if kind == "b" else np.zeros((), dtype=variable.dtype).item()
     payload, error = guarded(lambda: candidate.where(is_owner, other=neutral))
     combined = comm_reduce(
-        runtime,
+        mpi_context,
         payload,
         MPI.LOR if kind == "b" else MPI.SUM,
         expect_dtype=variable.dtype,
@@ -1042,7 +1048,7 @@ def _first_last_combine(
                 )
             )
             coord_combined = comm_reduce(
-                runtime,
+                mpi_context,
                 coord_payload,
                 MPI.LOR if reducible_kind == "b" else MPI.SUM,
                 expect_dtype=reducible.dtype,
@@ -1060,7 +1066,7 @@ def _first_last_combine(
 
 
 def first_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1072,8 +1078,8 @@ def first_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
     dim : str
@@ -1092,7 +1098,7 @@ def first_reduce(
         no-duplication guarantee this carries.
     """
     return _first_or_last(
-        runtime,
+        mpi_context,
         value,
         dim,
         skipna=skipna,
@@ -1103,7 +1109,7 @@ def first_reduce(
 
 
 def last_reduce(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1115,8 +1121,8 @@ def last_reduce(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     value : xr.Dataset | xr.DataArray
         Distributed xarray object.
     dim : str
@@ -1135,7 +1141,7 @@ def last_reduce(
         no-duplication guarantee this carries.
     """
     return _first_or_last(
-        runtime,
+        mpi_context,
         value,
         dim,
         skipna=skipna,
@@ -1146,7 +1152,7 @@ def last_reduce(
 
 
 def _first_or_last(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
     *,
@@ -1165,13 +1171,13 @@ def _first_or_last(
     if local_meta is not None:
         if isinstance(value, xr.DataArray):
             result = _first_last_pick(
-                runtime, value, dim, skipna=skipna, want_first=want_first
+                mpi_context, value, dim, skipna=skipna, want_first=want_first
             )
             if keep_attrs:
                 result.attrs.update(value.attrs)
         else:
             result = value.map(
-                functools.partial(_first_last_pick, runtime),
+                functools.partial(_first_last_pick, mpi_context),
                 dim=dim,
                 skipna=skipna,
                 want_first=want_first,
@@ -1180,22 +1186,22 @@ def _first_or_last(
         return finish_local_reduction(result, old_meta=local_meta)
 
     reduce_plan = reduction_plan(
-        runtime, value, dims, old_meta, operation="first" if want_first else "last"
+        mpi_context, value, dims, old_meta, operation="first" if want_first else "last"
     )
 
     if isinstance(value, xr.DataArray):
         result = _first_last_combine(
-            runtime,
+            mpi_context,
             value,
             dim,
             skipna=skipna,
             want_first=want_first,
-            comm=resolve_comm(runtime, old_meta, (dim,)),
+            comm=resolve_comm(mpi_context, old_meta, (dim,)),
         )
         if keep_attrs:
             result.attrs.update(value.attrs)
         return finish(
-            runtime,
+            mpi_context,
             result,
             old_meta=old_meta,
             partition_dim=partition_dim,
@@ -1210,22 +1216,22 @@ def _first_or_last(
             continue
         if entry.distributed:
             result = _first_last_combine(
-                runtime,
+                mpi_context,
                 variable,
                 dim,
                 skipna=skipna,
                 want_first=want_first,
-                comm=resolve_comm(runtime, old_meta, (dim,)),
+                comm=resolve_comm(mpi_context, old_meta, (dim,)),
             )
         else:
             result = _first_last_pick(
-                runtime, variable, dim, skipna=skipna, want_first=want_first
+                mpi_context, variable, dim, skipna=skipna, want_first=want_first
             )
         if keep_attrs:
             result.attrs.update(variable.attrs)
         variables[entry.name] = result
     return finish(
-        runtime,
+        mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
         auto_candidates=repartition_candidates(reduce_plan),

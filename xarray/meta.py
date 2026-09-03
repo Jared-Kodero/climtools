@@ -377,12 +377,12 @@ def format_bytes(count: float) -> str:
     return f"{count:.1f}TiB"
 
 
-def should_log_partitions(runtime: MPIContext, log_partitions: bool) -> bool:
+def should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
     """Collectively resolve whether to call :func:`log_partition_report`.
 
     Parameters
     ----------
-    runtime : MPIContext
+    mpi_context : MPIContext
         Runtime whose communicator backs the collective.
     log_partitions : bool
         This rank's own request.
@@ -391,11 +391,11 @@ def should_log_partitions(runtime: MPIContext, log_partitions: bool) -> bool:
     bool
         Identical on every rank: whether to call :func:`log_partition_report`.
     """
-    return bool(runtime.comm.allreduce(bool(log_partitions), op=MPI.LOR))
+    return bool(mpi_context.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
 
 def log_partition_report(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
     dim: Hashable,
     *,
@@ -410,8 +410,8 @@ def log_partition_report(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     data : xr.Dataset | xr.DataArray
         Input xarray object.
     dim : Hashable
@@ -429,7 +429,7 @@ def log_partition_report(
     detail : bool
         Whether to print detailed partition diagnostics.
     """
-    comm = runtime.comm
+    comm = mpi_context.comm
     first, last = _edge_labels(data, dim)
     local = (int(comm.rank), int(start), int(stop), first, last, int(data.nbytes))
     rows = comm.gather(local, root=0)
@@ -504,13 +504,13 @@ def log_partition_report(
             )
 
     lines.append(border)
-    runtime.log("")
-    runtime.log("\n".join(lines), flush=True, prefix=False)
-    runtime.log("", prefix=False)
+    mpi_context.log("")
+    mpi_context.log("\n".join(lines), flush=True, prefix=False)
+    mpi_context.log("", prefix=False)
 
 
 def log_partition_report_cartesian(
-    runtime: MPIContext,
+    mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     *,
@@ -526,8 +526,8 @@ def log_partition_report_cartesian(
 
     Parameters
     ----------
-    runtime : MPIContext
-        MPI runtime used for communication.
+    mpi_context : MPIContext
+        MPI context used for communication.
     data : xr.Dataset | xr.DataArray
         Input xarray object.
     dims : tuple[Hashable, ...]
@@ -547,7 +547,7 @@ def log_partition_report_cartesian(
     automatic : bool
         Whether partitioning was selected automatically.
     """
-    comm = runtime.comm
+    comm = mpi_context.comm
     local = (
         int(comm.rank),
         tuple(int(c) for c in coords),
@@ -583,9 +583,9 @@ def log_partition_report_cartesian(
         )
         lines.append(f"   rank {rank_id:>4}  coords={rank_coords}  {slab}")
     lines.append(border)
-    runtime.log("")
-    runtime.log("\n".join(lines), flush=True, prefix=False)
-    runtime.log("", prefix=False)
+    mpi_context.log("")
+    mpi_context.log("\n".join(lines), flush=True, prefix=False)
+    mpi_context.log("", prefix=False)
 
 
 def indexer_is_scalar(indexer: Any) -> bool:

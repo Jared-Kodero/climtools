@@ -1,4 +1,4 @@
-# Full climtools runtime environment. Every package below is imported
+# Full climtools mpi_context environment. Every package below is imported
 # somewhere in climtools's own source, or (cdo, nco, ffmpeg) invoked as a
 # subprocess. Excludes mpi4py and netCDF4: those are built and pinned in
 # place by env/setup_env.sh against a parallel-enabled MPI/HDF5/NetCDF-C
