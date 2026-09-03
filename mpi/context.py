@@ -1,4 +1,9 @@
-"""Small user-facing MPI namespace built on :mod:`mpi4py`."""
+"""MPI communication utilities built on :mod:`mpi4py`.
+
+Provides :class:`MPIContext` for point-to-point, collective, hierarchical,
+and decorator-based MPI execution. The :data:`mpi` singleton uses
+``MPI.COMM_WORLD`` by default.
+"""
 
 # mpi.py
 from __future__ import annotations
@@ -25,44 +30,46 @@ T = TypeVar("T")
 
 
 class ToChildrenContext:
-    """Parent-to-child-group communication namespace.
+    """Parent-to-child communication operations.
 
-    Accessed through :attr:`MPIContext.to_children` after
-    :meth:`MPIContext.decompose`. Operations originate on a parent rank and
-    deliver values to the logical child communicators.
+    Provides collective operations from a parent communicator to logical child
+    communicators created by :meth:`MPIContext.decompose`.
 
     Parameters
     ----------
     mpi_context : MPIContext
-        Parent mpi_context owning the decomposed child communicators.
+        Parent MPI context containing the child communicators.
     """
 
     def __init__(self, mpi_context: MPIContext) -> None:
+        """Initialize parent-to-child communication operations."""
         self._runtime = mpi_context
 
     def broadcast(self, value: T | None, *, root: int = 0) -> T:
-        """Broadcast one parent-root value to every rank in every child.
+        """Broadcast a parent value to all child communicators.
 
         Parameters
         ----------
         value : T or None
-            Value on the parent ``root`` rank. Non-root ranks may pass None.
+            Value provided on ``root``. Non-root ranks may pass None.
         root : int, optional
-            Source rank in the parent communicator. Default 0.
+            Source rank in the parent communicator.
 
         Returns
         -------
         T
-            Broadcast value on every rank in every child communicator.
+            Broadcast value on every rank.
 
         Raises
         ------
         RuntimeError
-            If :meth:`MPIContext.decompose` has not been called.
+            If the communicator has not been decomposed.
+        TypeError
+            If ``root`` is not an integer rank.
         ValueError
-            If ``root`` is not a valid parent rank.
+            If ``root`` is outside the parent communicator.
         MPIError
-            If ranks disagree on the collective call.
+            If ranks disagree on the collective operation.
         """
         mpi_context = self._runtime
         _ = mpi_context.child
@@ -90,36 +97,30 @@ class ToChildrenContext:
         )
 
     def scatter(self, values: Sequence[T] | None, *, root: int = 0) -> T:
-        """Scatter one parent-root value per child and replicate within it.
-
-        ``root`` supplies exactly one value per child communicator. The
-        parent communicator sends each value to that child's leader, which
-        then broadcasts it within the child.
+        """Scatter one value to each child communicator.
 
         Parameters
         ----------
         values : sequence of T or None
-            One value per child on the parent ``root`` rank. Non-root ranks
-            may pass None.
+            One value per child on ``root``. Non-root ranks may pass None.
         root : int, optional
-            Source rank in the parent communicator. Default 0.
+            Source rank in the parent communicator.
 
         Returns
         -------
         T
-            Value assigned to this rank's child; identical on every rank in
-            that child.
+            Value assigned to this rank's child communicator.
 
         Raises
         ------
         RuntimeError
-            If :meth:`MPIContext.decompose` has not been called.
+            If the communicator has not been decomposed.
+        TypeError
+            If ``root`` is not an integer rank.
         ValueError
-            If ``root`` is invalid, ``values`` is None on ``root``, or the
-            number of values does not equal the number of children.
+            If ``root`` or ``values`` is invalid.
         MPIError
-            If ranks disagree on the collective call or root-side validation
-            fails on only a subset of ranks.
+            If ranks disagree on the collective operation.
         """
         mpi_context = self._runtime
         child = mpi_context.child
@@ -171,48 +172,48 @@ class ToChildrenContext:
 
 
 class FromChildrenContext:
-    """Child-group-to-parent communication namespace.
+    """Child-to-parent communication operations.
 
-    Accessed through :attr:`MPIContext.from_children` after
-    :meth:`MPIContext.decompose`. Operations collect one logical result from
-    each child communicator back onto the parent communicator.
+    Provides collective operations from logical child communicators created by
+    :meth:`MPIContext.decompose` back to their parent communicator.
 
     Parameters
     ----------
     mpi_context : MPIContext
-        Parent mpi_context owning the decomposed child communicators.
+        Parent MPI context containing the child communicators.
     """
 
     def __init__(self, mpi_context: MPIContext) -> None:
+        """Initialize child-to-parent communication operations."""
         self._runtime = mpi_context
 
     def gather(self, value: T, *, root: int = 0) -> list[T] | None:
-        """Gather one child result onto one parent rank.
+        """Gather one value from each child communicator.
 
-        Only rank zero of each child contributes ``value`` to the parent
-        gather. Results on ``root`` are ordered by child task index.
+        Only each child leader contributes; results are ordered by child index.
 
         Parameters
         ----------
         value : T
-            This child's result. Only the child leader contributes it.
+            Child result. Only the child leader's value is collected.
         root : int, optional
-            Destination rank in the parent communicator. Default 0.
+            Destination rank in the parent communicator.
 
         Returns
         -------
         list of T or None
-            One value per child, ordered by child task index, on ``root``.
-            None on every other parent rank.
+            Child-ordered values on ``root``; otherwise None.
 
         Raises
         ------
         RuntimeError
-            If :meth:`MPIContext.decompose` has not been called.
+            If the communicator has not been decomposed.
+        TypeError
+            If ``root`` is not an integer rank.
         ValueError
-            If ``root`` is not a valid parent rank.
+            If ``root`` is outside the parent communicator.
         MPIError
-            If ranks disagree on the collective call.
+            If ranks disagree on the collective operation.
         """
         mpi_context = self._runtime
         child = mpi_context.child
@@ -245,14 +246,16 @@ class FromChildrenContext:
 
 
 class MPIContext(MPIDiagnostics):
-    """User-facing MPI context  namespace.
+    """MPI communication context.
 
-    Owns one intracommunicator, exposed directly through :attr:`comm`.
+    Wraps an MPI intracommunicator and provides point-to-point and collective
+    communication, communicator decomposition, diagnostics, and MPI-aware
+    function execution. The communicator is exposed through :attr:`comm`.
 
     Parameters
     ----------
-    comm : mpi4py.MPI.Intracomm or None, optional
-        Communicator used by the mpi_context. None uses ``MPI.COMM_WORLD``.
+    comm : mpi4py.MPI.Intracomm, optional
+        MPI communicator. Defaults to ``MPI.COMM_WORLD``.
     """
 
     MPIError = MPIError
@@ -262,6 +265,7 @@ class MPIContext(MPIDiagnostics):
     # -------------------------------------------------------------------------
 
     def __init__(self, comm: MPI.Intracomm | None = None) -> None:
+        """Initialize an MPI communication context."""
         self.comm: MPI.Intracomm = comm if comm is not None else MPI.COMM_WORLD
         self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIContext | None = None
@@ -274,22 +278,27 @@ class MPIContext(MPIDiagnostics):
 
     @property
     def to_children(self) -> ToChildrenContext:
-        """ToChildrenContext: Parent-to-child-group communication namespace."""
+        """Parent-to-child communication operations."""
         return self._to_children
 
     @property
     def from_children(self) -> FromChildrenContext:
-        """FromChildrenContext: Child-group-to-parent communication namespace."""
+        """Child-to-parent communication operations."""
         return self._from_children
 
     @property
     def child(self) -> MPIContext:
-        """MPIContext: Runtime for this rank's child communicator.
+        """Child MPI context for this rank.
+
+        Returns
+        -------
+        MPIContext
+            Context associated with this rank's child communicator.
 
         Raises
         ------
         RuntimeError
-            If :meth:`decompose` has not been called.
+            If the communicator has not been decomposed.
         """
         if self._child is None:
             raise RuntimeError("MPI context has not been decomposed.")
@@ -298,12 +307,12 @@ class MPIContext(MPIDiagnostics):
 
     @property
     def launched(self) -> bool:
-        """bool: Whether this process appears to have been launched by MPI."""
+        """Whether this process appears to have been launched under MPI."""
         return self.alive(self.comm)
 
     @staticmethod
     def alive(comm: MPI.Comm) -> bool:
-        """Return whether a process appears to have been launched by MPI.
+        """Check whether a communicator appears to be running under MPI.
 
         Parameters
         ----------
@@ -313,8 +322,7 @@ class MPIContext(MPIDiagnostics):
         Returns
         -------
         bool
-            True if ``comm`` has more than one rank, a known launch
-            environment variable is set, or this process has an MPI parent.
+            Whether MPI execution is detected.
         """
         if comm.Get_size() > 1 or builtins.any(
             key in os.environ for key in _LAUNCH_ENV
@@ -326,17 +334,17 @@ class MPIContext(MPIDiagnostics):
             return False
 
     def is_root(self, root: int = 0) -> bool:
-        """Return whether this process has the requested root rank.
+        """Check whether this process is the specified root rank.
 
         Parameters
         ----------
         root : int, optional
-            Root rank to compare against. Default 0.
+            Root rank.
 
         Returns
         -------
         bool
-            True when the current rank equals ``root``.
+            Whether the current rank equals ``root``.
         """
         return self.comm.rank == root
 
@@ -345,36 +353,24 @@ class MPIContext(MPIDiagnostics):
     # -------------------------------------------------------------------------
 
     def decompose(self, ntasks: int) -> None:
-        """Split the communicator into ``ntasks`` equally sized children.
+        """Split the communicator into equally sized child communicators.
 
-        Every rank belongs to exactly one child, available through
-        :attr:`child`; ``child.task`` is the zero-based child index and
-        ``child.info`` holds the parent ranks belonging to it. The child is a
-        complete :class:`MPIContext`, so ordinary operations such as
-        ``child.log()``, ``child.broadcast()``, and ``child.xarray`` operate
-        within that child communicator.
-
-        Parent-to-child-group communication is exposed through
-        :attr:`to_children`; child-group-to-parent communication is exposed
-        through :attr:`from_children`. All ranks in the current communicator
-        must call this method with the same ``ntasks`` value.
+        Each rank receives one context exposed through :attr:`child`. All ranks must
+        call this collective operation with the same ``ntasks``.
 
         Parameters
         ----------
         ntasks : int
-            Number of child communicators. Must evenly divide the current
-            communicator size.
+            Number of child communicators.
 
         Raises
         ------
         TypeError
             If ``ntasks`` is not an integer.
         ValueError
-            If ``ntasks`` is less than one, exceeds the communicator size,
-            or does not evenly divide it.
+            If ``ntasks`` is invalid for the communicator size.
         MPIError
-            If ranks call this method with different valid ``ntasks`` values,
-            or validation fails on only a subset of ranks.
+            If ranks provide inconsistent arguments.
         """
         comm = self.comm
         error: BaseException | None = None
@@ -415,7 +411,7 @@ class MPIContext(MPIDiagnostics):
     # -------------------------------------------------------------------------
 
     def send(self, value: T, dest: int, *, tag: int = 0) -> None:
-        """Send a Python object to one rank.
+        """Send a Python object to a rank.
 
         Parameters
         ----------
@@ -424,7 +420,7 @@ class MPIContext(MPIDiagnostics):
         dest : int
             Destination rank.
         tag : int, optional
-            MPI message tag. Default 0.
+            MPI message tag.
         """
         self.comm.send(value, dest=dest, tag=tag)
 
@@ -434,14 +430,14 @@ class MPIContext(MPIDiagnostics):
         *,
         tag: int = MPI.ANY_TAG,
     ) -> T:
-        """Receive a Python object from one rank.
+        """Receive a Python object from a rank.
 
         Parameters
         ----------
         source : int, optional
-            Source rank. Default ``MPI.ANY_SOURCE``.
+            Source rank.
         tag : int, optional
-            MPI message tag. Default ``MPI.ANY_TAG``.
+            MPI message tag.
 
         Returns
         -------
@@ -451,31 +447,31 @@ class MPIContext(MPIDiagnostics):
         return cast("T", self.comm.recv(source=source, tag=tag))
 
     def broadcast(self, value: T | None, *, root: int = 0) -> T:
-        """Broadcast one Python object from ``root`` to every rank.
+        """Broadcast a Python object from one rank.
 
         Parameters
         ----------
         value : T or None
-            Object on ``root``. Non-root ranks may pass None.
+            Object provided on ``root``. Non-root ranks may pass None.
         root : int, optional
-            Broadcasting rank. Default 0.
+            Source rank.
 
         Returns
         -------
         T
-            Broadcast object on every rank.
+            Broadcast object.
         """
         return cast("T", self.comm.bcast(value, root=root))
 
     def scatter(self, values: Sequence[T] | None, *, root: int = 0) -> T:
-        """Scatter one Python object from ``root`` to each rank.
+        """Scatter Python objects across ranks.
 
         Parameters
         ----------
         values : sequence of T or None
-            One value per rank on ``root``. Non-root ranks may pass None.
+            Rank-ordered objects on ``root``. Non-root ranks may pass None.
         root : int, optional
-            Source rank. Default 0.
+            Source rank.
 
         Returns
         -------
@@ -493,49 +489,30 @@ class MPIContext(MPIDiagnostics):
         *,
         root: int = 0,
     ) -> np.ndarray:
-        """Scatter an array's leading axis with a variable per-rank count.
-
-        Zero-copy counterpart to :meth:`scatter`: rather than one Python
-        object per rank, this splits ``send``'s axis 0 into ``counts[rank]``
-        rows per rank via ``MPI_Scatterv`` and returns each rank's
-        contiguous local slab directly as a NumPy array, without pickling.
-        Use this whenever every rank's row count may differ (e.g. an
-        uneven partition), unlike :meth:`scatter`, whose one-Python-object-
-        per-rank contract has no notion of a shared leading axis to split.
+        """Scatter variable-sized array slabs across ranks.
 
         Parameters
         ----------
         send : numpy.ndarray or None
-            Complete array on ``root``, axis 0 already ordered rank by
-            rank (row ``i`` for ``sum(counts[:r]) <= i < sum(counts[:r+1])``
-            belongs to rank ``r``). Ignored (may be None) on every other
-            rank.
+            Source array on ``root``, partitioned contiguously along axis 0.
         counts : sequence of int or numpy.ndarray
-            Row count along axis 0 assigned to each rank, ``counts[rank]``
-            summing to ``send.shape[0]``. Every rank must pass the
-            identical ``counts``.
+            Rank-wise axis-0 counts, identical on all ranks.
         local_shape : sequence of int
-            This rank's output shape; ``local_shape[0]`` must equal
-            ``counts[self.comm.rank]`` and the trailing dimensions must
-            match ``send.shape[1:]``.
-        dtype : numpy dtype-like
-            Element dtype of ``send`` and the returned array. Every rank
-            must agree on this dtype; :func:`~mpi4py.util.dtlib.from_numpy_dtype`
-            maps it to the matching ``MPI.Datatype`` for the transfer, so
-            an unsupported (e.g. non-numeric) dtype raises there before
-            any communication happens.
+            Output shape for this rank; the leading dimension must equal its count.
+        dtype : numpy.dtype-like
+            Element dtype, identical on all ranks.
         root : int, optional
-            Rank holding ``send``. Default 0.
+            Source rank.
 
         Returns
         -------
         numpy.ndarray
-            This rank's contiguous local slab, shape ``local_shape``.
+            Contiguous array assigned to this rank.
 
         Raises
         ------
         ValueError
-            If ``root`` is asked to scatter without providing ``send``.
+            If ``send`` is missing on ``root``.
         """
         import numpy as np
         from mpi4py.util import dtlib
@@ -563,19 +540,19 @@ class MPIContext(MPIDiagnostics):
         return local
 
     def gather(self, value: T, *, root: int = 0) -> list[T] | None:
-        """Gather one Python object from every rank onto ``root``.
+        """Gather Python objects onto one rank.
 
         Parameters
         ----------
         value : T
-            This rank's contribution.
+            Object contributed by this rank.
         root : int, optional
-            Destination rank. Default 0.
+            Destination rank.
 
         Returns
         -------
         list of T or None
-            Rank-ordered values on ``root``; None on all other ranks.
+            Rank-ordered objects on ``root``; otherwise None.
         """
         return cast("list[T] | None", self.comm.gather(value, root=root))
 
@@ -599,45 +576,45 @@ class MPIContext(MPIDiagnostics):
     ):
         """Decorate a function for MPI-aware execution.
 
-        By default the function runs only on ``root``. It can instead run
-        on every rank, or run on ``root`` and broadcast its return value.
+        By default, the function runs only on ``root``.
 
         Parameters
         ----------
-        function : callable or None, optional
-            Function to decorate (positional, for bare ``@mpi`` use).
+        function : callable, optional
+            Function to decorate.
         all_ranks : bool, optional
-            Run on every rank. Default False.
+            Execute the function on every rank.
         broadcast : bool, optional
-            Run on ``root`` and broadcast the result to every rank. Default
-            False.
+            Broadcast the root rank's result to every rank.
         root : int, optional
-            Root rank for root-only execution/broadcasting. Default 0.
+            Root rank.
 
         Returns
         -------
         callable
-            Decorated function, or a decorator when ``function`` is None.
-            Root-only mode returns None on non-root ranks.
+            Decorated function or configured decorator. In root-only mode, non-root
+            ranks return None.
 
         Raises
         ------
         TypeError
-            If the positional argument is not callable.
+            If ``function`` is not callable.
         ValueError
-            If ``broadcast`` and ``all_ranks`` are both True, or ``root`` is
-            invalid.
+            If the execution options or root rank are invalid.
         MPIError
-            If distributed execution fails on only a subset of ranks.
+            If execution fails inconsistently across ranks.
 
         Examples
         --------
         >>> @mpi
-        ... def compute_metrics(): ...
+        ... def compute():
+        ...     ...
         >>> @mpi(all_ranks=True)
-        ... def initialize_worker(): ...
+        ... def compute_local():
+        ...     ...
         >>> @mpi(broadcast=True)
-        ... def load_shared_configuration(): ...
+        ... def load():
+        ...     ...
         """
         if function is None:
             return functools.partial(
@@ -672,7 +649,6 @@ class MPIContext(MPIDiagnostics):
         return wrapper
 
 
-mpi: MPIContext = MPIContext()
-
+mpi = MPIContext()
 
 __all__ = ["mpi"]
