@@ -36,7 +36,7 @@ Utilities for climate data analysis and plotting: geospatial operations, Cartopy
 
 | `climtools.cdo` | Thin wrapper over the CDO command-line tool. | [`cdo/pycdo.py`](cdo/pycdo.py) |
 
-| `climtools.mpi` | MPI runtime/communicator handle, shared by every distributed operation below. | [`mpi/runtime.py`](mpi/runtime.py) |
+| `climtools.mpi` | MPI runtime/communicator handle, shared by every distributed operation below. | [`mpi/context.py`](mpi/context.py) |
 
 | `climtools.xgeo.mpi_open_dataset`, `.mpi_create_dataarray`, `.mpi_create_dataset`, `.mpi_partition_data` | MPI-parallel Xarray: partition NetCDF data or in-memory arrays across ranks, then operate on them with (mostly) ordinary Xarray syntax. See [MPI-Xarray](#mpi-xarray-distributed-processing) below. | [`xarray/io.py`](xarray/io.py), [`xarray/core.py`](xarray/core.py) |
 
