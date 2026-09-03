@@ -6,12 +6,15 @@ coverage) checks.
 
 from __future__ import annotations
 
-import numpy as np
-import xarray as xr
+import shutil
 
+import numpy as np
 from climtools import mpi, xgeo
 from climtools.xarray.core import MPIXarray
+from mock_dataset import PATH
 from mpi_test_common import Fixtures, local_of, record
+
+import xarray as xr
 
 
 def run(fx: Fixtures) -> None:
@@ -35,21 +38,33 @@ def run(fx: Fixtures) -> None:
             return (idx[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
 
         da = xgeo.mpi_create_dataarray(
-            mpi, fill, dims=("x", "y"), shape={"x": global_size, "y": 3},
-            dim="x", log_partitions=False,
+            mpi,
+            fill,
+            dims=("x", "y"),
+            shape={"x": global_size, "y": 3},
+            dim="x",
+            log_partitions=False,
         )
         s, e = da.meta["start"], da.meta["stop"]
         local = local_of(da)
         idx_global = np.arange(global_size)
-        expected_global = (idx_global[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
+        expected_global = (idx_global[:, None] * 100 + np.arange(3)[None, :]).astype(
+            np.float64
+        )
         shape_ok = local.shape[0] == (e - s)
-        val_ok = np.array_equal(local.values, expected_global[s:e]) if local.shape[0] else True
+        val_ok = (
+            np.array_equal(local.values, expected_global[s:e])
+            if local.shape[0]
+            else True
+        )
 
         bounds = mpi.comm.gather((s, e), root=0)
         coverage_ok = None
         if mpi.comm.rank == 0:
             bounds_sorted = sorted(bounds)
-            coverage_ok = bounds_sorted[0][0] == 0 and bounds_sorted[-1][1] == global_size
+            coverage_ok = (
+                bounds_sorted[0][0] == 0 and bounds_sorted[-1][1] == global_size
+            )
             for i in range(1, len(bounds_sorted)):
                 if bounds_sorted[i][0] != bounds_sorted[i - 1][1]:
                     coverage_ok = False
@@ -81,18 +96,26 @@ def run(fx: Fixtures) -> None:
 
     DGX, DGY = 1, 1
     da_deg = xgeo.mpi_create_dataarray(
-        mpi, fill_degenerate, dims=("x", "y"), shape={"x": DGX, "y": DGY},
-        dim=("x", "y"), log_partitions=False, name="v",
+        mpi,
+        fill_degenerate,
+        dims=("x", "y"),
+        shape={"x": DGX, "y": DGY},
+        dim=("x", "y"),
+        log_partitions=False,
+        name="v",
     )
     m_deg = da_deg.meta
     dxs, dxe = m_deg["starts"]["x"], m_deg["stops"]["x"]
     dys, dye = m_deg["starts"]["y"], m_deg["stops"]["y"]
     local_deg = local_of(da_deg)
-    expected_deg_global = (np.arange(DGX)[:, None] * 10 + np.arange(DGY)[None, :]).astype(np.float64)
+    expected_deg_global = (
+        np.arange(DGX)[:, None] * 10 + np.arange(DGY)[None, :]
+    ).astype(np.float64)
     shape_ok = local_deg.shape == (dxe - dxs, dye - dys)
     val_ok = (
         np.array_equal(local_deg.values, expected_deg_global[dxs:dxe, dys:dye])
-        if (dxe > dxs and dye > dys) else local_deg.size == 0
+        if (dxe > dxs and dye > dys)
+        else local_deg.size == 0
     )
     bounds_deg = mpi.comm.gather((dxs, dxe, dys, dye, shape_ok and val_ok), root=0)
     if mpi.comm.rank == 0:
@@ -101,7 +124,7 @@ def run(fx: Fixtures) -> None:
         any_empty = False
         for b in bounds_deg:
             if b[1] > b[0] and b[3] > b[2]:
-                grid[b[0]:b[1], b[2]:b[3]] += 1
+                grid[b[0] : b[1], b[2] : b[3]] += 1
             else:
                 any_empty = True
             all_ok = all_ok and b[4]
@@ -111,7 +134,8 @@ def run(fx: Fixtures) -> None:
         # exercised and this check would be vacuous.
         degenerate_exercised = any_empty or mpi.comm.size == 1
         record(
-            "mpi_create_dataarray", "2d(x,y), degenerate (both dims < ranks)",
+            "mpi_create_dataarray",
+            "2d(x,y), degenerate (both dims < ranks)",
             all_ok and bool(np.all(grid == 1)) and degenerate_exercised,
         )
     mpi.comm.barrier()
@@ -120,18 +144,27 @@ def run(fx: Fixtures) -> None:
     #    split, vs a naive-average ground truth ----------------------------
     def fill_uneven(a, b):
         idx = np.arange(a, b)
-        return (np.sin(idx.astype(np.float64))[:, None] * (idx[:, None] + 1)
-                + np.arange(3)[None, :]).astype(np.float64)
+        return (
+            np.sin(idx.astype(np.float64))[:, None] * (idx[:, None] + 1)
+            + np.arange(3)[None, :]
+        ).astype(np.float64)
 
     GLOBAL = 21  # uneven for any rank count in {2,3,4,5,6} except divisors
     da_uneven = xgeo.mpi_create_dataarray(
-        mpi, fill_uneven, dims=("x", "y"), shape={"x": GLOBAL, "y": 3},
-        dim="x", log_partitions=False, name="v",
+        mpi,
+        fill_uneven,
+        dims=("x", "y"),
+        shape={"x": GLOBAL, "y": 3},
+        dim="x",
+        log_partitions=False,
+        name="v",
     )
     gmean = da_uneven.mean(dim="x")
     idx_global = np.arange(GLOBAL)
-    full = (np.sin(idx_global.astype(np.float64))[:, None] * (idx_global[:, None] + 1)
-            + np.arange(3)[None, :]).astype(np.float64)
+    full = (
+        np.sin(idx_global.astype(np.float64))[:, None] * (idx_global[:, None] + 1)
+        + np.arange(3)[None, :]
+    ).astype(np.float64)
     expected_mean = full.mean(axis=0)
     try:
         if isinstance(gmean, MPIXarray) and gmean.meta is not None:
@@ -143,7 +176,9 @@ def run(fx: Fixtures) -> None:
         if mpi.comm.rank == 0:
             record("mean", "uneven partition, weighted vs naive-average", all(all_ok))
     except Exception as e:
-        record("mean", "uneven partition, weighted vs naive-average", False, str(e)[:200])
+        record(
+            "mean", "uneven partition, weighted vs naive-average", False, str(e)[:200]
+        )
     mpi.comm.barrier()
 
     # -- multiple distributed dimensions -------------------------------
@@ -162,10 +197,13 @@ def run(fx: Fixtures) -> None:
         grid = np.zeros((lat_n, lon_n), dtype=int)
         all_ok = True
         for b in bounds2d:
-            grid[b[0]:b[1], b[2]:b[3]] += 1
+            grid[b[0] : b[1], b[2] : b[3]] += 1
             all_ok = all_ok and b[4]
-        record("mpi_open_dataset", "2d(lat,lon), reconstruction",
-               all_ok and bool(np.all(grid == 1)))
+        record(
+            "mpi_open_dataset",
+            "2d(lat,lon), reconstruction",
+            all_ok and bool(np.all(grid == 1)),
+        )
     mpi.comm.barrier()
 
     GX, GY = 19, 36
@@ -176,13 +214,20 @@ def run(fx: Fixtures) -> None:
         return (xs[:, None] * 1000 + ys[None, :]).astype(np.float64)
 
     da2d = xgeo.mpi_create_dataarray(
-        mpi, fill2d, dims=("x", "y"), shape={"x": GX, "y": GY},
-        dim=("x", "y"), log_partitions=False, name="v",
+        mpi,
+        fill2d,
+        dims=("x", "y"),
+        shape={"x": GX, "y": GY},
+        dim=("x", "y"),
+        log_partitions=False,
+        name="v",
     )
     m3 = da2d.meta
     xs, xe = m3["starts"]["x"], m3["stops"]["x"]
     ys, ye = m3["starts"]["y"], m3["stops"]["y"]
-    expected_global = (np.arange(GX)[:, None] * 1000 + np.arange(GY)[None, :]).astype(np.float64)
+    expected_global = (np.arange(GX)[:, None] * 1000 + np.arange(GY)[None, :]).astype(
+        np.float64
+    )
     local2d = local_of(da2d)
     ok_val = np.array_equal(local2d.values, expected_global[xs:xe, ys:ye])
     ok_shape = local2d.shape == (xe - xs, ye - ys)
@@ -191,10 +236,13 @@ def run(fx: Fixtures) -> None:
         grid = np.zeros((GX, GY), dtype=int)
         all_ok = True
         for b in bounds2:
-            grid[b[0]:b[1], b[2]:b[3]] += 1
+            grid[b[0] : b[1], b[2] : b[3]] += 1
             all_ok = all_ok and b[4]
-        record("mpi_create_dataarray", "2d(x,y), reconstruction",
-               all_ok and bool(np.all(grid == 1)))
+        record(
+            "mpi_create_dataarray",
+            "2d(x,y), reconstruction",
+            all_ok and bool(np.all(grid == 1)),
+        )
     mpi.comm.barrier()
 
     def fill_x_only(a, b):
@@ -217,13 +265,19 @@ def run(fx: Fixtures) -> None:
     local_ds = local_of(ds2d)
     ok = (
         np.array_equal(local_ds["full2d"].values, expected_global[xs:xe, ys:ye])
-        and np.array_equal(local_ds["x_only"].values, np.arange(xs, xe, dtype=np.float64) * 7.0)
+        and np.array_equal(
+            local_ds["x_only"].values, np.arange(xs, xe, dtype=np.float64) * 7.0
+        )
         and np.array_equal(local_ds["const"].values, np.full((3,), 42.0))
         and local_ds.sizes["z"] == 3
     )
     all_ok = mpi.comm.gather(ok, root=0)
     if mpi.comm.rank == 0:
-        record("mpi_create_dataset", "2d(x,y), mixed both/one/no-partition-dim vars", all(all_ok))
+        record(
+            "mpi_create_dataset",
+            "2d(x,y), mixed both/one/no-partition-dim vars",
+            all(all_ok),
+        )
     mpi.comm.barrier()
 
     correct_da = xr.DataArray(np.zeros((xe - xs, ye - ys)), dims=("x", "y"))
@@ -231,7 +285,9 @@ def run(fx: Fixtures) -> None:
         check_ds = xgeo.mpi_create_dataset(
             mpi,
             data_vars={"pre_built": correct_da, "other": (("x", "y"), fill2d)},
-            sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
+            sizes={"x": GX, "y": GY},
+            dim=("x", "y"),
+            log_partitions=False,
         )
         local_of(check_ds)
         ok_a = True
@@ -241,8 +297,11 @@ def run(fx: Fixtures) -> None:
     wrong_y = xr.DataArray(np.zeros((xe - xs, (ye - ys) + 1)), dims=("x", "y"))
     try:
         xgeo.mpi_create_dataset(
-            mpi, data_vars={"wrong_y": wrong_y, "other": (("x", "y"), fill2d)},
-            sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
+            mpi,
+            data_vars={"wrong_y": wrong_y, "other": (("x", "y"), fill2d)},
+            sizes={"x": GX, "y": GY},
+            dim=("x", "y"),
+            log_partitions=False,
         )
         ok_b = False  # should have raised
     except ValueError:
@@ -253,8 +312,11 @@ def run(fx: Fixtures) -> None:
     wrong_x = xr.DataArray(np.zeros(((xe - xs) + 1, ye - ys)), dims=("x", "y"))
     try:
         xgeo.mpi_create_dataset(
-            mpi, data_vars={"wrong_x": wrong_x, "other": (("x", "y"), fill2d)},
-            sizes={"x": GX, "y": GY}, dim=("x", "y"), log_partitions=False,
+            mpi,
+            data_vars={"wrong_x": wrong_x, "other": (("x", "y"), fill2d)},
+            sizes={"x": GX, "y": GY},
+            dim=("x", "y"),
+            log_partitions=False,
         )
         ok_c = False  # should have raised
     except ValueError:
@@ -264,71 +326,104 @@ def run(fx: Fixtures) -> None:
 
     all_ok = mpi.comm.gather((ok_a, ok_b, ok_c), root=0)
     if mpi.comm.rank == 0:
-        record("mpi_create_dataset", "2d(x,y), DataArray shape validation",
-               all(all(t) for t in all_ok))
+        record(
+            "mpi_create_dataset",
+            "2d(x,y), DataArray shape validation",
+            all(all(t) for t in all_ok),
+        )
     mpi.comm.barrier()
 
     # -- to_netcdf(parallel=True): real write-reread-compare round trip,
     #    single-dim (auto-chunked) and multi-dim (explicit chunks
     #    required -- auto-chunk inference isn't multi-dim generalized
     #    yet, and says so rather than guessing) -------------------------
-    import tempfile
+    parallel_dir = PATH.parent / f"{PATH.stem}_parallel"
+    if mpi.comm.rank == 0:
+        parallel_dir.mkdir(parents=True, exist_ok=False)
+    mpi.comm.barrier()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out_1d = f"{tmpdir}/parallel_1d.nc"
+    def check_parallel_write(case: str, path, write_fn) -> None:
+        ok = True
+        msg = ""
         try:
-            xgeo.to_netcdf(dist._prepare(), out_1d, mpi, parallel=True, allow_serial=(mpi.comm.size == 1))
-            mpi.comm.barrier()
-            ok = True
-            if mpi.comm.rank == 0:
-                written = xr.open_dataset(out_1d).load()
-                xr.testing.assert_allclose(written, native, rtol=1e-6)
+            write_fn()
         except Exception as e:
             ok = False
-            record("to_netcdf(parallel=True)", "1d(time)", False, str(e)[:200])
+            msg = f"{type(e).__name__}: {str(e)[:180]}"
+
+        statuses = mpi.comm.gather((ok, msg), root=0)
+        if mpi.comm.rank == 0:
+            all_write_ok = all(status[0] for status in statuses)
+            if not all_write_ok:
+                msg = next(status[1] for status in statuses if not status[0])
         else:
-            all_ok = mpi.comm.gather(ok, root=0)
-            if mpi.comm.rank == 0:
-                record("to_netcdf(parallel=True)", "1d(time)", all(all_ok))
+            all_write_ok = None
+        all_write_ok = mpi.comm.bcast(all_write_ok, root=0)
+
+        read_ok = True
+        if all_write_ok and mpi.comm.rank == 0:
+            try:
+                written = xr.open_dataset(path).load()
+                xr.testing.assert_allclose(written, native, rtol=1e-6)
+            except Exception as e:
+                read_ok = False
+                msg = f"{type(e).__name__}: {str(e)[:180]}"
+        read_ok = mpi.comm.bcast(read_ok, root=0)
+        if mpi.comm.rank == 0:
+            record(
+                "to_netcdf(parallel=True)",
+                case,
+                bool(all_write_ok and read_ok),
+                "" if all_write_ok and read_ok else msg,
+            )
         mpi.comm.barrier()
 
-        out_2d = f"{tmpdir}/parallel_2d.nc"
+    try:
+        out_1d = parallel_dir / "parallel_1d.nc"
+        check_parallel_write(
+            "1d(time)",
+            out_1d,
+            lambda: xgeo.to_netcdf(
+                dist._prepare(),
+                out_1d,
+                mpi,
+                parallel=True,
+                allow_serial=(mpi.comm.size == 1),
+            ),
+        )
+
+        out_2d = parallel_dir / "parallel_2d.nc"
         var_chunks = {
             name: tuple(native.sizes[d] for d in native[name].dims)
             for name in native.data_vars
         }
-        try:
-            xgeo.to_netcdf(dist2d._prepare(), out_2d, mpi, parallel=True, chunks=var_chunks, allow_serial=(mpi.comm.size == 1))
-            mpi.comm.barrier()
-            ok = True
-            if mpi.comm.rank == 0:
-                written = xr.open_dataset(out_2d).load()
-                xr.testing.assert_allclose(written, native, rtol=1e-6)
-        except Exception as e:
-            ok = False
-            record("to_netcdf(parallel=True)", "2d(lat,lon), explicit chunks", False, str(e)[:200])
-        else:
-            all_ok = mpi.comm.gather(ok, root=0)
-            if mpi.comm.rank == 0:
-                record("to_netcdf(parallel=True)", "2d(lat,lon), explicit chunks", all(all_ok))
-        mpi.comm.barrier()
-
-        out_2d_auto = f"{tmpdir}/parallel_2d_auto.nc"
-        try:
-            xgeo.to_netcdf(
-                dist2d._prepare(), out_2d_auto, mpi, parallel=True,
+        check_parallel_write(
+            "2d(lat,lon), explicit chunks",
+            out_2d,
+            lambda: xgeo.to_netcdf(
+                dist2d._prepare(),
+                out_2d,
+                mpi,
+                parallel=True,
+                chunks=var_chunks,
                 allow_serial=(mpi.comm.size == 1),
-            )
-            mpi.comm.barrier()
-            ok = True
-            if mpi.comm.rank == 0:
-                written = xr.open_dataset(out_2d_auto).load()
-                xr.testing.assert_allclose(written, native, rtol=1e-6)
-        except Exception as e:
-            ok = False
-            record("to_netcdf(parallel=True)", "2d(lat,lon), auto chunks", False, str(e)[:200])
-        else:
-            all_ok = mpi.comm.gather(ok, root=0)
-            if mpi.comm.rank == 0:
-                record("to_netcdf(parallel=True)", "2d(lat,lon), auto chunks", all(all_ok))
+            ),
+        )
+
+        out_2d_auto = parallel_dir / "parallel_2d_auto.nc"
+        check_parallel_write(
+            "2d(lat,lon), auto chunks",
+            out_2d_auto,
+            lambda: xgeo.to_netcdf(
+                dist2d._prepare(),
+                out_2d_auto,
+                mpi,
+                parallel=True,
+                allow_serial=(mpi.comm.size == 1),
+            ),
+        )
+    finally:
+        mpi.comm.barrier()
+        if mpi.comm.rank == 0:
+            shutil.rmtree(parallel_dir, ignore_errors=True)
         mpi.comm.barrier()

@@ -51,5 +51,7 @@ local_time = (t1 - t0) / REPS
 slowest = mpi.comm.reduce(local_time, op=MPI.MAX, root=0)
 
 if rank == 0:
-    print(f"ranks={mpi.comm.size}  n_vars={N_VARS} (3 dtypes: float32/float64/int32)  reps={REPS}")
+    print(
+        f"ranks={mpi.comm.size}  n_vars={N_VARS} (3 dtypes: float32/float64/int32)  reps={REPS}"
+    )
     print(f"wall time per halo_exchange() call (slowest rank): {slowest * 1000:.4f} ms")

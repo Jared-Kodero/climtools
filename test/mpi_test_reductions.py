@@ -8,10 +8,10 @@ in planning.py, and median's own gather-to-root dedup).
 from __future__ import annotations
 
 import numpy as np
-import xarray as xr
-
 from climtools import mpi
 from mpi_test_common import Fixtures, local_of, record
+
+import xarray as xr
 
 
 def run(fx: Fixtures) -> None:
@@ -37,7 +37,12 @@ def run(fx: Fixtures) -> None:
         xr.testing.assert_allclose(local_of(global_mean), expected, rtol=1e-5)
         record("mean(dim='time')", "1d(time), reduction+reconstruction", True)
     except Exception as e:
-        record("mean(dim='time')", "1d(time), reduction+reconstruction", False, str(e)[:200])
+        record(
+            "mean(dim='time')",
+            "1d(time), reduction+reconstruction",
+            False,
+            str(e)[:200],
+        )
     mpi.comm.barrier()
 
     # -- multi-dim reductions: correct values AND exactly-once,
@@ -62,10 +67,18 @@ def run(fx: Fixtures) -> None:
                 ok = ok and bool(np.all(coverage == 1))
             all_ok = mpi.comm.gather(ok, root=0)
             if mpi.comm.rank == 0:
-                record(op_name, f"2d(lat,lon)/{reduce_dim}, reduction+reconstruction", all(all_ok))
+                record(
+                    op_name,
+                    f"2d(lat,lon)/{reduce_dim}, reduction+reconstruction",
+                    all(all_ok),
+                )
         except Exception as e:
-            record(op_name, f"2d(lat,lon)/{reduce_dim}, reduction+reconstruction",
-                   False, str(e)[:200])
+            record(
+                op_name,
+                f"2d(lat,lon)/{reduce_dim}, reduction+reconstruction",
+                False,
+                str(e)[:200],
+            )
 
     for op_name, apply_fn, native_fn in [
         ("mean", lambda: dist2d.mean(dim="lat"), lambda: native.mean(dim="lat")),
@@ -103,7 +116,8 @@ def run(fx: Fixtures) -> None:
             local = local_of(result)
             xr.testing.assert_allclose(
                 local if isinstance(local, xr.DataArray) else xr.DataArray(local),
-                expected, rtol=1e-5,
+                expected,
+                rtol=1e-5,
             )
             record(op_name, "1d(x), uneven", True)
         except Exception as e:

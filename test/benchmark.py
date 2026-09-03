@@ -93,16 +93,17 @@ def peak_rss_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def time_it(fn, reps, warmup):
+def time_it(fn, reps, warmup, *, synchronize=True):
     """Run fn() warmup+reps times; return sorted list of per-run wall times
-    on THIS rank, after an MPI barrier immediately before each timed call
-    (so no rank starts early on stale local state)."""
+    on THIS rank. Distributed timings synchronize ranks immediately before
+    each timed call; rank-local timings can disable that synchronization."""
     for _ in range(warmup):
         fn()
     times = []
     for _ in range(reps):
         gc.collect()
-        mpi.comm.barrier()
+        if synchronize:
+            mpi.comm.barrier()
         t0 = time.perf_counter()
         fn()
         t1 = time.perf_counter()
@@ -260,7 +261,9 @@ def run_native_phase():
         for entry in PENDING:
             if entry.get("error") is not None or entry["native_fn"] is None:
                 continue
-            times = time_it(entry["native_fn"], args.reps, args.warmup)
+            times = time_it(
+                entry["native_fn"], args.reps, args.warmup, synchronize=False
+            )
             entry["native_s"] = float(np.median(times))
     mpi.comm.barrier()
     if mpi.comm.rank == 0:

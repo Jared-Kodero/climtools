@@ -1,0 +1,89 @@
+diff --git a/test/mock_dataset.py b/test/mock_dataset.py
+index 2e4ebdf..4891658 100644
+--- a/test/mock_dataset.py
++++ b/test/mock_dataset.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import shutil
++import time
+ import uuid
+ from pathlib import Path
+ 
+@@ -16,7 +17,62 @@ OUTPUT_DIR = (Path.home() / "jobtmp" / "climtools_mock_dataset_test").resolve()
+ 
+ name = uuid.uuid4().hex if mpi.comm.rank == 0 else None
+ name = mpi.comm.bcast(name, root=0)
+-_path = OUTPUT_DIR / f"{name}.nc"
++# Scope the working directory to this run's uuid rather than reusing the
++# fixed OUTPUT_DIR across every invocation. Reusing a fixed directory name
++# meant a fresh srun step's rank 0 could shutil.rmtree() a directory that a
++# just-killed prior step (e.g. an MPI_ABORT from an earlier job step) was
++# still tearing down on the filesystem side (an NFS/Lustre "silly rename"
++# leaves a hidden .nfsXXXX entry for files a killed process still had open,
++# which then vanishes mid-walk) -- that TOCTOU race is what produced the
++# "FileNotFoundError: No such file or directory" aborts in test_suite.log.
++_run_dir = OUTPUT_DIR / name
++_path = _run_dir / f"{name}.nc"
++
++
++def _sweep_stale_runs(output_dir: Path, max_age_seconds: float = 3600.0) -> None:
++    """Remove leftover per-run subdirectories from earlier invocations.
++
++    Each run now gets its own uuid-named subdirectory under OUTPUT_DIR
++    (see the comment above), so nothing removes a *previous* run's
++    directory automatically the way the old shared-directory rmtree did.
++    Left unchecked that accumulates one directory per run forever. This
++    only removes subdirectories whose mtime is older than max_age_seconds,
++    so it can never touch a directory belonging to another job that is
++    still in flight on the same shared filesystem -- only ones old enough
++    that their owning process has certainly finished.
++    """
++    if not output_dir.exists():
++        return
++    now = time.time()
++    for child in output_dir.iterdir():
++        try:
++            if not child.is_dir():
++                continue
++            if now - child.stat().st_mtime < max_age_seconds:
++                continue
++            _rmtree_tolerant(child)
++        except FileNotFoundError:
++            # Another concurrent run already swept the same stale entry.
++            continue
++
++
++def _rmtree_tolerant(path: Path) -> None:
++    """Best-effort recursive delete that never raises on a vanished entry.
++
++    shutil.rmtree() lists a directory and then lstats/removes each entry in
++    a second pass; if an entry disappears between those two steps (another
++    process/rank finishing its own cleanup, or filesystem-level deferred
++    delete) the default onexc handler re-raises. We only care that the
++    directory ends up gone, not that every entry was removed by us, so any
++    FileNotFoundError encountered during the walk is treated as success.
++    """
++
++    def _onexc(_func, _target_path, exc):
++        if isinstance(exc, FileNotFoundError):
++            return
++        raise exc
++
++    shutil.rmtree(path, onexc=_onexc)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -128,10 +184,10 @@ def create_dataset(
+ 
+     if mpi.comm.rank == 0:
+         if path.parent.exists():
+-            shutil.rmtree(path.parent)
++            _rmtree_tolerant(path.parent)
++        _sweep_stale_runs(OUTPUT_DIR)
+         path.parent.mkdir(parents=True, exist_ok=True)
+ 
+-        # we need to broadcaste the constanst
+         build_dataset(path, n_time, resolution_deg, plev_step)
+     mpi.comm.barrier()
+ 

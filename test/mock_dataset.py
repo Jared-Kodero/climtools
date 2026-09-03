@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import os
 import shutil
-import uuid
 from pathlib import Path
 
 import numpy as np
@@ -11,12 +11,9 @@ from climtools import mpi
 
 import xarray as xr
 
-OUTPUT_DIR = (Path.home() / "jobtmp" / "climtools_mock_dataset_test").resolve()
-
-
-name = uuid.uuid4().hex if mpi.comm.rank == 0 else None
-name = mpi.comm.bcast(name, root=0)
-_path = OUTPUT_DIR / f"{name}.nc"
+OUTPUT_DIR = (Path.home() / "jobtmp" / "mpi_test").resolve()
+PATH = OUTPUT_DIR / "mock_data.nc"
+PATH2D = OUTPUT_DIR / "mock_data2d.nc"
 
 
 # ---------------------------------------------------------------------------
@@ -112,28 +109,29 @@ def build_dataset(
         },
         attrs={"title": "climtools MPI test suite mock dataset"},
     )
-
-    ds.to_netcdf(path, format="NETCDF4")
+    ds.to_netcdf(path)
 
 
 def create_dataset(
     path: Path | None = None,
+    path2d: Path | None = None,
     n_time: int = 12,
     resolution_deg: float = 1,
     plev_step: float = -100,
 ) -> Path:
 
-    if not path:
-        path = _path
+    path = path or PATH
+    path2d = path2d or PATH2D
 
     if mpi.comm.rank == 0:
-        if path.parent.exists():
-            shutil.rmtree(path.parent)
+        shutil.rmtree(path.parent)
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        # we need to broadcaste the constanst
         build_dataset(path, n_time, resolution_deg, plev_step)
+
+        os.system(f"cp {path} {path2d}")
+
     mpi.comm.barrier()
+    return path
 
 
 __all__ = ["create_dataset"]

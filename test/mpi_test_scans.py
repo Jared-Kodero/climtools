@@ -7,11 +7,11 @@ single-dim and, where supported, multi-dim, with explicit no-duplication
 from __future__ import annotations
 
 import numpy as np
-import xarray as xr
-
 from climtools import mpi, xgeo
 from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, local_of, record
+
+import xarray as xr
 
 
 def run(fx: Fixtures) -> None:
@@ -92,7 +92,9 @@ def run(fx: Fixtures) -> None:
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
-                xr.testing.assert_allclose(local, expected_full.isel({d: slice(s, e)}), rtol=1e-6)
+                xr.testing.assert_allclose(
+                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-6
+                )
             record(op_name, case, True)
         except Exception as e:
             record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
@@ -128,7 +130,9 @@ def run(fx: Fixtures) -> None:
                 groups: dict[tuple, list[tuple[int, int]]] = {}
                 for entry in all_sel:
                     d = dict(entry)
-                    other = tuple(sorted((k, v) for k, v in d.items() if k != moved_dim))
+                    other = tuple(
+                        sorted((k, v) for k, v in d.items() if k != moved_dim)
+                    )
                     groups.setdefault(other, []).append(d[moved_dim])
                 per_group_ok = True
                 for other, ranges in groups.items():
@@ -146,10 +150,19 @@ def run(fx: Fixtures) -> None:
         except NotImplementedError as e:
             record(op_name, case, None, f"NotImplementedError: {str(e)[:150]}")
         except Exception as e:
-            record(op_name, case, False, f"unexpected {type(e).__name__}: {str(e)[:150]}")
+            record(
+                op_name, case, False, f"unexpected {type(e).__name__}: {str(e)[:150]}"
+            )
 
-    check_single_dim("cumsum", lambda: dist.cumsum("time"), lambda: native.cumsum("time"))
-    check_multidim("cumsum", lambda: dist2d.cumsum("lat"), lambda: native.cumsum("lat"), moved_dim="lat")
+    check_single_dim(
+        "cumsum", lambda: dist.cumsum("time"), lambda: native.cumsum("time")
+    )
+    check_multidim(
+        "cumsum",
+        lambda: dist2d.cumsum("lat"),
+        lambda: native.cumsum("lat"),
+        moved_dim="lat",
+    )
     # cumsum carries a running total forward across ranks (each rank's
     # start value depends on an Exscan/prefix-sum over every rank before
     # it), so a rank holding very few -- or, at the extreme, zero --
@@ -159,7 +172,9 @@ def run(fx: Fixtures) -> None:
     # counts; the shared uneven fixture (mpi_test_common.UNEVEN_GLOBAL=21)
     # is deliberately not guaranteed to.
     check_single_dim(
-        "cumsum", lambda: fx.dist_uneven.cumsum("x"), lambda: fx.native_uneven.cumsum("x"),
+        "cumsum",
+        lambda: fx.dist_uneven.cumsum("x"),
+        lambda: fx.native_uneven.cumsum("x"),
         case="1d(x), uneven",
     )
     mpi.comm.barrier()
@@ -179,11 +194,15 @@ def run(fx: Fixtures) -> None:
 
     new_time = native.time.values[::-1][:8]
     check_single_dim(
-        "reindex", lambda: dist.reindex(time=new_time), lambda: native.reindex(time=new_time),
+        "reindex",
+        lambda: dist.reindex(time=new_time),
+        lambda: native.reindex(time=new_time),
     )
     new_lat = native.lat.values[::-1]
     check_multidim(
-        "reindex", lambda: dist2d.reindex(lat=new_lat), lambda: native.reindex(lat=new_lat),
+        "reindex",
+        lambda: dist2d.reindex(lat=new_lat),
+        lambda: native.reindex(lat=new_lat),
         moved_dim="lat",
     )
     mpi.comm.barrier()
@@ -212,8 +231,13 @@ def run(fx: Fixtures) -> None:
         return np.arange(a, b, dtype=np.float64)[:, None] * np.ones((1, GYM))
 
     left_1d = xgeo.mpi_create_dataarray(
-        mpi, fill_left, dims=("x", "y"), shape={"x": GXM, "y": GYM}, dim="x",
-        log_partitions=False, name="left",
+        mpi,
+        fill_left,
+        dims=("x", "y"),
+        shape={"x": GXM, "y": GYM},
+        dim="x",
+        log_partitions=False,
+        name="left",
     )
     right_native = xr.DataArray(
         np.arange(GYM * 3, dtype=np.float64).reshape(GYM, 3), dims=("y", "z")
@@ -222,6 +246,8 @@ def run(fx: Fixtures) -> None:
         np.arange(GXM, dtype=np.float64)[:, None] * np.ones((1, GYM)), dims=("x", "y")
     )
     check_single_dim(
-        "matmul", lambda: left_1d.matmul(right_native),
-        lambda: native_left.dot(right_native, dim="y"), case="1d(x)",
+        "matmul",
+        lambda: left_1d.matmul(right_native),
+        lambda: native_left.dot(right_native, dim="y"),
+        case="1d(x)",
     )

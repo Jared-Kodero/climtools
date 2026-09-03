@@ -12,11 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import xarray as xr
-
 from climtools import mpi, xgeo
 from climtools.xarray.core import MPIXarray
-from mock_dataset import _path, create_dataset
+from mock_dataset import PATH, PATH2D, create_dataset
+
+import xarray as xr
 
 RESULTS: list[tuple[str, str, bool | None, str]] = []
 
@@ -62,12 +62,12 @@ def build_fixtures() -> Fixtures:
     'lon')) -- every test module compares against the same underlying
     data, just partitioned differently. Also builds a small, separate,
     deliberately-uneven 1D DataArray fixture (see `UNEVEN_GLOBAL`)."""
-    create_dataset(n_time=12, resolution_deg=10, plev_step=-250)
-    mpi.comm.barrier()
-    native = xr.open_dataset(_path).load()
-    dist = xgeo.mpi_open_dataset(_path, mpi, partition_dim="time", log_partitions=False)
+    create_dataset(n_time=24 * 30, resolution_deg=0.25, plev_step=-100)
+
+    native = xr.open_dataset(PATH).load()
+    dist = xgeo.mpi_open_dataset(PATH, mpi, partition_dim="time", log_partitions=True)
     dist2d = xgeo.mpi_open_dataset(
-        _path, mpi, partition_dim=("lat", "lon"), log_partitions=False
+        PATH2D, mpi, partition_dim=("lat", "lon"), log_partitions=True
     )
 
     def fill_uneven(a, b):
@@ -75,16 +75,24 @@ def build_fixtures() -> Fixtures:
         return np.sin(idx) * (idx + 1.0)
 
     dist_uneven = xgeo.mpi_create_dataarray(
-        mpi, fill_uneven, dims=("x",), shape={"x": UNEVEN_GLOBAL},
-        dim="x", log_partitions=False, name="v",
+        mpi,
+        fill_uneven,
+        dims=("x",),
+        shape={"x": UNEVEN_GLOBAL},
+        dim="x",
+        log_partitions=False,
+        name="v",
     )
     idx_global = np.arange(UNEVEN_GLOBAL, dtype=np.float64)
     native_uneven = xr.DataArray(
         np.sin(idx_global) * (idx_global + 1.0), dims=("x",), name="v"
     )
     return Fixtures(
-        native=native, dist=dist, dist2d=dist2d,
-        native_uneven=native_uneven, dist_uneven=dist_uneven,
+        native=native,
+        dist=dist,
+        dist2d=dist2d,
+        native_uneven=native_uneven,
+        dist_uneven=dist_uneven,
     )
 
 
@@ -113,8 +121,10 @@ def report() -> None:
             status = "FAIL"
             n_fail += 1
         print(f"[{status}] {op:<18} {case:<20} {msgs.get((op, case), '')}")
-    print(f"--- {n_pass} passed, {n_fail} failed, {n_skip} skipped "
-          f"(declared NotImplementedError under an unsupported partition shape) "
-          f"of {len(combined)} checks ---")
+    print(
+        f"--- {n_pass} passed, {n_fail} failed, {n_skip} skipped "
+        f"(declared NotImplementedError under an unsupported partition shape) "
+        f"of {len(combined)} checks ---"
+    )
     if n_fail:
         raise SystemExit(1)
