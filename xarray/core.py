@@ -492,11 +492,9 @@ class MPIXarray:
         """Truth value (``if mpixarray:``, ``bool(mpixarray)``)."""
         if self.meta is not None:
             raise ValueError(
-                "The truth value of a distributed MPIXarray is ambiguous: "
+                "the truth value of a distributed MPIXarray is ambiguous: "
                 + "different ranks could take different branches and "
-                + "deadlock on a later collective. Reduce to a replicated "
-                + "scalar first (.all()/.any()), or use .data directly for "
-                + "this rank's own local truthiness."
+                + "deadlock on a later collective"
             )
         return bool(self.data)
 
@@ -505,10 +503,8 @@ class MPIXarray:
         if isinstance(key, str):
             return self.apply(lambda d, k: d[k], self, key)
         raise TypeError(
-            "MPIXarray.__getitem__ only selects a Dataset variable by "
-            + f"name (a str key); got {key!r} ({type(key).__name__}). Use "
-            + ".isel()/.sel() for indexing, or .data[key] for xarray's "
-            + "plain, rank-local version."
+            f"only a str key is supported to select a Dataset variable "
+            + f"by name; got {key!r} ({type(key).__name__})"
         )
 
     def __matmul__(self, other: Any) -> MPIXarray:
@@ -590,10 +586,10 @@ class MPIXarray:
 
         if not parallel and self.meta is not None:
             raise ValueError(
-                "to_netcdf(): data is distributed but parallel=False "
-                + "(the default) would silently write only this rank's "
-                + "local slice as the whole file. Pass parallel=True, or "
-                + "gather/replicate to one rank first for serial output."
+                "data is distributed but parallel=False (the default) "
+                + "would silently write only this rank's local slice as "
+                + "the whole file. Pass parallel=True, or gather/"
+                + "replicate to one rank first for serial output."
             )
 
         prepared = self._prepare()

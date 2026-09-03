@@ -44,7 +44,7 @@ def compute_layout(extents: Sequence[int], nranks: int) -> tuple[int, ...]:
         If ``extents`` is empty, any extent is not positive, or ``nranks`` is not positive.
     """
     if not extents:
-        raise ValueError("compute_layout() requires at least one extent.")
+        raise ValueError("requires at least one extent")
     if any(extent <= 0 for extent in extents):
         raise ValueError(f"All extents must be positive; got {tuple(extents)!r}.")
     if nranks <= 0:
@@ -175,8 +175,8 @@ def build_cartesian_topology(
     """
     if len(dims) < 2:
         raise ValueError(
-            f"build_cartesian_topology() requires at least two partition "
-            + f"dimensions; got {tuple(dims)!r}"
+            f"requires at least two partition dimensions; got "
+            + f"{tuple(dims)!r}"
         )
 
     extents = [int(sizes[dim]) for dim in dims]

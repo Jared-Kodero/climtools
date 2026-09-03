@@ -929,11 +929,9 @@ def attach_save_chunks(
         return value
     if len(meta["dims"]) > 1:
         raise NotImplementedError(
-            "attach_save_chunks() only supports a single partition "
-            + f"dimension so far (dims={meta['dims']!r}). Pass explicit "
-            + "chunks= to to_netcdf() to skip this and reach "
-            + "write_distributed(), which supports any number of "
-            + "partition dimensions."
+            "only supports a single partition dimension so far "
+            + f"(dims={meta['dims']!r}); pass explicit save chunks to "
+            + "skip this"
         )
 
     save_chunks: dict[str, tuple[int, ...]] | None = None

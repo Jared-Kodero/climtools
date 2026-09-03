@@ -64,9 +64,8 @@ def where(
     meta, reference = check_operands_distribution(runtime, operands)
     if meta is not None and drop:
         raise ValueError(
-            "where(): drop=True is not supported on a distributed object "
-            + "(result length could differ across ranks). Use isel()/sel() "
-            + "first, or repartition afterwards."
+            "drop=True is not supported on a distributed object "
+            + "(result length could differ across ranks)"
         )
 
     _agree(
@@ -513,9 +512,9 @@ def diff(
     if meta is None or dim not in meta["dims"]:
         return value.diff(dim, n=n, label=label)
     if n < 0:
-        raise ValueError(f"diff(): n must be >= 0, got {n!r}.")
+        raise ValueError(f"n must be >= 0, got {n!r}")
     if label not in ("upper", "lower"):
-        raise ValueError(f"diff(): label must be 'upper' or 'lower', got {label!r}.")
+        raise ValueError(f"label must be 'upper' or 'lower', got {label!r}")
     if n == 0:
         return reattach_meta(value.diff(dim, n=0, label=label), meta)
 

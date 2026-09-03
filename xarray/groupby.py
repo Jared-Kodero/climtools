@@ -85,7 +85,7 @@ def _resample_bin_labels(
     anchor = pd.Timestamp(global_min_ns, unit="ns").normalize()
 
     if delta_ns <= 0:
-        raise ValueError(f"resample(): non-positive Tick frequency {freq!r}.")
+        raise ValueError(f"non-positive Tick frequency {freq!r}")
 
     offsets_ns = timestamps_ns.asi8 - anchor.value
     bin_index = offsets_ns // delta_ns  # floor division: works for negatives too

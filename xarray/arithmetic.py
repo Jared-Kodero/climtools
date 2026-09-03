@@ -643,7 +643,7 @@ def reindex(
     """
     indexers = {**(indexers or {}), **indexers_kwargs}
     if not indexers:
-        raise ValueError("reindex() requires at least one indexer.")
+        raise ValueError("requires at least one indexer")
 
     meta = get_mpi_meta(value)
     if meta is None:
@@ -671,17 +671,16 @@ def reindex(
 
     if len(touched) > 1:
         raise NotImplementedError(
-            "reindex() cannot yet redistribute more than one active "
-            + f"partition dimension at once (touched={touched!r}). "
-            + "Reindex a dimension at a time instead."
+            "cannot yet redistribute more than one active partition "
+            + f"dimension at once: touched={touched!r}"
         )
 
     dim = touched[0]
     new_labels = np.asarray(indexers[dim])
     if new_labels.ndim != 1:
         raise NotImplementedError(
-            f"reindex(): the new {dim!r} labels must be one-dimensional "
-            + f"to redistribute; got shape {new_labels.shape!r}."
+            f"new {dim!r} labels must be one-dimensional to "
+            + f"redistribute; got shape {new_labels.shape!r}"
         )
     _agree(
         runtime,
@@ -780,10 +779,9 @@ def sortby(
 
     if len(touched) > 1:
         raise NotImplementedError(
-            "sortby() cannot yet redistribute when the sort key(s) "
-            + f"together vary along more than one active partition "
-            + f"dimension ({touched!r}); each key must vary along at "
-            + "most one of them."
+            "cannot yet redistribute when the sort key(s) together vary "
+            + f"along more than one active partition dimension "
+            + f"({touched!r})"
         )
 
     dim = touched[0]
@@ -795,11 +793,9 @@ def sortby(
         )
         if arr.ndim != 1 or arr.shape[0] != local_len:
             raise NotImplementedError(
-                f"sortby(): key {key!r} is not one-dimensional along the "
-                + f"partition dimension {dim!r} (shape {arr.shape!r} vs. "
-                + f"local length {local_len!r}); redistribution needs "
-                + "every key to give exactly one sort value per element "
-                + "along the partition dimension."
+                f"key {key!r} is not one-dimensional along partition "
+                + f"dimension {dim!r}: shape {arr.shape!r} vs. local "
+                + f"length {local_len!r}"
             )
         key_arrays_local.append(arr)
 
@@ -947,11 +943,9 @@ def check_operands_distribution(
                     if not indexed
                 ]
                 raise ValueError(
-                    f"Cannot verify operand alignment for dimension {dim!r}: "
-                    + f"{' and '.join(missing)} has no coordinate for it to "
-                    + "check against equal length alone. Add a coordinate "
-                    + f"for {dim!r}, or build the operand from the "
-                    + "distributed side directly (isel()/apply())."
+                    f"cannot verify operand alignment for dimension {dim!r}: "
+                    + f"{' and '.join(missing)} has no coordinate to check "
+                    + "against equal length alone"
                 )
     return meta, reference
 
@@ -982,22 +976,15 @@ def check_partition_preserved(
 
         if dim not in result.dims:
             raise ValueError(
-                "apply(): the callable removed or renamed distributed "
-                + f"dimension {dim!r} (result dims: {tuple(result.dims)!r}). "
-                + "apply() only supports rank-local callables that "
-                + "preserve the partition; use a reduction/indexing/"
-                + "groupby method for anything that changes it."
+                f"the callable removed or renamed distributed dimension "
+                + f"{dim!r} (result dims: {tuple(result.dims)!r})"
             )
 
         local = int(result.sizes[dim])
         if local != owned:
             raise ValueError(
-                "apply(): the callable changed the local length of "
-                + f"distributed dimension {dim!r} from {owned} to {local} "
-                + "on this rank. apply() only supports rank-local "
-                + "callables that preserve each rank's owned length; use "
-                + "isel()/sel()/a halo-aware method for anything that "
-                + "needs neighboring ranks' values."
+                "the callable changed the local length of distributed "
+                + f"dimension {dim!r} from {owned} to {local} on this rank"
             )
 
         if (
@@ -1009,8 +996,8 @@ def check_partition_preserved(
                 xr.align(reference, result, join="exact")
             except (ValueError, KeyError) as exc:
                 raise ValueError(
-                    f"apply(): the callable changed the {dim!r} coordinate "
-                    + f"on this rank even though the length ({local}) is "
+                    f"the callable changed the {dim!r} coordinate on this "
+                    + f"rank even though the length ({local}) is "
                     + f"unchanged. xarray.align reports: {exc}"
                 ) from exc
 
@@ -1127,10 +1114,8 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
         return _apply_generic(runtime, operator.matmul, (left, right), {})
     if len(contracted) > 1:
         raise NotImplementedError(
-            "matmul() cannot yet contract more than one partition "
-            + f"dimension at once ({contracted!r} are common to both "
-            + "operands). Reduce one first, or restructure the "
-            + "contraction to touch only one partition axis."
+            "cannot yet contract more than one partition dimension at "
+            + f"once: {contracted!r} are common to both operands"
         )
     dim = contracted[0]
     other_axes = tuple(d for d in meta["dims"] if d != dim)
@@ -1141,10 +1126,8 @@ def matmul(runtime: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     )
     if replicated:
         raise NotImplementedError(
-            f"matmul() cannot yet contract dimension {dim!r} while an "
-            + f"operand is replicated along {replicated!r}: the "
-            + "contraction sum would need de-duplicating across that "
-            + "axis, which isn't implemented here (see sum()/mean())."
+            f"cannot yet contract dimension {dim!r} while an operand is "
+            + f"replicated along {replicated!r}"
         )
 
     _agree(runtime, ("matmul", str(dim), int(meta["global_sizes"][dim])))
@@ -1195,27 +1178,25 @@ def halo_exchange(
     """
     meta = _operand_meta(value)
     if meta is None:
-        raise ValueError(
-            "halo_exchange() requires a distributed xarray object"
-        )
+        raise ValueError("requires a distributed xarray object")
     partition_dims = meta["dims"]
     if dim is None:
         if len(partition_dims) > 1:
             raise ValueError(
-                "halo_exchange(): dim is required (no default) once more "
-                + "than one dimension is partitioned; pick one of "
-                + f"{tuple(str(d) for d in partition_dims)!r}."
+                "dim is required once more than one dimension is "
+                + f"partitioned; pick one of "
+                + f"{tuple(str(d) for d in partition_dims)!r}"
             )
         partition_dim = partition_dims[0]
     elif dim not in partition_dims:
         raise ValueError(
-            f"halo_exchange(): dim={dim!r} is not one of the object's "
-            + f"active partition dimensions {tuple(str(d) for d in partition_dims)!r}."
+            f"dim={dim!r} is not one of the object's active partition "
+            + f"dimensions {tuple(str(d) for d in partition_dims)!r}"
         )
     else:
         partition_dim = dim
     if before < 0 or after < 0:
-        raise ValueError("halo_exchange(): before and after must be >= 0.")
+        raise ValueError("before and after must be >= 0")
 
     _agree(
         runtime,
@@ -1291,10 +1272,9 @@ def halo_exchange(
     ]
     if deficient:
         raise ValueError(
-            f"halo_exchange(): rank(s) {deficient} ([rank, local_length]) "
-            + f"have a local partition along {partition_dim!r} shorter "
-            + f"than the requested halo (before={before}, after={after}). "
-            + "Repartition with fewer, larger chunks first."
+            f"rank(s) {deficient} ([rank, local_length]) have a local "
+            + f"partition along {partition_dim!r} shorter than the "
+            + f"requested halo (before={before}, after={after})"
         )
 
     before_block, after_block = _exchange_halo_blocks(
@@ -1443,8 +1423,8 @@ def coarsen_reduce(
 
     if side != "left":
         raise NotImplementedError(
-            "coarsen_reduce(): side='right' is not yet supported for a "
-            + "distributed dimension (only the default side='left' is)."
+            "side='right' is not yet supported for a distributed "
+            + "dimension (only the default side='left' is)"
         )
 
     _agree(
@@ -1576,9 +1556,9 @@ def _eval_ast_node(
             last_val = _eval_ast_node(runtime, val_node, variables)
             if isinstance(last_val, (xr.Dataset, xr.DataArray)):
                 raise TypeError(
-                    "evaluate(): 'and'/'or' use Python truth-value "
-                    + "checks, undefined for a multi-element array. "
-                    + "Use '&'/'|' instead, e.g. \"(a > 0) & (b < 1)\"."
+                    "'and'/'or' use Python truth-value checks, undefined "
+                    + "for a multi-element array. Use '&'/'|' instead, "
+                    + 'e.g. "(a > 0) & (b < 1)".'
                 )
             if is_and and not last_val:
                 return last_val
@@ -1626,9 +1606,9 @@ def _eval_ast_node(
 
     raise ValueError(
         f"Unsupported expression element {type(node).__name__!r}; "
-        + "evaluate() only accepts variable names, numeric literals, "
-        + "parentheses, and the arithmetic/comparison/bitwise/boolean "
-        + "operators."
+        + "only variable names, numeric literals, parentheses, and "
+        + "the arithmetic/comparison/bitwise/boolean operators are "
+        + "accepted."
     )
 
 

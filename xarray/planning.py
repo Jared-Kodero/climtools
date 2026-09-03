@@ -235,11 +235,10 @@ def reduction_plan(
             # silently return a wrong answer, this combination is
             # explicitly unsupported for now.
             raise NotImplementedError(
-                f"prod() cannot yet reduce variable {name!r}: it is "
-                + f"replicated along {tuple(str(d) for d in replicated)!r}, "
-                + "and undoing a product's duplication has no exact "
-                + "general inverse (unlike sum/mean). Reduce the "
-                + "replicated dimension(s) first, or use sum()/mean()."
+                f"cannot yet reduce variable {name!r}: it is replicated "
+                + f"along {tuple(str(d) for d in replicated)!r}, and "
+                + "undoing a product's duplication has no exact general "
+                + "inverse"
             )
 
         entries.append(
