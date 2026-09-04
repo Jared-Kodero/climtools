@@ -11,13 +11,13 @@ conda activate mother
 
 module list
 
-# export OMP_NUM_THREADS=1
-# export OPENBLAS_NUM_THREADS=1
-# export MKL_NUM_THREADS=1
-# export VECLIB_MAXIMUM_THREADS=1
-# export NUMEXPR_NUM_THREADS=1
-# export MPLBACKEND=Agg
-# export OMPI_MCA_mpi_warn_on_fork=0
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export OMPI_MCA_mpi_warn_on_fork=0
+export OMPI_MCA_io=romio321
 
 # Correctness suite
 echo "=== mpi_test.py ==="
