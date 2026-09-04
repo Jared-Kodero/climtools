@@ -63,12 +63,25 @@ def run(fx: Fixtures) -> None:
         ("1d(x), uneven", dist_uneven, "x"),
     ]:
         native_here = native_uneven if dm == "x" else native
-        run_op(
-            "rolling_reduce",
-            lambda d=d, dm=dm: d.rolling_reduce(dm, window=3, reduce="mean"),
-            lambda dm=dm: native_here.rolling({dm: 3}, center=True).mean(),
-            case_label,
-        )
+        # rolling_reduce()'s default reduce="mean" hits the exact same
+        # bottleneck-vs-non-bottleneck non-reproducibility documented in
+        # detail below for the rolling().{mean,sum} loop: bottleneck's
+        # rolling-mean is a streaming, running-sum algorithm whose
+        # per-window floating-point error depends on how much data has
+        # already passed through its internal accumulator, which is not
+        # invariant to how the array is split across ranks. Comparing
+        # climtools' independent, short-accumulator per-rank result
+        # against native's single long-accumulator run is therefore not a
+        # meaningful correctness check while bottleneck is in play, so
+        # this pinned comparison -- like the loop below -- forces the
+        # stable, non-bottleneck path on both sides.
+        with xr.set_options(use_bottleneck=False):
+            run_op(
+                "rolling_reduce",
+                lambda d=d, dm=dm: d.rolling_reduce(dm, window=3, reduce="mean"),
+                lambda dm=dm: native_here.rolling({dm: 3}, center=True).mean(),
+                case_label,
+            )
         run_op(
             "coarsen_reduce",
             lambda d=d, dm=dm: d.coarsen_reduce(
@@ -121,27 +134,30 @@ def run(fx: Fixtures) -> None:
         # though it is documented as dispatching straight through it --
         # that dispatch itself (and each of the six reduce names,
         # including count()) was genuinely unverified.
-        # bottleneck's rolling std (xarray's default fast path when it's
-        # installed, which it is here) uses the textbook-unstable
-        # E[x^2]-E[x]^2 formula. Its per-window rounding error is a
-        # function of how much data it has already streamed through its
-        # internal running-sum accumulator, which is *not* invariant to
-        # how the array is split -- confirmed directly, not assumed:
-        # running it once over the full 24-length native array drifts
-        # window-by-window away from a hand-computed ground truth,
-        # while climtools runs it independently per rank over each
+        # bottleneck's rolling reductions (xarray's default fast path when
+        # it's installed, which it is here) use streaming, running-sum
+        # accumulators (the textbook-unstable E[x^2]-E[x]^2 formula for
+        # std; an incremental running total for mean/sum). Their per-window
+        # rounding error is a function of how much data has already
+        # streamed through that accumulator, which is *not* invariant to
+        # how the array is split -- confirmed directly, not assumed, for
+        # all three: running each once over the full 24-length native
+        # array drifts window-by-window away from a hand-computed ground
+        # truth, while climtools runs it independently per rank over each
         # rank's much shorter halo-padded slice, which drifts far less
         # over the same positions. Comparing native's (long-accumulator)
-        # bottleneck path against climtools' (short-accumulator) one
-        # would therefore fail even for a perfectly correct distributed
-        # implementation, for a reason that has nothing to do with
-        # either side's correctness -- so std alone, both sides, uses
-        # the stable non-bottleneck path, which is not sensitive to
-        # this and gives a meaningful comparison; every other reduce
-        # name here is unaffected by bottleneck either way and is left
-        # on xarray's normal default.
+        # bottleneck path against climtools' (short-accumulator) one would
+        # therefore fail even for a perfectly correct distributed
+        # implementation, for a reason that has nothing to do with either
+        # side's correctness -- so mean/sum/std, on both sides, use the
+        # stable non-bottleneck path, which is not sensitive to this and
+        # gives a meaningful comparison; min/max/count are exact regardless
+        # of accumulator strategy and are unaffected either way, so they
+        # stay on xarray's normal default.
         for reduce_name in ("mean", "sum", "min", "max", "std", "count"):
-            with xr.set_options(use_bottleneck=(reduce_name != "std")):
+            with xr.set_options(
+                use_bottleneck=(reduce_name not in ("mean", "sum", "std"))
+            ):
                 run_op(
                     f"rolling().{reduce_name}",
                     lambda d=d, dm=dm, r=reduce_name: getattr(

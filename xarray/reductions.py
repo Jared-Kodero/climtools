@@ -459,6 +459,30 @@ def _sum_prod(
     )
 
 
+def _materialize_local(value: xr.DataArray) -> xr.DataArray:
+    """Force a dask-backed local (already rank-partitioned) array to a
+    concrete, in-memory one.
+
+    By the time a reduction reaches this point ``value`` is always this
+    rank's own local slice, so materializing it does not increase the
+    volume of data read -- it has to be read exactly once regardless.
+    What it avoids is *re-reading* it: :func:`mean_reduce` derives both a
+    partial sum and (for skipna-eligible dtypes) an independent global
+    valid-value count from the same source array via
+    :func:`count_valid_values`. Left lazy, xarray/dask has no reason to
+    share results between two separately-triggered ``.compute()`` calls,
+    so it reruns the *entire* upstream task graph -- including whatever
+    produced ``value`` in the first place (e.g. an expensive user fill
+    function behind ``mpi_create_dataarray``, or decompression/decoding of
+    a file-backed chunk behind ``mpi_open_dataset``) -- once per derived
+    quantity instead of once total. Confirmed by profiling: for a
+    synthetic O(N) fill function, this doubling was the dominant cost of
+    every ``mean()`` call, well above the cost of the reduction itself or
+    any MPI collective involved.
+    """
+    return value.load() if getattr(value, "chunks", None) is not None else value
+
+
 def mean_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -503,6 +527,7 @@ def mean_reduce(
         if not dims:
             local_mean = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
             return local_mean
+        value = _materialize_local(value)
         local_sum, local_error = guarded(
             lambda: value.sum(
                 dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
@@ -537,6 +562,7 @@ def mean_reduce(
                 dim=entry.dims, skipna=skipna, keep_attrs=keep_attrs
             )
             continue
+        variable = _materialize_local(variable)
         local_sum, local_error = guarded(
             lambda variable=variable, entry=entry: variable.sum(
                 dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs

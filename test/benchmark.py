@@ -341,6 +341,21 @@ def fill(a, b):
 
 
 t_setup0 = time.perf_counter()
+# .load() immediately: mpi_create_dataarray returns a lazy, dask-backed
+# object by design (see MPIXarray.load()'s docstring for the full
+# rationale). `dist`/`dist_check` are each reused below across roughly
+# ten independent bench() calls (mean, sum, np.log, rolling_mean, ...);
+# left lazy, every single one of those calls would independently re-run
+# this whole fill() from scratch before doing its own, nominally-timed
+# work -- confirmed directly by profiling: for this benchmark's own
+# fill(), that re-run was the dominant cost of a downstream mean() call,
+# well above the reduction itself or any MPI collective. Left unfixed,
+# that is not "MPI overhead" in any meaningful sense; it is this script
+# comparing an MPI side that silently regenerates its entire input on
+# every timed call against a native side (`native = native_full(N)`,
+# built once, below) that never does. Both sides now pay the fill cost
+# exactly once, outside every timed loop, which is the only comparison
+# that actually measures what this benchmark claims to measure.
 dist = xgeo.mpi_create_dataarray(
     mpi,
     fill,
@@ -349,7 +364,7 @@ dist = xgeo.mpi_create_dataarray(
     dim="x",
     log_partitions=False,
     name="v",
-)
+).load()
 dist_check = xgeo.mpi_create_dataarray(
     mpi,
     fill,
@@ -358,7 +373,7 @@ dist_check = xgeo.mpi_create_dataarray(
     dim="x",
     log_partitions=False,
     name="v",
-)
+).load()
 mpi.comm.barrier()
 t_setup1 = time.perf_counter()
 setup_times = mpi.comm.gather(t_setup1 - t_setup0, root=0)

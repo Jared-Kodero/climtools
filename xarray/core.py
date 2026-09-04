@@ -536,6 +536,49 @@ class MPIXarray:
         assign_mpi_meta(prepared, self.meta)
         return prepared
 
+    def load(self) -> MPIXarray:
+        """Materialize this rank's local data in place; return ``self``.
+
+        ``mpi_create_dataarray``/``mpi_open_dataset`` return a *lazy*
+        rank-local object by design (dask-backed, so a caller who only
+        needs a small slice or a single downstream reduction never pays
+        for more than that). That laziness becomes a real, easy-to-hit
+        performance trap when the same distributed object is instead
+        reused for *several* independent operations (a plotting/analysis
+        script computing a mean, a rolling window, and a couple of
+        elementwise transforms off one opened dataset is the ordinary
+        case, not an edge case): with nothing forcing computation in
+        between, xarray/dask has no reason to share results across
+        separately-triggered ``.compute()`` calls, so each call re-runs
+        the *entire* upstream task graph -- including whatever produced
+        this rank's data in the first place (a user fill function, or
+        decoding/decompressing a file-backed chunk) -- from scratch,
+        every single time. Confirmed directly by profiling: for one
+        representative synthetic fill function, this was measurably the
+        dominant cost of a downstream ``.mean()`` call, well above the
+        cost of the reduction itself or any MPI collective involved (see
+        :func:`~.reductions._materialize_local`, which applies the same
+        fix locally *inside* a single reduction that needs more than one
+        derived quantity from the same source, e.g. mean's sum and
+        valid-count -- this method is the equivalent fix at the caller's
+        level, for reuse *across* separate top-level calls).
+
+        Calling this once, right after construction, whenever the result
+        will be used more than once is the recommended pattern; a
+        distributed object used exactly once (e.g. straight into a single
+        ``.mean()``) does not need it -- laziness costs nothing there.
+
+        Returns
+        -------
+        MPIXarray
+            ``self``, with ``.data`` now a concrete, non-lazy object.
+            Mutates and returns ``self`` (rather than returning a new
+            instance) so it chains directly onto a constructor call, e.g.
+            ``xgeo.mpi_create_dataarray(...).load()``.
+        """
+        self.data = self.data.load()
+        return self
+
     def to_netcdf(
         self,
         file: str | PathLike[str],

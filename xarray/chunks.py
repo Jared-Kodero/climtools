@@ -333,6 +333,49 @@ def get_partition_chunk_size(
     return _cap_partition_chunk_to_hdf5_limit(preferred, other_bytes)
 
 
+def _validate_explicit_chunk_bytes(
+    ds: xr.Dataset, explicit: Mapping[str, tuple[int, ...]]
+) -> None:
+    """Reject a caller-supplied save_chunk shape that would exceed
+    ``MAX_SAVE_CHUNK_BYTES``.
+
+    The auto-inferred path below already keeps every save_chunk under this
+    limit via ``_cap_partition_chunk_to_hdf5_limit`` (HDF5/netCDF-C hard-caps
+    a single chunk at 4 GiB; the auto path deliberately targets half that,
+    2 GiB, for headroom -- see the ``MAX_SAVE_CHUNK_BYTES`` comment above).
+    An explicit ``chunks=`` mapping bypassed that entirely: nothing checked
+    the byte size of a user-supplied shape before handing it to
+    ``createVariable``/``set_collective(True)``, so a chunk shape as
+    ordinary as "one chunk spanning every dimension's full length" (a
+    completely natural thing to write for a variable the caller does not
+    want sub-chunked) silently produced a multi-gigabyte single HDF5 chunk
+    at production data sizes. Creation can still succeed under the 4 GiB
+    hard limit while the actual parallel collective write to that chunk
+    fails with an opaque ``RuntimeError: NetCDF: HDF error`` deep inside
+    HDF5 -- exactly the failure this raises a clear, actionable error for
+    instead, before any write is attempted.
+    """
+    offenders: list[str] = []
+    for name, shape in explicit.items():
+        if name not in ds.variables:
+            continue
+        itemsize = ds.variables[name].dtype.itemsize
+        nbytes = itemsize * math.prod(shape)
+        if nbytes > MAX_SAVE_CHUNK_BYTES:
+            offenders.append(
+                f"{name!r}: chunk shape {shape} * itemsize {itemsize} = "
+                f"{nbytes / 2**30:.2f} GiB (limit {MAX_SAVE_CHUNK_BYTES / 2**30:.0f} GiB)"
+            )
+    if offenders:
+        raise ValueError(
+            "Explicit chunks= would create an HDF5 chunk larger than the "
+            "safe per-chunk byte limit for parallel NetCDF-4 output "
+            "(a chunk this large can pass variable creation and still fail "
+            "the collective write with an opaque 'NetCDF: HDF error'). "
+            "Pass a smaller chunk shape for: " + "; ".join(offenders)
+        )
+
+
 def get_chunks(
     ds: xr.Dataset,
     chunks: Mapping[str, Iterable[int]] | None,
@@ -357,10 +400,12 @@ def get_chunks(
         Mapping from variable name to NetCDF save_chunk shape.
     """
     if chunks is not None:
-        return {
+        explicit = {
             name: tuple(int(length) for length in shape)
             for name, shape in chunks.items()
         }
+        _validate_explicit_chunk_bytes(ds, explicit)
+        return explicit
 
     output: dict[str, tuple[int, ...]] = {}
     for name, da in ds.variables.items():

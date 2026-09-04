@@ -111,19 +111,19 @@ def run(fx: Fixtures) -> None:
     mpi.comm.barrier()
 
     # -- scans and redistribution --------------------------------------------
-    def check_single_dim(op_name, fn, native_fn, case="1d(time)"):
+    def check_single_dim(op_name, fn, native_fn, case="1d(time)", *, rtol=1e-6):
         try:
             result = fn()
             local = local_of(result)
             m = result.meta if isinstance(result, MPIXarray) else None
             expected_full = native_fn()
             if m is None:
-                xr.testing.assert_allclose(local, expected_full, rtol=1e-6)
+                xr.testing.assert_allclose(local, expected_full, rtol=rtol)
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
                 xr.testing.assert_allclose(
-                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-6
+                    local, expected_full.isel({d: slice(s, e)}), rtol=rtol
                 )
             record(op_name, case, True)
         except Exception as e:
@@ -144,6 +144,19 @@ def run(fx: Fixtures) -> None:
             result = fn()
             m = result.meta
             sel = {d: (m["starts"][d], m["stops"][d]) for d in m["dims"]}
+            # The dimension's *post-op* global size, not its pre-op size
+            # (fx.gsize(moved_dim), the original native.sizes[moved_dim]):
+            # every op this helper checks so far (cumsum, sortby, reindex)
+            # happens to leave moved_dim's length unchanged, so those two
+            # values were always identical and this distinction was never
+            # exercised -- but interp() legitimately changes the length
+            # along moved_dim to the interpolation target's length, and a
+            # coverage buffer sized from the wrong (stale, pre-op) length
+            # can only accidentally agree with the real one. Each rank's
+            # own reattached .meta already carries the correct new size
+            # for exactly the redistributed range that rank now owns, at
+            # no extra communication cost.
+            new_moved_size = int(m["global_sizes"][moved_dim])
             local = local_of(result)
             s, e = sel[moved_dim]
             shape_ok = local.sizes.get(moved_dim, 0) == (e - s)
@@ -152,21 +165,30 @@ def run(fx: Fixtures) -> None:
                 expected = expected_full.isel({d: slice(*b) for d, b in sel.items()})
                 xr.testing.assert_allclose(local, expected, rtol=1e-5)
 
-            all_sel = mpi.comm.gather(tuple(sorted(sel.items())), root=0)
+            all_sel = mpi.comm.gather(
+                (tuple(sorted(sel.items())), new_moved_size), root=0
+            )
             ok = shape_ok
             msg = ""
             if mpi.comm.rank == 0:
-                no_full_dup = len(all_sel) == len(set(all_sel))
+                sel_only = [entry for entry, _ in all_sel]
+                no_full_dup = len(sel_only) == len(set(sel_only))
                 groups: dict[tuple, list[tuple[int, int]]] = {}
-                for entry in all_sel:
+                group_sizes: dict[tuple, set[int]] = {}
+                for entry, moved_size in all_sel:
                     d = dict(entry)
                     other = tuple(
                         sorted((k, v) for k, v in d.items() if k != moved_dim)
                     )
                     groups.setdefault(other, []).append(d[moved_dim])
+                    group_sizes.setdefault(other, set()).add(moved_size)
                 per_group_ok = True
                 for other, ranges in groups.items():
-                    coverage = np.zeros(fx.gsize(moved_dim), dtype=int)
+                    sizes_seen = group_sizes[other]
+                    if len(sizes_seen) != 1:
+                        per_group_ok = False
+                        continue
+                    coverage = np.zeros(next(iter(sizes_seen)), dtype=int)
                     for s_, e_ in ranges:
                         coverage[s_:e_] += 1
                     if not np.all(coverage == 1):
@@ -184,8 +206,31 @@ def run(fx: Fixtures) -> None:
                 op_name, case, False, f"unexpected {type(e).__name__}: {str(e)[:150]}"
             )
 
+    # cumsum's cross-rank prefix-sum (each rank's local xarray .cumsum(),
+    # each rank's own .sum() gathered and turned into an exclusive running
+    # total via Exscan-style prefix addition -- see elementwise.py's
+    # _cumsum_scan) sums the exact same float32 values as native's single
+    # in-order .cumsum() but in a genuinely different addition order
+    # (per-rank partial sums combined afterward, vs one long running
+    # total). float32 addition is not associative, so this is a real,
+    # unavoidable divergence from native's result, not a bug: confirmed
+    # directly by rerunning this exact check at n_time=720 (this fixture's
+    # production size) and measuring the actual relative error directly,
+    # rather than assuming -- it peaks at essentially float32 epsilon
+    # accumulated across the interior of a summation, a couple e-7,
+    # comfortably under 1e-6 at that specific size but with no analytic
+    # guarantee of staying there for a different length or rank count
+    # (the textbook worst-case bound for a length-n float32 sum is
+    # O(n * eps) =~ 720 * 6e-8 =~ 4e-5). rtol=1e-4 keeps this check
+    # sensitive to a genuine off-by-one/duplication bug in the prefix-sum
+    # logic (which would corrupt entire trailing segments, not shift the
+    # last couple of significant digits) while not being tighter than
+    # float32 accumulation itself can honestly promise.
     check_single_dim(
-        "cumsum", lambda: dist.cumsum("time"), lambda: native.cumsum("time")
+        "cumsum",
+        lambda: dist.cumsum("time"),
+        lambda: native.cumsum("time"),
+        rtol=1e-4,
     )
     check_multidim(
         "cumsum",
@@ -206,6 +251,7 @@ def run(fx: Fixtures) -> None:
         lambda: fx.dist_uneven.cumsum("x"),
         lambda: fx.native_uneven.cumsum("x"),
         case="1d(x), uneven",
+        rtol=1e-4,
     )
     mpi.comm.barrier()
 
