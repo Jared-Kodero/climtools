@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import builtins
+import atexit
 import fcntl
 import getpass
 import inspect
 import logging
 import os
+import shutil
+import signal
 import socket
 import sys
 import time
@@ -14,7 +16,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TextIO
 
-from mpi4py.MPI import COMM_WORLD
+from mpi4py.MPI import COMM_WORLD as comm
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,33 +40,47 @@ _LAUNCH_ENV = (
     "I_MPI_COMM_WORLD_RANK",
 )
 
-is_mpi = COMM_WORLD.Get_size() > 1 or builtins.any(
-    key in os.environ for key in _LAUNCH_ENV
-)
+is_mpi = comm.Get_size() > 1 or any(k in os.environ for k in _LAUNCH_ENV)
 
 if is_mpi:
-    tmp_id = uuid.uuid4().hex if COMM_WORLD.Get_rank() == 0 else None
-    tmp_id = COMM_WORLD.bcast(tmp_id, root=0)
-
+    tmp_id = comm.bcast(uuid.uuid4().hex if comm.Get_rank() == 0 else None, root=0)
     home = Path.home()
 
-    base = Path(
-        os.environ.get("SCRATCH", None)
-        or os.environ.get("WORK", None)
-        or os.environ.get("SLURM_JOB_TMPDIR")
-        or os.environ.get("PBS_JOBTMP")
-        or os.environ.get("TMPDIR")
-        or (home / "scratch" if (home / "scratch").exists() else None)
-        or (home / "jobtmp" if (home / "jobtmp").exists() else None)
-        or (home / "work" if (home / "work").exists() else None)
-        or home
-    )
-    tmp = base / ".tmp" / ".xgeo" / tmp_id
+    # Find the first available scratch/work directory
+    env_vars = ("SLURM_JOB_TMPDIR", "PBS_JOBTMP", "SCRATCH", "WORK", "TMPDIR")
+    base = next((Path(os.environ[v]) for v in env_vars if os.environ.get(v)), None)
+    hpc_dirs = ("scratch", "jobtmp", "work")
+
+    if not base:
+        base = next((home / p for p in hpc_dirs if (home / p).exists()), home)
+
+    tmp = base / "tmp" / "xgeo" / tmp_id
 else:
     tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
 
-
 tmp.mkdir(parents=True, exist_ok=True)
+
+
+def _cleanup():
+    try:
+        if is_mpi:
+            comm.Barrier()
+            if comm.Get_rank() == 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _signal_handler(signum, frame):
+    _cleanup()
+
+
+# Register cleanup for normal exits and cancellation signals
+atexit.register(_cleanup)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 current_dask_cluster = None

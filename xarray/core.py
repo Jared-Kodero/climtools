@@ -315,7 +315,7 @@ class MPIXarray:
         if netCDF4.__has_parallel4_support__:
             return
         else:
-            raise RuntimeError("netCDF4 lacks parallel support.")
+            raise RuntimeError("netCDF4 lacks parallel support!")
 
     #
     # Each redirects to `apply()`, so operand handling is exactly `apply()`'s

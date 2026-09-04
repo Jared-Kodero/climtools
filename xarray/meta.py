@@ -396,192 +396,166 @@ def should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool
 def log_partition_report(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
-    dim: Hashable,
+    dim: Hashable | tuple[Hashable, ...],
     *,
     origin: str,
-    global_size: int,
-    start: int,
-    stop: int,
+    global_size: int | Mapping[Hashable, int],
+    start: int | Mapping[Hashable, int],
+    stop: int | Mapping[Hashable, int],
+    grid_shape: tuple[int, ...] | None = None,
+    coords: tuple[int, ...] | None = None,
     automatic: bool = False,
     detail: bool = True,
 ) -> None:
-    """Print a structured, compact description of the rank-local partition layout.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    data : xr.Dataset | xr.DataArray
-        Input xarray object.
-    dim : Hashable
-        Dimension to operate on.
-    origin : str
-        Origin label for diagnostics.
-    global_size : int
-        Global dimension length.
-    start : int
-        Global inclusive start index.
-    stop : int
-        Global exclusive stop index.
-    automatic : bool
-        Whether partitioning was selected automatically.
-    detail : bool
-        Whether to print detailed partition diagnostics.
-    """
+    """Print a structured, compact description of a rank-local partition layout (1D or Cartesian)."""
     comm = mpi_context.comm
-    first, last = _edge_labels(data, dim)
-    local = (int(comm.rank), int(start), int(stop), first, last, int(data.nbytes))
+    is_cartesian = grid_shape is not None or isinstance(dim, tuple | list)
+
+    if is_cartesian:
+        dims = dim if isinstance(dim, tuple | list) else (dim,)
+        starts_map = start if isinstance(start, Mapping) else {dims[0]: start}
+        stops_map = stop if isinstance(stop, Mapping) else {dims[0]: stop}
+
+        local = (
+            int(comm.rank),
+            tuple(int(c) for c in (coords or ())),
+            tuple(int(starts_map[d]) for d in dims),
+            tuple(int(stops_map[d]) for d in dims),
+        )
+    else:
+        local = (
+            int(comm.rank),
+            int(start),
+            int(stop),
+        )
+
     rows = comm.gather(local, root=0)
     if comm.rank != 0 or rows is None:
         return
-
-    counts = [row[2] - row[1] for row in rows]
-    total = sum(row[5] for row in rows)
-    peak_bytes = max(row[5] for row in rows)
-    idle = sum(1 for count in counts if count == 0)
-
-    other = " ".join(
-        f"{name!s}={int(length)}" for name, length in data.sizes.items() if name != dim
-    )
-    chunk_text = "  ".join(
-        f"{name!s}={max(int(size) for size in chunks)}"
-        for name, chunks in (data.chunks or {}).items()
-    )
-
-    # Build structured summary values
-    dim_str = f"{str(dim)!r}{' (auto)' if automatic else ''}"
-
-    # Use a single value if min and max counts are identical, otherwise show range
-    if min(counts) == max(counts):
-        split_str = f"{min(counts)}/rank"
-    else:
-        split_str = f"{min(counts)}-{max(counts)}/rank"
-
-    if idle:
-        split_str += f" (IDLE={idle})"
-
-    usage_str = f"{format_bytes(total)} total (Peak/Rank: {format_bytes(peak_bytes)})"
 
     border = "=" * 80
     separator = "-" * 80
+    lines = [border]
 
-    lines = [
-        border,
-        f" MPI PARTITION REPORT: {origin}",
-        border,
-        f" 🔹 Dimension   : {dim_str}",
-        f" 🔹 Global Size : {global_size} (Ranks: {comm.size})",
-        f" 🔹 Split       : {split_str}",
-        f" 🔹 Shape       : {other or 'scalar'}",
-        f" 🔹 Chunks/Rank : {chunk_text or 'unchunked'}",
-        f" 🔹 Memory      : {usage_str}",
-    ]
-
-    if detail:
-        lines.append(separator)
-        # Calculate max widths using the original table logic
-        slice_width = max(len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows))
-        first_width = max(len("first"), *(len(str(row[3])) for row in rows))
-        last_width = max(len("last"), *(len(str(row[4])) for row in rows))
-        count_width = max(len("n"), *(len(str(row[2] - row[1])) for row in rows))
-
-        lines.append(
-            f"   {'rank':>4}  {'slice':>{slice_width}}  {'n':>{count_width}}  "
-            + f"({'first':>{first_width}}, {'last':>{last_width}})"
+    if is_cartesian:
+        dims = dim if isinstance(dim, tuple | list) else (dim,)
+        global_sizes_map = (
+            global_size if isinstance(global_size, Mapping) else {dims[0]: global_size}
         )
-        lines.append(separator)
+        dims_str = ", ".join(
+            f"{str(d)!r}{' (auto)' if automatic else ''}" for d in dims
+        )
+        grid_str = "x".join(str(n) for n in (grid_shape or (comm.size,)))
 
-        for row in rows:
-            slice_str = f"{row[1]}:{row[2]}"
-            count_val = row[2] - row[1]
-            first_str = str(row[3])
-            last_str = str(row[4])
+        lines.extend(
+            [
+                f" MPI CARTESIAN PARTITION REPORT: {origin}",
+                border,
+                f" 🔹 Dimensions   : {dims_str}",
+                f" 🔹 Process grid : {grid_str} ({comm.size} ranks)",
+                " 🔹 Global sizes : "
+                + ", ".join(f"{str(d)!s}={int(global_sizes_map[d])}" for d in dims),
+            ]
+        )
 
-            lines.append(
-                f"   {row[0]:>4}  {slice_str:>{slice_width}}  {count_val:>{count_width}}  "
-                + f"({first_str:>{first_width}}, {last_str:>{last_width}})"
+        if detail:
+            lines.append(separator)
+            slice_widths = [
+                max(
+                    len(f"{d} slice"),
+                    *(len(f"{row[2][i]}:{row[3][i]}") for row in rows),
+                )
+                for i, d in enumerate(dims)
+            ]
+            count_widths = [
+                max(len(f"{d} n"), *(len(str(row[3][i] - row[2][i])) for row in rows))
+                for i, d in enumerate(dims)
+            ]
+            coord_width = (
+                max(len("coords"), *(len(str(row[1])) for row in rows))
+                if coords is not None or any(row[1] for row in rows)
+                else 0
             )
 
-    lines.append(border)
-    mpi_context.log("")
-    mpi_context.log("\n".join(lines), flush=True, prefix=False)
-    mpi_context.log("", prefix=False)
+            header_parts = ["   " + f"{'rank':>4}"]
+            if coord_width > 0:
+                header_parts.append(f"{'coords':>{coord_width}}")
+            for i, d in enumerate(dims):
+                header_parts.append(f"{f'{d} slice':>{slice_widths[i]}}")
+                header_parts.append(f"{f'{d} n':>{count_widths[i]}}")
 
+            lines.append("  ".join(header_parts))
+            lines.append(separator)
 
-def log_partition_report_cartesian(
-    mpi_context: MPIContext,
-    data: xr.Dataset | xr.DataArray,
-    dims: tuple[Hashable, ...],
-    *,
-    origin: str,
-    global_sizes: Mapping[Hashable, int],
-    starts: Mapping[Hashable, int],
-    stops: Mapping[Hashable, int],
-    grid_shape: tuple[int, ...],
-    coords: tuple[int, ...],
-    automatic: bool = False,
-) -> None:
-    """Print a compact per-axis summary of a Cartesian-topology partition.
+            for row in rows:
+                rank_id, rank_coords, rank_starts, rank_stops = row
+                row_parts = ["   " + f"{rank_id:>4}"]
+                if coord_width > 0:
+                    row_parts.append(f"{rank_coords!s:>{coord_width}}")
+                for i in range(len(dims)):
+                    slice_str = f"{rank_starts[i]}:{rank_stops[i]}"
+                    count_val = rank_stops[i] - rank_starts[i]
+                    row_parts.append(f"{slice_str:>{slice_widths[i]}}")
+                    row_parts.append(f"{count_val:>{count_widths[i]}}")
+                lines.append("  ".join(row_parts))
+    else:
+        counts = [row[2] - row[1] for row in rows]
+        idle = sum(1 for count in counts if count == 0)
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    data : xr.Dataset | xr.DataArray
-        Input xarray object.
-    dims : tuple[Hashable, ...]
-        Dimensions to operate on.
-    origin : str
-        Origin label for diagnostics.
-    global_sizes : Mapping[Hashable, int]
-        Global sizes by partition dimension.
-    starts : Mapping[Hashable, int]
-        Global start indices by partition dimension.
-    stops : Mapping[Hashable, int]
-        Global stop indices by partition dimension.
-    grid_shape : tuple[int, ...]
-        Cartesian process-grid shape.
-    coords : tuple[int, ...]
-        Coordinate specifications.
-    automatic : bool
-        Whether partitioning was selected automatically.
-    """
-    comm = mpi_context.comm
-    local = (
-        int(comm.rank),
-        tuple(int(c) for c in coords),
-        tuple(int(starts[d]) for d in dims),
-        tuple(int(stops[d]) for d in dims),
-        int(data.nbytes),
-    )
-    rows = comm.gather(local, root=0)
-    if comm.rank != 0 or rows is None:
-        return
-
-    total = sum(row[4] for row in rows)
-    peak_bytes = max(row[4] for row in rows)
-    dims_str = ", ".join(f"{str(d)!r}{' (auto)' if automatic else ''}" for d in dims)
-    grid_str = "x".join(str(n) for n in grid_shape)
-
-    border = "=" * 80
-    lines = [
-        border,
-        f" MPI CARTESIAN PARTITION REPORT: {origin}",
-        border,
-        f" \U0001f539 Dimensions   : {dims_str}",
-        f" \U0001f539 Process grid : {grid_str} ({comm.size} ranks)",
-        " \U0001f539 Global sizes : "
-        + ", ".join(f"{str(d)!s}={int(global_sizes[d])}" for d in dims),
-        f" \U0001f539 Memory       : {format_bytes(total)} total "
-        + f"(Peak/Rank: {format_bytes(peak_bytes)})",
-        "-" * 80,
-    ]
-    for rank_id, rank_coords, rank_starts, rank_stops, nbytes in sorted(rows):
-        slab = ", ".join(
-            f"{str(d)!s}[{s}:{e}]" for d, s, e in zip(dims, rank_starts, rank_stops)
+        other = " ".join(
+            f"{name!s}={int(length)}"
+            for name, length in data.sizes.items()
+            if name != dim
         )
-        lines.append(f"   rank {rank_id:>4}  coords={rank_coords}  {slab}")
+        chunk_text = "  ".join(
+            f"{name!s}={max(int(size) for size in chunks)}"
+            for name, chunks in (data.chunks or {}).items()
+        )
+
+        dim_str = f"{str(dim)!r}{' (auto)' if automatic else ''}"
+        split_str = (
+            f"{min(counts)}/rank"
+            if min(counts) == max(counts)
+            else f"{min(counts)}-{max(counts)}/rank"
+        )
+        if idle:
+            split_str += f" (IDLE={idle})"
+
+        lines.extend(
+            [
+                f" MPI PARTITION REPORT: {origin}",
+                border,
+                f" 🔹 Dimension    : {dim_str}",
+                f" 🔹 Global Size  : {global_size} (Ranks: {comm.size})",
+                f" 🔹 Split        : {split_str}",
+                f" 🔹 Shape        : {other or 'scalar'}",
+                f" 🔹 Chunks/Rank  : {chunk_text or 'unchunked'}",
+            ]
+        )
+
+        if detail:
+            slice_width = max(
+                len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows)
+            )
+            count_width = max(len("n"), *(len(str(row[2] - row[1])) for row in rows))
+
+            lines.extend(
+                [
+                    separator,
+                    f"   {'rank':>4}  {'slice':>{slice_width}}  {'n':>{count_width}}",
+                    separator,
+                ]
+            )
+
+            for row in rows:
+                slice_str = f"{row[1]}:{row[2]}"
+                count_val = row[2] - row[1]
+                lines.append(
+                    f"   {row[0]:>4}  {slice_str:>{slice_width}}  {count_val:>{count_width}}"
+                )
+
     lines.append(border)
+
     mpi_context.log("")
     mpi_context.log("\n".join(lines), flush=True, prefix=False)
     mpi_context.log("", prefix=False)

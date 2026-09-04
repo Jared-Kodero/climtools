@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
+from mpi4py import MPI
 
 from ..mpi.context import MPIContext
 
@@ -34,7 +33,6 @@ from .meta import (
     get_mpi_meta,
     localize_coord,
     log_partition_report,
-    log_partition_report_cartesian,
     resolve_sizes,
     set_mpi_meta,
     set_save_chunks,
@@ -223,7 +221,7 @@ def _open_dataset_cartesian(
         },
     )
     if should_log_partitions(mpi_context, log_partitions):
-        log_partition_report_cartesian(
+        log_partition_report(
             mpi_context,
             data,
             dims,
@@ -362,7 +360,7 @@ def partition(
     if should_log_partitions(mpi_context, log_partitions):
         meta = get_mpi_meta(output)
         if meta is not None and "cart" in meta:
-            log_partition_report_cartesian(
+            log_partition_report(
                 mpi_context,
                 output,
                 meta["dims"],
@@ -653,7 +651,7 @@ def create_dataarray(
     )
     if should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
-            log_partition_report_cartesian(
+            log_partition_report(
                 mpi_context,
                 da,
                 partition_dims,
@@ -841,7 +839,7 @@ def create_dataset(
     )
     if should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
-            log_partition_report_cartesian(
+            log_partition_report(
                 mpi_context,
                 ds,
                 partition_dims,
@@ -1180,7 +1178,6 @@ def mpi_create_dataset(
     """
     from .core import MPIXarray
 
-    mpi_context = mpi_context
     if not isinstance(mpi_context, MPIContext):
         mpi_context = MPIContext(mpi_context)
 
@@ -1230,7 +1227,6 @@ def mpi_partition_data(
     """
     from .core import MPIXarray, unwrap
 
-    mpi_context = mpi_context
     if not isinstance(mpi_context, MPIContext):
         mpi_context = MPIContext(mpi_context)
 
