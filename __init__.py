@@ -96,6 +96,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "RedirectStreams": (".core.utils", "RedirectStreams"),
     "SerialProgressBar": (".core.progress", "SerialProgressBar"),
     "locked_print": (".core.utils", "locked_print"),
+    "exclude_key": (".core.utils", "exclude_key"),
 }
 
 

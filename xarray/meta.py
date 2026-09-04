@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -730,19 +729,6 @@ def choose_partition_dim(
     order = {dim: position for position, (dim, _) in enumerate(usable)}
     dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
 
-    if length < mpi_size and (rank is None or rank == 0):
-        warn_key = (str(dim), length, mpi_size)
-        if warn_key not in _SHORT_PARTITION_WARNED:
-            _SHORT_PARTITION_WARNED.add(warn_key)
-            warnings.warn(
-                f"Automatic partition dimension {str(dim)!r} has length "
-                + f"{length}, which is shorter than the {mpi_size} available "
-                + f"ranks, so {mpi_size - length} rank(s) will hold no data. "
-                + "This message will not repeat for the same dimension, "
-                + "length, and rank count.",
-                UserWarning,
-                stacklevel=3,
-            )
     return dim
 
 

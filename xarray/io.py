@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral
 from os import PathLike
@@ -77,22 +76,6 @@ def _open_dataset_1d(
                     )
                 chunk_info = get_chunk_info(metadata, mpi_context.comm.size)
                 global_size = int(metadata.sizes[partition_dim])
-                longest_size = max(int(length) for length in metadata.sizes.values())
-
-                if not automatic and global_size < longest_size:
-                    longest_dims = [
-                        str(dim)
-                        for dim, length in metadata.sizes.items()
-                        if int(length) == longest_size
-                    ]
-                    warnings.warn(
-                        f"partition_dim {partition_dim!r} has length "
-                        + f"{global_size}, but it should be a longest "
-                        + "dataset dimension. Longest dimension(s) "
-                        + f"{longest_dims!r} have length {longest_size}.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
 
                 # Pack the plan into a dictionary for broadcasting
                 plan = {
@@ -226,9 +209,9 @@ def _open_dataset_cartesian(
             data,
             dims,
             origin="open_dataset",
-            global_sizes=dict(zip(dims, extents, strict=True)),
-            starts={d: bounds[d][0] for d in dims},
-            stops={d: bounds[d][1] for d in dims},
+            global_size=dict(zip(dims, extents, strict=True)),
+            start={d: bounds[d][0] for d in dims},
+            stop={d: bounds[d][1] for d in dims},
             grid_shape=grid_shape,
             coords=coords,
         )
@@ -365,9 +348,9 @@ def partition(
                 output,
                 meta["dims"],
                 origin="partition",
-                global_sizes=meta["global_sizes"],
-                starts=meta["starts"],
-                stops=meta["stops"],
+                global_size=meta["global_sizes"],
+                start=meta["starts"],
+                stop=meta["stops"],
                 grid_shape=meta["cart"]["grid_shape"],
                 coords=meta["cart"]["coords"],
             )
@@ -656,9 +639,9 @@ def create_dataarray(
                 da,
                 partition_dims,
                 origin="create_dataarray",
-                global_sizes={d: int(resolved_sizes[d]) for d in partition_dims},
-                starts={d: bounds[d][0] for d in partition_dims},
-                stops={d: bounds[d][1] for d in partition_dims},
+                global_size={d: int(resolved_sizes[d]) for d in partition_dims},
+                start={d: bounds[d][0] for d in partition_dims},
+                stop={d: bounds[d][1] for d in partition_dims},
                 grid_shape=cart["grid_shape"],
                 coords=cart["coords"],
             )
@@ -844,9 +827,9 @@ def create_dataset(
                 ds,
                 partition_dims,
                 origin="create_dataset",
-                global_sizes={d: int(resolved_sizes[d]) for d in partition_dims},
-                starts={d: bounds[d][0] for d in partition_dims},
-                stops={d: bounds[d][1] for d in partition_dims},
+                global_size={d: int(resolved_sizes[d]) for d in partition_dims},
+                start={d: bounds[d][0] for d in partition_dims},
+                stop={d: bounds[d][1] for d in partition_dims},
                 grid_shape=cart["grid_shape"],
                 coords=cart["coords"],
             )

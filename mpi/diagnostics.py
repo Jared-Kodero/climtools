@@ -310,6 +310,8 @@ class MPIDiagnostics:
                 "traceback": traceback_text,
             }
 
+            reporter = False
+
             try:
                 with error_lock:
                     reporter = not error_file.exists()
@@ -375,7 +377,8 @@ class MPIDiagnostics:
                 sys.stderr.flush()
 
             finally:
-                MPI.COMM_WORLD.Abort(1)
+                if reporter:
+                    MPI.COMM_WORLD.Abort(1)
 
         _abort_excepthook._climtools_mpi_abort = True  # type: ignore[attr-defined]
         sys.excepthook = _abort_excepthook
