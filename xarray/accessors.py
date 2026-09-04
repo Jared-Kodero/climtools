@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
+from ..core import stats as calc
 from ..core import xgeo
 from ..core.utils import exclude_key
+from ..viz import plotting
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -474,10 +476,9 @@ class PlotAccessor:
             Composable map holding the base artists, with chainable overlay methods.
         """
 
-        from ..viz import plotting
-
         opts = exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
+
         return plotting.geo(self._obj, **opts, **kwargs)
 
     def animate(
@@ -647,8 +648,6 @@ class PlotAccessor:
             Inside a Jupyter kernel, the encoded MP4 is embedded and its display handle is returned.
         """
 
-        from ..viz import plotting
-
         opts = exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
 
@@ -743,7 +742,6 @@ class PlotAccessor:
         matplotlib.collections.PathCollection
             The scatter artist holding the markers.
         """
-        from ..viz import plotting
 
         kwargs = exclude_key("self", dict(locals()))
 
@@ -791,7 +789,6 @@ class CalcAccessor:
         xarray.Dataset
             Dataset holding ``corr`` and ``p_value``.
         """
-        from ..core import stats as calc
 
         kwargs = exclude_key("self", dict(locals()))
         kwargs["y"] = kwargs.pop("other")
@@ -811,7 +808,6 @@ class CalcAccessor:
         xarray.DataArray
             Pointwise p-values of a Welch t-test.
         """
-        from ..core import stats as calc
 
         return calc.pvalues(self._obj, other, dim=dim)
 
@@ -840,7 +836,6 @@ class CalcAccessor:
         xarray.Dataset
             Trend statistics, including the slope and its p-value.
         """
-        from ..core import stats as calc
 
         kwargs = exclude_key("self", dict(locals()))
         return calc.trends(self._obj, **kwargs)

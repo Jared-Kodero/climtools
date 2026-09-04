@@ -8,10 +8,12 @@ in planning.py, and median's own gather-to-root dedup).
 from __future__ import annotations
 
 import numpy as np
-from climtools import mpi
+from climtools import MPIContext
 from mpi_test_common import Fixtures, local_of, record
 
 import xarray as xr
+
+mpi = MPIContext()
 
 
 def run(fx: Fixtures) -> None:

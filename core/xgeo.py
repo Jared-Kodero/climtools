@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 
     from ..viz import cmaps
     from ..viz import plotting as plot
+    from ..xarray.core import MPIXarray
     from ..xarray.io import (
         mpi_create_dataarray,
         mpi_create_dataset,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DaskProgressBar",
+    "MPIXarray",
     "SerialProgressBar",
     "SetupDask",
     "add_local_solar_time",

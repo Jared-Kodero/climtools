@@ -12,11 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import xarray as xr
+from climtools import MPIContext, xgeo
+from climtools.xarray.core import MPIXarray
 from mock_dataset import PATH, PATH2D, create_dataset
 
-from climtools import mpi, xgeo
-from climtools.xarray.core import MPIXarray
+import xarray as xr
+
+mpi = MPIContext()
 
 RESULTS: list[tuple[str, str, bool | None, str]] = []
 

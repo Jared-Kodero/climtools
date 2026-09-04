@@ -48,11 +48,14 @@ import resource
 import time
 
 import numpy as np
-from climtools import mpi, xgeo
+from climtools import MPIContext, xgeo
 from climtools.xarray.core import MPIXarray
 from mpi4py import MPI
 
 import xarray as xr
+
+mpi = MPIContext()
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument(

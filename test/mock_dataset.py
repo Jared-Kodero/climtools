@@ -8,9 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from climtools import MPIContext
+
 import xarray as xr
 
-from climtools import mpi
+mpi = MPIContext()
 
 OUTPUT_DIR = (Path.home() / "scratch" / "mpi_test").resolve()
 PATH = OUTPUT_DIR / "mock_data.nc"

@@ -58,7 +58,7 @@ if TYPE_CHECKING:
         exclude_key,
         locked_print,
     )
-    from .mpi.context import mpi
+    from .mpi.context import MPIContext
     from .viz import cmaps, plotting
 
 warnings.filterwarnings("ignore")
@@ -68,13 +68,13 @@ __all__ = [
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
+    "MPIContext",
     "RedirectStreams",
     "SerialProgressBar",
     "cdo",
     "cmaps",
     "exclude_key",
     "locked_print",
-    "mpi",
     "n_cpus",
     "operator",
     "plotting",
@@ -91,6 +91,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "plotting": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
     "mpi": (".mpi.context", "mpi"),
+    "MPIContext": (".mpi.context", "MPIContext"),
     "LockedLogger": (".core.utils", "LockedLogger"),
     "LockFile": (".core.utils", "LockFile"),
     "RedirectStreams": (".core.utils", "RedirectStreams"),

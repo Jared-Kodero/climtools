@@ -12,11 +12,14 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from climtools import mpi, xgeo
+from climtools import MPIContext, xgeo
 from climtools.xarray.arithmetic import halo_exchange
 from mpi4py import MPI
 
 import xarray as xr
+
+mpi = MPIContext()
+
 
 N_VARS = 12
 GLOBAL_LEN = 40 * mpi.comm.size

@@ -7,11 +7,13 @@ single-dim and, where supported, multi-dim, with explicit no-duplication
 from __future__ import annotations
 
 import numpy as np
-from climtools import mpi, xgeo
+from climtools import MPIContext, xgeo
 from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, local_of, record
 
 import xarray as xr
+
+mpi = MPIContext()
 
 
 def run(fx: Fixtures) -> None:
@@ -57,7 +59,9 @@ def run(fx: Fixtures) -> None:
         xr.testing.assert_allclose(local, expected, rtol=1e-6)
         record("sel", "1d(time), label slice", True)
     except Exception as e:
-        record("sel", "1d(time), label slice", False, f"{type(e).__name__}: {str(e)[:200]}")
+        record(
+            "sel", "1d(time), label slice", False, f"{type(e).__name__}: {str(e)[:200]}"
+        )
     mpi.comm.barrier()
 
     # -- where(): elementwise selection, single-dim and multi-dim, plus

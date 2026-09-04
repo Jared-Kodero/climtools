@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-import xarray as xr
 from mpi4py import MPI
+
+import xarray as xr
 
 from ..mpi.context import MPIContext
 
@@ -1320,9 +1321,9 @@ def to_netcdf(
 
     if parallel:
         if not mpi_context:
-            from ..mpi.context import mpi
+            from ..mpi.context import get_mpi_ctx
 
-            mpi_context = mpi
+            mpi_context = get_mpi_ctx()
         if not isinstance(mpi_context, MPIContext):
             mpi_context = MPIContext(mpi_context)
 

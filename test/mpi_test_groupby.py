@@ -10,11 +10,13 @@ assuming either way).
 from __future__ import annotations
 
 import numpy as np
-from climtools import mpi
-from climtools.xarray.core import MPIXarray
-from mpi_test_common import Fixtures, local_of, record
+from climtools import MPIContext
 
 import xarray as xr
+
+mpi = MPIContext()
+from climtools.xarray.core import MPIXarray
+from mpi_test_common import Fixtures, local_of, record
 
 
 def run(fx: Fixtures) -> None:

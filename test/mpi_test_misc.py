@@ -6,11 +6,13 @@ align, evaluate, roll, repartition, apply.
 from __future__ import annotations
 
 import numpy as np
-from climtools import mpi
+from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
 
 import xarray as xr
+
+mpi = MPIContext()
 
 
 def run(fx: Fixtures) -> None:

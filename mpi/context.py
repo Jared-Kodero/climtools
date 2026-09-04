@@ -648,6 +648,8 @@ class MPIContext(MPIDiagnostics):
         return wrapper
 
 
-mpi = MPIContext()
+def get_mpi_ctx() -> MPIContext:
+    return MPIContext()
 
-__all__ = ["mpi"]
+
+__all__ = ["MPIContext", "get_mpi_ctx"]

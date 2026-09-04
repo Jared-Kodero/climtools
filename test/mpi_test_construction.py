@@ -9,12 +9,14 @@ from __future__ import annotations
 import shutil
 
 import numpy as np
-from climtools import mpi, xgeo
+from climtools import MPIContext, xgeo
 from climtools.xarray.core import MPIXarray
 from mock_dataset import PATH
 from mpi_test_common import Fixtures, local_of, record
 
 import xarray as xr
+
+mpi = MPIContext()
 
 
 def run(fx: Fixtures) -> None:

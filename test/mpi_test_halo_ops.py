@@ -6,11 +6,13 @@ deliberately-uneven single-dimension partition (see mpi_test_common).
 
 from __future__ import annotations
 
-from climtools import mpi
+from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
 
 import xarray as xr
+
+mpi = MPIContext()
 
 
 def run(fx: Fixtures) -> None:
