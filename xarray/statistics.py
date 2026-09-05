@@ -29,7 +29,7 @@ from .planning import (
     repartition_candidates,
     resolve_comm,
 )
-from .reductions import mean_reduce
+from .reductions import mpp_mean_reduce
 
 
 def _var_or_std(
@@ -123,7 +123,7 @@ def _var_or_std(
             return method(
                 dim=local_dim, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
             )
-        mean = mean_reduce(
+        mean = mpp_mean_reduce(
             mpi_context,  # type: ignore[attr-defined]
             value,
             dim,
@@ -146,7 +146,7 @@ def _var_or_std(
             auto_candidates=repartition_candidates(reduce_plan),
         )
 
-    mean_ds = mean_reduce(
+    mean_ds = mpp_mean_reduce(
         mpi_context,  # type: ignore[attr-defined]
         value,
         dim,
@@ -182,7 +182,7 @@ def _var_or_std(
     )
 
 
-def var(
+def mpp_var(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -228,7 +228,7 @@ def var(
     )
 
 
-def std(
+def mpp_std(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,

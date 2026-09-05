@@ -267,7 +267,7 @@ def _combine_extreme(
     return template.copy(data=np.asarray(masked, dtype=expect_dtype).reshape(shape))
 
 
-def sum_reduce(
+def mpp_sum_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -314,7 +314,7 @@ def sum_reduce(
     )
 
 
-def prod_reduce(
+def mpp_prod_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -466,7 +466,7 @@ def _materialize_local(value: xr.DataArray) -> xr.DataArray:
     By the time a reduction reaches this point ``value`` is always this
     rank's own local slice, so materializing it does not increase the
     volume of data read -- it has to be read exactly once regardless.
-    What it avoids is *re-reading* it: :func:`mean_reduce` derives both a
+    What it avoids is *re-reading* it: :func:`mpp_mean_reduce` derives both a
     partial sum and (for skipna-eligible dtypes) an independent global
     valid-value count from the same source array via
     :func:`count_valid_values`. Left lazy, xarray/dask has no reason to
@@ -483,7 +483,7 @@ def _materialize_local(value: xr.DataArray) -> xr.DataArray:
     return value.load() if getattr(value, "chunks", None) is not None else value
 
 
-def mean_reduce(
+def mpp_mean_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -588,7 +588,7 @@ def mean_reduce(
     )
 
 
-def min_reduce(
+def mpp_min_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -630,7 +630,7 @@ def min_reduce(
     )
 
 
-def max_reduce(
+def mpp_max_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -780,7 +780,7 @@ def _min_max(
     )
 
 
-def any_reduce(
+def mpp_any_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -820,7 +820,7 @@ def any_reduce(
     )
 
 
-def all_reduce(
+def mpp_all_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None = None,
@@ -1091,7 +1091,7 @@ def _first_last_combine(
     return result
 
 
-def first_reduce(
+def mpp_first_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,
@@ -1134,7 +1134,7 @@ def first_reduce(
     )
 
 
-def last_reduce(
+def mpp_last_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: str,

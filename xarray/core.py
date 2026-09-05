@@ -38,17 +38,17 @@ from .io import attach_save_chunks, repartition
 from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
 from .meta import assign_mpi_meta, get_mpi_meta, strip_mpi_meta
 from .reductions import (
-    all_reduce,
-    any_reduce,
-    first_reduce,
-    last_reduce,
-    max_reduce,
-    mean_reduce,
-    min_reduce,
-    prod_reduce,
-    sum_reduce,
+    mpp_all_reduce,
+    mpp_any_reduce,
+    mpp_first_reduce,
+    mpp_last_reduce,
+    mpp_max_reduce,
+    mpp_mean_reduce,
+    mpp_min_reduce,
+    mpp_prod_reduce,
+    mpp_sum_reduce,
 )
-from .statistics import std, var
+from .statistics import mpp_std, mpp_var
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -814,7 +814,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            sum_reduce(
+            mpp_sum_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -855,7 +855,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            prod_reduce(
+            mpp_prod_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -893,7 +893,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            mean_reduce(
+            mpp_mean_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -930,7 +930,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            min_reduce(
+            mpp_min_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -967,7 +967,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            max_reduce(
+            mpp_max_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1001,7 +1001,7 @@ class MPIXarray:
             Logical OR over the requested dimensions, with ``.meta`` updated.
         """
         return finalize(
-            any_reduce(
+            mpp_any_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1034,7 +1034,7 @@ class MPIXarray:
             Logical AND over the requested dimensions, with ``.meta`` updated.
         """
         return finalize(
-            all_reduce(
+            mpp_all_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1070,7 +1070,7 @@ class MPIXarray:
             Selected object with ``.meta`` updated.
         """
         return finalize(
-            first_reduce(
+            mpp_first_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1107,7 +1107,7 @@ class MPIXarray:
             Selected object with ``.meta`` updated.
         """
         return finalize(
-            last_reduce(
+            mpp_last_reduce(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1147,7 +1147,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            var(
+            mpp_var(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1188,7 +1188,7 @@ class MPIXarray:
             Reduced object with ``.meta`` updated.
         """
         return finalize(
-            std(
+            mpp_std(
                 self._runtime,
                 self._prepare(),
                 dim,
