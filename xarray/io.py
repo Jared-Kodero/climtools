@@ -18,7 +18,6 @@ from ..mpi.context import MPIContext
 if TYPE_CHECKING:
     from .core import MPIXarray
 
-from .mpp import mpp_define_domains
 from .chunks import (
     compute_save_chunks,
     get_chunk_bounds,
@@ -29,15 +28,16 @@ from .chunks import (
 from .meta import (
     choose_partition_dim,
     delayed_local,
-    mpp_get_meta,
     localize_coord,
+    mpp_get_meta,
     mpp_log_partition_report,
-    resolve_sizes,
-    mpp_update_meta,
-    set_save_chunks,
     mpp_should_log_partitions,
+    mpp_update_meta,
+    resolve_sizes,
+    set_save_chunks,
     strip_mpi_meta,
 )
+from .mpp import mpp_define_domains
 from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
 __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]
@@ -171,7 +171,9 @@ def _open_dataset_cartesian(
     # Every rank derives its own Cartesian coordinates and per-axis
     # bounds from `extents` and `comm.size` alone -- identical on
     # every rank, no further communication needed to agree on it.
-    domain = mpp_define_domains(mpi_context, dict(zip(dims, extents, strict=True)), dims)
+    domain = mpp_define_domains(
+        mpi_context, dict(zip(dims, extents, strict=True)), dims
+    )
     bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
 
     # Synchronize before opening the dataset (mirrors the

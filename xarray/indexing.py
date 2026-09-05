@@ -16,10 +16,10 @@ from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
     choose_partition_dim,
-    mpp_get_meta,
     indexer_is_scalar,
-    reattach_meta_after_collapse,
+    mpp_get_meta,
     mpp_update_meta,
+    reattach_meta_after_collapse,
     strip_mpi_meta,
 )
 
@@ -106,7 +106,9 @@ def mpp_isel(
 
     distributed_indexer = supplied.pop(dim)
     if indexer_is_scalar(distributed_indexer):
-        return mpp_isel_scalar(mpi_context, value, dim, int(distributed_indexer), supplied)
+        return mpp_isel_scalar(
+            mpi_context, value, dim, int(distributed_indexer), supplied
+        )
 
     if not isinstance(distributed_indexer, slice):
         raise NotImplementedError(

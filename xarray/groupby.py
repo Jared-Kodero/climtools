@@ -20,11 +20,11 @@ from .common import extreme_identity, partial_dtype
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .mpp import mpp_reduce_scatter
 from .planning import (
-    mpp_comm_reduce,
     dataset_result,
-    mpp_finish,
     finish_local_reduction,
     local_reduction_meta,
+    mpp_comm_reduce,
+    mpp_finish,
     mpp_reduction_plan,
     mpp_resolve_comm,
 )
@@ -88,11 +88,17 @@ def _group_combine_scatter(
         return result.where(global_count > 0), start, stop
 
     if op in ("sum", "count"):
-        local = _group_reduce_local(mpi_context, variable, dim, group, op=op, skipna=skipna)
+        local = _group_reduce_local(
+            mpi_context, variable, dim, group, op=op, skipna=skipna
+        )
         local = local.reindex({_GROUP_DIM: global_labels}, fill_value=0)
         axis = local.get_axis_num(_GROUP_DIM)
-        raw = mpp_reduce_scatter(np.asarray(local.values), MPI.SUM, comm, counts, axis=axis)
-        result = xr.DataArray(raw, dims=local.dims).assign_coords({_GROUP_DIM: my_labels})
+        raw = mpp_reduce_scatter(
+            np.asarray(local.values), MPI.SUM, comm, counts, axis=axis
+        )
+        result = xr.DataArray(raw, dims=local.dims).assign_coords(
+            {_GROUP_DIM: my_labels}
+        )
         return result, start, stop
 
     minimum = op == "min"
@@ -101,7 +107,11 @@ def _group_combine_scatter(
     local = local.reindex({_GROUP_DIM: global_labels}, fill_value=identity)
     axis = local.get_axis_num(_GROUP_DIM)
     raw = mpp_reduce_scatter(
-        np.asarray(local.values), MPI.MIN if minimum else MPI.MAX, comm, counts, axis=axis
+        np.asarray(local.values),
+        MPI.MIN if minimum else MPI.MAX,
+        comm,
+        counts,
+        axis=axis,
     )
     result = xr.DataArray(raw, dims=local.dims).assign_coords({_GROUP_DIM: my_labels})
     return result, start, stop
@@ -444,7 +454,9 @@ def mpp_groupby_reduce(
         and combine_comms
         and len({c.size for c in combine_comms.values()}) == 1
         and all(
-            entry.replica_count == 1 for entry in plan if entry.dims and entry.distributed
+            entry.replica_count == 1
+            for entry in plan
+            if entry.dims and entry.distributed
         )
     )
 

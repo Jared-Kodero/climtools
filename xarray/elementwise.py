@@ -10,8 +10,8 @@ from mpi4py import MPI
 import xarray as xr
 
 from .arithmetic import (
-    mpp_check_operands_distribution,
     check_partition_preserved,
+    mpp_check_operands_distribution,
     mpp_halo_exchange,
     reattach_meta,
 )

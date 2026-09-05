@@ -16,7 +16,6 @@ import xarray as xr
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .mpp import _mpp_reduce
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
 from .common import (
@@ -28,6 +27,7 @@ from .common import (
     partial_dtype,
 )
 from .meta import choose_partition_dim, mpp_update_meta, strip_mpi_meta
+from .mpp import _mpp_reduce
 
 
 def normalize_dim(

@@ -6,8 +6,9 @@ import operator as _operator
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
-import xarray as xr
 from mpi4py import MPI
+
+import xarray as xr
 
 from .arithmetic import (
     mpp_align,
@@ -36,7 +37,7 @@ from .handles import MPIGroupBy, MPIResample, MPIRolling
 from .indexing import mpp_isel, mpp_sel
 from .io import mpp_attach_save_chunks, mpp_repartition
 from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
-from .meta import mpp_set_meta, mpp_get_meta, strip_mpi_meta
+from .meta import mpp_get_meta, mpp_set_meta, strip_mpi_meta
 from .reductions import (
     mpp_all_reduce,
     mpp_any_reduce,
@@ -1654,7 +1655,8 @@ class MPIXarray:
         if fill_value is not _FILL_VALUE_UNSET:
             kwargs["fill_value"] = fill_value
         return finalize(
-            mpp_shift(self._runtime, self._prepare(), dim, periods, **kwargs), self._runtime
+            mpp_shift(self._runtime, self._prepare(), dim, periods, **kwargs),
+            self._runtime,
         )
 
     def roll(self, dim: Hashable, shift_by: int) -> MPIXarray:
@@ -1732,7 +1734,9 @@ class MPIXarray:
             Interpolated result, with ``.meta`` recomputed for the new length along ``dim``.
         """
         return finalize(
-            mpp_interp(self._runtime, self._prepare(), dim, new_coord, method, **kwargs),
+            mpp_interp(
+                self._runtime, self._prepare(), dim, new_coord, method, **kwargs
+            ),
             self._runtime,
         )
 
