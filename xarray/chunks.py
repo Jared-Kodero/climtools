@@ -125,29 +125,6 @@ def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     }
 
 
-def get_chunk_overrides(
-    data: xr.Dataset, chunk_info: Mapping[str, int]
-) -> dict[str, int]:
-    """Return only distribution_chunk overrides that cannot use useful native chunks.
-
-    Parameters
-    ----------
-    data : xarray.Dataset
-        Dataset to evaluate.
-    chunk_info : mapping
-        Effective chunk sizes for dimensions.
-    Returns
-    -------
-    dict
-        Mapping of dimensions requiring overrides to their chunk sizes.
-    """
-    return {
-        str(dim): int(chunk_info[str(dim)])
-        for dim, length in data.sizes.items()
-        if not get_usable_native_chunk(int(length), get_native_chunk_sizes(data, dim))
-    }
-
-
 def get_balanced_bounds(
     length: int, rank: int, size: int, min_chunk: int | None = None
 ) -> tuple[int, int]:
@@ -163,21 +140,12 @@ def get_balanced_bounds(
         Total number of MPI ranks.
     min_chunk : int or None, optional
         Guaranteed minimum local length for every rank that receives any
-        data. When set, at most ``max(1, length // min_chunk)`` ranks
-        (never more than ``size``) are given a non-empty slab; the
-        remaining highest-numbered ranks each get an empty ``(length,
-        length)`` slab, exactly as already happens here when ``length <
-        size`` with no ``min_chunk`` set. This does not itself guarantee
-        every downstream halo-based operation will fit -- it only
-        guarantees the *partition*, not any later ``before``/``after``
-        halo width a caller might request on top of it -- but choosing
-        ``min_chunk`` at or above the widest halo/limit/window a
-        distributed dimension will ever see (e.g. the largest
-        ``rolling_reduce`` window or ``ffill``/``bfill`` limit planned
-        for it) rules out ``halo_exchange``'s "local partition shorter
-        than the requested halo" ``ValueError`` for that dimension
-        entirely, rather than discovering it at call time on some rank
-        count. See ``halo_exchange``'s own docstring for that error.
+        data. At most ``max(1, length // min_chunk)`` ranks get a
+        non-empty slab; the rest get an empty ``(length, length)`` slab.
+        Set at or above the widest halo/window a distributed dimension
+        will need (e.g. the largest ``rolling_reduce`` window) to avoid
+        ``mpp_halo_exchange``'s "local partition shorter than the
+        requested halo" error on that dimension.
     Returns
     -------
     tuple of int
@@ -336,24 +304,14 @@ def get_partition_chunk_size(
 def _validate_explicit_chunk_bytes(
     ds: xr.Dataset, explicit: Mapping[str, tuple[int, ...]]
 ) -> None:
-    """Reject a caller-supplied save_chunk shape that would exceed
-    ``MAX_SAVE_CHUNK_BYTES``.
+    """Reject an explicit ``chunks=`` shape that would exceed ``MAX_SAVE_CHUNK_BYTES``.
 
-    The auto-inferred path below already keeps every save_chunk under this
-    limit via ``_cap_partition_chunk_to_hdf5_limit`` (HDF5/netCDF-C hard-caps
-    a single chunk at 4 GiB; the auto path deliberately targets half that,
-    2 GiB, for headroom -- see the ``MAX_SAVE_CHUNK_BYTES`` comment above).
-    An explicit ``chunks=`` mapping bypassed that entirely: nothing checked
-    the byte size of a user-supplied shape before handing it to
-    ``createVariable``/``set_collective(True)``, so a chunk shape as
-    ordinary as "one chunk spanning every dimension's full length" (a
-    completely natural thing to write for a variable the caller does not
-    want sub-chunked) silently produced a multi-gigabyte single HDF5 chunk
-    at production data sizes. Creation can still succeed under the 4 GiB
-    hard limit while the actual parallel collective write to that chunk
-    fails with an opaque ``RuntimeError: NetCDF: HDF error`` deep inside
-    HDF5 -- exactly the failure this raises a clear, actionable error for
-    instead, before any write is attempted.
+    Unlike the auto-inferred path (capped via
+    ``_cap_partition_chunk_to_hdf5_limit``), nothing previously checked an
+    explicit shape's byte size -- an oversized chunk could pass variable
+    creation and still fail the collective write with an opaque
+    ``RuntimeError: NetCDF: HDF error``. Raises early instead, with a
+    clear message, before any write is attempted.
     """
     offenders: list[str] = []
     for name, shape in explicit.items():
@@ -456,7 +414,7 @@ def compute_save_chunks(
     value : xarray.Dataset or xarray.DataArray
         Local slice of a distributed object on the current MPI rank.
     meta : mapping
-        Distribution metadata returned by ``get_mpi_meta``. May describe
+        Distribution metadata returned by ``mpp_get_meta``. May describe
         one or several active partition dimensions (a Cartesian
         partition); each is handled independently, using that axis's
         own division count from ``meta["cart"]["grid_shape"]`` (falling

@@ -16,20 +16,20 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 from .common import extreme_identity, op_name, partial_dtype
-from .meta import get_mpi_meta
-from .mpp import mpp_reduce
+from .meta import mpp_get_meta
+from .mpp import _mpp_reduce
 from .planning import (
-    comm_reduce,
-    count_valid_values,
+    mpp_comm_reduce,
+    mpp_count_valid_values,
     dataset_result,
-    finish,
+    mpp_finish,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
     normalize_dim,
-    reduction_plan,
+    mpp_reduction_plan,
     repartition_candidates,
-    resolve_comm,
+    mpp_resolve_comm,
     skipna_enabled,
 )
 
@@ -48,7 +48,7 @@ def _combine_sum_or_prod(
     replica_count: int = 1,
 ) -> xr.DataArray:
     """Combine rank-local sum or product partials."""
-    result = comm_reduce(
+    result = mpp_comm_reduce(
         mpi_context,
         partial,
         op,
@@ -62,7 +62,7 @@ def _combine_sum_or_prod(
     )
     global_count = None
     if min_count is not None and skipna_enabled(value.dtype, skipna):
-        global_count = count_valid_values(
+        global_count = mpp_count_valid_values(
             mpi_context, value, dims, comm=comm, replica_count=replica_count
         )
     if global_count is not None:
@@ -89,7 +89,7 @@ def _combine_mean(
     replica_count: int = 1,
 ) -> xr.DataArray:
     """Combine rank-local sums and counts into a global mean."""
-    global_sum = comm_reduce(
+    global_sum = mpp_comm_reduce(
         mpi_context,
         partial_sum,
         MPI.SUM,
@@ -99,7 +99,7 @@ def _combine_mean(
         comm=comm,
         replica_count=replica_count,
     )
-    global_count = count_valid_values(
+    global_count = mpp_count_valid_values(
         mpi_context, value, dims, comm=comm, replica_count=replica_count
     )
     # Divide in the dtype xarray's own .mean() would produce for this
@@ -183,7 +183,7 @@ def _combine_extreme(
     expect_dtype = value.dtype
     kind = value.dtype.kind
     if kind == "b":
-        return comm_reduce(
+        return mpp_comm_reduce(
             mpi_context,
             partial,
             MPI.LAND if minimum else MPI.LOR,
@@ -195,7 +195,7 @@ def _combine_extreme(
 
     op = MPI.MIN if minimum else MPI.MAX
     if kind != "f":
-        return comm_reduce(
+        return mpp_comm_reduce(
             mpi_context,
             partial,
             op,
@@ -258,7 +258,7 @@ def _combine_extreme(
     if send is None or template is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
+    recv = _mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
 
     shape = tuple(int(length) for length in template.shape)
     combined = np.asarray(recv[0]).reshape(shape)
@@ -376,7 +376,7 @@ def _sum_prod(
     """Implement distributed sum and product reductions."""
     operation = "prod" if product else "sum"
     local_dim, dims = normalize_dim(value, dim)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
     if local_meta is not None:
         method = value.prod if product else value.sum
@@ -385,7 +385,7 @@ def _sum_prod(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(
+    reduce_plan = mpp_reduction_plan(
         mpi_context, value, dims, old_meta, operation=operation
     )
 
@@ -409,10 +409,10 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -446,11 +446,11 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
         variables[entry.name] = result
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
@@ -460,25 +460,11 @@ def _sum_prod(
 
 
 def _materialize_local(value: xr.DataArray) -> xr.DataArray:
-    """Force a dask-backed local (already rank-partitioned) array to a
-    concrete, in-memory one.
+    """Force a dask-backed local array to a concrete, in-memory one.
 
-    By the time a reduction reaches this point ``value`` is always this
-    rank's own local slice, so materializing it does not increase the
-    volume of data read -- it has to be read exactly once regardless.
-    What it avoids is *re-reading* it: :func:`mpp_mean_reduce` derives both a
-    partial sum and (for skipna-eligible dtypes) an independent global
-    valid-value count from the same source array via
-    :func:`count_valid_values`. Left lazy, xarray/dask has no reason to
-    share results between two separately-triggered ``.compute()`` calls,
-    so it reruns the *entire* upstream task graph -- including whatever
-    produced ``value`` in the first place (e.g. an expensive user fill
-    function behind ``mpi_create_dataarray``, or decompression/decoding of
-    a file-backed chunk behind ``mpi_open_dataset``) -- once per derived
-    quantity instead of once total. Confirmed by profiling: for a
-    synthetic O(N) fill function, this doubling was the dominant cost of
-    every ``mean()`` call, well above the cost of the reduction itself or
-    any MPI collective involved.
+    Avoids re-running the upstream task graph once per derived quantity
+    (mean's sum and valid-count both read ``value`` independently) --
+    already this rank's own slice, so no extra data volume is read.
     """
     return value.load() if getattr(value, "chunks", None) is not None else value
 
@@ -515,13 +501,13 @@ def mpp_mean_reduce(
         replication/no-duplication guarantee this carries.
     """
     local_dim, dims = normalize_dim(value, dim)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
     if local_meta is not None:
         local_result = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(mpi_context, value, dims, old_meta, operation="mean")
+    reduce_plan = mpp_reduction_plan(mpi_context, value, dims, old_meta, operation="mean")
 
     if isinstance(value, xr.DataArray):
         if not dims:
@@ -540,10 +526,10 @@ def mpp_mean_reduce(
             dims,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -575,11 +561,11 @@ def mpp_mean_reduce(
             entry.dims,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
         variables[entry.name] = result
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
@@ -685,14 +671,14 @@ def _min_max(
     """Implement distributed minimum and maximum reductions."""
     operation = "min" if minimum else "max"
     local_dim, dims = normalize_dim(value, dim)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
     if local_meta is not None:
         method = value.min if minimum else value.max
         local_result = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(
+    reduce_plan = mpp_reduction_plan(
         mpi_context, value, dims, old_meta, operation=operation
     )
 
@@ -728,9 +714,9 @@ def _min_max(
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
         )
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -768,10 +754,10 @@ def _min_max(
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
         )
         variables[entry.name] = result
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
@@ -873,14 +859,14 @@ def _logical(
     """Implement distributed logical reductions."""
     operation = "all" if all_values else "any"
     local_dim, dims = normalize_dim(value, dim)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
     if local_meta is not None:
         method = value.all if all_values else value.any
         local_result = method(dim=local_dim, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(
+    reduce_plan = mpp_reduction_plan(
         mpi_context, value, dims, old_meta, operation=operation
     )
 
@@ -893,16 +879,16 @@ def _logical(
             if local_error is not None:
                 raise local_error
             return local
-        result = comm_reduce(
+        result = mpp_comm_reduce(
             mpi_context,
             local,
             op,
             expect_dtype=partial_dtype(value.dtype.str, operation, None),
             error=local_error,
             phase=f"MPI xarray {operation} reduction",
-            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
         )
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -927,17 +913,17 @@ def _logical(
                 raise local_error
             variables[entry.name] = local
             continue
-        result = comm_reduce(
+        result = mpp_comm_reduce(
             mpi_context,
             local,
             op,
             expect_dtype=partial_dtype(variable.dtype.str, operation, None),
             error=local_error,
             phase=f"MPI xarray {operation} reduction",
-            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
         )
         variables[entry.name] = result
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,
@@ -1007,7 +993,7 @@ def _first_last_combine(
     rank, size = active_comm.rank, active_comm.size
     sentinel = size if want_first else -1
     owner, error = guarded(lambda: xr.where(any_valid, rank, sentinel).astype(np.int32))
-    owner = comm_reduce(
+    owner = mpp_comm_reduce(
         mpi_context,
         owner,
         MPI.MIN if want_first else MPI.MAX,
@@ -1021,7 +1007,7 @@ def _first_last_combine(
     kind = variable.dtype.kind
     neutral = False if kind == "b" else np.zeros((), dtype=variable.dtype).item()
     payload, error = guarded(lambda: candidate.where(is_owner, other=neutral))
-    combined = comm_reduce(
+    combined = mpp_comm_reduce(
         mpi_context,
         payload,
         MPI.LOR if kind == "b" else MPI.SUM,
@@ -1037,7 +1023,7 @@ def _first_last_combine(
     # "time" axis) rides along with the vectorized `.isel(dim=index,
     # drop=True)` inside `_first_last_local`: `candidate` ends up
     # carrying that coordinate's value *at the locally-picked index*,
-    # not a scalar. `comm_reduce` above only Allreduces the requested
+    # not a scalar. `mpp_comm_reduce` above only Allreduces the requested
     # data array and otherwise copies `payload`'s own (rank-local)
     # coordinates onto the result verbatim -- correct for every other
     # caller in this module, where a surviving coordinate is already
@@ -1073,7 +1059,7 @@ def _first_last_combine(
                     is_owner, other=coord_neutral
                 )
             )
-            coord_combined = comm_reduce(
+            coord_combined = mpp_comm_reduce(
                 mpi_context,
                 coord_payload,
                 MPI.LOR if reducible_kind == "b" else MPI.SUM,
@@ -1191,7 +1177,7 @@ def _first_or_last(
     if not isinstance(dim, str):
         raise TypeError("MPI xarray first/last reduce exactly one dimension.")
     dims = (dim,)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
 
     if local_meta is not None:
@@ -1211,7 +1197,7 @@ def _first_or_last(
             )
         return finish_local_reduction(result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(
+    reduce_plan = mpp_reduction_plan(
         mpi_context, value, dims, old_meta, operation="first" if want_first else "last"
     )
 
@@ -1222,11 +1208,11 @@ def _first_or_last(
             dim,
             skipna=skipna,
             want_first=want_first,
-            comm=resolve_comm(mpi_context, old_meta, (dim,)),
+            comm=mpp_resolve_comm(mpi_context, old_meta, (dim,)),
         )
         if keep_attrs:
             result.attrs.update(value.attrs)
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -1247,7 +1233,7 @@ def _first_or_last(
                 dim,
                 skipna=skipna,
                 want_first=want_first,
-                comm=resolve_comm(mpi_context, old_meta, (dim,)),
+                comm=mpp_resolve_comm(mpi_context, old_meta, (dim,)),
             )
         else:
             result = _first_last_pick(
@@ -1256,7 +1242,7 @@ def _first_or_last(
         if keep_attrs:
             result.attrs.update(variable.attrs)
         variables[entry.name] = result
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,

@@ -15,19 +15,19 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 from .common import partial_dtype
-from .meta import get_mpi_meta
+from .meta import mpp_get_meta
 from .planning import (
-    comm_reduce,
-    count_valid_values,
+    mpp_comm_reduce,
+    mpp_count_valid_values,
     dataset_result,
-    finish,
+    mpp_finish,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
     normalize_dim,
-    reduction_plan,
+    mpp_reduction_plan,
     repartition_candidates,
-    resolve_comm,
+    mpp_resolve_comm,
 )
 from .reductions import mpp_mean_reduce
 
@@ -45,7 +45,7 @@ def _var_or_std(
 ) -> xr.Dataset | xr.DataArray:
     """Shared implementation for :meth:`var` and :meth:`std`."""
     local_dim, dims = normalize_dim(value, dim)
-    old_meta = get_mpi_meta(value)
+    old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
     if local_meta is not None:
         method = value.std if root else value.var
@@ -54,7 +54,7 @@ def _var_or_std(
         )
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = reduction_plan(
+    reduce_plan = mpp_reduction_plan(
         mpi_context, value, dims, old_meta, operation="std" if root else "var"
     )
 
@@ -80,7 +80,7 @@ def _var_or_std(
                 dim=variable_dims, skipna=skipna, min_count=None, keep_attrs=False
             )
         )
-        global_sq_sum = comm_reduce(
+        global_sq_sum = mpp_comm_reduce(
             mpi_context,
             partial_sq_sum,
             MPI.SUM,
@@ -91,7 +91,7 @@ def _var_or_std(
             replica_count=replica_count,
         )
         denominator = (
-            count_valid_values(
+            mpp_count_valid_values(
                 mpi_context,
                 variable,
                 variable_dims,
@@ -135,10 +135,10 @@ def _var_or_std(
             value,
             dims,
             mean,
-            comm=resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
             replica_count=reduce_plan[0].replica_count,
         )
-        return finish(
+        return mpp_finish(
             mpi_context,
             result,
             old_meta=old_meta,
@@ -170,10 +170,10 @@ def _var_or_std(
             variable,
             entry.dims,
             mean_ds[entry.name],
-            comm=resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
             replica_count=entry.replica_count,
         )
-    return finish(
+    return mpp_finish(
         mpi_context,
         dataset_result(value, dims, variables),
         old_meta=old_meta,

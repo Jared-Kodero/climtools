@@ -241,6 +241,8 @@ Supported distributed operations include rank-local NumPy ufuncs, halo-aware rol
 
 Halo-aware operations exchange only the neighboring data required by the operation. For constructors that support `min_partition_size`, set it at least as large as the widest halo required by downstream operations when partitions may become very small.
 
+Internally, the actual MPI traffic (domain decomposition, global reductions, halo exchange) is centralized in `climtools.xarray.mpp`, a small communication kernel modeled on GFDL's [FMS](https://github.com/NOAA-GFDL/FMS) `mpp`/`mpp_domains` modules (`Domain`, `mpp_define_domains`, `mpp_sum`/`mpp_max`/`mpp_min`, `mpp_update_domains`). It operates on plain NumPy buffers with no Xarray dependency and is not part of the public API; the constructors and methods above are the intended entry points.
+
 Parallel output is available with:
 
 ```python

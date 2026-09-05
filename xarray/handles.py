@@ -15,7 +15,197 @@ if TYPE_CHECKING:
     from .core import MPIXarray
 
 
-class MPIRolling:
+class _RollingReduceMixin:
+    """Shared zero-argument reduce methods for :class:`MPIRolling`.
+
+    Each of these previously hand-duplicated, in full, as its own
+    ``def name(self) -> MPIXarray: return self._reduce("name")`` method;
+    factored here since the six only ever differed in that one string.
+    """
+
+    def _reduce(self, reduce: str) -> MPIXarray:
+        raise NotImplementedError
+
+    def mean(self) -> MPIXarray:
+        """Rolling mean."""
+        return self._reduce("mean")
+
+    def sum(self) -> MPIXarray:
+        """Rolling sum."""
+        return self._reduce("sum")
+
+    def min(self) -> MPIXarray:
+        """Rolling minimum."""
+        return self._reduce("min")
+
+    def max(self) -> MPIXarray:
+        """Rolling maximum."""
+        return self._reduce("max")
+
+    def std(self) -> MPIXarray:
+        """Rolling standard deviation."""
+        return self._reduce("std")
+
+    def count(self) -> MPIXarray:
+        """Rolling valid-value count."""
+        return self._reduce("count")
+
+
+class _PartitionReduceMixin:
+    """Shared reduce methods for :class:`MPIGroupBy` and :class:`MPIResample`.
+
+    Both handles partition the data (into groups or resample bins) and
+    then reduce within each partition via their own ``_reduce`` dispatch
+    (``mpp_groupby_reduce``/``mpp_resample_reduce`` respectively) -- the
+    two classes previously each hand-duplicated an identical five-method
+    ``sum``/``mean``/``count``/``min``/``max`` surface differing only in
+    which module function ``_reduce`` called; factored here instead.
+    """
+
+    def _reduce(
+        self,
+        op: Literal["sum", "mean", "count", "min", "max"],
+        *,
+        skipna: bool | None,
+        keep_attrs: bool | None,
+        partition_dim: Hashable | Literal["auto"] | None,
+    ) -> MPIXarray:
+        raise NotImplementedError
+
+    def _reduce_kw(
+        self,
+        op: Literal["sum", "mean", "count", "min", "max"],
+        skipna: bool | None,
+        keep_attrs: bool | None,
+        partition_dim: Hashable | Literal["auto"] | None,
+    ) -> MPIXarray:
+        """Forward keyword args to :meth:`_reduce`; shared by every method below."""
+        return self._reduce(
+            op, skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
+        )
+
+    def sum(
+        self,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Sum within each partition.
+
+        Parameters
+        ----------
+        skipna : bool | None
+            Whether to ignore missing values.
+        keep_attrs : bool | None
+            Whether to preserve xarray attributes.
+        partition_dim : Hashable | Literal['auto'] | None
+            Partition dimension to use for the result.
+        Returns
+        -------
+        MPIXarray
+            Reduced result.
+        """
+        return self._reduce_kw("sum", skipna, keep_attrs, partition_dim)
+
+    def mean(
+        self,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Mean within each partition.
+
+        Parameters
+        ----------
+        skipna : bool | None
+            Whether to ignore missing values.
+        keep_attrs : bool | None
+            Whether to preserve xarray attributes.
+        partition_dim : Hashable | Literal['auto'] | None
+            Partition dimension to use for the result.
+        Returns
+        -------
+        MPIXarray
+            Reduced result.
+        """
+        return self._reduce_kw("mean", skipna, keep_attrs, partition_dim)
+
+    def count(
+        self,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Valid-value count within each partition.
+
+        Parameters
+        ----------
+        skipna : bool | None
+            Whether to ignore missing values.
+        keep_attrs : bool | None
+            Whether to preserve xarray attributes.
+        partition_dim : Hashable | Literal['auto'] | None
+            Partition dimension to use for the result.
+        Returns
+        -------
+        MPIXarray
+            Reduced result.
+        """
+        return self._reduce_kw("count", skipna, keep_attrs, partition_dim)
+
+    def min(
+        self,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Minimum within each partition.
+
+        Parameters
+        ----------
+        skipna : bool | None
+            Whether to ignore missing values.
+        keep_attrs : bool | None
+            Whether to preserve xarray attributes.
+        partition_dim : Hashable | Literal['auto'] | None
+            Partition dimension to use for the result.
+        Returns
+        -------
+        MPIXarray
+            Reduced result.
+        """
+        return self._reduce_kw("min", skipna, keep_attrs, partition_dim)
+
+    def max(
+        self,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Maximum within each partition.
+
+        Parameters
+        ----------
+        skipna : bool | None
+            Whether to ignore missing values.
+        keep_attrs : bool | None
+            Whether to preserve xarray attributes.
+        partition_dim : Hashable | Literal['auto'] | None
+            Partition dimension to use for the result.
+        Returns
+        -------
+        MPIXarray
+            Reduced result.
+        """
+        return self._reduce_kw("max", skipna, keep_attrs, partition_dim)
+
+
+class MPIRolling(_RollingReduceMixin):
     """Chainable rolling-window handle, mirroring ``xarray``'s ``.rolling(...)``.
 
     Returned by :meth:`MPIXarray.rolling`; call one of the reduction
@@ -62,68 +252,8 @@ class MPIRolling:
             min_periods=self._min_periods,
         )
 
-    def mean(self) -> MPIXarray:
-        """Rolling mean.
 
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped mean.
-        """
-        return self._reduce("mean")
-
-    def sum(self) -> MPIXarray:
-        """Rolling sum.
-
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped sum.
-        """
-        return self._reduce("sum")
-
-    def min(self) -> MPIXarray:
-        """Rolling minimum.
-
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped minimum.
-        """
-        return self._reduce("min")
-
-    def max(self) -> MPIXarray:
-        """Rolling maximum.
-
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped maximum.
-        """
-        return self._reduce("max")
-
-    def std(self) -> MPIXarray:
-        """Rolling standard deviation.
-
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling standard deviation.
-        """
-        return self._reduce("std")
-
-    def count(self) -> MPIXarray:
-        """Rolling valid-value count.
-
-        Returns
-        -------
-        MPIXarray
-            Distributed valid-value count.
-        """
-        return self._reduce("count")
-
-
-class MPIGroupBy:
+class MPIGroupBy(_PartitionReduceMixin):
     """Chainable groupby handle, mirroring ``xarray``'s ``.groupby(...)``.
 
     Returned by :meth:`MPIXarray.groupby`; call one of the reduction
@@ -174,138 +304,8 @@ class MPIGroupBy:
             self._parent._runtime,
         )
 
-    def sum(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Sum within each group.
 
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped sum.
-        """
-        return self._reduce(
-            "sum", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def mean(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Mean within each group.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped mean.
-        """
-        return self._reduce(
-            "mean", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def count(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Valid-value count within each group.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed valid-value count.
-        """
-        return self._reduce(
-            "count", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def min(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Minimum within each group.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped minimum.
-        """
-        return self._reduce(
-            "min", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def max(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Maximum within each group.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped maximum.
-        """
-        return self._reduce(
-            "max", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-
-class MPIResample:
+class MPIResample(_PartitionReduceMixin):
     """Chainable resample handle, mirroring ``xarray``'s ``.resample(...)``.
 
     Returned by :meth:`MPIXarray.resample`; call one of the reduction
@@ -352,134 +352,4 @@ class MPIResample:
                 partition_dim=partition_dim,
             ),
             self._parent._runtime,
-        )
-
-    def sum(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Sum within each resampled bin.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped sum.
-        """
-        return self._reduce(
-            "sum", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def mean(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Mean within each resampled bin.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped mean.
-        """
-        return self._reduce(
-            "mean", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def count(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Valid-value count within each resampled bin.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed valid-value count.
-        """
-        return self._reduce(
-            "count", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def min(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Minimum within each resampled bin.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped minimum.
-        """
-        return self._reduce(
-            "min", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
-        )
-
-    def max(
-        self,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        partition_dim: Hashable | Literal["auto"] | None = "auto",
-    ) -> MPIXarray:
-        """Maximum within each resampled bin.
-
-        Parameters
-        ----------
-        skipna : bool | None
-            Whether to ignore missing values.
-        keep_attrs : bool | None
-            Whether to preserve xarray attributes.
-        partition_dim : Hashable | Literal['auto'] | None
-            Partition dimension to use for the result.
-        Returns
-        -------
-        MPIXarray
-            Distributed rolling or grouped maximum.
-        """
-        return self._reduce(
-            "max", skipna=skipna, keep_attrs=keep_attrs, partition_dim=partition_dim
         )

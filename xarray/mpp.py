@@ -1,29 +1,9 @@
-"""FMS/mpp-style distributed-memory primitives.
-
-Named and organized after GFDL's Flexible Modeling System (FMS)
-``mpp``/``mpp_domains`` modules (NOAA-GFDL/FMS: ``mpp/mpp.F90``,
-``mpp/mpp_domains.F90``): a :class:`Domain` is FMS's ``domain2D``/
-``domain1D`` equivalent -- partition bounds, halo topology, and a
-communicator, carrying no data and no labels of its own. It is built once
-via :func:`mpp_define_domains` and passed alongside plain NumPy buffers to
-:func:`mpp_sum`/:func:`mpp_max`/:func:`mpp_min` (global reductions, FMS's
-``MPP_REDUCE_`` family) and :func:`mpp_update_domains` (halo exchange,
-FMS's ``mpp_update_domains``).
-
-This module is the actual communication kernel underneath climtools'
-xarray-facing layer: ``xarray/planning.py``'s ``comm_reduce``
-and ``xarray/arithmetic.py``'s ``halo_exchange`` both delegate their real
-MPI traffic here. Every function below takes and returns plain
-``numpy.ndarray`` buffers plus a :class:`Domain` (or a raw
-``mpi4py.MPI.Comm``) -- never an xarray object -- so it is usable, and
-independently testable, with no xarray dependency at all. xarray's role
-above this module is exactly what FMS's ``diag_manager`` layer's is above
-``mpp``: labels, coordinates, and access, not communication.
-"""
+"""FMS/mpp-style distributed-memory primitives, adapted from GFDL FMS."""
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -31,7 +11,7 @@ import numpy as np
 from mpi4py import MPI
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from ..mpi.context import MPIContext
 
@@ -39,10 +19,10 @@ __all__ = [
     "Domain",
     "mpp_define_domains",
     "mpp_define_layout",
-    "mpp_get_neighbors",
+    "mpp_get_neighbor_pe",
     "mpp_max",
     "mpp_min",
-    "mpp_reduce",
+    "mpp_reduce_scatter",
     "mpp_sum",
     "mpp_update_domains",
 ]
@@ -50,31 +30,14 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Domain:
-    """A rank's local partition of one or more distributed dimensions.
+    """This rank's partition: FMS's ``domain2D``/``domain1D``, no data or labels.
 
-    The FMS equivalent of ``domain2D``/``domain1D``: describes *where*
-    this rank's data sits in the global array (compute-domain bounds) and
-    *how* ranks are laid out relative to one another (the communicator,
-    and -- for a multi-dimensional partition -- the Cartesian process
-    grid), but holds no field data and no coordinate/units/attrs labels.
-    Those stay entirely in xarray, one layer up.
-
-    Attributes
-    ----------
-    dims : tuple of str
-        Partitioned dimension names, in a fixed order.
-    global_sizes : mapping of str to int
-        Global length of each dimension in ``dims``.
-    starts, stops : mapping of str to int
-        This rank's half-open ``[start, stop)`` compute-domain interval
-        along each dimension in ``dims`` (FMS's ``isc:iec``/``jsc:jec``).
-    comm : mpi4py.MPI.Comm
-        Communicator whose ranks jointly own the full global array.
-    cart : mapping, optional
-        Cartesian process-grid descriptor (``grid_shape``, ``coords``,
-        ``periods``) for a multi-dimensional partition; ``None`` for a
-        single partitioned dimension. See
-        :func:`~.xarray.cartesian.get_cartesian_topology`.
+    dims : partitioned dimension names.
+    global_sizes, starts, stops : global length and this rank's
+        half-open ``[start, stop)`` interval per dim (FMS's ``isc:iec``).
+    comm : communicator owning the full global array.
+    cart : ``{grid_shape, coords, periods}`` for a multi-dim partition,
+        else ``None``.
     """
 
     dims: tuple[str, ...]
@@ -85,19 +48,10 @@ class Domain:
     cart: dict[str, Any] | None = field(default=None)
 
     def local_size(self, dim: str) -> int:
-        """This rank's local extent along ``dim``."""
         return self.stops[dim] - self.starts[dim]
 
     def is_global_edge(self, dim: str, side: str) -> bool:
-        """True if this rank's slab touches the global boundary of ``dim``.
-
-        Parameters
-        ----------
-        dim : str
-            Partitioned dimension to check.
-        side : {"lower", "upper"}
-            Which edge of ``dim``.
-        """
+        """``side`` is "lower" or "upper"."""
         if side == "lower":
             return self.starts[dim] == 0
         if side == "upper":
@@ -106,15 +60,7 @@ class Domain:
 
     @classmethod
     def from_meta(cls, meta: Mapping[str, Any], comm: MPI.Comm) -> Domain:
-        """Build a :class:`Domain` from climtools' existing ``.meta`` dict.
-
-        ``.meta`` (see ``xarray/meta.py``) remains the system-of-record
-        threaded through the xarray-facing layer (every ``MPIXarray`` op
-        reads/writes it via ``.attrs``); this is the bridge that lets the
-        buffer-only communication kernel below consume it without the
-        rest of the codebase having to be rewritten around
-        :class:`Domain` all at once.
-        """
+        """Build from climtools' ``.meta`` dict (see ``xarray/meta.py``)."""
         dims = tuple(str(d) for d in meta["dims"])
         return cls(
             dims=dims,
@@ -126,7 +72,7 @@ class Domain:
         )
 
     def to_meta(self, *, chunk_info: Mapping[str, int]) -> dict[str, Any]:
-        """Return the ``.meta`` dict form of this domain (see :func:`from_meta`)."""
+        """Inverse of :meth:`from_meta`."""
         meta: dict[str, Any] = {
             "dims": self.dims,
             "global_sizes": dict(self.global_sizes),
@@ -145,34 +91,41 @@ class Domain:
         return meta
 
 
+def mpp_reduce_scatter(
+    local: np.ndarray,
+    op: MPI.Op,
+    comm: MPI.Comm,
+    recvcounts: Sequence[int],
+    *,
+    axis: int = 0,
+) -> np.ndarray:
+    """Elementwise-reduce ``local`` (identical shape on every rank) so each
+    rank keeps only its own contiguous slice along ``axis`` -- MPI's
+    ``Reduce_scatter``, generalized to any axis via ``moveaxis`` (it
+    natively splits a flat buffer, so ``axis`` is brought to position 0,
+    split by element count, then moved back). Where :func:`_mpp_reduce`'s
+    ``Allreduce`` gives every rank the full result (needed when every rank
+    genuinely wants a full copy), this gives each rank only the part it
+    will end up owning -- for a result about to be redistributed anyway,
+    that's the same answer without ever materializing the full array on
+    every rank. ``recvcounts[r]`` is rank ``r``'s share of ``axis``, in
+    elements along that axis (not flattened count); their sum must equal
+    ``local.shape[axis]``.
+    """
+    moved = np.ascontiguousarray(np.moveaxis(local, axis, 0))
+    per_slice = moved[0].size if moved.ndim > 1 else 1
+    flat_counts = [c * per_slice for c in recvcounts]
+    recvbuf = np.empty(flat_counts[comm.rank], dtype=moved.dtype)
+    comm.Reduce_scatter(moved.reshape(-1), recvbuf, recvcounts=flat_counts, op=op)
+    my_len = recvcounts[comm.rank]
+    shape = (my_len, *moved.shape[1:]) if moved.ndim > 1 else (my_len,)
+    return np.moveaxis(recvbuf.reshape(shape), 0, axis)
+
+
 def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]:
-    """Choose a 2D process-grid shape for ``ndivs`` ranks over a domain.
-
-    FMS's own ``mpp_define_layout2D`` algorithm
-    (``mpp/include/mpp_domains_define.inc``), adapted verbatim rather
-    than reimplemented: first guess the divisor along axis 0 that
-    matches the domain's aspect ratio (``round(sqrt(ndivs * extent0 /
-    extent1))``), then walk it down until it evenly divides ``ndivs``
-    (guaranteed to terminate at 1). This closed-form guess-and-adjust is
-    FMS's actual algorithm for the 2D case -- which is the only case
-    climtools' own Cartesian partitioning ever uses (every
-    ``mpi_open_dataset``/``mpi_create_dataset`` call in this codebase
-    partitions exactly two dimensions, e.g. ``("lat", "lon")``) -- in
-    place of a general N-dimensional prime-factorization heuristic that
-    was solving a more general problem than the one ever actually posed
-    to it.
-
-    Parameters
-    ----------
-    extent0, extent1 : int
-        Global length of each of the two dimensions being partitioned.
-    ndivs : int
-        Number of process-grid cells (MPI ranks) to lay out.
-    Returns
-    -------
-    tuple of (int, int)
-        Process-grid divisions along axis 0 and axis 1;
-        ``divisions[0] * divisions[1] == ndivs``.
+    """FMS's ``mpp_define_layout2D`` (``mpp_domains_define.inc``): guess the
+    aspect-ratio-matching divisor, walk down until it evenly divides
+    ``ndivs``. 2D only -- the only case climtools partitions.
     """
     idiv = max(round(math.sqrt(ndivs * extent0 / extent1)), 1)
     while ndivs % idiv != 0:
@@ -186,54 +139,41 @@ def mpp_define_domains(
     dims: str | Sequence[str],
     *,
     min_partition_size: int | Mapping[str, int] | None = None,
+    rank: int | None = None,
 ) -> Domain:
-    """Partition one or more dimensions across ``mpi_context``'s ranks.
+    """FMS's ``mpp_define_domains``. One dim: balanced ``[start, stop)``
+    slabs (``chunks.get_balanced_bounds``). Two or more: a Cartesian
+    process grid (``cartesian.get_cartesian_topology``). ``min_partition_size``
+    is ``get_balanced_bounds``'s ``min_chunk``, per dimension for either case.
 
-    FMS's ``mpp_define_domains``: called once to build the domain
-    descriptor every subsequent :func:`mpp_sum`/:func:`mpp_update_domains`
-    call is handed, rather than each op recomputing its own bounds. A
-    single partitioned dimension is split with balanced contiguous
-    ``[start, stop)`` slabs (:func:`~.xarray.chunks.get_balanced_bounds`);
-    two or more are split as a Cartesian process grid
-    (:func:`~.xarray.cartesian.get_cartesian_topology`), reusing the same
-    layout/neighbor logic climtools' xarray-facing layer already relies
-    on rather than duplicating it.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context; ``mpi_context.comm`` is the communicator every rank
-        in the returned :class:`Domain` belongs to.
-    global_sizes : mapping of str to int
-        Global length of every dimension named in ``dims`` (and, for the
-        Cartesian case, of any other dimension the topology needs -- see
-        :func:`~.xarray.cartesian.get_cartesian_topology`).
-    dims : str or sequence of str
-        Dimension name(s) to partition.
-    min_partition_size : int, mapping, or None, optional
-        Per :func:`~.xarray.chunks.get_balanced_bounds`'s ``min_chunk``:
-        guaranteed minimum local length per partitioned dimension for
-        every rank that receives any data. Single-dimension partitions
-        only; ignored for a Cartesian partition.
-    Returns
-    -------
-    Domain
-        This rank's partition of ``global_sizes`` along ``dims``.
+    ``rank`` defaults to the caller's own rank (the common case: "what is
+    my own domain"). Pass another rank's number to compute *its* domain
+    instead -- e.g. a root building every rank's piece for a scatter,
+    the way FMS itself keeps every PE's domain in one shared table rather
+    than each PE only knowing its own. For the multi-dim case this bypasses
+    ``get_cartesian_topology``'s cached, calling-rank-only Cartcomm lookup
+    in favor of computing that rank's grid coordinates directly (the same
+    row-major mapping ``get_cartesian_topology`` itself relies on for a
+    non-reordered communicator, confirmed to agree with it across many
+    rank counts before this was ever used for a rank other than one's own).
     """
     from .chunks import get_balanced_bounds
 
     comm = mpi_context.comm
+    target_rank = comm.rank if rank is None else rank
     dim_tuple = (dims,) if isinstance(dims, str) else tuple(dims)
+
+    def _min_chunk(d: str) -> int | None:
+        return (
+            min_partition_size
+            if not isinstance(min_partition_size, Mapping)
+            else min_partition_size.get(d)
+        )
 
     if len(dim_tuple) == 1:
         dim = dim_tuple[0]
         length = int(global_sizes[dim])
-        min_chunk = (
-            min_partition_size
-            if not isinstance(min_partition_size, Mapping)
-            else min_partition_size.get(dim)
-        )
-        start, stop = get_balanced_bounds(length, comm.rank, comm.size, min_chunk)
+        start, stop = get_balanced_bounds(length, target_rank, comm.size, _min_chunk(dim))
         return Domain(
             dims=dim_tuple,
             global_sizes={dim: length},
@@ -242,74 +182,52 @@ def mpp_define_domains(
             comm=comm,
         )
 
-    from .cartesian import get_cartesian_topology
-
     sizes = {d: int(global_sizes[d]) for d in dim_tuple}
-    topology = get_cartesian_topology(comm, dim_tuple, sizes)
-    starts = {d: topology.bounds[d][0] for d in dim_tuple}
-    stops = {d: topology.bounds[d][1] for d in dim_tuple}
+
+    if target_rank == comm.rank:
+        from .cartesian import get_cartesian_topology
+
+        topology = get_cartesian_topology(comm, dim_tuple, sizes)
+        grid_shape = topology.grid_shape
+        starts = {d: topology.bounds[d][0] for d in dim_tuple}
+        stops = {d: topology.bounds[d][1] for d in dim_tuple}
+        cart = topology.as_meta_cart()
+    else:
+        grid_shape = mpp_define_layout(sizes[dim_tuple[0]], sizes[dim_tuple[1]], comm.size)
+        coords = tuple(int(c) for c in np.unravel_index(target_rank, grid_shape))
+        starts, stops = {}, {}
+        for axis, d in enumerate(dim_tuple):
+            s, e = get_balanced_bounds(
+                sizes[d], coords[axis], grid_shape[axis], _min_chunk(d)
+            )
+            starts[d], stops[d] = s, e
+        cart = {"grid_shape": grid_shape, "coords": coords, "periods": (False,) * len(dim_tuple)}
+
     return Domain(
         dims=dim_tuple,
         global_sizes=sizes,
         starts=starts,
         stops=stops,
         comm=comm,
-        cart={
-            "grid_shape": topology.grid_shape,
-            "coords": topology.coords,
-            "periods": topology.periods,
-        },
+        cart=cart,
     )
 
 
-def mpp_reduce(
+def _mpp_reduce(
     local: np.ndarray, op: MPI.Op, comm: MPI.Comm | None, domain: Domain | None = None
 ) -> np.ndarray:
-    """Global elementwise reduction of ``local`` under an arbitrary MPI op.
+    """Global elementwise reduction under any MPI op (generic kernel behind
+    ``mpp_sum``/``mpp_max``/``mpp_min``): a single ``Allreduce``, as FMS's
+    ``MPP_REDUCE_`` (``mpp_reduce_mpi.fh``) does. No agreement handshake --
+    unlike ``mpp_comm_reduce`` above this, FMS trusts SPMD by construction, and
+    so does this: every rank must reach it with the same op and a
+    compatible ``local`` shape/dtype. Always calls ``Allreduce`` even for a
+    size-1 comm (cheap no-op in MPI; a short-circuit here broke
+    ``mpp_comm_reduce``'s replicated-axis path, which can hand different ranks
+    different-sized comms).
 
-    The generic kernel behind :func:`mpp_sum`/:func:`mpp_max`/
-    :func:`mpp_min` (each fixes ``op`` to ``MPI.SUM``/``MAX``/``MIN``);
-    call this one directly for any other reducible op (``MPI.PROD``,
-    ``MPI.LAND``, ``MPI.LOR``, ...). A single direct buffer-based
-    FMS's own ``MPP_REDUCE_`` (``mpp/include/mpp_reduce_mpi.fh``) uses
-    for ``mpp_max``/``mpp_min``, and the pattern ``mpp_sum`` follows too.
-    No verification/agreement handshake runs here (unlike the xarray
-    layer's own ``comm_reduce``, which additionally checks every rank
-    posted the same operation before committing to a collective) --
-    FMS trusts compiled SPMD Fortran by construction, and this is the
-    equivalent trust boundary: the caller is responsible for every rank
-    reaching this call with a compatible ``local`` shape/dtype and the
-    same ``op``, exactly as an FMS caller is responsible for every PE
-    reaching the matching ``call mpp_sum(...)``.
-
-    Deliberately always calls ``Allreduce``, even over a size-1
-    communicator, rather than short-circuiting: ``comm_reduce`` (this
-    kernel's xarray-facing caller) can resolve *different* ranks onto
-    *different* communicators of different sizes for a replicated-axis
-    reduction group (see ``replica_count`` there), and Allreduce over a
-    size-1 communicator is already a well-defined, cheap no-op in every
-    MPI implementation -- a same-communicator early return here would be
-    consistent, but was confirmed by direct testing to interact badly
-    with that replicated-group path (the reduction result's shape only
-    matched what the caller expected on the branch that actually called
-    Allreduce). Not worth the risk for a case MPI already handles for
-    free.
-
-    Parameters
-    ----------
-    local : numpy.ndarray
-        This rank's local buffer.
-    op : MPI.Op
-        Reduction operation.
-    comm : mpi4py.MPI.Comm or None
-        Communicator to reduce over. Takes priority over ``domain`` when
-        both are given.
-    domain : Domain or None, optional
-        Used for its ``.comm`` when ``comm`` is not given directly.
-    Returns
-    -------
-    numpy.ndarray
-        The globally reduced buffer, same shape and dtype as ``local``.
+    ``comm`` takes priority over ``domain`` (used only for its ``.comm``)
+    when both are given.
     """
     active_comm = comm if comm is not None else (domain.comm if domain else MPI.COMM_WORLD)
     recv = np.empty_like(local)
@@ -318,73 +236,35 @@ def mpp_reduce(
 
 
 def mpp_sum(
-    local: np.ndarray,
-    domain: Domain | None = None,
-    *,
-    comm: MPI.Comm | None = None,
+    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
 ) -> np.ndarray:
-    """Global sum of ``local`` across every rank in ``domain``/``comm``.
-
-    FMS's ``mpp_sum``. Pass either ``domain`` (its ``.comm`` is used) or
-    ``comm`` directly; at least one is required.
-    """
-    return mpp_reduce(local, MPI.SUM, comm, domain)
+    """FMS's ``mpp_sum``. Pass ``domain`` or ``comm``."""
+    return _mpp_reduce(local, MPI.SUM, comm, domain)
 
 
 def mpp_max(
-    local: np.ndarray,
-    domain: Domain | None = None,
-    *,
-    comm: MPI.Comm | None = None,
+    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
 ) -> np.ndarray:
-    """Global elementwise max of ``local`` across every rank in ``domain``/``comm``.
-
-    FMS's ``mpp_max``.
-    """
-    return mpp_reduce(local, MPI.MAX, comm, domain)
+    """FMS's ``mpp_max``."""
+    return _mpp_reduce(local, MPI.MAX, comm, domain)
 
 
 def mpp_min(
-    local: np.ndarray,
-    domain: Domain | None = None,
-    *,
-    comm: MPI.Comm | None = None,
+    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
 ) -> np.ndarray:
-    """Global elementwise min of ``local`` across every rank in ``domain``/``comm``.
-
-    FMS's ``mpp_min``.
-    """
-    return mpp_reduce(local, MPI.MIN, comm, domain)
+    """FMS's ``mpp_min``."""
+    return _mpp_reduce(local, MPI.MIN, comm, domain)
 
 
-def mpp_get_neighbors(
+def mpp_get_neighbor_pe(
     domain: Domain, dim: str, *, periodic: bool = False
 ) -> tuple[int | None, int | None]:
-    """Return the (lower, upper) neighbor rank along ``dim``.
-
-    Single lookup point for "who is this rank's neighbor along a
-    partitioned dimension" -- FMS builds this once into ``domain2D`` at
-    ``mpp_define_domains`` time (its ``pe``/layout tables); here it is
-    computed on demand from :class:`Domain`, since climtools' domains are
-    cheap, frozen dataclasses rather than a persistent Fortran module
-    state. Handles both a single partitioned dimension (linear
-    ``rank -+ 1`` in ``domain.comm``) and a multi-dimensional Cartesian
-    partition (a face neighbor along ``dim`` in the process grid, which
-    does *not* coincide with ``rank -+ 1`` in general).
-
-    Parameters
-    ----------
-    domain : Domain
-        This rank's partition.
-    dim : str
-        Partitioned dimension to look up neighbors along.
-    periodic : bool, optional
-        Wrap at the global edge instead of returning ``None`` there.
-    Returns
-    -------
-    tuple of (int or None, int or None)
-        Lower and upper neighbor rank; ``None`` on a side with no
-        neighbor (a true global edge, non-periodic).
+    """FMS's ``mpp_get_neighbor_pe``, adapted to return both directions in
+    one call (FMS takes a ``direction`` argument and returns one PE per
+    call) rather than one call per side -- ``Domain`` only has two
+    directions per axis, so there's no direction enum to take. Single
+    dim: linear ``rank -+ 1``. Multi-dim: Cartesian face neighbor (not
+    ``rank -+ 1`` in general). ``None`` on a non-periodic edge.
     """
     comm = domain.comm
     rank = comm.rank
@@ -424,74 +304,24 @@ def mpp_update_domains(
     left_rank: int | None = None,
     right_rank: int | None = None,
 ) -> tuple[np.ndarray | dict[str, np.ndarray], int, int]:
-    """Fill ``before``/``after`` halo cells of ``fields`` from neighbor ranks.
-
-    FMS's ``mpp_update_domains``: exchanges boundary slabs with the ranks
-    adjacent along ``dim`` and returns each field padded with them, using
-    nonblocking point-to-point buffer sends (``Isend``/``Irecv`` + one
-    shared ``Waitall``) -- one pair of messages per neighbor per field,
-    all posted together and waited on once, not a collective and not one
-    round trip per field. This is FMS's *group* update: passing a
-    ``Mapping`` of several same-shaped-along-``axis`` fields batches all
-    of their messages into that single ``Waitall``, exactly as updating
-    several fields together is cheaper than one ``mpp_update_domains``
-    call per field (each of which would otherwise pay its own
-    synchronization latency). Passing a single ``numpy.ndarray`` instead
-    is the plain single-field case; the return shape mirrors whichever
-    was passed in.
-
-    At a non-periodic global edge, the corresponding side is left
-    unpadded (``left_pad``/``right_pad`` report 0 for that side) rather
-    than raising -- callers that need to know they are at an edge
-    trim/branch on those return values.
-
-    Parameters
-    ----------
-    fields : numpy.ndarray or mapping of str to numpy.ndarray
-        This rank's local buffer(s), contiguous or not. Every array must
-        share the same length along ``axis`` (this rank's own local
-        extent) but may otherwise differ in shape and dtype.
-    domain : Domain
-        This rank's partition; used only for edge detection when
-        ``left_rank``/``right_rank`` are not given explicitly.
-    dim : str
-        Name of the partitioned dimension being exchanged (for edge
-        lookup on ``domain``; purely a label here, not used for any
-        indexing decision beyond that).
-    axis : int
-        Position of ``dim`` in each field's own axes.
-    before, after : int
-        Halo width requested from the lower/upper neighbor.
-    periodic : bool, optional
-        Wrap at the global edge (rank 0's lower neighbor is the last
-        rank, and symmetrically for the last rank's upper neighbor)
-        instead of leaving that side unpadded.
-    left_rank, right_rank : int or None, optional
-        Explicit lower/upper neighbor rank. When omitted, derived from
-        ``domain.comm``'s linear rank order (``rank - 1``/``rank + 1``,
-        wrapped under ``periodic``) -- correct for a single partitioned
-        dimension; a caller managing a Cartesian partition must pass
-        these explicitly (its neighbors are Cartesian-topology face
-        neighbors along ``dim``, not linear rank +-1 in the flattened
-        communicator; see ``xarray/cartesian.py``'s
-        ``CartesianTopology.neighbors``).
-    Returns
-    -------
-    tuple of (result, int, int)
-        ``(padded, left_pad, right_pad)``: each field padded with up to
-        ``before`` elements prepended and up to ``after`` appended along
-        ``axis`` (``padded`` is a single array if ``fields`` was one, a
-        dict of arrays if ``fields`` was a mapping), and how many
-        elements were actually added on each side (equal to
-        ``before``/``after`` except at an unpadded global edge, where it
-        is 0).
+    """FMS's ``mpp_update_domains``: halo exchange with the neighbors along
+    ``dim``, via nonblocking ``Isend``/``Irecv`` + one shared ``Waitall``.
+    A ``Mapping`` of same-``axis``-length fields is FMS's *group update*
+    (all messages batched into one ``Waitall``, not one round trip per
+    field); a single array is the plain case, and the return shape
+    mirrors whichever was passed. ``before``/``after`` are the halo width
+    from the lower/upper neighbor; at a non-periodic global edge that
+    side is left unpadded (``left_pad``/``right_pad`` report 0 there
+    instead of raising). ``left_rank``/``right_rank`` default to
+    :func:`mpp_get_neighbor_pe`; a Cartesian caller should pass them
+    explicitly (its neighbors are not ``rank -+ 1``).
     """
     single = isinstance(fields, np.ndarray)
     items: dict[str, np.ndarray] = {"": fields} if single else dict(fields)
 
     comm = domain.comm
     if left_rank is None or right_rank is None:
-        default_left, default_right = mpp_get_neighbors(domain, dim, periodic=periodic)
+        default_left, default_right = mpp_get_neighbor_pe(domain, dim, periodic=periodic)
         left_rank = default_left if left_rank is None else left_rank
         right_rank = default_right if right_rank is None else right_rank
 
@@ -529,9 +359,7 @@ def mpp_update_domains(
         if right_rank is not None and after > 0
     }
 
-    # Post every message for every field up front, then wait once: the
-    # whole point of a group update, and why this isn't just a loop
-    # calling a single-field version once per field.
+    # Post every message for every field, then wait once (the group update).
     recv_reqs = [comm.Irecv(_view(buf), source=left_rank) for buf in recv_before.values()]
     recv_reqs += [comm.Irecv(_view(buf), source=right_rank) for buf in recv_after.values()]
     send_reqs = [comm.Isend(arr, dest=right_rank) for arr in send_right.values()]

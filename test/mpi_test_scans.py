@@ -285,7 +285,7 @@ def run(fx: Fixtures) -> None:
 
     # interp -- Allgather-based; not halo-bounded, checked under the
     # partition dimension it interpolates along.
-    from climtools.xarray.cartesian import dim_comm as _dim_comm_check
+    from climtools.xarray.cartesian import mpp_dim_comm as _dim_comm_check
     from climtools.xarray.chunks import get_balanced_bounds as _gbb_check
 
     new_lat_fine = np.linspace(native.lat.values.min(), native.lat.values.max(), 37)

@@ -1,5 +1,5 @@
 """Isolate the effect of packed-buffer halo exchange: message count and
-wall time for halo_exchange() as a function of haloed variable count, at
+wall time for mpp_halo_exchange() as a function of haloed variable count, at
 a fixed small per-variable size so the result reflects per-call MPI
 posting overhead (what buffer packing targets) rather than payload
 bandwidth.
@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 from climtools import MPIContext, xgeo
-from climtools.xarray.arithmetic import halo_exchange
+from climtools.xarray.arithmetic import mpp_halo_exchange
 from mpi4py import MPI
 
 import xarray as xr
@@ -41,12 +41,12 @@ else:
 ds = xgeo.mpi_partition_data(full, mpi, dim="x", log_partitions=False)
 
 mpi.comm.barrier()
-halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)  # warm up
+mpp_halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)  # warm up
 
 mpi.comm.barrier()
 t0 = time.perf_counter()
 for _ in range(REPS):
-    halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)
+    mpp_halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)
 mpi.comm.barrier()
 t1 = time.perf_counter()
 
@@ -57,4 +57,4 @@ if rank == 0:
     print(
         f"ranks={mpi.comm.size}  n_vars={N_VARS} (3 dtypes: float32/float64/int32)  reps={REPS}"
     )
-    print(f"wall time per halo_exchange() call (slowest rank): {slowest * 1000:.4f} ms")
+    print(f"wall time per mpp_halo_exchange() call (slowest rank): {slowest * 1000:.4f} ms")

@@ -12,13 +12,14 @@ import xarray as xr
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .cartesian import dim_comm as _dim_comm
+from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
     choose_partition_dim,
-    get_mpi_meta,
+    mpp_get_meta,
     indexer_is_scalar,
-    set_mpi_meta,
+    reattach_meta_after_collapse,
+    mpp_update_meta,
     strip_mpi_meta,
 )
 
@@ -55,7 +56,7 @@ def _merge_partition_meta(
     global_sizes[dim] = global_size
     starts[dim] = start
     stops[dim] = stop
-    set_mpi_meta(
+    mpp_update_meta(
         output,
         dim=meta["dims"],
         global_size=global_sizes,
@@ -66,7 +67,7 @@ def _merge_partition_meta(
     )
 
 
-def isel(
+def mpp_isel(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
@@ -95,7 +96,7 @@ def isel(
     """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value.isel(supplied)
 
@@ -105,7 +106,7 @@ def isel(
 
     distributed_indexer = supplied.pop(dim)
     if indexer_is_scalar(distributed_indexer):
-        return isel_scalar(mpi_context, value, dim, int(distributed_indexer), supplied)
+        return mpp_isel_scalar(mpi_context, value, dim, int(distributed_indexer), supplied)
 
     if not isinstance(distributed_indexer, slice):
         raise NotImplementedError(
@@ -154,7 +155,7 @@ def isel(
     return output
 
 
-def isel_scalar(
+def mpp_isel_scalar(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -185,7 +186,7 @@ def isel_scalar(
     IndexError
         If ``index`` is outside the global dimension.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value.isel({dim: index, **other_indexers})
 
@@ -217,32 +218,11 @@ def isel_scalar(
         # graph is not guaranteed picklable.
         result = result.load()
     result = dim_comm.bcast(result, root=owner)
-    remaining_dims = tuple(
-        d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
-    )
-    if remaining_dims:
-        # `dim` just collapsed away; every other active partition axis
-        # is untouched, so its existing bounds are simply carried
-        # forward. The Cartesian "cart" descriptor is only carried
-        # forward when every one of its axes survived (i.e. `dim` was
-        # the only one to begin with, which can't happen here since
-        # `remaining_dims` is non-empty) -- otherwise it no longer
-        # describes every axis it was built for, and a fresh, smaller
-        # topology is built lazily on demand instead (see `_finish`'s
-        # identical handling for a reduction).
-        set_mpi_meta(
-            result,
-            dim=remaining_dims,
-            global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
-            start={d: int(meta["starts"][d]) for d in remaining_dims},
-            stop={d: int(meta["stops"][d]) for d in remaining_dims},
-            chunk_info=prune_chunk_info(meta["chunk_info"], result),
-            cart=meta.get("cart") if len(remaining_dims) == len(meta["dims"]) else None,
-        )
+    result = reattach_meta_after_collapse(result, meta, dim)
     return cast("xr.Dataset | xr.DataArray", result)
 
 
-def sel(
+def mpp_sel(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Any, Any] | None = None,
@@ -280,7 +260,7 @@ def sel(
     """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value.sel(supplied, method=method, tolerance=tolerance, drop=drop)
 
@@ -290,7 +270,7 @@ def sel(
 
     distributed_indexer = supplied.pop(dim)
     if indexer_is_scalar(distributed_indexer):
-        return sel_scalar(
+        return mpp_sel_scalar(
             mpi_context,
             value,
             dim,
@@ -337,7 +317,7 @@ def sel(
     return output
 
 
-def sel_scalar(
+def mpp_sel_scalar(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -374,7 +354,7 @@ def sel_scalar(
         Replicated selected slice.
     """
     if method is not None:
-        meta = get_mpi_meta(value)
+        meta = mpp_get_meta(value)
         if meta is None:
             return value.sel(
                 {dim: label, **other_indexers},
@@ -472,21 +452,7 @@ def sel_scalar(
                 error = exc
         mpi_context.raise_if_error(error, "distributed scalar selection", comm=dim_comm)
         result = dim_comm.bcast(result, root=owner)
-        remaining_dims = tuple(
-            d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
-        )
-        if remaining_dims:
-            set_mpi_meta(
-                result,
-                dim=remaining_dims,
-                global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
-                start={d: int(meta["starts"][d]) for d in remaining_dims},
-                stop={d: int(meta["stops"][d]) for d in remaining_dims},
-                chunk_info=prune_chunk_info(meta["chunk_info"], result),
-                cart=meta.get("cart")
-                if len(remaining_dims) == len(meta["dims"])
-                else None,
-            )
+        result = reattach_meta_after_collapse(result, meta, dim)
         return cast("xr.Dataset | xr.DataArray", result)
 
     result = None
@@ -502,7 +468,7 @@ def sel_scalar(
     except (KeyError, IndexError):
         pass
 
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     dim_comm = mpi_context.comm if meta is None else _dim_comm(mpi_context, meta, dim)
     found_ranks = dim_comm.allgather(found)
     owners = [rank for rank, state in enumerate(found_ranks) if state]
@@ -520,21 +486,7 @@ def sel_scalar(
         payload = payload.load()
     result = dim_comm.bcast(payload, root=owner)
     if meta is not None:
-        remaining_dims = tuple(
-            d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
-        )
-        if remaining_dims:
-            set_mpi_meta(
-                result,
-                dim=remaining_dims,
-                global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
-                start={d: int(meta["starts"][d]) for d in remaining_dims},
-                stop={d: int(meta["stops"][d]) for d in remaining_dims},
-                chunk_info=prune_chunk_info(meta["chunk_info"], result),
-                cart=meta.get("cart")
-                if len(remaining_dims) == len(meta["dims"])
-                else None,
-            )
+        result = reattach_meta_after_collapse(result, meta, dim)
     return cast("xr.Dataset | xr.DataArray", result)
 
 
@@ -555,7 +507,7 @@ def _repartition_singleton(
         new_start = sum(counts[: comm.rank])
         new_stop = new_start + counts[comm.rank]
         chunk_info = prune_chunk_info({str(old_dim): 1}, output)
-        set_mpi_meta(
+        mpp_update_meta(
             output,
             dim=old_dim,
             global_size=1,
@@ -618,7 +570,7 @@ def _repartition_singleton(
             str(other_dim),
             get_effective_chunk_size(int(other_length), None, comm.size),
         )
-    set_mpi_meta(
+    mpp_update_meta(
         local,
         dim=target,
         global_size=target_length,

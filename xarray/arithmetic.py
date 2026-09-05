@@ -13,17 +13,17 @@ from mpi4py import MPI
 
 import xarray as xr
 
-from .cartesian import dim_comm as _dim_comm
+from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import get_balanced_bounds, prune_chunk_info
-from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
-from .planning import _agree, comm_reduce, resolve_comm
+from .meta import _partitions_match, mpp_get_meta, mpp_update_meta, strip_mpi_meta
+from .planning import _agree, mpp_comm_reduce, mpp_resolve_comm
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
     from ..mpi.context import MPIContext
 
-from .mpp import Domain, mpp_get_neighbors, mpp_update_domains
+from .mpp import Domain, mpp_get_neighbor_pe, mpp_update_domains
 
 # Callables mpp_apply() recognizes and transparently redirects to their
 # dedicated implementation, so mpp_apply() is MPI-aware for them the same way
@@ -324,7 +324,7 @@ def mpp_align(
     ValueError
         If neither operand is distributed and ``dim`` is omitted.
     """
-    from .io import repartition
+    from .io import mpp_repartition
 
     left_meta = _operand_meta(left)
     right_meta = _operand_meta(right)
@@ -336,14 +336,14 @@ def mpp_align(
         full_left = _gather_full(mpi_context, left, left_meta)
         full_right = _gather_full(mpi_context, right, right_meta)
         return (
-            repartition(
+            mpp_repartition(
                 mpi_context,
                 full_left,
                 target_dim,
                 chunk_info=chunk_info,
                 log_partitions=log_partitions,
             ),
-            repartition(
+            mpp_repartition(
                 mpi_context,
                 full_right,
                 target_dim,
@@ -378,10 +378,10 @@ def mpp_align(
             ) from exc
 
     return (
-        repartition(
+        mpp_repartition(
             mpi_context, left, dim, chunk_info=chunk_info, log_partitions=log_partitions
         ),
-        repartition(
+        mpp_repartition(
             mpi_context,
             right,
             dim,
@@ -550,7 +550,7 @@ def _shuffle_by_position(
         global_size[dim] = new_length
         start[dim] = new_start
         stop[dim] = new_stop
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=all_dims,
             global_size=global_size,
@@ -560,7 +560,7 @@ def _shuffle_by_position(
             cart=meta.get("cart"),
         )
     else:
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=dim,
             global_size=new_length,
@@ -621,7 +621,7 @@ def mpp_reindex(
     if not indexers:
         raise ValueError("requires at least one indexer")
 
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value.reindex(
             indexers, method=method, tolerance=tolerance, fill_value=fill_value
@@ -634,7 +634,7 @@ def mpp_reindex(
         result = strip_mpi_meta(value).reindex(
             indexers, method=method, tolerance=tolerance, fill_value=fill_value
         )
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=meta["dims"],
             global_size=meta["global_sizes"],
@@ -722,7 +722,7 @@ def mpp_sortby(
     NotImplementedError
         If the sort key(s) together vary along more than one active partition dimension under a multi-dimensional (Cartesian) partition, or a key is not one-dimensional along the partition dimension it varies along.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value.sortby(by, ascending=ascending)
 
@@ -742,7 +742,7 @@ def mpp_sortby(
 
     if not touched:
         result = strip_mpi_meta(value).sortby(by, ascending=ascending)
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=meta["dims"],
             global_size=meta["global_sizes"],
@@ -805,7 +805,7 @@ def mpp_sortby(
 def _operand_meta(operand: Any) -> dict[str, Any] | None:
     """Return ``operand``'s MPI distribution metadata, if any."""
     if isinstance(operand, (xr.Dataset, xr.DataArray)):
-        return get_mpi_meta(operand)
+        return mpp_get_meta(operand)
     return None
 
 
@@ -824,7 +824,7 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
         The tagged result object if it is an xarray dataset or dataarray, otherwise returned unmodified.
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=meta["dims"],
             global_size=meta["global_sizes"],
@@ -836,7 +836,7 @@ def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
     return result
 
 
-def check_operands_distribution(
+def mpp_check_operands_distribution(
     mpi_context: MPIContext, operands: Iterable[Any]
 ) -> tuple[dict[str, Any] | None, Any]:
     """Return the mpi_meta to attach to a multi-operand call's result.
@@ -1016,7 +1016,7 @@ def _apply_generic(
     kwargs: dict[str, Any],
 ) -> Any:
     """Run the shared partition-preserving callable path."""
-    meta, reference = check_operands_distribution(
+    meta, reference = mpp_check_operands_distribution(
         mpi_context, (*args, *kwargs.values())
     )
 
@@ -1075,7 +1075,7 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
     TypeError
         If the dtype involved has no MPI reduction datatype, when the distributed dimension is contracted.
     """
-    meta, _reference = check_operands_distribution(mpi_context, (left, right))
+    meta, _reference = mpp_check_operands_distribution(mpi_context, (left, right))
     if meta is None:
         return _apply_generic(mpi_context, operator.matmul, (left, right), {})
 
@@ -1111,12 +1111,12 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
     _agree(mpi_context, ("matmul", str(dim), int(meta["global_sizes"][dim])))
 
     partial = operator.matmul(left, right)
-    total = comm_reduce(
+    total = mpp_comm_reduce(
         mpi_context,
         partial,
         MPI.SUM,
         phase="MPI xarray distributed matrix multiplication",
-        comm=resolve_comm(mpi_context, meta, (dim,)),
+        comm=mpp_resolve_comm(mpi_context, meta, (dim,)),
     )
     return strip_mpi_meta(total)
 
@@ -1143,7 +1143,9 @@ def mpp_halo_exchange(
     before, after : int
         Number of elements requested from the neighbor below/above along ``dim``.
     periodic : bool, optional
-        Wrap the neighbor lookup at the global boundary instead of leaving that side unpadded -- rank 0's "left" neighbor becomes the last rank and vice versa (and symmetrically on the right), mirroring how FMS/``mpp_domains`` treats periodicity purely as a boundary condition on which rank a *bounded* halo exchange talks to (``cyclic``/``x_cyclic_offset``), not as a general block-move primitive.
+        Wrap the neighbor lookup at the global boundary instead of
+        leaving that side unpadded (rank 0's lower neighbor becomes the
+        last rank, and symmetrically on the upper side).
     Returns
     -------
     tuple[xarray.Dataset or xarray.DataArray, int, int]
@@ -1178,7 +1180,7 @@ def mpp_halo_exchange(
 
     _agree(
         mpi_context,
-        ("halo_exchange", str(partition_dim), int(before), int(after), bool(periodic)),
+        ("mpp_halo_exchange", str(partition_dim), int(before), int(after), bool(periodic)),
     )
 
     if before == 0 and after == 0:
@@ -1199,13 +1201,13 @@ def mpp_halo_exchange(
     # Neighbor lookup along `partition_dim` -- single-dim linear rank -+ 1,
     # or (for a multi-dimensional Cartesian partition) the process grid's
     # face neighbor along this axis, which does not coincide with rank -+
-    # 1 in general. Delegated to mpi.mpp.mpp_get_neighbors, the same
+    # 1 in general. Delegated to mpi.mpp.mpp_get_neighbor_pe, the same
     # lookup FMS builds once into domain2D at mpp_define_domains time;
     # here it is one call against a Domain built from this op's own
     # .meta, keeping the logic in one place rather than duplicated at
     # every halo-exchange call site.
     domain = Domain.from_meta(meta, comm)
-    left_rank, right_rank = mpp_get_neighbors(domain, str(partition_dim), periodic=periodic)
+    left_rank, right_rank = mpp_get_neighbor_pe(domain, str(partition_dim), periodic=periodic)
 
     local_len = int(value.sizes[partition_dim])
     lengths = comm.allgather(local_len)
@@ -1232,7 +1234,7 @@ def mpp_halo_exchange(
             + f"{partition_dim!r}); if it instead leaves some "
             + "highest-numbered ranks with an empty slice, a halo op "
             + "spanning the active/empty boundary still raises this same "
-            + "error today (halo_exchange does not yet route around a "
+            + "error today (mpp_halo_exchange does not yet route around a "
             + "zero-length neighbor as if it were a global edge), so "
             + "option (1) or (2) is the only complete fix in that case. "
             + "See get_balanced_bounds's min_chunk parameter."
@@ -1374,7 +1376,7 @@ def mpp_coarsen_reduce(
     NotImplementedError
         If ``side="right"`` is requested on a distributed ``dim``.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         coarsened = value.coarsen(
             {dim: window}, boundary=boundary, side=side, coord_func=coord_func
@@ -1446,7 +1448,7 @@ def mpp_coarsen_reduce(
             padded = padded.isel({dim: slice(0, trim_len)})
         else:  # "pad": only the true global edge ever needs a synthetic
             # (non-neighbor-sourced) pad -- every interior boundary block
-            # already got real data from halo_exchange above.
+            # already got real data from mpp_halo_exchange above.
             local_boundary = "pad"
 
     coarsened = getattr(
@@ -1478,7 +1480,7 @@ def mpp_coarsen_reduce(
     global_sizes[dim] = new_global_size
     starts[dim] = new_start
     stops[dim] = new_stop
-    set_mpi_meta(
+    mpp_update_meta(
         coarsened,
         dim=meta["dims"],
         global_size=global_sizes,

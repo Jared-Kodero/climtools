@@ -22,8 +22,8 @@ from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
-from .meta import get_mpi_meta, strip_export_attrs
-from .planning import resolve_comm
+from .meta import mpp_get_meta, strip_export_attrs
+from .planning import mpp_resolve_comm
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from ..mpi.context import MPIContext
 
-    # `.io` imports `append`/`to_netcdf_parallel`/`to_netcdf_serial` from this
+    # `.io` imports `append`/`mpp_to_netcdf_parallel`/`to_netcdf_serial` from this
     # module, so importing `mpi_partition_data` back from `.io` at module
     # scope would be circular. Call sites that need it at mpi_context import
     # locally.
@@ -211,7 +211,7 @@ def create_file(
         set_attrs(nc, schema["attrs"])
 
 
-def writer_comm(mpi_context: MPIContext, has_data: bool) -> MPI.Comm:
+def mpp_writer_comm(mpi_context: MPIContext, has_data: bool) -> MPI.Comm:
     """Create the communicator used for collective writes.
 
     Parameters
@@ -232,7 +232,7 @@ def writer_comm(mpi_context: MPIContext, has_data: bool) -> MPI.Comm:
     )
 
 
-def free_writer_comm(mpi_context: MPIContext, comm: MPI.Comm) -> None:
+def mpp_free_writer_comm(mpi_context: MPIContext, comm: MPI.Comm) -> None:
     """Free a writer communicator when required.
 
     Parameters
@@ -291,7 +291,24 @@ def open_in_parallel(
     return netCDF4.Dataset(path, mode="r+")
 
 
-def write_distributed(
+def mpp_close_writer(mpi_context: MPIContext, nc: netCDF4.Dataset | None, comm: MPI.Comm) -> None:
+    """Close, free, and barrier after a parallel NetCDF write.
+
+    Shared cleanup for :func:`mpp_write_distributed`/:func:`mpp_write_partitioned`
+    (previously duplicated identically in both): close the file if one was
+    opened, free the writer sub-communicator, then a full world barrier so
+    no rank downstream (a different communicator, a non-parallel reopen
+    for validation, ...) can run ahead of a writer rank still inside
+    ``nc.close()``. Every rank reaches this, including a COMM_NULL/no-data
+    rank that never opened a file at all.
+    """
+    if nc is not None:
+        nc.close()
+    mpp_free_writer_comm(mpi_context, comm)
+    mpi_context.comm.Barrier()
+
+
+def mpp_write_distributed(
     mpi_context: MPIContext,
     path: str,
     schema: Mapping[str, Any],
@@ -320,7 +337,7 @@ def write_distributed(
     has_data = all(stops[dim] > starts[dim] for dim in partition_dims)
     prewritten = set(schema.get("prewritten", ()))
 
-    comm = writer_comm(mpi_context, has_data)
+    comm = mpp_writer_comm(mpi_context, has_data)
     nc: netCDF4.Dataset | None = None
     try:
         if comm == MPI.COMM_NULL:
@@ -348,17 +365,10 @@ def write_distributed(
             with quiet_netcdf4_writes():
                 ncvar[index] = values
     finally:
-        if nc is not None:
-            nc.close()
-        free_writer_comm(mpi_context, comm)
-        # Every rank reaches this barrier -- including the COMM_NULL/no-data
-        # ranks that returned above -- so nothing downstream (a different
-        # communicator, a non-parallel reopen for validation, ...) can run
-        # ahead of a writer rank that is still inside nc.close().
-        mpi_context.comm.Barrier()
+        mpp_close_writer(mpi_context, nc, comm)
 
 
-def write_partitioned(
+def mpp_write_partitioned(
     mpi_context: MPIContext,
     path: str,
     schema: Mapping[str, Any],
@@ -387,8 +397,8 @@ def write_partitioned(
     # length get_chunks() gave this variable's partition axis (see
     # get_partition_chunk_size), or a rank's write straddles two HDF5
     # chunks -- see get_chunks()'s docstring for what that corrupts. This is
-    # the same alignment to_netcdf_parallel's already-distributed path gets
-    # for free from mpi_meta's own start/stop; write_partitioned computes it
+    # the same alignment mpp_to_netcdf_parallel's already-distributed path gets
+    # for free from mpi_meta's own start/stop; mpp_write_partitioned computes it
     # fresh here because rank 0 owns the whole array before this call and no
     # partition boundaries exist yet.
     chunk_size = int(
@@ -402,7 +412,7 @@ def write_partitioned(
     counts = np.array([stop - start for start, stop in bounds], dtype=np.int64)
     start, stop = bounds[mpi_context.comm.rank]
 
-    comm = writer_comm(mpi_context, stop > start)
+    comm = mpp_writer_comm(mpi_context, stop > start)
     nc: netCDF4.Dataset | None = None
     try:
         if comm != MPI.COMM_NULL:
@@ -450,7 +460,7 @@ def write_partitioned(
             # function's duration -- still holds it regardless. What this
             # loop actually avoids is the *old* design's redundant extra
             # copy of every variable sitting in root_data simultaneously
-            # (see to_netcdf_parallel's schema-construction step); it does
+            # (see mpp_to_netcdf_parallel's schema-construction step); it does
             # not, and cannot, undo the baseline cost of an eager source
             # already being fully resident before this function is called.
             send = None
@@ -468,16 +478,10 @@ def write_partitioned(
             with quiet_netcdf4_writes():
                 ncvar[index] = local
     finally:
-        if nc is not None:
-            nc.close()
-        free_writer_comm(mpi_context, comm)
-        # See the matching comment in write_distributed: guarantees every
-        # rank waits for every writer rank's close() before anything
-        # downstream reopens the file.
-        mpi_context.comm.Barrier()
+        mpp_close_writer(mpi_context, nc, comm)
 
 
-def to_netcdf_parallel(
+def mpp_to_netcdf_parallel(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray | None,
     path: str | PathLike[str],
@@ -543,7 +547,7 @@ def to_netcdf_parallel(
             if data.name is None:
                 raise ValueError("DataArray must have a name for NetCDF output.")
             # to_dataset() moves the array's attributes onto the variable and
-            # leaves Dataset.attrs empty. get_mpi_meta falls back to
+            # leaves Dataset.attrs empty. mpp_get_meta falls back to
             # variable-level metadata for exactly this reason, so the
             # distributed path is still selected here.
             local_ds = data.to_dataset()
@@ -555,7 +559,7 @@ def to_netcdf_parallel(
         error = exc
     mpi_context.raise_if_error(error, "parallel NetCDF input validation")
 
-    local_meta = get_mpi_meta(local_ds) if local_ds is not None else None
+    local_meta = mpp_get_meta(local_ds) if local_ds is not None else None
     distributed = local_meta is not None
 
     # The distributed and scatter paths post different collectives, so every
@@ -607,7 +611,7 @@ def to_netcdf_parallel(
                 dim=partition_dim if partition_dim is not None else "auto",
                 root=0,
             )
-            local_meta = get_mpi_meta(local_ds)
+            local_meta = mpp_get_meta(local_ds)
             distributed = local_meta is not None
 
     if distributed:
@@ -644,15 +648,15 @@ def to_netcdf_parallel(
         # chunks to honor below, since every rank sees the same `chunks`
         # argument and can decide this identically without communication.
         if chunks is None:
-            # Deferred import: `.io` imports `to_netcdf_parallel` from this
+            # Deferred import: `.io` imports `mpp_to_netcdf_parallel` from this
             # module at module scope, so `attach_save_chunks` can only be
             # reached here without a circular import. It mutates
             # local_ds.attrs[mpi_meta] in place via _assign_meta and returns
             # the same object, so its return value is intentionally unused.
-            from .io import attach_save_chunks
+            from .io import mpp_attach_save_chunks
 
-            attach_save_chunks(mpi_context, local_ds)
-            local_meta = get_mpi_meta(local_ds)
+            mpp_attach_save_chunks(mpi_context, local_ds)
+            local_meta = mpp_get_meta(local_ds)
             if local_meta is None:
                 raise AssertionError(
                     "attach_save_chunks unexpectedly cleared mpi_meta."
@@ -714,7 +718,7 @@ def to_netcdf_parallel(
             dim_comm = (
                 mpi_context.comm
                 if len(partition_dims_tuple) == 1
-                else resolve_comm(mpi_context, local_meta, (coord_dim,))
+                else mpp_resolve_comm(mpi_context, local_meta, (coord_dim,))
             )
             start = int(starts_map[coord_dim])
             stop = int(stops_map[coord_dim])
@@ -890,7 +894,7 @@ def to_netcdf_parallel(
                 partitioned = partition_dim in dims and name not in prewritten_names
 
                 if partitioned and not is_time_like(source):
-                    # The actual array is deferred to write_partitioned,
+                    # The actual array is deferred to mpp_write_partitioned,
                     # which extracts, encodes and scatters one variable at a
                     # time. Materializing every variable's full array here,
                     # before any writing starts, would hold all of them
@@ -906,7 +910,7 @@ def to_netcdf_parallel(
                     # timedelta branches) is not always knowable without
                     # actually running the encode, and getting it wrong here
                     # would create the netCDF variable with a dtype that
-                    # write_partitioned's later scatter wouldn't match.
+                    # mpp_write_partitioned's later scatter wouldn't match.
                     if source.dtype.kind in ("U", "S", "O"):
                         dtype: str | np.dtype[Any] = "str"
                     elif source.dtype.kind == "b":
@@ -987,9 +991,9 @@ def to_netcdf_parallel(
         if distributed:
             if local_ds is None or local_meta is None:
                 raise AssertionError("Distributed rank-local data are missing.")
-            write_distributed(mpi_context, output_path, schema, local_ds, local_meta)
+            mpp_write_distributed(mpi_context, output_path, schema, local_ds, local_meta)
         else:
-            write_partitioned(mpi_context, output_path, schema, local_ds)
+            mpp_write_partitioned(mpi_context, output_path, schema, local_ds)
     except BaseException:
         # Aborting without a diagnostic leaves the job log with nothing but
         # "MPI_ABORT was invoked", so the failure is reported first.
@@ -1468,9 +1472,9 @@ __all__ = [
     "createVariable",
     "dataarray_to_netcdf",
     "dataset_to_netcdf",
+    "mpp_to_netcdf_parallel",
+    "mpp_writer_comm",
     "nc_append",
     "resolve_unlimited_dim",
-    "to_netcdf_parallel",
     "to_netcdf_serial",
-    "writer_comm",
 ]

@@ -18,10 +18,9 @@ from ..mpi.context import MPIContext
 if TYPE_CHECKING:
     from .core import MPIXarray
 
-from .cartesian import compute_layout
+from .mpp import mpp_define_domains
 from .chunks import (
     compute_save_chunks,
-    get_balanced_bounds,
     get_chunk_bounds,
     get_chunk_info,
     get_effective_chunk_size,
@@ -30,16 +29,16 @@ from .chunks import (
 from .meta import (
     choose_partition_dim,
     delayed_local,
-    get_mpi_meta,
+    mpp_get_meta,
     localize_coord,
-    log_partition_report,
+    mpp_log_partition_report,
     resolve_sizes,
-    set_mpi_meta,
+    mpp_update_meta,
     set_save_chunks,
-    should_log_partitions,
+    mpp_should_log_partitions,
     strip_mpi_meta,
 )
-from .netcdf import nc_append, to_netcdf_parallel, to_netcdf_serial
+from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
 __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]
 
@@ -113,7 +112,7 @@ def _open_dataset_1d(
     data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
     data = data.isel({partition_dim: slice(start, stop)})
 
-    set_mpi_meta(
+    mpp_update_meta(
         data,
         dim=partition_dim,
         global_size=global_size,
@@ -121,8 +120,8 @@ def _open_dataset_1d(
         stop=stop,
         chunk_info=chunk_info,
     )
-    if should_log_partitions(mpi_context, log_partitions):
-        log_partition_report(
+    if mpp_should_log_partitions(mpi_context, log_partitions):
+        mpp_log_partition_report(
             mpi_context,
             data,
             partition_dim,
@@ -172,12 +171,8 @@ def _open_dataset_cartesian(
     # Every rank derives its own Cartesian coordinates and per-axis
     # bounds from `extents` and `comm.size` alone -- identical on
     # every rank, no further communication needed to agree on it.
-    grid_shape = compute_layout(extents, comm.size)
-    coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
-    bounds = {
-        d: get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
-        for axis, d in enumerate(dims)
-    }
+    domain = mpp_define_domains(mpi_context, dict(zip(dims, extents, strict=True)), dims)
+    bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
 
     # Synchronize before opening the dataset (mirrors the
     # single-dimension path's own barrier here).
@@ -191,21 +186,17 @@ def _open_dataset_cartesian(
         str(other_dim): get_effective_chunk_size(int(other_length), None, comm.size)
         for other_dim, other_length in data.sizes.items()
     }
-    set_mpi_meta(
+    mpp_update_meta(
         data,
         dim=dims,
         global_size=dict(zip(dims, extents, strict=True)),
         start={d: bounds[d][0] for d in dims},
         stop={d: bounds[d][1] for d in dims},
         chunk_info=chunk_info,
-        cart={
-            "grid_shape": grid_shape,
-            "coords": coords,
-            "periods": (False,) * len(dims),
-        },
+        cart=domain.cart,
     )
-    if should_log_partitions(mpi_context, log_partitions):
-        log_partition_report(
+    if mpp_should_log_partitions(mpi_context, log_partitions):
+        mpp_log_partition_report(
             mpi_context,
             data,
             dims,
@@ -213,19 +204,19 @@ def _open_dataset_cartesian(
             global_size=dict(zip(dims, extents, strict=True)),
             start={d: bounds[d][0] for d in dims},
             stop={d: bounds[d][1] for d in dims},
-            grid_shape=grid_shape,
-            coords=coords,
+            grid_shape=domain.cart["grid_shape"],
+            coords=domain.cart["coords"],
         )
     return data
 
 
-# mpi4py point-to-point tag for partition(); arbitrary but fixed so a
+# mpi4py point-to-point tag for mpp_partition(); arbitrary but fixed so a
 # stray message from unrelated code can never be mistaken for a piece
 # this call is expecting.
 _DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
 
 
-def partition(
+def mpp_partition(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray | None,
     dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
@@ -274,7 +265,7 @@ def partition(
         if is_root:
             if value is None:
                 raise ValueError(f"Rank {root} (root) must provide a value, not None.")
-            if get_mpi_meta(value) is not None:
+            if mpp_get_meta(value) is not None:
                 raise ValueError(
                     "Cannot partition an already distributed object. "
                     + "Reduce or gather its distributed dimension first."
@@ -288,6 +279,7 @@ def partition(
                 replicated_value = stripped
             elif multi_dim:
                 pieces = _partition_pieces_nd(
+                    mpi_context,
                     stripped,
                     cast("tuple[Hashable, ...]", requested_dims),
                     comm.size,
@@ -341,10 +333,10 @@ def partition(
     else:
         output = mpi_context.receive(source=root, tag=_DISTRIBUTE_TAG)
 
-    if should_log_partitions(mpi_context, log_partitions):
-        meta = get_mpi_meta(output)
+    if mpp_should_log_partitions(mpi_context, log_partitions):
+        meta = mpp_get_meta(output)
         if meta is not None and "cart" in meta:
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 output,
                 meta["dims"],
@@ -356,7 +348,7 @@ def partition(
                 coords=meta["cart"]["coords"],
             )
         elif meta is not None:
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 output,
                 meta["dim"],
@@ -372,7 +364,7 @@ def partition(
 def _as_partition_dims(
     dim: Hashable | Sequence[Hashable] | Literal["auto"],
 ) -> Literal["auto"] | tuple[Hashable, ...]:
-    """Normalize ``partition()``'s ``dim`` argument."""
+    """Normalize ``mpp_partition()``'s ``dim`` argument."""
     if dim == "auto":
         return "auto"
     if isinstance(dim, (list, tuple)):
@@ -416,7 +408,7 @@ def _partition_pieces_1d(
                 str(other_dim),
                 get_effective_chunk_size(int(other_length), None, comm_size),
             )
-        set_mpi_meta(
+        mpp_update_meta(
             piece,
             dim=resolved_dim,
             global_size=length,
@@ -429,6 +421,7 @@ def _partition_pieces_1d(
 
 
 def _partition_pieces_nd(
+    mpi_context: MPIContext,
     stripped: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
     comm_size: int,
@@ -438,15 +431,12 @@ def _partition_pieces_nd(
         if d not in stripped.dims:
             raise ValueError(f"Distribution dimension {d!r} does not exist.")
     extents = tuple(int(stripped.sizes[d]) for d in dims)
-    grid_shape = compute_layout(extents, comm_size)
+    sizes = dict(zip(dims, extents, strict=True))
 
     pieces = []
     for rank in range(comm_size):
-        coords = tuple(int(c) for c in np.unravel_index(rank, grid_shape))
-        bounds = {
-            d: get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
-            for axis, d in enumerate(dims)
-        }
+        domain = mpp_define_domains(mpi_context, sizes, dims, rank=rank)
+        bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
         piece = stripped.isel({d: slice(*bounds[d]) for d in dims})
         piece.attrs = dict(piece.attrs)
         if isinstance(piece, xr.Dataset):
@@ -456,18 +446,14 @@ def _partition_pieces_nd(
             str(other_dim): get_effective_chunk_size(int(other_length), None, comm_size)
             for other_dim, other_length in piece.sizes.items()
         }
-        set_mpi_meta(
+        mpp_update_meta(
             piece,
             dim=dims,
-            global_size=dict(zip(dims, extents, strict=True)),
+            global_size=sizes,
             start={d: bounds[d][0] for d in dims},
             stop={d: bounds[d][1] for d in dims},
             chunk_info=piece_info,
-            cart={
-                "grid_shape": grid_shape,
-                "coords": coords,
-                "periods": (False,) * len(dims),
-            },
+            cart=domain.cart,
         )
         pieces.append(piece)
     return pieces
@@ -492,7 +478,7 @@ def _normalize_create_dim(
     return (dims[axis_or_name],)
 
 
-def create_dataarray(
+def mpp_create_dataarray(
     mpi_context: MPIContext,
     fill: Callable[..., Any],
     dims: Sequence[Hashable],
@@ -542,7 +528,7 @@ def create_dataarray(
         used when the global size is smaller than the rank count. Set
         this to the widest halo width, ``rolling_reduce``/``coarsen_reduce``
         window, or ``ffill``/``bfill`` ``limit`` you plan to call on the
-        result, so :func:`~.arithmetic.halo_exchange` never raises its
+        result, so :func:`~.arithmetic.mpp_halo_exchange` never raises its
         "local partition shorter than the requested halo" ``ValueError``
         for that dimension regardless of rank count. See
         :func:`~.chunks.get_balanced_bounds`.
@@ -575,32 +561,14 @@ def create_dataarray(
         explicit_sizes = dict(zip(dims, shape, strict=True))
     resolved_sizes = resolve_sizes(dims, explicit_sizes, coords)
 
-    comm = mpi_context.comm
     extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
+    sizes = dict(zip(partition_dims, extents, strict=True))
 
-    cart: dict[str, Any] | None = None
-    if len(partition_dims) > 1:
-        grid_shape = compute_layout(extents, comm.size)
-        cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
-        bounds = {
-            d: get_balanced_bounds(
-                extents[axis],
-                cart_coords[axis],
-                grid_shape[axis],
-                min_chunk_map.get(d),
-            )
-            for axis, d in enumerate(partition_dims)
-        }
-        cart = {
-            "grid_shape": grid_shape,
-            "coords": cart_coords,
-            "periods": (False,) * len(partition_dims),
-        }
-    else:
-        start, stop = get_balanced_bounds(
-            extents[0], comm.rank, comm.size, min_chunk_map.get(partition_dims[0])
-        )
-        bounds = {partition_dims[0]: (start, stop)}
+    domain = mpp_define_domains(
+        mpi_context, sizes, partition_dims, min_partition_size=min_chunk_map
+    )
+    bounds = {d: (domain.starts[d], domain.stops[d]) for d in partition_dims}
+    cart = domain.cart
 
     local_shape = tuple(
         (bounds[name][1] - bounds[name][0])
@@ -624,7 +592,7 @@ def create_dataarray(
         local_data, dims=tuple(dims), coords=local_coords, name=name, attrs=attrs
     )
     chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
-    set_mpi_meta(
+    mpp_update_meta(
         da,
         dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
         global_size={d: int(resolved_sizes[d]) for d in partition_dims},
@@ -633,9 +601,9 @@ def create_dataarray(
         chunk_info=chunk_info,
         cart=cart,
     )
-    if should_log_partitions(mpi_context, log_partitions):
+    if mpp_should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 da,
                 partition_dims,
@@ -648,7 +616,7 @@ def create_dataarray(
             )
         else:
             d0 = partition_dims[0]
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 da,
                 d0,
@@ -660,7 +628,7 @@ def create_dataarray(
     return da
 
 
-def create_dataset(
+def mpp_create_dataset(
     mpi_context: MPIContext,
     data_vars: Mapping[
         Hashable,
@@ -733,32 +701,14 @@ def create_dataset(
             required_dims.update(var_dims)
     resolved_sizes = resolve_sizes(required_dims, sizes, coords)
 
-    comm = mpi_context.comm
     extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
+    sizes = dict(zip(partition_dims, extents, strict=True))
 
-    cart: dict[str, Any] | None = None
-    if len(partition_dims) > 1:
-        grid_shape = compute_layout(extents, comm.size)
-        cart_coords = tuple(int(c) for c in np.unravel_index(comm.rank, grid_shape))
-        bounds = {
-            d: get_balanced_bounds(
-                extents[axis],
-                cart_coords[axis],
-                grid_shape[axis],
-                min_chunk_map.get(d),
-            )
-            for axis, d in enumerate(partition_dims)
-        }
-        cart = {
-            "grid_shape": grid_shape,
-            "coords": cart_coords,
-            "periods": (False,) * len(partition_dims),
-        }
-    else:
-        start, stop = get_balanced_bounds(
-            extents[0], comm.rank, comm.size, min_chunk_map.get(partition_dims[0])
-        )
-        bounds = {partition_dims[0]: (start, stop)}
+    domain = mpp_define_domains(
+        mpi_context, sizes, partition_dims, min_partition_size=min_chunk_map
+    )
+    bounds = {d: (domain.starts[d], domain.stops[d]) for d in partition_dims}
+    cart = domain.cart
 
     dtype_map = dtype if isinstance(dtype, Mapping) else None
 
@@ -812,7 +762,7 @@ def create_dataset(
 
     ds = xr.Dataset(built_vars, coords=local_coords, attrs=attrs)
     chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
-    set_mpi_meta(
+    mpp_update_meta(
         ds,
         dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
         global_size={d: int(resolved_sizes[d]) for d in partition_dims},
@@ -821,9 +771,9 @@ def create_dataset(
         chunk_info=chunk_info,
         cart=cart,
     )
-    if should_log_partitions(mpi_context, log_partitions):
+    if mpp_should_log_partitions(mpi_context, log_partitions):
         if len(partition_dims) > 1:
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 ds,
                 partition_dims,
@@ -836,7 +786,7 @@ def create_dataset(
             )
         else:
             d0 = partition_dims[0]
-            log_partition_report(
+            mpp_log_partition_report(
                 mpi_context,
                 ds,
                 d0,
@@ -848,7 +798,7 @@ def create_dataset(
     return ds
 
 
-def repartition(
+def mpp_repartition(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | Literal["auto"] = "auto",
@@ -880,7 +830,7 @@ def repartition(
     ValueError
         If ``value`` is already distributed or ``dim`` is invalid.
     """
-    if get_mpi_meta(value) is not None:
+    if mpp_get_meta(value) is not None:
         raise ValueError(
             "Cannot repartition an already distributed object. "
             + "Reduce or gather its distributed dimension first."
@@ -919,11 +869,11 @@ def repartition(
             get_effective_chunk_size(int(other_length), None, mpi_context.comm.size),
         )
 
-    set_mpi_meta(
+    mpp_update_meta(
         output, dim=dim, global_size=length, start=start, stop=stop, chunk_info=info
     )
-    if should_log_partitions(mpi_context, log_partitions):
-        log_partition_report(
+    if mpp_should_log_partitions(mpi_context, log_partitions):
+        mpp_log_partition_report(
             mpi_context,
             output,
             dim,
@@ -936,7 +886,7 @@ def repartition(
     return output
 
 
-def attach_save_chunks(
+def mpp_attach_save_chunks(
     mpi_context: MPIContext, value: xr.Dataset | xr.DataArray
 ) -> xr.Dataset | xr.DataArray:
     """Attach write-time chunk metadata to a distributed object.
@@ -957,7 +907,7 @@ def attach_save_chunks(
     ValueError
         If required partition chunk metadata are missing.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         return value
 
@@ -1100,7 +1050,7 @@ def mpi_create_dataarray(
     if not isinstance(mpi_context, MPIContext):
         mpi_context = MPIContext(mpi_context)
 
-    data = create_dataarray(
+    data = mpp_create_dataarray(
         mpi_context,
         fill,
         dims,
@@ -1165,7 +1115,7 @@ def mpi_create_dataset(
     if not isinstance(mpi_context, MPIContext):
         mpi_context = MPIContext(mpi_context)
 
-    data = create_dataset(
+    data = mpp_create_dataset(
         mpi_context,
         data_vars,
         sizes,
@@ -1214,7 +1164,7 @@ def mpi_partition_data(
     if not isinstance(mpi_context, MPIContext):
         mpi_context = MPIContext(mpi_context)
 
-    data = partition(
+    data = mpp_partition(
         mpi_context,
         unwrap(value),
         dim,
@@ -1327,7 +1277,7 @@ def to_netcdf(
         if not isinstance(mpi_context, MPIContext):
             mpi_context = MPIContext(mpi_context)
 
-        mpi_meta = get_mpi_meta(data)
+        mpi_meta = mpp_get_meta(data)
         distributed = mpi_meta is not None
 
         # Ranks must agree on the write path. If one rank saw valid mpi_meta
@@ -1355,7 +1305,7 @@ def to_netcdf(
         elif mpi_context.comm.rank != 0:
             data = mpi_empty_dataset()
 
-        to_netcdf_parallel(
+        mpp_to_netcdf_parallel(
             mpi_context,
             data,
             target_path,

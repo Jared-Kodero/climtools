@@ -185,7 +185,7 @@ def run(fx: Fixtures) -> None:
     #    along "lat" while `dist` is partitioned along "time" is
     #    rank-local by construction (meta["dims"] doesn't contain "lat"),
     #    so it only ever exercises roll()'s trivial early-return branch
-    #    -- never the actual halo_exchange(periodic=True)-based cross-
+    #    -- never the actual mpp_halo_exchange(periodic=True)-based cross-
     #    rank shift roll() uses when the roll dimension IS the
     #    distributed one (confirmed directly from elementwise.py: the
     #    early return is `if meta is None or dim not in meta["dims"]`).
@@ -221,12 +221,12 @@ def run(fx: Fixtures) -> None:
             xr.testing.assert_allclose(result_time, expected_time, rtol=1e-6)
             record("roll", case_label, True)
         except ValueError as e:
-            # halo_exchange() correctly refuses a halo request wider than
+            # mpp_halo_exchange() correctly refuses a halo request wider than
             # some rank's own local length rather than silently returning
             # wrong data -- a genuine architectural limit of a single-hop
             # point-to-point exchange (this rank only ever talks to its
             # immediate neighbor, which itself only holds its own local
-            # share), not a defect in roll() or halo_exchange(). At this
+            # share), not a defect in roll() or mpp_halo_exchange(). At this
             # suite's usual rank counts, "near-half shift" on the small
             # (time=12) fixture is expected to land beyond what any single
             # rank locally holds -- recorded as a declared, expected

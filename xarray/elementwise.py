@@ -10,14 +10,14 @@ from mpi4py import MPI
 import xarray as xr
 
 from .arithmetic import (
-    check_operands_distribution,
+    mpp_check_operands_distribution,
     check_partition_preserved,
     mpp_halo_exchange,
     reattach_meta,
 )
-from .cartesian import dim_comm as _dim_comm
+from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import prune_chunk_info
-from .meta import get_mpi_meta, set_mpi_meta, strip_mpi_meta
+from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ def mpp_where(
         If ``drop=True`` is requested on a distributed object, or the operands are distributed over incompatible partitions (see :meth:`~.arithmetic.Arithmetic.apply`).
     """
     operands = (value, cond, other)
-    meta, reference = check_operands_distribution(mpi_context, operands)
+    meta, reference = mpp_check_operands_distribution(mpi_context, operands)
     if meta is not None and drop:
         raise ValueError(
             "drop=True is not supported on a distributed object "
@@ -110,7 +110,7 @@ def mpp_cumsum(
     xarray.Dataset or xarray.DataArray
         Cumulative sum with the same local length and ``.meta`` as ``value``.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
 
@@ -235,7 +235,7 @@ def mpp_ffill(
     xarray.Dataset or xarray.DataArray
         The forward-filled object, same shape and distribution as the input.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.ffill(dim, limit=limit)
 
@@ -276,7 +276,7 @@ def mpp_bfill(
     xarray.Dataset or xarray.DataArray
         The backward-filled object, same shape and distribution as the input.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.bfill(dim, limit=limit)
 
@@ -385,7 +385,7 @@ def mpp_interp(
     xarray.Dataset or xarray.DataArray
         Interpolated onto this rank's ``new_coord``, with ``.meta`` recomputed for the new length along ``dim`` (an allgather of each rank's own new local length, the same mechanism :func:`diff`/:func:`~.arithmetic.coarsen_reduce` use for their own length-changing case).
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.interp({dim: new_coord}, method=method, **kwargs)
 
@@ -411,7 +411,7 @@ def mpp_interp(
     global_sizes[dim] = new_global_size
     starts[dim] = new_start
     stops[dim] = new_stop
-    set_mpi_meta(
+    mpp_update_meta(
         result,
         dim=meta["dims"],
         global_size=global_sizes,
@@ -458,7 +458,7 @@ def mpp_median(
         with a genuinely empty (``start == stop``) slice instead of a
         redundant copy.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
 
@@ -521,7 +521,7 @@ def mpp_median(
         result = result.isel({empty_dim: slice(0, 0)})
         stop[empty_dim] = start[empty_dim]
 
-    set_mpi_meta(
+    mpp_update_meta(
         result,
         dim=remaining_dims,
         global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
@@ -563,9 +563,9 @@ def mpp_diff(
     Raises
     ------
     ValueError
-        If ``n`` is negative, ``label`` is not "upper"/"lower", or any rank's local length along ``dim`` is shorter than ``n`` (this last case is caught by :meth:`~.arithmetic.Arithmetic.halo_exchange` itself, which checks every rank's local length together via a synchronized ``allgather`` before raising, so the error is consistent and every rank raises together rather than some hanging).
+        If ``n`` is negative, ``label`` is not "upper"/"lower", or any rank's local length along ``dim`` is shorter than ``n`` (this last case is caught by :meth:`~.arithmetic.mpp_halo_exchange` itself, which checks every rank's local length together via a synchronized ``allgather`` before raising, so the error is consistent and every rank raises together rather than some hanging).
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.diff(dim, n=n, label=label)
     if n < 0:
@@ -593,7 +593,7 @@ def mpp_diff(
     global_sizes[dim] = new_global_size
     starts[dim] = new_start
     stops[dim] = new_stop
-    set_mpi_meta(
+    mpp_update_meta(
         diffed,
         dim=meta["dims"],
         global_size=global_sizes,
@@ -632,7 +632,7 @@ def mpp_shift(
     xarray.Dataset or xarray.DataArray
         The shifted object, same shape and distribution as the input.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
         return value.shift({dim: periods}, **kwargs)
@@ -674,7 +674,7 @@ def mpp_roll(
     xarray.Dataset or xarray.DataArray
         The rolled object, same shape and distribution as the input.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.roll({dim: shift}, roll_coords=False)
 
@@ -749,9 +749,9 @@ def mpp_differentiate(
     Raises
     ------
     ValueError
-        If any rank's local length along ``coord`` is shorter than 1 (see ``halo_exchange``'s own synchronized length check) or too short overall for ``edge_order`` (raised by xarray itself).
+        If any rank's local length along ``coord`` is shorter than 1 (see ``mpp_halo_exchange``'s own synchronized length check) or too short overall for ``edge_order`` (raised by xarray itself).
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None or coord not in meta["dims"]:
         return value.differentiate(
             coord, edge_order=edge_order, datetime_unit=datetime_unit
@@ -760,16 +760,16 @@ def mpp_differentiate(
     padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, coord, before=1, after=1
     )
-    # dask's gradient (unlike every other halo_exchange consumer -- shift,
+    # dask's gradient (unlike every other mpp_halo_exchange consumer -- shift,
     # diff, rolling_reduce, coarsen_reduce, ffill/bfill) requires every
     # individual chunk along the differentiated axis, not just the total
-    # local length, to exceed edge_order + 1. halo_exchange's padding
+    # local length, to exceed edge_order + 1. mpp_halo_exchange's padding
     # arrives as its own separate, unconsolidated 1-element chunk (e.g.
     # local shape 125000 pads to chunks (125000, 1), not one (125002,)
     # chunk), which is too small on its own regardless of how large the
     # rank's real local data is. Consolidating to a single chunk here
-    # only touches this local, already-fully-materialized-by-halo_exchange
-    # piece -- it does not change halo_exchange's own chunking for any of
+    # only touches this local, already-fully-materialized-by-mpp_halo_exchange
+    # piece -- it does not change mpp_halo_exchange's own chunking for any of
     # its other, unaffected callers.
     if padded.chunks:
         padded = padded.chunk({coord: -1})

@@ -41,13 +41,13 @@ def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
     RESULTS.append((op, case, ok, msg))
 
 
-#: Substring of the ValueError halo_exchange() raises when some rank's
+#: Substring of the ValueError mpp_halo_exchange() raises when some rank's
 #: local partition along the requested dimension is shorter than the
 #: before/after halo width being asked of it (see
-#: climtools.xarray.arithmetic.halo_exchange's docstring). Every
+#: climtools.xarray.arithmetic.mpp_halo_exchange's docstring). Every
 #: halo-based op -- rolling_reduce, coarsen_reduce, diff, shift,
 #: differentiate, ffill, bfill, roll, ... -- funnels through the same
-#: halo_exchange() and so can hit this identical, deliberate refusal
+#: mpp_halo_exchange() and so can hit this identical, deliberate refusal
 #: whenever a fixture's uneven/undersized partition (see UNEVEN_GLOBAL
 #: above) meets a large enough halo width at a given rank count; it is
 #: not a bug in the op itself. `is_declared_halo_refusal` is the single
@@ -59,7 +59,7 @@ _DECLARED_HALO_REFUSAL = "shorter than the requested halo"
 
 
 def is_declared_halo_refusal(exc: Exception) -> bool:
-    """True if `exc` is halo_exchange()'s declared undersized-partition
+    """True if `exc` is mpp_halo_exchange()'s declared undersized-partition
     ValueError rather than a genuine, unexpected failure."""
     return isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
 

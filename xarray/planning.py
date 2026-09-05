@@ -16,7 +16,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .mpp import mpp_reduce
+from .mpp import _mpp_reduce
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
 from .common import (
@@ -27,7 +27,7 @@ from .common import (
     op_name,
     partial_dtype,
 )
-from .meta import choose_partition_dim, set_mpi_meta, strip_mpi_meta
+from .meta import choose_partition_dim, mpp_update_meta, strip_mpi_meta
 
 
 def normalize_dim(
@@ -146,7 +146,7 @@ def finish_local_reduction(
     dims = tuple(dim for dim in old_meta["dims"] if dim in result.dims)
     if not dims:
         return strip_mpi_meta(result)
-    set_mpi_meta(
+    mpp_update_meta(
         result,
         dim=dims,
         global_size={dim: int(old_meta["global_sizes"][dim]) for dim in dims},
@@ -170,7 +170,7 @@ def _agree(mpi_context: MPIContext, signature: tuple[Any, ...]) -> None:
     )
 
 
-def reduction_plan(
+def mpp_reduction_plan(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dims: tuple[Hashable, ...],
@@ -300,7 +300,7 @@ def reduction_plan(
     return plan
 
 
-def resolve_comm(
+def mpp_resolve_comm(
     mpi_context: MPIContext,
     meta: Mapping[str, Any] | None,
     comm_axes: Iterable[Hashable],
@@ -347,7 +347,7 @@ def guarded(function: Any) -> tuple[Any, BaseException | None]:
         return None, exc
 
 
-def comm_reduce(
+def mpp_comm_reduce(
     mpi_context: MPIContext,
     value: xr.DataArray | None,
     op: MPI.Op,
@@ -417,7 +417,7 @@ def comm_reduce(
     if send is None or value is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
+    recv = _mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
     result = value.copy(data=recv)
     if replica_count != 1 and op == MPI.SUM:
         # Every one of the replica_count duplicate copies contributed to
@@ -434,7 +434,7 @@ def comm_reduce(
     return result
 
 
-def count_valid_values(
+def mpp_count_valid_values(
     mpi_context: MPIContext,
     value: xr.DataArray,
     dims: tuple[Hashable, ...],
@@ -467,7 +467,7 @@ def count_valid_values(
         count = value.count(dim=dims, keep_attrs=False)
     except BaseException as exc:
         error = exc
-    return comm_reduce(
+    return mpp_comm_reduce(
         mpi_context,
         count,
         MPI.SUM,
@@ -525,7 +525,7 @@ def repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
     )
 
 
-def finish(
+def mpp_finish(
     mpi_context: MPIContext,
     result: xr.Dataset | xr.DataArray,
     *,
@@ -576,7 +576,7 @@ def finish(
         # first place). Every rank already owns a valid, unmoved,
         # contiguous slice along whatever survived, so reattach
         # metadata for that surviving subset directly instead of
-        # scattering through repartition() below. The Cartesian
+        # scattering through mpp_repartition() below. The Cartesian
         # topology descriptor is only carried forward when every one
         # of its axes survived unchanged; otherwise a fresh, smaller
         # topology (for just the surviving axes) is built lazily, on
@@ -610,13 +610,13 @@ def finish(
             # already-computed values are correct on every rank, so no
             # extra communication is needed to arrive at this, only to
             # discard the now-redundant copies' claim to ownership.
-            comm = resolve_comm(mpi_context, old_meta, reduced_dims)
+            comm = mpp_resolve_comm(mpi_context, old_meta, reduced_dims)
             if comm.rank != 0:
                 empty_dim = remaining_dims[0]
                 result = result.isel({empty_dim: slice(0, 0)})
                 stop[empty_dim] = start[empty_dim]
 
-        set_mpi_meta(
+        mpp_update_meta(
             result,
             dim=remaining_dims,
             global_size={
@@ -654,6 +654,6 @@ def finish(
     chunk_info = (
         prune_chunk_info(old_meta["chunk_info"], result) if old_meta is not None else {}
     )
-    from .io import repartition
+    from .io import mpp_repartition
 
-    return repartition(mpi_context, result, target, chunk_info=chunk_info)
+    return mpp_repartition(mpi_context, result, target, chunk_info=chunk_info)

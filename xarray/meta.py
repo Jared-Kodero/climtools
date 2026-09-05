@@ -31,7 +31,7 @@ _INTERNAL_ATTRS = frozenset({MPI_META, PARTITIONED_ATTR})
 # The subset of a partition's metadata that decides whether two partitions
 # describe the same rank-local ownership. chunk_info and save_chunks are
 # deliberately excluded: they record how the split/write was computed for
-# the benefit of a later repartition(..., chunk_info=...) or a NetCDF
+# the benefit of a later mpp_repartition(..., chunk_info=...) or a NetCDF
 # write, not the ownership itself, so two partitions with different (or
 # absent) chunk_info/save_chunks but identical dims/global_sizes/starts/stops
 # still own the exact same data and are still equal.
@@ -134,7 +134,7 @@ def _validate_mpi_meta(
     return cast("dict[str, Any]", canonical)
 
 
-def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
+def mpp_get_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     """Return validated MPI distribution metadata.
 
     Parameters
@@ -170,7 +170,7 @@ def get_mpi_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
     return _validate_mpi_meta(value, reference)
 
 
-def assign_mpi_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
+def mpp_set_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
     """Attach an already-built ``meta`` dict to ``value`` and its variables.
 
     Parameters
@@ -217,7 +217,7 @@ def _as_dim_map(
     return {dims[0]: int(cast("int", value))}
 
 
-def set_mpi_meta(
+def mpp_update_meta(
     value: xr.Dataset | xr.DataArray,
     *,
     dim: Hashable | Sequence[Hashable],
@@ -268,7 +268,7 @@ def set_mpi_meta(
     }
     if cart is not None:
         meta["cart"] = dict(cart)
-    assign_mpi_meta(value, meta)
+    mpp_set_meta(value, meta)
 
 
 def set_save_chunks(
@@ -279,7 +279,7 @@ def set_save_chunks(
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
-        Rank-local xarray object that already carries valid MPI distribution metadata (see :func:`get_mpi_meta`).
+        Rank-local xarray object that already carries valid MPI distribution metadata (see :func:`mpp_get_meta`).
     save_chunks : mapping
         Mapping from variable name to save_chunk shape.
     Raises
@@ -287,7 +287,7 @@ def set_save_chunks(
     ValueError
         If ``value`` carries no valid MPI distribution metadata to attach ``save_chunks`` to.
     """
-    meta = get_mpi_meta(value)
+    meta = mpp_get_meta(value)
     if meta is None:
         raise ValueError("value carries no MPI distribution metadata")
     updated = dict(meta)
@@ -295,7 +295,55 @@ def set_save_chunks(
         str(name): tuple(int(length) for length in shape)
         for name, shape in save_chunks.items()
     }
-    assign_mpi_meta(value, updated)
+    mpp_set_meta(value, updated)
+
+
+def reattach_meta_after_collapse(
+    result: xr.Dataset | xr.DataArray, meta: Mapping[str, Any], dim: str
+) -> xr.Dataset | xr.DataArray:
+    """Carry forward metadata for the dims that survive ``dim`` collapsing away.
+
+    Shared by ops that resolve one global label along ``dim`` and
+    replicate the answer to every rank (`mpp_sel_scalar`, `mpp_isel_scalar`,
+    `isel`'s singleton-repartition case). ``dim`` itself gets no
+    replacement value; other active partition dimensions carry over
+    unchanged.
+
+    Parameters
+    ----------
+    result : xr.Dataset | xr.DataArray
+        Already-replicated result, with ``dim`` no longer a dimension.
+    meta : Mapping[str, Any]
+        Pre-collapse distribution metadata.
+    dim : str
+        The dimension that collapsed away.
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        ``result`` with metadata reattached for any surviving partition
+        dimension, or unchanged if none survive.
+    """
+    from .chunks import prune_chunk_info
+
+    remaining_dims = tuple(
+        d for d in meta["dims"] if d != dim and d in getattr(result, "dims", ())
+    )
+    if not remaining_dims:
+        return result
+    mpp_update_meta(
+        result,
+        dim=remaining_dims,
+        global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
+        start={d: int(meta["starts"][d]) for d in remaining_dims},
+        stop={d: int(meta["stops"][d]) for d in remaining_dims},
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+        # `dim` collapsed away and is excluded from `remaining_dims`, so
+        # it can never cover every axis a Cartesian "cart" descriptor
+        # needs; a fresh, smaller topology is built lazily on demand
+        # instead (see `mpp_finish`'s identical handling for a reduction).
+        cart=None,
+    )
+    return result
 
 
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
@@ -356,27 +404,8 @@ def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, s
     return _format_label(values[0]), _format_label(values[-1])
 
 
-def format_bytes(count: float) -> str:
-    """Return a compact binary size label.
-
-    Parameters
-    ----------
-    count : float
-        Byte count.
-    Returns
-    -------
-    str
-        Human-readable binary size label.
-    """
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if count < 1024.0 or unit == "TiB":
-            return f"{count:.0f}{unit}" if unit == "B" else f"{count:.1f}{unit}"
-        count /= 1024.0
-    return f"{count:.1f}TiB"
-
-
-def should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
-    """Collectively resolve whether to call :func:`log_partition_report`.
+def mpp_should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
+    """Collectively resolve whether to call :func:`mpp_log_partition_report`.
 
     Parameters
     ----------
@@ -387,12 +416,12 @@ def should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool
     Returns
     -------
     bool
-        Identical on every rank: whether to call :func:`log_partition_report`.
+        Identical on every rank: whether to call :func:`mpp_log_partition_report`.
     """
     return bool(mpi_context.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
 
-def log_partition_report(
+def mpp_log_partition_report(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
     dim: Hashable | tuple[Hashable, ...],
@@ -731,45 +760,3 @@ def choose_partition_dim(
 
     return dim
 
-
-def choose_partition_dims(
-    sizes: Mapping[Hashable, int],
-    ndims: int,
-    mpi_size: int,
-    *,
-    exclude: Iterable[Hashable] = (),
-    rank: int | None = None,
-) -> tuple[Hashable, ...]:
-    """Select ``ndims`` partition dimensions automatically.
-
-    Parameters
-    ----------
-    sizes : mapping
-        Dimension name to global length.
-    ndims : int
-        Number of partition dimensions to choose.
-    mpi_size : int
-        Number of ranks the data will be spread over.
-    exclude : iterable of hashable, optional
-        Dimensions that must not be chosen.
-    rank : int, optional
-        Forwarded to :func:`choose_partition_dim`.
-    Returns
-    -------
-    tuple of hashable
-        Chosen dimensions, longest first (ties broken by declaration order).
-
-    Raises
-    ------
-    ValueError
-        If ``ndims`` is less than 1 or exceeds the number of available dimensions.
-    """
-    if ndims < 1:
-        raise ValueError(f"ndims must be at least 1; got {ndims}.")
-    blocked = set(exclude)
-    chosen: list[Hashable] = []
-    for _ in range(ndims):
-        dim = choose_partition_dim(sizes, mpi_size, exclude=blocked, rank=rank)
-        chosen.append(dim)
-        blocked.add(dim)
-    return tuple(chosen)

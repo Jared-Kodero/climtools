@@ -255,19 +255,26 @@ def get_cartesian_topology(
         This rank's (cached) view of the process grid.
     """
     dims = tuple(dims)
+    # Keyed by (dims, sizes), not dims alone: two calls sharing dimension
+    # *names* (e.g. both ("x", "y")) but different *sizes* -- two
+    # differently-shaped objects partitioned on the same communicator,
+    # not a hypothetical -- must not collide on a single cached
+    # topology; the second would silently inherit the first's bounds,
+    # computed for the wrong extents entirely.
+    cache_key = (dims, tuple(int(sizes[d]) for d in dims))
     cache = comm.Get_attr(_TOPOLOGY_KEYVAL)
     if cache is None:
         cache = {}
         comm.Set_attr(_TOPOLOGY_KEYVAL, cache)
-    cached = cache.get(dims)
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
     topology = build_cartesian_topology(comm, dims, sizes)
-    cache[dims] = topology
+    cache[cache_key] = topology
     return topology
 
 
-def dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
+def mpp_dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
     """Return the communicator whose ranks vary along ``dim`` alone.
 
     Parameters
@@ -275,7 +282,7 @@ def dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm
     mpi_context : MPIContext
         Runtime whose communicator this resolves against.
     meta : mapping
-        Distribution metadata (as returned by :func:`~.meta.get_mpi_meta`) of the object being operated on.
+        Distribution metadata (as returned by :func:`~.meta.mpp_get_meta`) of the object being operated on.
     dim : str
         The single partition dimension to resolve a communicator for.
     Returns
