@@ -128,7 +128,7 @@ class MPIGroupBy:
 
     Returned by :meth:`MPIXarray.groupby`; call one of the reduction
     methods below to compute the grouped reduction via the internal
-    ``groupby_reduce`` engine dispatch.
+    ``mpp_groupby_reduce`` engine dispatch.
 
     Parameters
     ----------
@@ -158,10 +158,10 @@ class MPIGroupBy:
     ) -> MPIXarray:
         """Dispatch a grouped reduction through the parent wrapper."""
         from .core import finalize
-        from .groupby import groupby_reduce
+        from .groupby import mpp_groupby_reduce
 
         return finalize(
-            groupby_reduce(
+            mpp_groupby_reduce(
                 self._parent._runtime,
                 self._parent._prepare(),
                 self._dim,
@@ -310,7 +310,7 @@ class MPIResample:
 
     Returned by :meth:`MPIXarray.resample`; call one of the reduction
     methods below to compute the resampled reduction via the internal
-    ``resample_reduce`` engine dispatch.
+    ``mpp_resample_reduce`` engine dispatch.
 
     Parameters
     ----------
@@ -338,10 +338,10 @@ class MPIResample:
     ) -> MPIXarray:
         """Dispatch a resampled reduction through the parent wrapper."""
         from .core import finalize
-        from .groupby import resample_reduce
+        from .groupby import mpp_resample_reduce
 
         return finalize(
-            resample_reduce(
+            mpp_resample_reduce(
                 self._parent._runtime,
                 self._parent._prepare(),
                 self._dim,

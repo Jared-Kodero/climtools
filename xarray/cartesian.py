@@ -50,6 +50,20 @@ def compute_layout(extents: Sequence[int], nranks: int) -> tuple[int, ...]:
     if nranks <= 0:
         raise ValueError(f"nranks must be positive; got {nranks}.")
 
+    # The 2D case is the only one climtools' own Cartesian partitioning
+    # ever actually poses (every mpi_open_dataset/mpi_create_dataset
+    # call in this codebase partitions exactly two dimensions, e.g.
+    # ("lat", "lon")) -- use FMS's own mpp_define_layout2D algorithm for
+    # it directly, rather than the general N-dimensional heuristic below,
+    # which solves a harder problem than the one ever actually asked of
+    # it here. That heuristic is kept only as a fallback for a
+    # hypothetical 1- or 3+-dimensional partition, a case this codebase
+    # does not exercise anywhere today.
+    if len(extents) == 2:
+        from .mpp import mpp_define_layout
+
+        return mpp_define_layout(extents[0], extents[1], nranks)
+
     ndims = len(extents)
     shape = [1] * ndims
 

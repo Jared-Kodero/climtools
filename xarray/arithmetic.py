@@ -14,7 +14,6 @@ from mpi4py import MPI
 import xarray as xr
 
 from .cartesian import dim_comm as _dim_comm
-from .cartesian import get_cartesian_topology
 from .chunks import get_balanced_bounds, prune_chunk_info
 from .meta import _partitions_match, get_mpi_meta, set_mpi_meta, strip_mpi_meta
 from .planning import _agree, comm_reduce, resolve_comm
@@ -24,10 +23,12 @@ if TYPE_CHECKING:
 
     from ..mpi.context import MPIContext
 
-# Callables apply() recognizes and transparently redirects to their
-# dedicated implementation, so apply() is MPI-aware for them the same way
-# evaluate() is: apply(operator.matmul, a, b) computes the same correct,
-# MPI-reduced result as evaluate("a @ b", a=a, b=b) and matmul(a, b),
+from .mpp import Domain, mpp_get_neighbors, mpp_update_domains
+
+# Callables mpp_apply() recognizes and transparently redirects to their
+# dedicated implementation, so mpp_apply() is MPI-aware for them the same way
+# mpp_evaluate() is: mpp_apply(operator.matmul, a, b) computes the same correct,
+# MPI-reduced result as mpp_evaluate("a @ b", a=a, b=b) and mpp_matmul(a, b),
 # instead of running the plain rank-local matmul and failing the post-call
 # partition check whenever the distributed dimension gets contracted away.
 _MATMUL_CALLABLES: frozenset[Callable[..., Any]] = frozenset(
@@ -36,7 +37,7 @@ _MATMUL_CALLABLES: frozenset[Callable[..., Any]] = frozenset(
 # ast.MatMult ('@') is deliberately absent: whether matrix multiplication is
 # rank-local depends on which dimension gets contracted, so it is routed to
 # the dedicated Arithmetic.matmul() implementation in _eval_ast_node()
-# instead of the generic apply(operator.matmul, ...) table below.
+# instead of the generic mpp_apply(operator.matmul, ...) table below.
 _AST_BINARY_OPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -135,124 +136,95 @@ def _exchange_halo_blocks(
     before: int,
     after: int,
     *,
-    comm: MPI.Comm,
-    local_len: int,
+    domain: Domain,
     left_rank: int | None,
     right_rank: int | None,
 ) -> tuple[xr.Dataset | xr.DataArray | None, xr.Dataset | xr.DataArray | None]:
-    """Exchange boundary slabs with adjacent ranks using nonblocking MPI buffers."""
+    """Exchange boundary slabs with adjacent ranks.
+
+    Thin xarray-facing wrapper: extracts every variable that varies
+    along ``partition_dim`` into a plain NumPy array, delegates the
+    actual point-to-point exchange to :func:`~.mpi.mpp.mpp_update_domains`
+    (one batched group update covering every such variable at once, not
+    one call per variable), and reconstructs xarray objects -- labels,
+    dims, attrs -- from what comes back. climtools' communication layer
+    lives entirely in ``mpi.mpp``; this function's only job is the
+    xarray-object <-> plain-array translation on either side of it.
+    """
     haloed = _haloed_variable_names(value, partition_dim)
 
-    def _local_array(name: Hashable) -> np.ndarray:
-        """Return a contiguous local array for one variable."""
+    def _local_array(name: Hashable) -> xr.Variable:
         if isinstance(value, xr.Dataset):
             return value[name].variable
         if name == value.name:
             return value.variable
         return value.coords[name].variable
 
-    def _mpi_buffer_view(arr: np.ndarray) -> np.ndarray:
-        """View ``arr`` as a dtype the raw MPI buffer protocol accepts."""
-        return arr.view(np.int64) if arr.dtype.kind in "mM" else arr
+    # mpp_update_domains exchanges every field along the same `axis`, but
+    # different variables can carry `partition_dim` at different
+    # positions (e.g. "pr" is (time, lat, lon) -> axis 1 for "lat", while
+    # "slmsk" is (lat, lon) -> axis 0). Normalize every field to axis 0
+    # with a view (moveaxis, no copy) before the batched call, and move
+    # back after -- cheaper and simpler than threading a per-field axis
+    # through the communication kernel itself.
+    axes = {name: _local_array(name).dims.index(partition_dim) for name in haloed}
+    fields = {
+        name: np.moveaxis(np.asarray(_local_array(name).values), axes[name], 0)
+        for name in haloed
+    }
 
-    # This rank's own boundary slabs to send: the tail (size `before`) goes
-    # to right_rank, who will use it as their own "before" padding; the
-    # head (size `after`) goes to left_rank, who will use it as their own
-    # "after" padding -- symmetric with what this rank expects back below.
-    #
-    # Guarded on before>0/after>0, matching the receive side's guard
-    # exactly (not just on left_rank/right_rank being non-None): every
-    # rank agrees on the same before/after (see _agree() in the caller),
-    # so before==0 means *no* rank anywhere posts a recv_before this
-    # call. An unconditional send here would still fire a zero-byte
-    # Isend with no matching Irecv anywhere in this call -- MPI does not
-    # require a receive to exist for a send to "complete" locally, so
-    # that stray message is left unmatched and queued for the next
-    # message from the same (source, tag). The very next call that
-    # *does* request a halo on this axis then has its own legitimate
-    # Irecv silently satisfied by that old, empty, unrelated message
-    # instead of the new data -- a real cross-call corruption bug,
-    # confirmed by reproduction: a `before=0` or `after=0` call
-    # immediately followed by one with a nonzero request on the same
-    # side reads back an uninitialized (`np.empty`) buffer, not the
-    # true neighbor data.
-    send_to_right: dict[Hashable, np.ndarray] = {}
-    send_to_left: dict[Hashable, np.ndarray] = {}
-    for name in haloed:
-        var = _local_array(name)
-        axis = var.dims.index(partition_dim)
-        if right_rank is not None and before > 0:
-            send_to_right[name] = _mpi_buffer_view(
-                np.ascontiguousarray(
-                    var.isel(
-                        {partition_dim: slice(local_len - before, local_len)}
-                    ).values
-                )
-            )
-        if left_rank is not None and after > 0:
-            send_to_left[name] = _mpi_buffer_view(
-                np.ascontiguousarray(var.isel({partition_dim: slice(0, after)}).values)
-            )
+    padded, left_pad, right_pad = mpp_update_domains(
+        fields,
+        domain,
+        str(partition_dim),
+        0,
+        before=before,
+        after=after,
+        left_rank=left_rank,
+        right_rank=right_rank,
+    )
 
-    recv_before: dict[Hashable, np.ndarray] = {}
-    recv_after: dict[Hashable, np.ndarray] = {}
-    recv_before_bufs: dict[Hashable, np.ndarray] = {}
-    recv_after_bufs: dict[Hashable, np.ndarray] = {}
-    if left_rank is not None and before > 0:
-        for name in haloed:
-            var = _local_array(name)
-            axis = var.dims.index(partition_dim)
-            shape = list(var.shape)
-            shape[axis] = before
-            recv_before[name] = np.empty(shape, dtype=var.dtype)
-            recv_before_bufs[name] = _mpi_buffer_view(recv_before[name])
-    if right_rank is not None and after > 0:
-        for name in haloed:
-            var = _local_array(name)
-            axis = var.dims.index(partition_dim)
-            shape = list(var.shape)
-            shape[axis] = after
-            recv_after[name] = np.empty(shape, dtype=var.dtype)
-            recv_after_bufs[name] = _mpi_buffer_view(recv_after[name])
+    def _received(name: Hashable, side: str) -> np.ndarray | None:
+        """This name's exchanged slab (moved back to its original axis), or None.
 
-    recv_reqs: list[MPI.Request] = [
-        comm.Irecv(buf, source=left_rank) for buf in recv_before_bufs.values()
-    ] + [comm.Irecv(buf, source=right_rank) for buf in recv_after_bufs.values()]
-    send_reqs: list[MPI.Request] = [
-        comm.Isend(arr, dest=right_rank) for arr in send_to_right.values()
-    ] + [comm.Isend(arr, dest=left_rank) for arr in send_to_left.values()]
+        ``padded[name]``'s layout is ``[before-block | local | after-block]``,
+        with either block absent (0-length) at an unpadded edge -- so the
+        after-block's offset is ``local_len + left_pad``, not
+        ``local_len + right_pad`` (the two pads need not match: one side
+        can be a global edge with pad 0 while the other genuinely
+        exchanges data).
+        """
+        pad = left_pad if side == "before" else right_pad
+        if pad == 0:
+            return None
+        local_len = fields[name].shape[0]
+        start = 0 if side == "before" else local_len + left_pad
+        return np.moveaxis(padded[name][start : start + pad], 0, axes[name])
 
-    MPI.Request.Waitall(recv_reqs)
-    MPI.Request.Waitall(send_reqs)
-
-    def _reconstruct(
-        received: dict[Hashable, np.ndarray],
-    ) -> xr.Dataset | xr.DataArray | None:
-        """Reconstruct an xarray object from exchanged arrays."""
-        if not received:
+    def _reconstruct(side: str) -> xr.Dataset | xr.DataArray | None:
+        """Reconstruct an xarray object from the exchanged arrays, or None if unpadded."""
+        if (left_pad if side == "before" else right_pad) == 0:
             return None
         if isinstance(value, xr.Dataset):
             pieces = {}
             for name, var in value.variables.items():
-                if name in received:
-                    pieces[name] = xr.Variable(
-                        var.dims, received[name], attrs=var.attrs
-                    )
-                else:
-                    pieces[name] = var
+                received = _received(name, side) if name in haloed else None
+                pieces[name] = (
+                    var if received is None else xr.Variable(var.dims, received, attrs=var.attrs)
+                )
             return xr.Dataset(pieces, attrs=value.attrs)
-        data_var = xr.Variable(value.dims, received[value.name], attrs=value.attrs)
+        data_var = xr.Variable(value.dims, _received(value.name, side), attrs=value.attrs)
         new_coords = {}
         for coord_name, coord in value.coords.items():
-            if coord_name in received:
-                new_coords[coord_name] = xr.Variable(
-                    coord.dims, received[coord_name], attrs=coord.attrs
-                )
-            else:
-                new_coords[coord_name] = coord.variable
+            received = _received(coord_name, side) if coord_name in haloed else None
+            new_coords[coord_name] = (
+                coord.variable
+                if received is None
+                else xr.Variable(coord.dims, received, attrs=coord.attrs)
+            )
         return xr.DataArray(data_var, coords=new_coords, name=value.name)
 
-    return _reconstruct(recv_before), _reconstruct(recv_after)
+    return _reconstruct("before"), _reconstruct("after")
 
 
 def _gather_full(
@@ -317,7 +289,7 @@ def _align_replicated(
     return reattach_meta(sliced, meta)
 
 
-def align(
+def mpp_align(
     mpi_context: MPIContext,
     left: xr.Dataset | xr.DataArray,
     right: xr.Dataset | xr.DataArray,
@@ -420,8 +392,8 @@ def align(
 
 
 #
-# reindex() and sortby() are xarray's own coordinate-label operations
-# (unlike align() above, which reconciles rank *ownership* rather than
+# mpp_reindex() and mpp_sortby() are xarray's own coordinate-label operations
+# (unlike mpp_align() above, which reconciles rank *ownership* rather than
 # labels) -- either can move an element to a different rank whenever the
 # partition dimension itself is reindexed/reordered. Routing follows the
 # same "local unless communication is structurally required" rule as
@@ -599,7 +571,7 @@ def _shuffle_by_position(
     return result
 
 
-def reindex(
+def mpp_reindex(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     indexers: Mapping[Hashable, Any] | None = None,
@@ -715,7 +687,7 @@ def reindex(
     )
 
 
-def sortby(
+def mpp_sortby(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
@@ -1006,7 +978,7 @@ def check_partition_preserved(
                 ) from exc
 
 
-def apply(
+def mpp_apply(
     mpi_context: MPIContext, func: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
     """Call ``func(*args, **kwargs)`` rank-locally, propagating MPI metadata.
@@ -1032,7 +1004,7 @@ def apply(
         If the xarray arguments are distributed over incompatible partitions or their coordinates disagree, or if the callable's result no longer represents the same owned partition (missing dimension, changed local length, or changed coordinate labels).
     """
     if func in _MATMUL_CALLABLES and not kwargs and len(args) == 2:
-        return matmul(mpi_context, *args)
+        return mpp_matmul(mpi_context, *args)
 
     return _apply_generic(mpi_context, func, args, kwargs)
 
@@ -1070,7 +1042,7 @@ def _apply_generic(
 
 
 #
-# apply() only accepts callables that leave the partition dimension
+# mpp_apply() only accepts callables that leave the partition dimension
 # untouched. The two methods below are the "dedicated implementations"
 # for the classes of operation that genuinely need to reduce or
 # communicate across it: matrix multiplication that contracts the
@@ -1080,7 +1052,7 @@ def _apply_generic(
 # distributed result instead of refusing outright.
 
 
-def matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
+def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
     """Matrix multiplication (``left @ right``), correct under MPI.
 
     Parameters
@@ -1115,7 +1087,7 @@ def matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataAr
     if not contracted:
         # None of the partition dimensions are among the dot product's
         # common dimensions, so none are ever contracted: the operation
-        # only reads this rank's own owned slice and apply()'s post-call
+        # only reads this rank's own owned slice and mpp_apply()'s post-call
         # check confirms it.
         return _apply_generic(mpi_context, operator.matmul, (left, right), {})
     if len(contracted) > 1:
@@ -1149,7 +1121,7 @@ def matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataAr
     return strip_mpi_meta(total)
 
 
-def halo_exchange(
+def mpp_halo_exchange(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable | None = None,
@@ -1218,56 +1190,22 @@ def halo_exchange(
         # skip the length allgather and every point-to-point call
         # below, which would otherwise still post/complete 2-4 messages
         # per rank carrying zero-length payloads for no benefit. Callers
-        # that pass before=after=0 unconditionally (e.g. diff()/shift()
+        # that pass before=after=0 unconditionally (e.g. mpp_diff()/mpp_shift()
         # with n=0/periods=0, or an edge_order that needs no interior
         # halo) get correct output at zero communication cost instead.
         return value, 0, 0
 
     comm = mpi_context.comm
-    rank = comm.rank
-    if len(partition_dims) > 1:
-        # Multi-dimensional partition: the rank below/above along
-        # `partition_dim` is not `rank - 1`/`rank + 1` (that is a
-        # neighbor in the flattened Cartesian rank numbering, which
-        # only coincides with a neighbor along one particular axis
-        # when every other axis has exactly one division). Look it up
-        # from the Cartesian topology's `Cartcomm.Shift`-derived face
-        # neighbors instead -- built once and cached, not repeated
-        # per call; see `get_cartesian_topology`.
-        topology = get_cartesian_topology(comm, partition_dims, meta["global_sizes"])
-        if periodic:
-            # `topology.cart_comm` was itself built non-periodic (its
-            # `Shift`-derived `neighbors` always stop at a true edge,
-            # which every *other* caller of this function needs), so
-            # periodic wrapping is done by hand here rather than by
-            # asking Cart_create for a periodic communicator: wrap
-            # this rank's own coordinate on the target axis and look
-            # up the owning rank directly with `Get_cart_rank`, which
-            # (unlike `Shift`) does not consult the communicator's own
-            # `periods` flag at all -- it just maps a coordinate tuple
-            # to a rank, so this works regardless of how the
-            # communicator itself was created. Safe to feed straight
-            # back into `comm` (not just `cart_comm`) because
-            # `Create_cart` above used `reorder=False`, which
-            # `CartesianTopology.cart_comm`'s own docstring documents
-            # as keeping the two rank numberings identical.
-            axis = partition_dims.index(partition_dim)
-            axis_size = topology.grid_shape[axis]
-            coords = list(topology.coords)
-            coords[axis] = (topology.coords[axis] - 1) % axis_size
-            left_rank = topology.cart_comm.Get_cart_rank(coords)
-            coords[axis] = (topology.coords[axis] + 1) % axis_size
-            right_rank = topology.cart_comm.Get_cart_rank(coords)
-        else:
-            left_rank, right_rank = topology.neighbors[partition_dim]
-    else:
-        size = comm.size
-        if periodic:
-            left_rank = (rank - 1) % size
-            right_rank = (rank + 1) % size
-        else:
-            left_rank = rank - 1 if rank > 0 else None
-            right_rank = rank + 1 if rank < size - 1 else None
+    # Neighbor lookup along `partition_dim` -- single-dim linear rank -+ 1,
+    # or (for a multi-dimensional Cartesian partition) the process grid's
+    # face neighbor along this axis, which does not coincide with rank -+
+    # 1 in general. Delegated to mpi.mpp.mpp_get_neighbors, the same
+    # lookup FMS builds once into domain2D at mpp_define_domains time;
+    # here it is one call against a Domain built from this op's own
+    # .meta, keeping the logic in one place rather than duplicated at
+    # every halo-exchange call site.
+    domain = Domain.from_meta(meta, comm)
+    left_rank, right_rank = mpp_get_neighbors(domain, str(partition_dim), periodic=periodic)
 
     local_len = int(value.sizes[partition_dim])
     lengths = comm.allgather(local_len)
@@ -1305,8 +1243,7 @@ def halo_exchange(
         partition_dim,
         before,
         after,
-        comm=comm,
-        local_len=local_len,
+        domain=domain,
         left_rank=left_rank,
         right_rank=right_rank,
     )
@@ -1336,7 +1273,7 @@ def halo_exchange(
     )
 
 
-def rolling_reduce(
+def mpp_rolling_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -1383,7 +1320,7 @@ def rolling_reduce(
     before = window // 2 if center else window - 1
     after = (window - 1) - before if center else 0
 
-    padded, left_pad, _right_pad = halo_exchange(
+    padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=before, after=after
     )
     rolled = padded.rolling({dim: window}, center=center, min_periods=min_periods)
@@ -1394,7 +1331,7 @@ def rolling_reduce(
     return reattach_meta(trimmed, meta)
 
 
-def coarsen_reduce(
+def mpp_coarsen_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -1473,7 +1410,7 @@ def coarsen_reduce(
     before_needed = 0 if is_left_edge else start % window
     after_needed = 0 if is_right_edge else (window - stop % window) % window
 
-    # halo_exchange() requires every rank to request the *same*
+    # mpp_halo_exchange() requires every rank to request the *same*
     # before/after width (enforced by its own internal _agree(), which
     # exists to catch genuine cross-rank call mismatches elsewhere and
     # should not be weakened here) -- but each rank's own alignment
@@ -1487,7 +1424,7 @@ def coarsen_reduce(
     # to a collective-agreement constraint rather than to the maximum
     # halo width itself.
     request = max(window - 1, 0)
-    padded, left_pad, right_pad = halo_exchange(
+    padded, left_pad, right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=request, after=request
     )
     # left_pad/right_pad are what was actually fetched (0 at a true
@@ -1525,7 +1462,7 @@ def coarsen_reduce(
         # left neighbor computes and reports the identical block itself.
         coarsened = coarsened.isel({dim: slice(1, None)})
 
-    # coarsen changes the dimension's length, so -- exactly like diff()'s
+    # coarsen changes the dimension's length, so -- exactly like mpp_diff()'s
     # own length-changing case -- start/stop/global_size are recomputed
     # from an allgather of each rank's new local length, not carried
     # over from the (now stale) pre-coarsen meta.
@@ -1561,7 +1498,7 @@ def _eval_ast_node(
         if isinstance(node.op, ast.MatMult):
             left = _eval_ast_node(mpi_context, node.left, variables)
             right = _eval_ast_node(mpi_context, node.right, variables)
-            return matmul(mpi_context, left, right)
+            return mpp_matmul(mpi_context, left, right)
 
         function = _AST_BINARY_OPS.get(type(node.op))
         if function is None:
@@ -1570,7 +1507,7 @@ def _eval_ast_node(
             )
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.right, variables)
-        return apply(mpi_context, function, left, right)
+        return mpp_apply(mpi_context, function, left, right)
 
     if isinstance(node, ast.BoolOp):
         is_and = isinstance(node.op, ast.And)
@@ -1603,7 +1540,7 @@ def _eval_ast_node(
             )
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.comparators[0], variables)
-        return apply(mpi_context, function, left, right)
+        return mpp_apply(mpi_context, function, left, right)
 
     if isinstance(node, ast.UnaryOp):
         function = _AST_UNARY_OPS.get(type(node.op))
@@ -1613,7 +1550,7 @@ def _eval_ast_node(
                 + "in expression."
             )
         operand = _eval_ast_node(mpi_context, node.operand, variables)
-        return apply(mpi_context, function, operand)
+        return mpp_apply(mpi_context, function, operand)
 
     if isinstance(node, ast.Name):
         try:
@@ -1621,7 +1558,7 @@ def _eval_ast_node(
         except KeyError:
             raise NameError(
                 f"Name {node.id!r} is not defined; pass it as "
-                + f"evaluate(..., {node.id}=...)."
+                + f"mpp_evaluate(..., {node.id}=...)."
             ) from None
 
     if isinstance(node, ast.Constant):
@@ -1635,7 +1572,7 @@ def _eval_ast_node(
     )
 
 
-def evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) -> Any:
+def mpp_evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) -> Any:
     """Evaluate a string expression, respecting normal operator precedence.
 
     Parameters

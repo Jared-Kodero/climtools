@@ -198,7 +198,7 @@ def _group_combine(
     )
 
 
-def groupby_reduce(
+def mpp_groupby_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -320,7 +320,7 @@ def groupby_reduce(
     )
 
 
-def resample_reduce(
+def mpp_resample_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -358,7 +358,7 @@ def resample_reduce(
     """
     timestamps = pd.DatetimeIndex(value[dim].values)
     labels = _resample_bin_labels(timestamps, freq, mpi_context.comm)
-    result = groupby_reduce(
+    result = mpp_groupby_reduce(
         mpi_context,
         value,
         dim,
@@ -369,7 +369,7 @@ def resample_reduce(
         partition_dim=partition_dim,
     )
 
-    # groupby_reduce() always names its new dimension _GROUP_DIM
+    # mpp_groupby_reduce() always names its new dimension _GROUP_DIM
     # ("_mpi_group"), an internal convention appropriate for an
     # arbitrary label array. resample() groups by intervals of `dim`
     # itself, so -- mirroring plain xarray's own
@@ -382,7 +382,7 @@ def resample_reduce(
     renamed = strip_mpi_meta(result).rename({_GROUP_DIM: dim})
     if meta is not None and _GROUP_DIM in meta["dims"]:
         # _GROUP_DIM is itself an active partition dimension only when
-        # groupby_reduce() took its cross-rank combine path and
+        # mpp_groupby_reduce() took its cross-rank combine path and
         # finish() then (auto-)redistributed the reduced result onto
         # the new group dimension -- rename that one entry to `dim`,
         # keeping every other partition dimension (relevant under a
@@ -402,7 +402,7 @@ def resample_reduce(
         # The active partition dimension is something else entirely
         # (the common resample() case: `dim` -- the axis being
         # resampled -- is not the distributed axis at all, so
-        # groupby_reduce() took its local, non-communicating path and
+        # mpp_groupby_reduce() took its local, non-communicating path and
         # returned `meta` describing that other, untouched dimension
         # unchanged). That metadata is still exactly correct for
         # `renamed` (only `_GROUP_DIM` was renamed; every other

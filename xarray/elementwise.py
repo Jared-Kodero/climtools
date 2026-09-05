@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+from mpi4py import MPI
 
 import xarray as xr
 
 from .arithmetic import (
     check_operands_distribution,
     check_partition_preserved,
-    halo_exchange,
+    mpp_halo_exchange,
     reattach_meta,
 )
 from .cartesian import dim_comm as _dim_comm
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 _UNSET = object()
 
 
-def where(
+def mpp_where(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     cond: Any,
@@ -82,7 +83,7 @@ def where(
     return reattach_meta(result, meta)
 
 
-def cumsum(
+def mpp_cumsum(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -174,7 +175,7 @@ def _cumsum_scan(
         error, "MPI xarray cumsum", signature=("cumsum", str(dim))
     )
     local_cumsum, local_total = locals_or_none
-    # Materialize before gathering, for the same reason median() does:
+    # Materialize before gathering, for the same reason mpp_median() does:
     # `.sum(dim)` alone does not force a still-lazy dask-backed `value` to
     # compute, so `local_total` can still be lazy here, and `comm.gather`
     # pickles it as-is -- a lazy graph is not guaranteed picklable (e.g. a
@@ -186,27 +187,32 @@ def _cumsum_scan(
     local_total = local_total.load()
 
     comm = _dim_comm(mpi_context, meta, dim)
-    totals = comm.gather(local_total, root=0)
-    prefixes = None
-    if comm.rank == 0:
-        prefixes = []
-        # The additive identity must be a genuine zero, not `totals[0] * 0`:
-        # if any rank's local total contains +-inf (routine in real
-        # geophysical fields -- e.g. log of a non-positive value), `inf * 0`
-        # is NaN, and that single NaN becomes every rank's exclusive prefix
-        # at that position (each `prefixes[i]` derives from this same
-        # `running` seed), silently turning a correct +-inf cumsum result
-        # into NaN everywhere, not just on the rank that produced the inf.
-        running = xr.zeros_like(totals[0])
-        for total in totals:
-            prefixes.append(running)
-            running = running + total
-    exclusive_prefix = comm.scatter(prefixes, root=0)
+    # MPI_EXSCAN computes exactly the exclusive running total this needs
+    # (rank r's prefix = sum of every totals[0..r-1]) directly, via a
+    # proper distributed scan algorithm (mpi4py's object-based
+    # `exscan`, which pickles `local_total` and reduces with Python's
+    # own `+` -- xr.Dataset/DataArray both support it, so no manual
+    # tree logic is needed here). The previous implementation instead
+    # gathered every rank's total onto rank 0, computed every prefix
+    # there in a serial Python loop, and scattered them back out --
+    # correct, but a gather+scatter round trip through a single root is
+    # the one thing MPI's own MPI_EXSCAN exists specifically to avoid,
+    # and it does not scale as favorably to a large rank count.
+    #
+    # MPI_EXSCAN leaves rank 0's result undefined (there is no
+    # predecessor to sum), which mpi4py surfaces as `None`; the correct
+    # exclusive prefix there is a genuine zero, not `local_total * 0` --
+    # if any rank's own total contains +-inf (routine in real
+    # geophysical fields, e.g. log of a non-positive value), `inf * 0`
+    # is NaN, corrupting what should be a clean +-inf result.
+    exclusive_prefix = comm.exscan(local_total, op=MPI.SUM)
+    if exclusive_prefix is None:
+        exclusive_prefix = xr.zeros_like(local_total)
 
     return local_cumsum + exclusive_prefix
 
 
-def ffill(
+def mpp_ffill(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -235,7 +241,7 @@ def ffill(
 
     if limit is not None:
         _agree(mpi_context, ("ffill", str(dim), int(limit)))
-        padded, left_pad, _right_pad = halo_exchange(
+        padded, left_pad, _right_pad = mpp_halo_exchange(
             mpi_context, value, dim, before=limit, after=0
         )
         filled = padded.ffill(dim, limit=limit)
@@ -247,7 +253,7 @@ def ffill(
     return reattach_meta(_fill_scan(mpi_context, value, dim, meta, forward=True), meta)
 
 
-def bfill(
+def mpp_bfill(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -276,7 +282,7 @@ def bfill(
 
     if limit is not None:
         _agree(mpi_context, ("bfill", str(dim), int(limit)))
-        padded, _left_pad, right_pad = halo_exchange(
+        padded, _left_pad, right_pad = mpp_halo_exchange(
             mpi_context, value, dim, before=0, after=limit
         )
         filled = padded.bfill(dim, limit=limit)
@@ -296,7 +302,7 @@ def _fill_scan(
     *,
     forward: bool,
 ) -> xr.Dataset | xr.DataArray:
-    """Unbounded ffill/bfill core: a gather/scatter last-value-seen scan."""
+    """Unbounded ffill/bfill core: an exclusive-scan last-value-seen carry."""
     comm = _dim_comm(mpi_context, meta, dim)
     edge_index = -1 if forward else 0
 
@@ -305,8 +311,8 @@ def _fill_scan(
         local_filled = value.ffill(dim) if forward else value.bfill(dim)
         edge_slice = local_filled.isel({dim: edge_index}, drop=True)
         has_valid = bool(edge_slice.notnull().all())
-        # Materialize before it gets pickled by comm.gather() below, for
-        # the same reason median()/cumsum() do: computing has_valid above
+        # Materialize before it gets pickled by comm.exscan() below, for
+        # the same reason mpp_median()/mpp_cumsum() do: computing has_valid above
         # forces *that* particular reduction, not edge_slice itself, which
         # can still carry a lazy dask graph when `value` does.
         return local_filled, edge_slice.load(), has_valid
@@ -320,25 +326,37 @@ def _fill_scan(
     )
     local_filled, edge_slice, has_valid = local_or_none
 
-    rank_order = range(comm.size) if forward else range(comm.size - 1, -1, -1)
-    gathered = comm.gather((has_valid, edge_slice), root=0)
-    carries = None
-    if comm.rank == 0:
-        carries = [None] * comm.size
-        running = None
-        for r in rank_order:
-            carries[r] = running
-            rank_has_valid, rank_edge = gathered[r]
-            if rank_has_valid:
-                running = rank_edge
-    carry_in = comm.scatter(carries, root=0)
+    def _last_valid(carry: Any, current: Any) -> Any:
+        """Combine two (has_valid, edge_slice) pairs, keeping the more recent valid one."""
+        return current if current[0] else carry
+
+    # An exclusive scan of "last valid value seen so far" -- MPI_EXSCAN's
+    # own textbook use case, just with a custom combine instead of SUM.
+    # Ascending rank order is `forward`'s fill direction directly; `bfill`
+    # needs the same scan walked from the *last* rank toward the first,
+    # which MPI_EXSCAN has no "reverse" mode for, so it runs on a
+    # same-ranks-different-numbering sub-communicator instead: `Split`
+    # with `key = size - 1 - rank` relabels rank `size-1` as scan-rank 0
+    # and rank 0 as scan-rank `size-1`, without moving any data or
+    # posting any extra messages beyond the scan itself. This replaces
+    # the previous gather-every-edge-value-to-rank-0 -> serial Python
+    # loop -> scatter round trip (every rank waiting on one root for
+    # both halves of that trip) with the same proper distributed
+    # algorithm mpp_cumsum uses.
+    scan_comm = comm if forward else comm.Split(0, comm.size - 1 - comm.rank)
+    try:
+        carry_in_pair = scan_comm.exscan((has_valid, edge_slice), op=_last_valid)
+    finally:
+        if scan_comm is not comm:
+            scan_comm.Free()
+    carry_in = None if carry_in_pair is None else carry_in_pair[1]
 
     if carry_in is None:
         return local_filled
     return local_filled.fillna(carry_in)
 
 
-def interp(
+def mpp_interp(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -405,7 +423,7 @@ def interp(
     return result
 
 
-def median(
+def mpp_median(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -456,7 +474,7 @@ def median(
     # reduction here already forces implicitly when it extracts a plain
     # scalar/small array from `value` before its own Allreduce, so this
     # costs nothing extra other operations don't already pay, and it makes
-    # median() robust to any construction pattern rather than only ones
+    # mpp_median() robust to any construction pattern rather than only ones
     # whose graph happens to be picklable.
     value = value.load()
     pieces = comm.gather(value, root=0)
@@ -515,7 +533,7 @@ def median(
     return result
 
 
-def diff(
+def mpp_diff(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -558,7 +576,7 @@ def diff(
         return reattach_meta(value.diff(dim, n=0, label=label), meta)
 
     before, after = (n, 0) if label == "upper" else (0, n)
-    padded, _left_pad, _right_pad = halo_exchange(
+    padded, _left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=before, after=after
     )
     diffed = padded.diff(dim, n=n, label=label)
@@ -587,7 +605,7 @@ def diff(
     return diffed
 
 
-def shift(
+def mpp_shift(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -622,7 +640,7 @@ def shift(
         return value
 
     before, after = (periods, 0) if periods > 0 else (0, -periods)
-    padded, left_pad, _right_pad = halo_exchange(
+    padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=before, after=after
     )
     kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
@@ -633,7 +651,7 @@ def shift(
     return reattach_meta(trimmed, meta)
 
 
-def roll(
+def mpp_roll(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
@@ -676,7 +694,7 @@ def roll(
         return value
 
     before, after = (shift, 0) if shift > 0 else (0, -shift)
-    padded, left_pad, _right_pad = halo_exchange(
+    padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=before, after=after, periodic=True
     )
     shifted = padded.shift({dim: shift})
@@ -686,7 +704,7 @@ def roll(
     # `.shift()` unconditionally reserves a float NaN fill value for the
     # boundary it introduces, upcasting any integer/bool variable to
     # float even though, by construction, that boundary is never
-    # actually missing here: `halo_exchange(..., periodic=True)` already
+    # actually missing here: `mpp_halo_exchange(..., periodic=True)` already
     # padded with genuine neighbor data (wrapping at the true global
     # edge), so every position `trimmed` keeps is real, borrowed data,
     # never a fill value. Restore each variable's original dtype now
@@ -702,7 +720,7 @@ def roll(
     return reattach_meta(trimmed, meta)
 
 
-def differentiate(
+def mpp_differentiate(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     coord: Hashable,
@@ -739,7 +757,7 @@ def differentiate(
             coord, edge_order=edge_order, datetime_unit=datetime_unit
         )
 
-    padded, left_pad, _right_pad = halo_exchange(
+    padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, coord, before=1, after=1
     )
     # dask's gradient (unlike every other halo_exchange consumer -- shift,

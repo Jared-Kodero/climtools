@@ -10,27 +10,27 @@ import xarray as xr
 from mpi4py import MPI
 
 from .arithmetic import (
-    align,
-    apply,
-    coarsen_reduce,
-    evaluate,
-    halo_exchange,
-    matmul,
-    reindex,
-    rolling_reduce,
-    sortby,
+    mpp_align,
+    mpp_apply,
+    mpp_coarsen_reduce,
+    mpp_evaluate,
+    mpp_halo_exchange,
+    mpp_matmul,
+    mpp_reindex,
+    mpp_rolling_reduce,
+    mpp_sortby,
 )
 from .elementwise import (
-    bfill,
-    cumsum,
-    diff,
-    differentiate,
-    ffill,
-    interp,
-    median,
-    roll,
-    shift,
-    where,
+    mpp_bfill,
+    mpp_cumsum,
+    mpp_diff,
+    mpp_differentiate,
+    mpp_ffill,
+    mpp_interp,
+    mpp_median,
+    mpp_roll,
+    mpp_shift,
+    mpp_where,
 )
 from .handles import MPIGroupBy, MPIResample, MPIRolling
 from .indexing import isel, sel
@@ -114,14 +114,14 @@ _SAFE_PASSTHROUGH_ATTRS: frozenset[str] = frozenset(
 
 #: Explicit allowlist of xarray methods ``MPIXarray.__getattr__`` forwards
 #: to ``self.apply(...)`` -- i.e. runs rank-locally, through the same
-#: partition-preservation check every other ``apply()`` call gets, and
+#: partition-preservation check every other ``mpp_apply()`` call gets, and
 #: with zero MPI communication when the partition dimension isn't touched
 #: at all (which for every method below is *always*, regardless of what
 #: dimension name is passed).
 #:
 #: Deliberately an allowlist, not a blocklist of "known-dangerous" names:
 #: several xarray methods are *structurally* partition-preserving (same
-#: length, same coordinate labels -- passes ``apply()``'s existing
+#: length, same coordinate labels -- passes ``mpp_apply()``'s existing
 #: post-call check) while being *value*-wrong without a neighboring
 #: rank's data when applied along the partition dimension --
 #: ``shift``, ``rolling(...).reduce()``, ``differentiate``, ``pad``,
@@ -198,9 +198,9 @@ class MPIXarray:
     #: majority of ufuncs -- `log`, `sqrt`, `exp`, `sin`, `add`,
     #: `multiply`, `isnan`, ...), every input is elementwise-independent
     #: by definition, so it is exactly the kind of partition-preserving,
-    #: rank-local callable `apply()` exists for: no communication, and
+    #: rank-local callable `mpp_apply()` exists for: no communication, and
     #: the result stays a distributed MPIXarray rather than being
-    #: silently gathered onto every rank (`apply()`/`check_operands_distribution`
+    #: silently gathered onto every rank (`mpp_apply()`/`check_operands_distribution`
     #: already validate any MPIXarray operands share a compatible
     #: partition -- the same check `__add__`/etc. below rely on -- and a
     #: plain scalar or numpy array operand is left untouched, so ordinary
@@ -292,7 +292,7 @@ class MPIXarray:
         )
 
     def _safe_method_wrapper(self, name: str) -> Callable[..., Any]:
-        """Return a bound, ``apply()``-based forward of ``self.data.<name>``."""
+        """Return a bound, ``mpp_apply()``-based forward of ``self.data.<name>``."""
 
         def call(*args: Any, **kwargs: Any) -> Any:
             """Call the wrapped xarray method through MPI-aware apply."""
@@ -302,7 +302,7 @@ class MPIXarray:
 
         call.__name__ = name
         call.__doc__ = (
-            f"MPI-aware forward of xarray's `.{name}(...)`, via `apply()`. "
+            f"MPI-aware forward of xarray's `.{name}(...)`, via `mpp_apply()`. "
             f"See MPIXarray's `_SAFE_PASSTHROUGH_METHODS`."
         )
         return call
@@ -318,8 +318,8 @@ class MPIXarray:
             raise RuntimeError("netCDF4 lacks parallel support!")
 
     #
-    # Each redirects to `apply()`, so operand handling is exactly `apply()`'s
-    # (and `where()`'s) existing, already-tested contract -- no new rules:
+    # Each redirects to `mpp_apply()`, so operand handling is exactly `mpp_apply()`'s
+    # (and `mpp_where()`'s) existing, already-tested contract -- no new rules:
     #
     # - MPIXarray + MPIXarray: must share the same partition (same dim,
     #   same start/stop on this rank) or raises, pointing at `.align()`.
@@ -361,8 +361,8 @@ class MPIXarray:
     #
     # `@`/`__matmul__` is the one exception: matrix multiplication can
     # reduce across the partition dimension, so it is not just an
-    # elementwise `apply()` call -- it redirects to the dedicated
-    # MPI-aware `matmul()` instead.
+    # elementwise `mpp_apply()` call -- it redirects to the dedicated
+    # MPI-aware `mpp_matmul()` instead.
     #
     # `__len__`/`__iter__` are deliberately not defined. `self.data` (a
     # rank-local slice) already has both, but exposing them directly on
@@ -525,7 +525,7 @@ class MPIXarray:
 
     def __rmatmul__(self, other: Any) -> Any:
         """Matrix multiplication (``other @ self``); MPI-aware like :meth:`matmul`."""
-        result = matmul(self._runtime, unwrap(other), self._prepare())
+        result = mpp_matmul(self._runtime, unwrap(other), self._prepare())
         return finalize(result, self._runtime)
 
     def _prepare(self) -> xr.Dataset | xr.DataArray:
@@ -1262,7 +1262,7 @@ class MPIXarray:
         tuple of MPIXarray
             ``(left, right)``, each with matching distribution metadata.
         """
-        left, right = align(
+        left, right = mpp_align(
             self._runtime,
             self._prepare(),
             unwrap(other),
@@ -1315,7 +1315,7 @@ class MPIXarray:
         if fill_value is not _FILL_VALUE_UNSET:
             kwargs["fill_value"] = fill_value
         return finalize(
-            reindex(
+            mpp_reindex(
                 self._runtime, self._prepare(), indexers, **kwargs, **indexers_kwargs
             ),
             self._runtime,
@@ -1347,7 +1347,7 @@ class MPIXarray:
             The sorted object.
         """
         return finalize(
-            sortby(
+            mpp_sortby(
                 self._runtime,
                 self._prepare(),
                 by,
@@ -1376,7 +1376,7 @@ class MPIXarray:
         """
         unwrapped_args = tuple(unwrap(arg) for arg in args)
         unwrapped_kwargs = {name: unwrap(value) for name, value in kwargs.items()}
-        result = apply(self._runtime, func, *unwrapped_args, **unwrapped_kwargs)
+        result = mpp_apply(self._runtime, func, *unwrapped_args, **unwrapped_kwargs)
         return finalize(result, self._runtime)
 
     def matmul(self, right: MPIXarray | Any) -> MPIXarray:
@@ -1391,14 +1391,14 @@ class MPIXarray:
         MPIXarray
             The matrix product.
         """
-        result = matmul(self._runtime, self._prepare(), unwrap(right))
+        result = mpp_matmul(self._runtime, self._prepare(), unwrap(right))
         return finalize(result, self._runtime)
 
     def _halo_exchange(
         self, dim: Hashable | None = None, *, before: int, after: int
     ) -> tuple[MPIXarray, int, int]:
         """Pad with boundary slices fetched from the adjacent ranks."""
-        padded, left_pad, right_pad = halo_exchange(
+        padded, left_pad, right_pad = mpp_halo_exchange(
             self._runtime, self._prepare(), dim, before=before, after=after
         )
         return finalize(padded, self._runtime), left_pad, right_pad
@@ -1431,7 +1431,7 @@ class MPIXarray:
         MPIXarray
             Rolled-and-reduced object with ``.meta`` preserved.
         """
-        result = rolling_reduce(
+        result = mpp_rolling_reduce(
             self._runtime,
             self._prepare(),
             dim,
@@ -1473,7 +1473,7 @@ class MPIXarray:
         MPIXarray
             Coarsened-and-reduced object with ``.meta`` updated to match the new, block-reduced length along ``dim``.
         """
-        result = coarsen_reduce(
+        result = mpp_coarsen_reduce(
             self._runtime,
             self._prepare(),
             dim,
@@ -1527,7 +1527,7 @@ class MPIXarray:
             The expression's value, wrapped if it is an xarray Dataset/DataArray, otherwise returned as-is.
         """
         unwrapped = {name: unwrap(value) for name, value in variables.items()}
-        result = evaluate(self._runtime, expression, **unwrapped)
+        result = mpp_evaluate(self._runtime, expression, **unwrapped)
         return finalize(result, self._runtime)
 
     def where(
@@ -1554,7 +1554,7 @@ class MPIXarray:
         """
         args = (cond,) if other is _WHERE_UNSET else (cond, other)
         return finalize(
-            where(
+            mpp_where(
                 self._runtime,
                 self._prepare(),
                 *(unwrap(arg) for arg in args),
@@ -1586,7 +1586,7 @@ class MPIXarray:
             Cumulative sum with ``.meta`` unchanged.
         """
         return finalize(
-            cumsum(
+            mpp_cumsum(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1619,7 +1619,7 @@ class MPIXarray:
             Reduced object.
         """
         return finalize(
-            median(
+            mpp_median(
                 self._runtime,
                 self._prepare(),
                 dim,
@@ -1652,7 +1652,7 @@ class MPIXarray:
             The differenced object, ``n`` elements shorter along ``dim`` globally, with ``.meta`` updated to match.
         """
         return finalize(
-            diff(self._runtime, self._prepare(), dim, n, label=label), self._runtime
+            mpp_diff(self._runtime, self._prepare(), dim, n, label=label), self._runtime
         )
 
     def shift(
@@ -1681,7 +1681,7 @@ class MPIXarray:
         if fill_value is not _FILL_VALUE_UNSET:
             kwargs["fill_value"] = fill_value
         return finalize(
-            shift(self._runtime, self._prepare(), dim, periods, **kwargs), self._runtime
+            mpp_shift(self._runtime, self._prepare(), dim, periods, **kwargs), self._runtime
         )
 
     def roll(self, dim: Hashable, shift_by: int) -> MPIXarray:
@@ -1699,7 +1699,7 @@ class MPIXarray:
             The rolled object, same shape and distribution as ``self``.
         """
         return finalize(
-            roll(self._runtime, self._prepare(), dim, shift_by), self._runtime
+            mpp_roll(self._runtime, self._prepare(), dim, shift_by), self._runtime
         )
 
     def ffill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
@@ -1717,7 +1717,7 @@ class MPIXarray:
             The forward-filled object, same shape and distribution as ``self``.
         """
         return finalize(
-            ffill(self._runtime, self._prepare(), dim, limit), self._runtime
+            mpp_ffill(self._runtime, self._prepare(), dim, limit), self._runtime
         )
 
     def bfill(self, dim: Hashable, limit: int | None = None) -> MPIXarray:
@@ -1735,7 +1735,7 @@ class MPIXarray:
             The backward-filled object, same shape and distribution as ``self``.
         """
         return finalize(
-            bfill(self._runtime, self._prepare(), dim, limit), self._runtime
+            mpp_bfill(self._runtime, self._prepare(), dim, limit), self._runtime
         )
 
     def interp(
@@ -1759,7 +1759,7 @@ class MPIXarray:
             Interpolated result, with ``.meta`` recomputed for the new length along ``dim``.
         """
         return finalize(
-            interp(self._runtime, self._prepare(), dim, new_coord, method, **kwargs),
+            mpp_interp(self._runtime, self._prepare(), dim, new_coord, method, **kwargs),
             self._runtime,
         )
 
@@ -1785,7 +1785,7 @@ class MPIXarray:
             The derivative, same shape and distribution as ``self``.
         """
         return finalize(
-            differentiate(
+            mpp_differentiate(
                 self._runtime,
                 self._prepare(),
                 coord,

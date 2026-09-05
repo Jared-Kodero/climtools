@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 
 from .common import extreme_identity, op_name, partial_dtype
 from .meta import get_mpi_meta
+from .mpp import mpp_reduce
 from .planning import (
     comm_reduce,
     count_valid_values,
     dataset_result,
-    exchange,
     finish,
     finish_local_reduction,
     guarded,
@@ -258,7 +258,7 @@ def _combine_extreme(
     if send is None or template is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = exchange(mpi_context, send, op, comm=comm)
+    recv = mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
 
     shape = tuple(int(length) for length in template.shape)
     combined = np.asarray(recv[0]).reshape(shape)
@@ -1058,8 +1058,8 @@ def _first_last_combine(
             # datetime64/timedelta64 (a real "time" axis, most commonly)
             # have no MPI reduction operator; Allreduce their lossless
             # int64 view instead -- the same reinterpretation
-            # `_mpi_buffer_view` uses for halo exchange in
-            # arithmetic.py -- and cast back afterward.
+            # mpi.mpp.mpp_update_domains's `_view` uses for halo exchange
+            # -- and cast back afterward.
             as_int = coord_kind in "mM"
             reducible = local_coord.astype(np.int64) if as_int else local_coord
             reducible_kind = reducible.dtype.kind

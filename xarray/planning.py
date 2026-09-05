@@ -16,6 +16,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
+from .mpp import mpp_reduce
 from .cartesian import get_cartesian_topology
 from .chunks import prune_chunk_info
 from .common import (
@@ -416,7 +417,7 @@ def comm_reduce(
     if send is None or value is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = exchange(mpi_context, send, op, comm=comm)
+    recv = mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
     result = value.copy(data=recv)
     if replica_count != 1 and op == MPI.SUM:
         # Every one of the replica_count duplicate copies contributed to
@@ -431,36 +432,6 @@ def comm_reduce(
         else:
             result = result / replica_count
     return result
-
-
-def exchange(
-    mpi_context: MPIContext,
-    send: np.ndarray[Any, Any],
-    op: MPI.Op,
-    *,
-    comm: MPI.Comm | None = None,
-) -> np.ndarray[Any, Any]:
-    """All-reduce a validated contiguous NumPy buffer over ``comm``.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    send : np.ndarray[Any, Any]
-        Local NumPy buffer to reduce.
-    op : MPI.Op
-        Reduction or MPI operation.
-    comm : MPI.Comm | None
-        MPI communicator.
-    Returns
-    -------
-    np.ndarray[Any, Any]
-        Globally reduced NumPy buffer.
-    """
-    recv = np.empty(send.shape, dtype=send.dtype)
-    active_comm = mpi_context.comm if comm is None else comm
-    active_comm.Allreduce(send, recv, op=op)
-    return recv
 
 
 def count_valid_values(
