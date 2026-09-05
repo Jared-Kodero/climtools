@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,13 +73,12 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from typing import Any, Literal, Self
 
+    import xarray as xr
     from matplotlib.colorbar import Colorbar
     from matplotlib.colors import Colormap, Normalize
     from matplotlib.figure import Figure
     from matplotlib.quiver import Quiver, QuiverKey
     from matplotlib.text import Text
-
-    import xarray as xr
 
 __all__ = [
     "Adder",
@@ -94,10 +94,20 @@ __all__ = [
 set_preview_quality()
 
 
-AxesType = Axes | cgeo.GeoAxes
-ScalarPrimitive = (
+type AxesType = Axes | cgeo.GeoAxes
+type ScalarPrimitive = (
     Artist | ScalarMappable | QuadMesh | QuadContourSet | AxesImage | PathCollection
 )
+
+
+@dataclass
+class Colors:
+    SteelBlue: str = "#3f6094"
+    MatteGraphite: str = "#444444"
+    RaspberryRed: str = "#d32f60"
+    DeepSeaGreen: str = "#2e8c71"
+    Cinnabar: str = "#c8462f"
+    # add more
 
 
 class Theme:
@@ -140,6 +150,10 @@ class Theme:
         self.grid = grid
         self.legend_frame = legend_frame
         self.mpl_rc = rc_params or {}
+
+    @property
+    def colors(self):
+        return Colors()
 
     def __enter__(self) -> Self:
         self.apply()

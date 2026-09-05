@@ -1,4 +1,4 @@
-"""Provide chainable rolling, groupby, and resample handles for MPIXarray."""
+"""Provide chainable rolling, groupby, resample, and weighted handles for MPIXarray."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import xarray as xr
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Hashable, Iterable
     from typing import Literal
 
     import numpy as np
@@ -353,3 +353,93 @@ class MPIResample(_PartitionReduceMixin):
             ),
             self._parent._runtime,
         )
+
+
+class MPIXarrayWeighted:
+    """Chainable weighted-reduction handle, mirroring ``xarray``'s ``.weighted(...)``.
+
+    Returned by :meth:`MPIXarray.weighted`. Built entirely from
+    :class:`MPIXarray`'s own already-distribution-safe elementwise
+    multiply (``self * weights``, going through the same
+    ``mpp_check_operands_distribution`` compatibility check every binary
+    operator gets) and :meth:`MPIXarray.sum` -- no new communication
+    primitive of its own. FMS has no weighted-mean routine to adapt: a
+    model diagnostic that needs an area-weighted global mean builds it by
+    hand from ``mpp_global_sum`` plus a separately precomputed weight
+    sum, which is exactly the composition this class performs, so this
+    is bespoke xarray-style logic throughout, not an adaptation of any
+    FMS routine.
+
+    Parameters
+    ----------
+    parent : MPIXarray
+        Object to reduce.
+    weights : MPIXarray
+        Weights, following ``xarray.DataArray.weighted``. Broadcast
+        against ``parent`` the same way any other binary operand is;
+        weights that don't vary along the partition dimension (the
+        common case -- e.g. ``cos(lat)`` area weights on a
+        time-partitioned object) need no special handling at all.
+    """
+
+    def __init__(
+        self, parent: MPIXarray, weights: MPIXarray | xr.Dataset | xr.DataArray
+    ) -> None:
+        """Initialize a weighted-operation handle."""
+        self._parent = parent
+        self._weights = weights
+
+    def sum_of_weights(
+        self,
+        dim: Hashable | Iterable[Hashable] | None = None,
+        *,
+        keep_attrs: bool | None = None,
+    ) -> MPIXarray:
+        """Sum of weights actually applied, mirroring ``DataArrayWeighted.sum_of_weights``.
+
+        Masked to where ``parent`` is valid first: a NaN in ``parent``
+        contributes nothing to a skipna-masked sum/mean, so its weight
+        must not count toward the denominator either. Built as
+        ``mask * weights`` (boolean-times-value gives the weight where
+        valid, 0 where not) rather than ``weights.where(mask, 0)``, so
+        ``weights`` never needs its own ``.where()`` -- it stays exactly
+        what was passed in, raw array or ``MPIXarray`` either way (see
+        :meth:`MPIXarray.weighted`).
+        """
+        mask = self._parent.notnull()
+        masked_weights = mask * self._weights
+        return masked_weights.sum(dim=dim, skipna=False, keep_attrs=keep_attrs)
+
+    def sum(
+        self,
+        dim: Hashable | Iterable[Hashable] | None = None,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Weighted sum over ``dim``."""
+        return (self._parent * self._weights).sum(
+            dim=dim,
+            skipna=skipna,
+            keep_attrs=keep_attrs,
+            partition_dim=partition_dim,
+        )
+
+    def mean(
+        self,
+        dim: Hashable | Iterable[Hashable] | None = None,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+        partition_dim: Hashable | Literal["auto"] | None = "auto",
+    ) -> MPIXarray:
+        """Weighted mean over ``dim`` -- ``sum() / sum_of_weights()``."""
+        weighted_sum = self.sum(
+            dim=dim,
+            skipna=skipna,
+            keep_attrs=keep_attrs,
+            partition_dim=partition_dim,
+        )
+        weights_sum = self.sum_of_weights(dim=dim, keep_attrs=keep_attrs)
+        return weighted_sum / weights_sum

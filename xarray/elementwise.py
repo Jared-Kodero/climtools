@@ -21,7 +21,7 @@ from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, Mapping
+    from collections.abc import Hashable, Iterable, Mapping
 
     from ..mpi.context import MPIContext
 
@@ -210,6 +210,115 @@ def _cumsum_scan(
         exclusive_prefix = xr.zeros_like(local_total)
 
     return local_cumsum + exclusive_prefix
+
+
+def mpp_cumprod(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    skipna: bool | None = None,
+    keep_attrs: bool | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Cumulative product along ``dim``, correct when ``dim`` is distributed.
+
+    Mirrors :func:`mpp_cumsum` exactly, substituting multiplication for
+    addition throughout: same rank-local-step + ``MPI_EXSCAN`` structure
+    (see :func:`_cumsum_scan`'s docstring for why ``exscan`` over a
+    gather-to-root-then-scatter), same per-``Dataset``-variable
+    untouched/touched split, same reasoning for why rank 0's undefined
+    ``exscan`` result must become a genuine identity rather than
+    ``local_total * 0`` (here the multiplicative identity ``1``, not
+    ``0`` -- and for the same reason: a real geophysical field can
+    contain +-inf, and ``inf * 0`` is NaN where ``inf * 1`` is the
+    correct, clean +-inf).
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context used for communication.
+    value : xarray.Dataset or xarray.DataArray
+        Object to accumulate.
+    dim : Hashable
+        Dimension to accumulate along.
+    skipna : bool or None, optional
+        Missing-value behavior, following xarray semantics.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes on the rank-local cumulative product step; lost by the subsequent multiplication by the cross-rank prefix.
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Cumulative product with the same local length and ``.meta`` as ``value``.
+    """
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.cumprod(dim, skipna=skipna, keep_attrs=keep_attrs)
+
+    _agree(mpi_context, ("cumprod", str(dim), int(meta["global_size"])))
+
+    if isinstance(value, xr.Dataset):
+        # See the matching comment in mpp_cumsum: a variable lacking `dim`
+        # must never enter the cross-rank prefix scan below, or its
+        # per-rank "total" (really its own unreduced, replicated array)
+        # would get multiplied into itself rank_index extra times instead
+        # of by the multiplicative identity 1 it needs for a variable
+        # `dim` never touched at all.
+        touched = [name for name, var in value.data_vars.items() if dim in var.dims]
+        if not touched:
+            return strip_mpi_meta(value.copy(deep=False))
+        untouched = [name for name in value.data_vars if name not in touched]
+        scanned = _cumprod_scan(
+            mpi_context, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
+        )
+        result = (
+            xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
+            if untouched
+            else scanned
+        )
+        result.attrs = dict(value.attrs)
+        return reattach_meta(result, meta)
+
+    return reattach_meta(
+        _cumprod_scan(
+            mpi_context, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs
+        ),
+        meta,
+    )
+
+
+def _cumprod_scan(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    meta: Mapping[str, Any],
+    *,
+    skipna: bool | None,
+    keep_attrs: bool | None,
+) -> xr.Dataset | xr.DataArray:
+    """Cross-rank prefix-product core of :meth:`cumprod`."""
+
+    def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
+        """Return this rank's local cumulative product and total."""
+        local_cumprod = value.cumprod(dim, skipna=skipna, keep_attrs=keep_attrs)
+        local_total = value.prod(dim, skipna=skipna)
+        return local_cumprod, local_total
+
+    locals_or_none, error = guarded(_locals)
+    mpi_context.raise_if_error(
+        error, "MPI xarray cumprod", signature=("cumprod", str(dim))
+    )
+    local_cumprod, local_total = locals_or_none
+    # Materialize before gathering -- see the matching comment in
+    # `_cumsum_scan` for why: `.prod(dim)` alone does not force a still-lazy
+    # dask-backed `value` to compute, and `comm.exscan` pickles it as-is.
+    local_total = local_total.load()
+
+    comm = _dim_comm(mpi_context, meta, dim)
+    exclusive_prefix = comm.exscan(local_total, op=MPI.PROD)
+    if exclusive_prefix is None:
+        exclusive_prefix = xr.ones_like(local_total)
+
+    return local_cumprod * exclusive_prefix
 
 
 def mpp_ffill(
@@ -533,6 +642,111 @@ def mpp_median(
     return result
 
 
+def mpp_quantile(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    q: float | Iterable[float],
+    dim: Hashable,
+    *,
+    method: str = "linear",
+    skipna: bool | None = None,
+    keep_attrs: bool | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Quantile(s) over ``dim``, correct when ``dim`` is distributed.
+
+    Structurally identical to :func:`mpp_median` (a quantile is the same
+    order statistic generalized from the 0.5 point to an arbitrary ``q``,
+    and needs the same full view of ``dim`` to compute correctly) --
+    gather this rank's local slice along ``dim`` onto ``dim``'s
+    sub-communicator's root, compute the ordinary ``xarray`` quantile
+    there, broadcast back, then apply the exact same no-duplicate-
+    ownership dedup :func:`mpp_median` uses for the surviving
+    dimensions. See that function's docstring for the full reasoning
+    behind each step; only the reduction call itself and the extra
+    ``quantile`` dimension a sequence ``q`` adds differ here.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context used for communication.
+    value : xarray.Dataset or xarray.DataArray
+        Object to reduce.
+    q : float or iterable of float
+        Quantile(s) to compute, in ``[0, 1]``, following ``xarray.DataArray.quantile``.
+    dim : Hashable
+        Dimension to reduce.
+    method : str, optional
+        Interpolation method, following ``xarray.DataArray.quantile``.
+    skipna : bool or None, optional
+        Missing-value behavior, following xarray semantics.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes.
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Reduced object, with a new ``quantile`` dimension/coordinate when
+        ``q`` is a sequence of more than one value. Under a single
+        partition dimension, fully replicated (``.meta`` is None) since
+        nothing remains distributed; under a multi-dimensional partition,
+        exactly one rank per distinct surviving range keeps the real
+        result, matching :func:`mpp_median`.
+    """
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return value.quantile(
+            q, dim, method=method, skipna=skipna, keep_attrs=keep_attrs
+        )
+
+    _agree(mpi_context, ("quantile", str(dim), int(meta["global_size"])))
+    comm = _dim_comm(mpi_context, meta, dim)
+    # See mpp_median's matching comment: `.load()` before `comm.gather`
+    # for the same picklability reason.
+    value = value.load()
+    pieces = comm.gather(value, root=0)
+
+    def _reduce_on_root() -> xr.Dataset | xr.DataArray:
+        """Compute the requested quantile(s) on the root rank."""
+        full = (
+            xr.concat(pieces, dim=dim, data_vars="minimal")
+            if isinstance(value, xr.Dataset)
+            else xr.concat(pieces, dim=dim)
+        )
+        return full.quantile(
+            q, dim, method=method, skipna=skipna, keep_attrs=keep_attrs
+        )
+
+    result, error = guarded(_reduce_on_root) if comm.rank == 0 else (None, None)
+    mpi_context.raise_if_error(
+        error, "MPI xarray quantile", signature=("quantile", str(dim)), comm=comm
+    )
+    # See mpp_median's matching comment for why only rank 0 of this
+    # sub-communicator keeps the real data.
+    result = comm.bcast(result, root=0)
+    result = strip_mpi_meta(result)
+
+    remaining_dims = tuple(d for d in meta["dims"] if d != dim)
+    if not remaining_dims:
+        return result
+
+    start = {d: int(meta["starts"][d]) for d in remaining_dims}
+    stop = {d: int(meta["stops"][d]) for d in remaining_dims}
+    if comm.rank != 0:
+        empty_dim = remaining_dims[0]
+        result = result.isel({empty_dim: slice(0, 0)})
+        stop[empty_dim] = start[empty_dim]
+
+    mpp_update_meta(
+        result,
+        dim=remaining_dims,
+        global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
+        start=start,
+        stop=stop,
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+        cart=None,
+    )
+    return result
+
+
 def mpp_diff(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -649,6 +863,136 @@ def mpp_shift(
     local_len = int(value.sizes[dim])
     trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
     return reattach_meta(trimmed, meta)
+
+
+def mpp_pad(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    pad_width: tuple[int, int],
+    *,
+    mode: str = "constant",
+    constant_values: Any = None,
+    keep_attrs: bool | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Pad ``value`` along ``dim``, correct when ``dim`` is distributed.
+
+    Unlike :func:`mpp_shift`/:func:`mpp_ffill`/:func:`mpp_differentiate`,
+    padding never needs a neighbor's actual data: it only ever adds new
+    values at the two true *global* edges of ``dim``, so the only
+    distributed-aware decision is whether *this* rank happens to own
+    one of those edges (``meta["starts"][dim] == 0`` for the lower edge,
+    ``meta["stops"][dim] == meta["global_sizes"][dim]`` for the upper
+    one) -- a purely interior rank calls ``value.pad()`` at all. No
+    ``Isend``/``Irecv`` of any kind is required, which is also why this
+    has no FMS routine to adapt: FMS's own domain padding
+    (``mpp_domains``' halo update) always exchanges real neighbor data,
+    the opposite of what a genuine edge-only pad needs.
+
+    Only ``mode="constant"`` is supported when ``dim`` is the active
+    partition dimension: ``"edge"``, ``"reflect"``, ``"wrap"``, and the
+    other modes read from data near the edge, which for an *interior*
+    rank's edge (adjacent to another rank's real data, not a true global
+    boundary) would need exactly the kind of halo exchange this function
+    exists to avoid paying for. Not attempted here; raises
+    ``NotImplementedError`` instead of silently padding with the wrong
+    values.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context used for communication.
+    value : xarray.Dataset or xarray.DataArray
+        Object to pad.
+    dim : Hashable
+        Dimension to pad along.
+    pad_width : tuple[int, int]
+        ``(before, after)`` -- number of values to add at the lower and
+        upper edge of ``dim``, as in ``xarray.DataArray.pad``.
+    mode : str, optional
+        Padding mode, as in ``xarray.DataArray.pad``. Only ``"constant"``
+        is supported when ``dim`` is distributed (see above).
+    constant_values : Any, optional
+        Fill value(s) for ``mode="constant"``, as in ``xarray.DataArray.pad``.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes.
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The padded object. ``.meta`` is unchanged on every rank except
+        whichever one, two, or (single-rank case) both own the two
+        global edges, where ``.meta``'s ``global_size`` grows by
+        ``sum(pad_width)`` and every rank's ``start``/``stop`` shifts to
+        match.
+    Raises
+    ------
+    NotImplementedError
+        If ``dim`` is distributed and ``mode`` is not ``"constant"``.
+    """
+    before, after = pad_width
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        kwargs = {} if mode != "constant" else {"constant_values": constant_values}
+        return value.pad({dim: pad_width}, mode=mode, keep_attrs=keep_attrs, **kwargs)
+    if before == 0 and after == 0:
+        return value
+    if mode != "constant":
+        raise NotImplementedError(
+            f"pad(mode={mode!r}) is not supported along the distributed "
+            + f"dimension {dim!r}; only mode='constant' avoids needing a "
+            + "neighboring rank's actual data at an interior rank's own "
+            + "edge (see mpp_pad's docstring)."
+        )
+
+    _agree(mpi_context, ("pad", str(dim), int(before), int(after), mode))
+
+    start = int(meta["starts"][dim])
+    stop = int(meta["stops"][dim])
+    global_size = int(meta["global_sizes"][dim])
+    is_lower_edge = start == 0
+    is_upper_edge = stop == global_size
+
+    side: tuple[int, int] = (
+        before if is_lower_edge else 0,
+        after if is_upper_edge else 0,
+    )
+    result = (
+        value.pad(
+            {dim: side},
+            mode="constant",
+            constant_values=constant_values,
+            keep_attrs=keep_attrs,
+        )
+        if side != (0, 0)
+        else value
+    )
+
+    new_start = 0 if is_lower_edge else start + before
+    new_stop = stop + before + (after if is_upper_edge else 0)
+
+    # Preserve every other partition dimension's bounds (and the
+    # Cartesian topology, for a 2D+ partition) unchanged -- unlike
+    # mpp_median/mpp_quantile's post-reduction call, `dim` is not the
+    # *only* partition dimension left here, so rebuilding meta from just
+    # `dim` alone would silently drop every other one, corrupting a 2D
+    # Cartesian partition's own second axis.
+    global_sizes = dict(meta["global_sizes"])
+    starts = dict(meta["starts"])
+    stops = dict(meta["stops"])
+    global_sizes[dim] = global_size + before + after
+    starts[dim] = new_start
+    stops[dim] = new_stop
+
+    mpp_update_meta(
+        result,
+        dim=meta["dims"],
+        global_size=global_sizes,
+        start=starts,
+        stop=stops,
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+        cart=meta.get("cart"),
+    )
+    return result
 
 
 def mpp_roll(

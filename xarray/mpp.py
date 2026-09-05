@@ -306,15 +306,24 @@ def mpp_update_domains(
 ) -> tuple[np.ndarray | dict[str, np.ndarray], int, int]:
     """FMS's ``mpp_update_domains``: halo exchange with the neighbors along
     ``dim``, via nonblocking ``Isend``/``Irecv`` + one shared ``Waitall``.
-    A ``Mapping`` of same-``axis``-length fields is FMS's *group update*
-    (all messages batched into one ``Waitall``, not one round trip per
-    field); a single array is the plain case, and the return shape
-    mirrors whichever was passed. ``before``/``after`` are the halo width
-    from the lower/upper neighbor; at a non-periodic global edge that
-    side is left unpadded (``left_pad``/``right_pad`` report 0 there
-    instead of raising). ``left_rank``/``right_rank`` default to
-    :func:`mpp_get_neighbor_pe`; a Cartesian caller should pass them
-    explicitly (its neighbors are not ``rank -+ 1``).
+    A ``Mapping`` of same-``axis``-length fields is FMS's *group update*:
+    every field's halo slab is packed into one contiguous buffer per
+    neighbor per dtype -- FMS's own ``buffer_pos`` accumulation in
+    ``mpp_do_update.fh`` -- so message count per exchange is
+    ``2 * (distinct dtypes present)``, not ``2 * (fields present)``. FMS
+    groups this same way, not across dtypes: its group-update routines
+    are compiled per Fortran kind (``mpp_do_update_r8_3d``/``_r4_3d``/
+    ``_i4_3d``, ...), so a Fortran group update never mixes dtypes into
+    one buffer either -- this mirrors that constraint rather than forcing
+    heterogeneous dtypes into one raw byte buffer, which FMS has no
+    equivalent for. A single array is the plain case (one field, one
+    dtype, same code path), and the return shape mirrors whichever was
+    passed. ``before``/``after`` are the halo width from the lower/upper
+    neighbor; at a non-periodic global edge that side is left unpadded
+    (``left_pad``/``right_pad`` report 0 there instead of raising).
+    ``left_rank``/``right_rank`` default to :func:`mpp_get_neighbor_pe`;
+    a Cartesian caller should pass them explicitly (its neighbors are not
+    ``rank -+ 1``).
     """
     single = isinstance(fields, np.ndarray)
     items: dict[str, np.ndarray] = {"": fields} if single else dict(fields)
@@ -334,39 +343,85 @@ def mpp_update_domains(
         idx[axis] = slice(start, stop)
         return np.ascontiguousarray(arr[tuple(idx)])
 
-    send_right = {
-        name: _view(_slab(arr, arr.shape[axis] - before, arr.shape[axis]))
-        for name, arr in items.items()
-        if right_rank is not None and before > 0
-    }
-    send_left = {
-        name: _view(_slab(arr, 0, after))
-        for name, arr in items.items()
-        if left_rank is not None and after > 0
-    }
-    recv_before = {
-        name: np.empty(
-            [*arr.shape[:axis], before, *arr.shape[axis + 1 :]], dtype=arr.dtype
-        )
-        for name, arr in items.items()
-        if left_rank is not None and before > 0
-    }
-    recv_after = {
-        name: np.empty(
-            [*arr.shape[:axis], after, *arr.shape[axis + 1 :]], dtype=arr.dtype
-        )
-        for name, arr in items.items()
-        if right_rank is not None and after > 0
-    }
+    def _halo_shape(name: str, width: int) -> tuple[int, ...]:
+        arr = items[name]
+        return (*arr.shape[:axis], width, *arr.shape[axis + 1 :])
 
-    # Post every message for every field, then wait once (the group update).
-    recv_reqs = [comm.Irecv(_view(buf), source=left_rank) for buf in recv_before.values()]
-    recv_reqs += [comm.Irecv(_view(buf), source=right_rank) for buf in recv_after.values()]
-    send_reqs = [comm.Isend(arr, dest=right_rank) for arr in send_right.values()]
-    send_reqs += [comm.Isend(arr, dest=left_rank) for arr in send_left.values()]
+    # Group by wire dtype, sorted for a deterministic pack/unpack order
+    # every rank derives independently from its own, structurally
+    # identical copy of `items` -- no layout information travels over
+    # the wire, only each dtype group's one packed buffer.
+    groups: dict[np.dtype, list[str]] = {}
+    for name, arr in items.items():
+        groups.setdefault(_view(arr).dtype, []).append(name)
+    for names in groups.values():
+        names.sort()
+
+    def _pack(names: list[str], side: str) -> np.ndarray:
+        pieces = []
+        for name in names:
+            arr = items[name]
+            slab = (
+                _slab(arr, arr.shape[axis] - before, arr.shape[axis])
+                if side == "right"
+                else _slab(arr, 0, after)
+            )
+            pieces.append(_view(slab).reshape(-1))
+        return np.concatenate(pieces)
+
+    def _unpack(
+        flat: np.ndarray, names: list[str], width: int
+    ) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        pos = 0
+        for name in names:
+            shape = _halo_shape(name, width)
+            count = int(np.prod(shape)) if shape else 1
+            # `flat` carries the group's wire dtype (e.g. int64 for a
+            # datetime64/timedelta64 field, per `_view`); reinterpret each
+            # field's slice back to its own original dtype before handing
+            # it back -- `padded`'s concatenate below needs it to match
+            # `arr`'s dtype, not the wire view's.
+            out[name] = flat[pos : pos + count].reshape(shape).view(items[name].dtype)
+            pos += count
+        return out
+
+    can_send_right = right_rank is not None and before > 0
+    can_send_left = left_rank is not None and after > 0
+    can_recv_before = left_rank is not None and before > 0
+    can_recv_after = right_rank is not None and after > 0
+
+    recv_bufs: dict[tuple[np.dtype, str], np.ndarray] = {}
+    recv_reqs = []
+    for dtype, names in groups.items():
+        if can_recv_before:
+            count = sum(int(np.prod(_halo_shape(name, before))) for name in names)
+            buf = np.empty(count, dtype=dtype)
+            recv_bufs[dtype, "before"] = buf
+            recv_reqs.append(comm.Irecv(buf, source=left_rank))
+        if can_recv_after:
+            count = sum(int(np.prod(_halo_shape(name, after))) for name in names)
+            buf = np.empty(count, dtype=dtype)
+            recv_bufs[dtype, "after"] = buf
+            recv_reqs.append(comm.Irecv(buf, source=right_rank))
+
+    send_reqs = []
+    for dtype, names in groups.items():
+        if can_send_right:
+            send_reqs.append(comm.Isend(_pack(names, "right"), dest=right_rank))
+        if can_send_left:
+            send_reqs.append(comm.Isend(_pack(names, "left"), dest=left_rank))
 
     MPI.Request.Waitall(recv_reqs)
     MPI.Request.Waitall(send_reqs)
+
+    recv_before: dict[str, np.ndarray] = {}
+    recv_after: dict[str, np.ndarray] = {}
+    for dtype, names in groups.items():
+        if (dtype, "before") in recv_bufs:
+            recv_before.update(_unpack(recv_bufs[dtype, "before"], names, before))
+        if (dtype, "after") in recv_bufs:
+            recv_after.update(_unpack(recv_bufs[dtype, "after"], names, after))
 
     padded = {
         name: np.concatenate(

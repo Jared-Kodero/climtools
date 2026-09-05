@@ -23,17 +23,20 @@ from .arithmetic import (
 )
 from .elementwise import (
     mpp_bfill,
+    mpp_cumprod,
     mpp_cumsum,
     mpp_diff,
     mpp_differentiate,
     mpp_ffill,
     mpp_interp,
     mpp_median,
+    mpp_pad,
+    mpp_quantile,
     mpp_roll,
     mpp_shift,
     mpp_where,
 )
-from .handles import MPIGroupBy, MPIResample, MPIRolling
+from .handles import MPIGroupBy, MPIResample, MPIRolling, MPIXarrayWeighted
 from .indexing import mpp_isel, mpp_sel
 from .io import mpp_attach_save_chunks, mpp_repartition
 from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
@@ -148,7 +151,9 @@ _SAFE_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
         "drop_vars",
         "expand_dims",
         "fillna",
+        "isnull",
         "load",
+        "notnull",
         "persist",
         "rename",
         "rename_dims",
@@ -1211,6 +1216,33 @@ class MPIXarray:
         """
         return MPIResample(self, dim, freq)
 
+    def weighted(
+        self, weights: MPIXarray | xr.Dataset | xr.DataArray
+    ) -> MPIXarrayWeighted:
+        """Weighted-reduction handle, mirroring ``xarray.Dataset.weighted``.
+
+        Parameters
+        ----------
+        weights : MPIXarray, xarray.Dataset, or xarray.DataArray
+            Weights (e.g. ``cos(lat)`` area weights). A raw
+            ``xarray.Dataset``/``DataArray`` is passed straight through
+            to every composed operation unwrapped, exactly like any other
+            raw-array binary operand (see the note above ``__add__``) --
+            it is *not* auto-partitioned, since weights are overwhelmingly
+            replicated (the same full array on every rank, broadcasting
+            against whichever dimension ``self`` happens to be
+            partitioned along) rather than independently distributed. An
+            already-distributed ``MPIXarray`` is also accepted and, like
+            any other binary operand, must be compatibly partitioned with
+            ``self``.
+        Returns
+        -------
+        MPIXarrayWeighted
+            Chainable handle; call ``.sum()``, ``.mean()``, or
+            ``.sum_of_weights()`` on it to get the reduced :class:`MPIXarray`.
+        """
+        return MPIXarrayWeighted(self, weights)
+
     def align(
         self,
         other: MPIXarray | xr.Dataset | xr.DataArray,
@@ -1570,6 +1602,39 @@ class MPIXarray:
             self._runtime,
         )
 
+    def cumprod(
+        self,
+        dim: Hashable,
+        *,
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+    ) -> MPIXarray:
+        """Cumulative product along ``dim``, correct when ``dim`` is distributed.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to accumulate along.
+        skipna : bool or None, optional
+            Missing-value behavior, following xarray semantics.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes.
+        Returns
+        -------
+        MPIXarray
+            Cumulative product with ``.meta`` unchanged.
+        """
+        return finalize(
+            mpp_cumprod(
+                self._runtime,
+                self._prepare(),
+                dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            ),
+            self._runtime,
+        )
+
     def median(
         self,
         dim: Hashable,
@@ -1597,6 +1662,48 @@ class MPIXarray:
                 self._runtime,
                 self._prepare(),
                 dim,
+                skipna=skipna,
+                keep_attrs=keep_attrs,
+            ),
+            self._runtime,
+        )
+
+    def quantile(
+        self,
+        q: float | Iterable[float],
+        dim: Hashable,
+        *,
+        method: str = "linear",
+        skipna: bool | None = None,
+        keep_attrs: bool | None = None,
+    ) -> MPIXarray:
+        """Quantile(s) over ``dim``, correct when ``dim`` is distributed.
+
+        Parameters
+        ----------
+        q : float or iterable of float
+            Quantile(s) to compute, in ``[0, 1]``, following ``xarray.DataArray.quantile``.
+        dim : Hashable
+            Dimension to reduce.
+        method : str, optional
+            Interpolation method, following ``xarray.DataArray.quantile``.
+        skipna : bool or None, optional
+            Missing-value behavior, following xarray semantics.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes.
+        Returns
+        -------
+        MPIXarray
+            Reduced object, with a new ``quantile`` dimension/coordinate
+            when ``q`` is a sequence of more than one value.
+        """
+        return finalize(
+            mpp_quantile(
+                self._runtime,
+                self._prepare(),
+                q,
+                dim,
+                method=method,
                 skipna=skipna,
                 keep_attrs=keep_attrs,
             ),
@@ -1656,6 +1763,52 @@ class MPIXarray:
             kwargs["fill_value"] = fill_value
         return finalize(
             mpp_shift(self._runtime, self._prepare(), dim, periods, **kwargs),
+            self._runtime,
+        )
+
+    def pad(
+        self,
+        dim: Hashable,
+        pad_width: tuple[int, int],
+        *,
+        mode: str = "constant",
+        constant_values: Any = None,
+        keep_attrs: bool | None = None,
+    ) -> MPIXarray:
+        """Pad along ``dim``, correct when ``dim`` is distributed.
+
+        Parameters
+        ----------
+        dim : Hashable
+            Dimension to pad along.
+        pad_width : tuple[int, int]
+            ``(before, after)``, as in ``xarray.DataArray.pad``.
+        mode : str, optional
+            Padding mode, as in ``xarray.DataArray.pad``. Only
+            ``"constant"`` is supported when ``dim`` is distributed.
+        constant_values : Any, optional
+            Fill value(s) for ``mode="constant"``.
+        keep_attrs : bool or None, optional
+            Whether to preserve attributes.
+        Returns
+        -------
+        MPIXarray
+            The padded object.
+        Raises
+        ------
+        NotImplementedError
+            If ``dim`` is distributed and ``mode`` is not ``"constant"``.
+        """
+        return finalize(
+            mpp_pad(
+                self._runtime,
+                self._prepare(),
+                dim,
+                pad_width,
+                mode=mode,
+                constant_values=constant_values,
+                keep_attrs=keep_attrs,
+            ),
             self._runtime,
         )
 

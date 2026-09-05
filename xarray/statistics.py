@@ -21,6 +21,9 @@ from .planning import (
     mpp_count_valid_values,
     dataset_result,
     mpp_finish,
+    mpp_finish_scatter,
+    mpp_plan_scatter_target,
+    mpp_scatter_replicated_slice,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
@@ -65,8 +68,14 @@ def _var_or_std(
         *,
         comm: MPI.Comm | None = None,
         replica_count: int = 1,
+        scatter: tuple[Hashable, list[int]] | None = None,
     ) -> xr.DataArray:
-        """Combine local squared deviations into global variance or standard deviation."""
+        """Combine local squared deviations into global variance or standard deviation.
+
+        ``scatter``, when given, is forwarded to both the squared-deviation
+        sum and the valid-value count (see :func:`~.planning.mpp_scatter_target`),
+        so this rank only ever holds its own post-reduction slice.
+        """
         deviation = variable - mean
         # `deviation`'s dtype (always floating: subtracting a float
         # `mean` promotes even an integer `variable`) is what the
@@ -89,6 +98,7 @@ def _var_or_std(
             phase="MPI xarray variance reduction",
             comm=comm,
             replica_count=replica_count,
+            scatter=scatter,
         )
         denominator = (
             mpp_count_valid_values(
@@ -97,6 +107,7 @@ def _var_or_std(
                 variable_dims,
                 comm=comm,
                 replica_count=replica_count,
+                scatter=scatter,
             )
             - ddof
         )
@@ -131,13 +142,26 @@ def _var_or_std(
             keep_attrs=False,
             partition_dim=None,
         )
+        scattered = mpp_plan_scatter_target(
+            mpi_context, old_meta, dims, partition_dim, reduce_plan
+        )
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
+        )
         result = combine(
             value,
             dims,
             mean,
-            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=comm,
             replica_count=reduce_plan[0].replica_count,
+            scatter=None if scattered is None else scattered[:2],
         )
+        if scattered is not None:
+            return mpp_finish_scatter(
+                result, target=scattered[0], counts=scattered[1], comm=comm
+            )
         return mpp_finish(
             mpi_context,
             result,
@@ -155,10 +179,24 @@ def _var_or_std(
         partition_dim=None,
     )
     variables: dict[Hashable, xr.DataArray] = {}
+    scattered = mpp_plan_scatter_target(
+        mpi_context, old_meta, dims, partition_dim, reduce_plan
+    )
+    scatter_start = scatter_stop = None
+    if scattered is not None:
+        _, scatter_counts, scatter_comm = scattered
+        scatter_start = sum(scatter_counts[: scatter_comm.rank])
+        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
     for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
-            variables[entry.name] = variable
+            variables[entry.name] = (
+                mpp_scatter_replicated_slice(
+                    variable, scattered[0], scatter_start, scatter_stop
+                )
+                if scattered is not None
+                else variable
+            )
             continue
         if not entry.distributed:
             method = variable.std if root else variable.var
@@ -166,16 +204,32 @@ def _var_or_std(
                 dim=entry.dims, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
             )
             continue
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+        )
         variables[entry.name] = combine(
             variable,
             entry.dims,
             mean_ds[entry.name],
-            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=comm,
             replica_count=entry.replica_count,
+            scatter=None if scattered is None else scattered[:2],
+        )
+    coord_source = (
+        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
+        if scattered is not None and scattered[0] in value.dims
+        else value
+    )
+    dataset = dataset_result(coord_source, dims, variables)
+    if scattered is not None:
+        return mpp_finish_scatter(
+            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
         )
     return mpp_finish(
         mpi_context,
-        dataset_result(value, dims, variables),
+        dataset,
         old_meta=old_meta,
         partition_dim=partition_dim,
         auto_candidates=repartition_candidates(reduce_plan),

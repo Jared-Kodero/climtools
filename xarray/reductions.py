@@ -17,12 +17,15 @@ if TYPE_CHECKING:
 
 from .common import extreme_identity, op_name, partial_dtype
 from .meta import mpp_get_meta
-from .mpp import _mpp_reduce
+from .mpp import _mpp_reduce, mpp_reduce_scatter
 from .planning import (
     mpp_comm_reduce,
     mpp_count_valid_values,
     dataset_result,
     mpp_finish,
+    mpp_finish_scatter,
+    mpp_plan_scatter_target,
+    mpp_scatter_replicated_slice,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
@@ -46,8 +49,15 @@ def _combine_sum_or_prod(
     error: BaseException | None = None,
     comm: MPI.Comm | None = None,
     replica_count: int = 1,
+    scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local sum or product partials."""
+    """Combine rank-local sum or product partials.
+
+    ``scatter``, when given, is forwarded to :func:`~.planning.mpp_comm_reduce`
+    (and to the ``min_count`` valid-value count below) so each rank keeps
+    only its own post-reduction slice instead of materializing the full
+    combined result -- see :func:`~.planning.mpp_scatter_target`.
+    """
     result = mpp_comm_reduce(
         mpi_context,
         partial,
@@ -59,11 +69,17 @@ def _combine_sum_or_prod(
         phase="MPI xarray sum/prod reduction",
         comm=comm,
         replica_count=replica_count,
+        scatter=scatter,
     )
     global_count = None
     if min_count is not None and skipna_enabled(value.dtype, skipna):
         global_count = mpp_count_valid_values(
-            mpi_context, value, dims, comm=comm, replica_count=replica_count
+            mpi_context,
+            value,
+            dims,
+            comm=comm,
+            replica_count=replica_count,
+            scatter=scatter,
         )
     if global_count is not None:
         # where() introduces NaN, which requires a floating result. Restore
@@ -87,8 +103,15 @@ def _combine_mean(
     error: BaseException | None = None,
     comm: MPI.Comm | None = None,
     replica_count: int = 1,
+    scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local sums and counts into a global mean."""
+    """Combine rank-local sums and counts into a global mean.
+
+    ``scatter``, when given, is forwarded to both the sum and the
+    valid-value count below (see :func:`~.planning.mpp_scatter_target`), so
+    the division that follows happens between two already-matching local
+    slices instead of two full replicated arrays.
+    """
     global_sum = mpp_comm_reduce(
         mpi_context,
         partial_sum,
@@ -98,9 +121,15 @@ def _combine_mean(
         phase="MPI xarray mean reduction",
         comm=comm,
         replica_count=replica_count,
+        scatter=scatter,
     )
     global_count = mpp_count_valid_values(
-        mpi_context, value, dims, comm=comm, replica_count=replica_count
+        mpi_context,
+        value,
+        dims,
+        comm=comm,
+        replica_count=replica_count,
+        scatter=scatter,
     )
     # Divide in the dtype xarray's own .mean() would produce for this
     # input. This is genuinely shape-dependent, not just dtype-dependent:
@@ -173,8 +202,22 @@ def _combine_extreme(
     skipna: bool | None,
     error: BaseException | None = None,
     comm: MPI.Comm | None = None,
+    scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local min/max partials across ranks."""
+    """Combine rank-local min/max partials across ranks.
+
+    ``scatter``, when given (see :func:`~.planning.mpp_scatter_target`),
+    is forwarded to :func:`~.planning.mpp_comm_reduce` for the boolean and
+    non-float dtype branches below (which route through it directly), and
+    handled explicitly for the float branch's own ``Reduce_scatter`` call,
+    since that branch packs value and validity into one ``(2, N)`` buffer
+    and calls :func:`~.mpp.mpp_reduce_scatter`/`_mpp_reduce` directly
+    rather than going through :func:`~.planning.mpp_comm_reduce`. FMS's
+    own ``mpp_max``/``mpp_min`` always broadcast the full reduced result
+    to every PE (see ``mpp.F90``); this scattering behavior has no FMS
+    counterpart at all, same as the sum/mean case (see
+    :func:`~.mpp.mpp_reduce_scatter`).
+    """
     # Use the agreed variable dtype, not a rank-local partial dtype. Empty
     # partitions follow a different local path, and dtype-dependent branching
     # could desynchronize collectives. Min/max also require no promotion; using
@@ -191,6 +234,7 @@ def _combine_extreme(
             error=error,
             phase=f"MPI xarray {operation} reduction",
             comm=comm,
+            scatter=scatter,
         )
 
     op = MPI.MIN if minimum else MPI.MAX
@@ -203,6 +247,7 @@ def _combine_extreme(
             error=error,
             phase=f"MPI xarray {operation} reduction",
             comm=comm,
+            scatter=scatter,
         )
 
     # Floating reductions carry validity beside the extreme so empty or all-NaN
@@ -250,6 +295,9 @@ def _combine_extreme(
             op_name(op),
             send.dtype.str,
             tuple(int(length) for length in send.shape),
+            None
+            if scatter is None
+            else (str(scatter[0]), tuple(int(c) for c in scatter[1])),
         )
     )
     mpi_context.raise_if_error(
@@ -258,7 +306,16 @@ def _combine_extreme(
     if send is None or template is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    recv = _mpp_reduce(send, op, comm if comm is not None else mpi_context.comm)
+    resolved_comm = comm if comm is not None else mpi_context.comm
+    if scatter is not None:
+        target, counts = scatter
+        axis = 1 + template.get_axis_num(target)
+        recv = mpp_reduce_scatter(send, op, resolved_comm, counts, axis=axis)
+        start = sum(counts[: resolved_comm.rank])
+        stop = start + counts[resolved_comm.rank]
+        template = template.isel({target: slice(start, stop)})
+    else:
+        recv = _mpp_reduce(send, op, resolved_comm)
 
     shape = tuple(int(length) for length in template.shape)
     combined = np.asarray(recv[0]).reshape(shape)
@@ -400,6 +457,15 @@ def _sum_prod(
             if local_error is not None:
                 raise local_error
             return local
+        scattered = mpp_plan_scatter_target(
+            mpi_context, old_meta, dims, partition_dim, reduce_plan
+        )
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
+        )
+        scatter = None if scattered is None else scattered[:2]
         result = _combine_sum_or_prod(
             mpi_context,
             value,
@@ -409,9 +475,14 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=comm,
             replica_count=reduce_plan[0].replica_count,
+            scatter=scatter,
         )
+        if scattered is not None:
+            return mpp_finish_scatter(
+                result, target=scattered[0], counts=scattered[1], comm=comm
+            )
         return mpp_finish(
             mpi_context,
             result,
@@ -421,10 +492,24 @@ def _sum_prod(
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
+    scattered = mpp_plan_scatter_target(
+        mpi_context, old_meta, dims, partition_dim, reduce_plan
+    )
+    scatter_start = scatter_stop = None
+    if scattered is not None:
+        _, scatter_counts, scatter_comm = scattered
+        scatter_start = sum(scatter_counts[: scatter_comm.rank])
+        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
     for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
-            variables[entry.name] = variable
+            variables[entry.name] = (
+                mpp_scatter_replicated_slice(
+                    variable, scattered[0], scatter_start, scatter_stop
+                )
+                if scattered is not None
+                else variable
+            )
             continue
         method = variable.prod if product else variable.sum
         local, local_error = guarded(
@@ -437,6 +522,12 @@ def _sum_prod(
                 raise local_error
             variables[entry.name] = local
             continue
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+        )
+        scatter = None if scattered is None else scattered[:2]
         result = _combine_sum_or_prod(
             mpi_context,
             variable,
@@ -446,13 +537,24 @@ def _sum_prod(
             skipna=skipna,
             min_count=min_count,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=comm,
             replica_count=entry.replica_count,
+            scatter=scatter,
         )
         variables[entry.name] = result
+    coord_source = (
+        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
+        if scattered is not None and scattered[0] in value.dims
+        else value
+    )
+    dataset = dataset_result(coord_source, dims, variables)
+    if scattered is not None:
+        return mpp_finish_scatter(
+            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
+        )
     return mpp_finish(
         mpi_context,
-        dataset_result(value, dims, variables),
+        dataset,
         old_meta=old_meta,
         partition_dim=partition_dim,
         auto_candidates=repartition_candidates(reduce_plan),
@@ -519,6 +621,15 @@ def mpp_mean_reduce(
                 dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
+        scattered = mpp_plan_scatter_target(
+            mpi_context, old_meta, dims, partition_dim, reduce_plan
+        )
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
+        )
+        scatter = None if scattered is None else scattered[:2]
         result = _combine_mean(
             mpi_context,
             value,
@@ -526,9 +637,14 @@ def mpp_mean_reduce(
             dims,
             skipna=skipna,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=comm,
             replica_count=reduce_plan[0].replica_count,
+            scatter=scatter,
         )
+        if scattered is not None:
+            return mpp_finish_scatter(
+                result, target=scattered[0], counts=scattered[1], comm=comm
+            )
         return mpp_finish(
             mpi_context,
             result,
@@ -538,10 +654,24 @@ def mpp_mean_reduce(
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
+    scattered = mpp_plan_scatter_target(
+        mpi_context, old_meta, dims, partition_dim, reduce_plan
+    )
+    scatter_start = scatter_stop = None
+    if scattered is not None:
+        _, scatter_counts, scatter_comm = scattered
+        scatter_start = sum(scatter_counts[: scatter_comm.rank])
+        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
     for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
-            variables[entry.name] = variable
+            variables[entry.name] = (
+                mpp_scatter_replicated_slice(
+                    variable, scattered[0], scatter_start, scatter_stop
+                )
+                if scattered is not None
+                else variable
+            )
             continue
         if not entry.distributed:
             variables[entry.name] = variable.mean(
@@ -554,6 +684,12 @@ def mpp_mean_reduce(
                 dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+        )
+        scatter = None if scattered is None else scattered[:2]
         result = _combine_mean(
             mpi_context,
             variable,
@@ -561,13 +697,24 @@ def mpp_mean_reduce(
             entry.dims,
             skipna=skipna,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=comm,
             replica_count=entry.replica_count,
+            scatter=scatter,
         )
         variables[entry.name] = result
+    coord_source = (
+        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
+        if scattered is not None and scattered[0] in value.dims
+        else value
+    )
+    dataset = dataset_result(coord_source, dims, variables)
+    if scattered is not None:
+        return mpp_finish_scatter(
+            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
+        )
     return mpp_finish(
         mpi_context,
-        dataset_result(value, dims, variables),
+        dataset,
         old_meta=old_meta,
         partition_dim=partition_dim,
         auto_candidates=repartition_candidates(reduce_plan),
@@ -706,6 +853,14 @@ def _min_max(
                 keep_attrs=keep_attrs,
             )
         )
+        scattered = mpp_plan_scatter_target(
+            mpi_context, old_meta, dims, partition_dim, reduce_plan
+        )
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
+        )
         result = _combine_extreme(
             mpi_context,
             value,
@@ -714,8 +869,13 @@ def _min_max(
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
+            comm=comm,
+            scatter=None if scattered is None else scattered[:2],
         )
+        if scattered is not None:
+            return mpp_finish_scatter(
+                result, target=scattered[0], counts=scattered[1], comm=comm
+            )
         return mpp_finish(
             mpi_context,
             result,
@@ -725,10 +885,24 @@ def _min_max(
         )
 
     variables: dict[Hashable, xr.DataArray] = {}
+    scattered = mpp_plan_scatter_target(
+        mpi_context, old_meta, dims, partition_dim, reduce_plan
+    )
+    scatter_start = scatter_stop = None
+    if scattered is not None:
+        _, scatter_counts, scatter_comm = scattered
+        scatter_start = sum(scatter_counts[: scatter_comm.rank])
+        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
     for entry in reduce_plan:
         variable = value[entry.name]
         if not entry.dims:
-            variables[entry.name] = variable
+            variables[entry.name] = (
+                mpp_scatter_replicated_slice(
+                    variable, scattered[0], scatter_start, scatter_stop
+                )
+                if scattered is not None
+                else variable
+            )
             continue
         local, local_error = guarded(
             lambda variable=variable, entry=entry: _local_extreme(
@@ -746,6 +920,11 @@ def _min_max(
                 raise local_error
             variables[entry.name] = local
             continue
+        comm = (
+            scattered[2]
+            if scattered is not None
+            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+        )
         result = _combine_extreme(
             mpi_context,
             variable,
@@ -754,12 +933,23 @@ def _min_max(
             minimum=minimum,
             skipna=skipna,
             error=local_error,
-            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=comm,
+            scatter=None if scattered is None else scattered[:2],
         )
         variables[entry.name] = result
+    coord_source = (
+        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
+        if scattered is not None and scattered[0] in value.dims
+        else value
+    )
+    dataset = dataset_result(coord_source, dims, variables)
+    if scattered is not None:
+        return mpp_finish_scatter(
+            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
+        )
     return mpp_finish(
         mpi_context,
-        dataset_result(value, dims, variables),
+        dataset,
         old_meta=old_meta,
         partition_dim=partition_dim,
         auto_candidates=repartition_candidates(reduce_plan),
