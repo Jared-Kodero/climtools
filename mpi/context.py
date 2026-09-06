@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from mpi4py import MPI
 
-from ..core.utils import LockFile, tmp
+from ..core.utils import LockFile
 from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
 
 if TYPE_CHECKING:
@@ -310,16 +310,9 @@ class MPIContext(MPIDiagnostics):
         # per-process scratch directory core.utils already made.
         if self.alive(self.comm):
             self._tmp: Path = get_tmpdir(self.comm)
-            # atexit only. tmp_cleanup barriers twice, and a Python signal
-            # handler runs in the main thread at an arbitrary bytecode
-            # boundary -- possibly while a collective is already in flight on
-            # this rank, or on only some of the ranks if the signal is not
-            # delivered job-wide. Posting a Barrier from there deadlocks the
-            # job rather than cleaning up after it.
             atexit.register(partial(tmp_cleanup, self.comm, self._tmp))
             self._install_abort_hook()
-        else:
-            self._tmp = tmp
+
         self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
 
     @property

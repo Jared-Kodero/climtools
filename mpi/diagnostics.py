@@ -392,7 +392,6 @@ def tmp_cleanup(comm: MPI.Intracomm, tmp: Path, *_):
     comm.Barrier()
     if comm.Get_rank() == 0:
         shutil.rmtree(tmp, ignore_errors=True)
-    comm.Barrier()
 
 
 def get_tmpdir(comm: MPI.Intracomm) -> Path:

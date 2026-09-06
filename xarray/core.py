@@ -6,9 +6,8 @@ import operator as _operator
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
-from mpi4py import MPI
-
 import xarray as xr
+from mpi4py import MPI
 
 from .arithmetic import (
     mpp_align,
