@@ -9,6 +9,7 @@ stateful classes defined in :mod:`plotting`.
 from __future__ import annotations
 
 import sys
+import warnings
 from typing import TYPE_CHECKING
 
 import cartopy.crs as ccrs
@@ -18,11 +19,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
-
-import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -48,6 +48,10 @@ if TYPE_CHECKING:
     from matplotlib.image import AxesImage
     from matplotlib.quiver import Quiver, QuiverKey
     from matplotlib.text import Text
+
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message=r".*program compiled against libxml.*")
 
 __all__ = [
     "add_colorbar",
