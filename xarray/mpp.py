@@ -42,6 +42,7 @@ __all__ = [
     "mpp_get_neighbor_pe",
     "mpp_max",
     "mpp_min",
+    "mpp_partition_offsets",
     "mpp_prod_decompose",
     "mpp_prod_recombine",
     "mpp_reduce_scatter",
@@ -73,17 +74,6 @@ class Domain:
     comm: MPI.Comm
     cart: dict[str, Any] | None = field(default=None)
 
-    def local_size(self, dim: str) -> int:
-        return self.stops[dim] - self.starts[dim]
-
-    def is_global_edge(self, dim: str, side: str) -> bool:
-        """``side`` is "lower" or "upper"."""
-        if side == "lower":
-            return self.starts[dim] == 0
-        if side == "upper":
-            return self.stops[dim] == self.global_sizes[dim]
-        raise ValueError(f"side must be 'lower' or 'upper', got {side!r}.")
-
     @classmethod
     def from_meta(cls, meta: Mapping[str, Any], comm: MPI.Comm) -> Domain:
         """Build from climtools' ``.meta`` dict (see ``xarray/meta.py``)."""
@@ -96,25 +86,6 @@ class Domain:
             comm=comm,
             cart=dict(meta["cart"]) if meta.get("cart") is not None else None,
         )
-
-    def to_meta(self, *, chunk_info: Mapping[str, int]) -> dict[str, Any]:
-        """Inverse of :meth:`from_meta`."""
-        meta: dict[str, Any] = {
-            "dims": self.dims,
-            "global_sizes": dict(self.global_sizes),
-            "starts": dict(self.starts),
-            "stops": dict(self.stops),
-            "dim": self.dims[0],
-            "global_size": self.global_sizes[self.dims[0]],
-            "start": self.starts[self.dims[0]],
-            "stop": self.stops[self.dims[0]],
-            "chunk_info": {
-                str(name): int(size) for name, size in chunk_info.items() if size > 0
-            },
-        }
-        if self.cart is not None:
-            meta["cart"] = dict(self.cart)
-        return meta
 
 
 def mpp_reduce_scatter(
@@ -895,3 +866,29 @@ def mpp_chksum(
     total = np.empty(1, dtype=np.int64)
     comm.Allreduce(np.array([local_sum], dtype=np.int64), total, op=MPI.SUM)
     return int(total[0])
+
+
+def mpp_partition_offsets(comm: MPI.Comm, local_length: int) -> tuple[int, int, int]:
+    """New ``(global_size, start, stop)`` after an op changed the local length.
+
+    Length-changing operations -- ``coarsen``, ``diff``, anything that drops
+    or adds elements along the partition dimension -- have to rebuild the
+    partition metadata from each rank's new length. The obvious way is an
+    ``allgather`` of that one integer, but the result is only ever used as a
+    total and an exclusive prefix sum, both of which are fixed-size
+    collectives: ``Allreduce`` and ``Exscan``. The allgather moves a pickled
+    object per rank and grows with rank count; this does not.
+
+    Requires the partition to be contiguous and ordered by rank along the
+    dimension, which is what makes the prefix sum this rank's own offset --
+    the same property FMS relies on throughout ``mpp_domains``.
+    """
+    length = np.array([int(local_length)], dtype=np.int64)
+    total = np.empty_like(length)
+    comm.Allreduce(length, total, op=MPI.SUM)
+    prefix = np.zeros_like(length)
+    comm.Exscan(length, prefix, op=MPI.SUM)
+    if comm.rank == 0:
+        prefix[0] = 0  # Exscan leaves rank 0's receive buffer undefined.
+    start = int(prefix[0])
+    return int(total[0]), start, start + int(length[0])

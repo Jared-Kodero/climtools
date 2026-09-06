@@ -213,13 +213,23 @@ def mpp_isel_scalar(
         )
 
     dim_comm = _dim_comm(mpi_context, meta, dim)
-    owner = None
-    parts = dim_comm.allgather((int(meta["starts"][dim]), int(meta["stops"][dim])))
-    for candidate_rank, (start, stop) in enumerate(parts):
-        if start <= normalized < stop:
-            owner = candidate_rank
-            break
-    if owner is None:
+    # Whether *this* rank owns the index is a local question, so finding the
+    # owner is a one-integer maximum rather than a gather of every rank's
+    # bounds: a rank that owns it offers its own number, one that does not
+    # offers -1. Fixed-size, and it does not grow with rank count the way
+    # collecting the whole bounds table did.
+    claim = np.array(
+        [
+            dim_comm.rank
+            if int(meta["starts"][dim]) <= normalized < int(meta["stops"][dim])
+            else -1
+        ],
+        dtype=np.int64,
+    )
+    elected = np.empty_like(claim)
+    dim_comm.Allreduce(claim, elected, op=MPI.MAX)
+    owner = int(elected[0])
+    if owner < 0:
         raise RuntimeError("Distributed partitions do not own the requested index.")
 
     result = None
@@ -500,15 +510,21 @@ def mpp_sel_scalar(
 
     meta = mpp_get_meta(value)
     dim_comm = mpi_context.comm if meta is None else _dim_comm(mpi_context, meta, dim)
-    found_ranks = dim_comm.allgather(found)
-    owners = [rank for rank, state in enumerate(found_ranks) if state]
-    if not owners:
+    # How many ranks matched, and which one, in a single fixed-size sum
+    # rather than a gathered flag per rank. The rank total is only read when
+    # exactly one rank contributed, in which case it *is* that rank's number;
+    # the ambiguous case is rejected below before it is used.
+    claim = np.array([int(found), dim_comm.rank if found else 0], dtype=np.int64)
+    tally = np.empty_like(claim)
+    dim_comm.Allreduce(claim, tally, op=MPI.SUM)
+    owner_count = int(tally[0])
+    if owner_count == 0:
         raise KeyError(f"No rank contains label {label!r} on {dim!r}.")
-    if len(owners) > 1:
+    if owner_count > 1:
         raise NotImplementedError(
             "Distributed scalar sel requires labels to be owned by one rank."
         )
-    owner = owners[0]
+    owner = int(tally[1])
     payload = result if dim_comm.rank == owner else None
     # Materialize before it gets pickled by bcast below (same reasoning as
     # the sibling scalar-selection functions above).

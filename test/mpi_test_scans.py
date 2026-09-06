@@ -327,3 +327,48 @@ def run(fx: Fixtures) -> None:
         lambda: native_left.dot(right_native, dim="y"),
         case="1d(x)",
     )
+
+    # Scalar isel/sel elect a single owning rank. That election used to
+    # gather every rank's bounds (or its match flag) and scan the list; it is
+    # now a fixed-size reduction, so the outcomes that reduction has to
+    # distinguish -- one owner, no owner, and an out-of-range request -- are
+    # checked here rather than left to the happy path alone.
+    try:
+        picked = dist.isel(time=int(native.sizes["time"]) - 1)
+        expected = native.isel(time=int(native.sizes["time"]) - 1)
+        xr.testing.assert_allclose(local_of(picked), expected, rtol=1e-6)
+        record("isel", "scalar, last global index", True)
+    except Exception as e:
+        record(
+            "isel",
+            "scalar, last global index",
+            False,
+            f"{type(e).__name__}: {e!s:.200}",
+        )
+
+    try:
+        dist.isel(time=int(native.sizes["time"]))
+        record("isel", "scalar, out of range raises", False, "no IndexError raised")
+    except IndexError:
+        record("isel", "scalar, out of range raises", True)
+    except Exception as e:
+        record(
+            "isel",
+            "scalar, out of range raises",
+            False,
+            f"raised {type(e).__name__}, wanted IndexError",
+        )
+
+    try:
+        # Every rank agrees the label is absent, so no rank claims ownership.
+        dist.sel(time=np.datetime64("1600-01-01"))
+        record("sel", "scalar, absent label raises", False, "no KeyError raised")
+    except KeyError:
+        record("sel", "scalar, absent label raises", True)
+    except Exception as e:
+        record(
+            "sel",
+            "scalar, absent label raises",
+            False,
+            f"raised {type(e).__name__}, wanted KeyError",
+        )

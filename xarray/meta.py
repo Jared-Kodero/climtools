@@ -384,27 +384,6 @@ def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in attrs.items() if key not in _INTERNAL_ATTRS}
 
 
-def _format_label(value: Any, limit: int = 16) -> str:
-    """Return a short, fixed-width-friendly label for a coordinate value."""
-    if isinstance(value, np.datetime64):
-        text = str(np.datetime64(value, "m"))
-    elif isinstance(value, (np.floating, float)):
-        text = f"{float(value):g}"
-    else:
-        text = str(value)
-    if len(text) > limit:
-        text = text[: limit - 1] + "\u2026"
-    return text
-
-
-def _edge_labels(data: xr.Dataset | xr.DataArray, dim: Hashable) -> tuple[str, str]:
-    """Return the first and last coordinate labels owned along ``dim``."""
-    if dim not in data.coords or int(data.sizes[dim]) == 0:
-        return "-", "-"
-    values = np.asarray(data.coords[dim].values)
-    return _format_label(values[0]), _format_label(values[-1])
-
-
 def mpp_should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
     """Collectively resolve whether to call :func:`mpp_log_partition_report`.
 

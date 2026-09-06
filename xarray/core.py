@@ -14,7 +14,6 @@ from .arithmetic import (
     mpp_apply,
     mpp_coarsen_reduce,
     mpp_evaluate,
-    mpp_halo_exchange,
     mpp_matmul,
     mpp_reindex,
     mpp_rolling_reduce,
@@ -1398,15 +1397,6 @@ class MPIXarray:
         """
         result = mpp_matmul(self._runtime, self._prepare(), unwrap(right))
         return finalize(result, self._runtime)
-
-    def _halo_exchange(
-        self, dim: Hashable | None = None, *, before: int, after: int
-    ) -> tuple[MPIXarray, int, int]:
-        """Pad with boundary slices fetched from the adjacent ranks."""
-        padded, left_pad, right_pad = mpp_halo_exchange(
-            self._runtime, self._prepare(), dim, before=before, after=after
-        )
-        return finalize(padded, self._runtime), left_pad, right_pad
 
     def rolling_reduce(
         self,

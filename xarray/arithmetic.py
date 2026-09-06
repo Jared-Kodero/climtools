@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -26,6 +27,7 @@ from .mpp import (
     Domain,
     mpp_complete_update_domains,
     mpp_get_neighbor_pe,
+    mpp_partition_offsets,
     mpp_start_update_domains,
 )
 
@@ -1137,6 +1139,7 @@ def mpp_halo_exchange(
     before: int,
     after: int,
     periodic: bool = False,
+    exchange_coords: bool = True,
 ) -> tuple[xr.Dataset | xr.DataArray, int, int]:
     """Pad ``value`` with boundary slices from the adjacent ranks.
 
@@ -1154,6 +1157,17 @@ def mpp_halo_exchange(
         Wrap the neighbor lookup at the global boundary instead of
         leaving that side unpadded (rank 0's lower neighbor becomes the
         last rank, and symmetrically on the upper side).
+    exchange_coords : bool, optional
+        Whether coordinates varying along ``dim`` take part. An operation
+        that reads coordinate *values* across the rank boundary needs them
+        -- ``differentiate`` divides by a spacing that straddles it -- but
+        one that reads only data values and then trims back to its own
+        compute domain does not, which is most of them. Exchanging them
+        anyway costs far more than their size suggests: joining an index
+        coordinate makes xarray rebuild a pandas Index over the padded
+        extent, measured here at roughly four times the cost of joining the
+        data alone. Pass False when the caller restores the coordinate
+        itself; the padded object then carries none along ``dim``.
     Returns
     -------
     tuple[xarray.Dataset or xarray.DataArray, int, int]
@@ -1194,6 +1208,7 @@ def mpp_halo_exchange(
             int(before),
             int(after),
             bool(periodic),
+            bool(exchange_coords),
         ),
     )
 
@@ -1210,6 +1225,13 @@ def mpp_halo_exchange(
         # with n=0/periods=0, or an edge_order that needs no interior
         # halo) get correct output at zero communication cost instead.
         return value, 0, 0
+
+    if not exchange_coords:
+        along_dim = [
+            name for name, coord in value.coords.items() if partition_dim in coord.dims
+        ]
+        if along_dim:
+            value = value.drop_vars(along_dim)
 
     comm = mpi_context.comm
     # Neighbor lookup along `partition_dim` -- single-dim linear rank -+ 1,
@@ -1347,14 +1369,25 @@ def mpp_rolling_reduce(
     before = window // 2 if center else window - 1
     after = (window - 1) - before if center else 0
 
+    # A rolling reduction reads data values in the halo but never coordinate
+    # values, and the trim below restores exactly this rank's own compute
+    # domain -- so the coordinate on the result is bit-for-bit the one that
+    # went in. Exchanging and re-joining it would rebuild a pandas Index over
+    # the padded extent for nothing; it is put back verbatim after the trim
+    # instead.
+    dim_coords = {
+        name: coord for name, coord in value.coords.items() if dim in coord.dims
+    }
     padded, left_pad, _right_pad = mpp_halo_exchange(
-        mpi_context, value, dim, before=before, after=after
+        mpi_context, value, dim, before=before, after=after, exchange_coords=False
     )
     rolled = padded.rolling({dim: window}, center=center, min_periods=min_periods)
     reduced = getattr(rolled, reduce)()
 
     local_len = int(value.sizes[dim])
     trimmed = reduced.isel({dim: slice(left_pad, left_pad + local_len)})
+    if dim_coords:
+        trimmed = trimmed.assign_coords(dim_coords)
     return reattach_meta(trimmed, meta)
 
 
@@ -1494,10 +1527,9 @@ def mpp_coarsen_reduce(
     # from an allgather of each rank's new local length, not carried
     # over from the (now stale) pre-coarsen meta.
     comm = _dim_comm(mpi_context, meta, dim)
-    counts = comm.allgather(int(coarsened.sizes[dim]))
-    new_global_size = sum(counts)
-    new_start = sum(counts[: comm.rank])
-    new_stop = new_start + counts[comm.rank]
+    new_global_size, new_start, new_stop = mpp_partition_offsets(
+        comm, int(coarsened.sizes[dim])
+    )
     new_chunk_info = prune_chunk_info(meta["chunk_info"], coarsened)
     global_sizes = dict(meta["global_sizes"])
     starts = dict(meta["starts"])

@@ -19,6 +19,9 @@ coherent area rather than everything living in a single file:
   mpi_test_groupby.py       groupby, resample
   mpi_test_misc.py          prod, any, all, first, last, align,
                              evaluate, roll, repartition, apply
+  mpi_test_mpp.py           the FMS-adapted primitives in xarray/mpp.py
+                             directly: domain bookkeeping, reproducing
+                             sum/product, checksums, halo start/complete
 
 Every numeric check compares this rank's local slice against the
 matching slice of a plain, non-distributed xarray/numpy computation --
@@ -34,6 +37,7 @@ import mpi_test_construction
 import mpi_test_groupby
 import mpi_test_halo_ops
 import mpi_test_misc
+import mpi_test_mpp
 import mpi_test_reductions
 import mpi_test_scans
 from mpi_test_common import build_fixtures, report
@@ -46,5 +50,6 @@ mpi_test_halo_ops.run(fixtures)
 mpi_test_scans.run(fixtures)
 mpi_test_groupby.run(fixtures)
 mpi_test_misc.run(fixtures)
+mpi_test_mpp.run(fixtures)
 
 report()

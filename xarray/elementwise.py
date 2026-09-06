@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -17,6 +18,7 @@ from .arithmetic import (
 from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
+from .mpp import mpp_partition_offsets
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
@@ -508,10 +510,9 @@ def mpp_interp(
     )
     result = full.interp({dim: new_coord}, method=method, **kwargs)
 
-    counts = comm.allgather(int(result.sizes[dim]))
-    new_global_size = sum(counts)
-    new_start = sum(counts[: comm.rank])
-    new_stop = new_start + counts[comm.rank]
+    new_global_size, new_start, new_stop = mpp_partition_offsets(
+        comm, int(result.sizes[dim])
+    )
     chunk_info = prune_chunk_info(meta["chunk_info"], result)
     global_sizes = dict(meta["global_sizes"])
     starts = dict(meta["starts"])
@@ -795,10 +796,9 @@ def mpp_diff(
     diffed = padded.diff(dim, n=n, label=label)
 
     comm = _dim_comm(mpi_context, meta, dim)
-    counts = comm.allgather(int(diffed.sizes[dim]))
-    new_global_size = sum(counts)
-    new_start = sum(counts[: comm.rank])
-    new_stop = new_start + counts[comm.rank]
+    new_global_size, new_start, new_stop = mpp_partition_offsets(
+        comm, int(diffed.sizes[dim])
+    )
     chunk_info = prune_chunk_info(meta["chunk_info"], diffed)
     global_sizes = dict(meta["global_sizes"])
     starts = dict(meta["starts"])
