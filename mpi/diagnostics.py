@@ -3,6 +3,7 @@ import datetime
 import faulthandler
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -10,11 +11,12 @@ import traceback
 import uuid
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from mpi4py import MPI
 
-from ..core.utils import LockFile, tmp
+from ..core.utils import LockFile
 
 
 class MPIError(Exception):
@@ -289,9 +291,9 @@ class MPIDiagnostics:
         error_name = f"{uuid.uuid4().hex}.error" if MPI.COMM_WORLD.rank == 0 else None
         error_name = MPI.COMM_WORLD.bcast(error_name, root=0)
 
-        error_file = tmp / error_name
-        error_lock = LockFile(tmp / f"{error_name}.lock")
-        finished_file = tmp / f"{error_name}.done"
+        error_file = self._tmp / error_name
+        error_lock = LockFile(self._tmp / f"{error_name}.lock")
+        finished_file = self._tmp / f"{error_name}.done"
 
         def _abort_excepthook(
             exc_type: type[BaseException],
@@ -384,3 +386,37 @@ class MPIDiagnostics:
         sys.excepthook = _abort_excepthook
 
         return True
+
+
+def tmp_cleanup(comm: MPI.Intracomm, tmp: Path, *_):
+    comm.Barrier()
+    if comm.Get_rank() == 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+    comm.Barrier()
+
+
+def get_tmpdir(comm: MPI.Intracomm) -> Path:
+
+    tmp_id = comm.bcast(
+        uuid.uuid4().hex if comm.Get_rank() == 0 else None,
+        root=0,
+    )
+    home = Path.home()
+
+    env_vars = ("SLURM_JOB_TMPDIR", "PBS_JOBTMP", "SCRATCH", "WORK", "TMPDIR")
+    base = next(
+        (Path(os.environ[v]) for v in env_vars if os.environ.get(v)),
+        None,
+    )
+    hpc_dirs = ("scratch", "jobtmp", "work")
+
+    if base is None:
+        base = next(
+            (home / p for p in hpc_dirs if (home / p).exists()),
+            home,
+        )
+
+    tmp = base / "tmp" / "xgeo" / tmp_id
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    return tmp

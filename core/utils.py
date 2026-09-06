@@ -16,8 +16,6 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TextIO
 
-from mpi4py.MPI import COMM_WORLD as comm
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -31,56 +29,8 @@ ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 
 
-_LAUNCH_ENV = (
-    "OMPI_COMM_WORLD_RANK",
-    "PMI_RANK",
-    "PMIX_RANK",
-    "SLURM_PROCID",
-    "MV2_COMM_WORLD_RANK",
-    "I_MPI_COMM_WORLD_RANK",
-)
-
-is_mpi = comm.Get_size() > 1 or any(k in os.environ for k in _LAUNCH_ENV)
-
-if is_mpi:
-    tmp_id = comm.bcast(uuid.uuid4().hex if comm.Get_rank() == 0 else None, root=0)
-    home = Path.home()
-
-    # Find the first available scratch/work directory
-    env_vars = ("SLURM_JOB_TMPDIR", "PBS_JOBTMP", "SCRATCH", "WORK", "TMPDIR")
-    base = next((Path(os.environ[v]) for v in env_vars if os.environ.get(v)), None)
-    hpc_dirs = ("scratch", "jobtmp", "work")
-
-    if not base:
-        base = next((home / p for p in hpc_dirs if (home / p).exists()), home)
-
-    tmp = base / "tmp" / "xgeo" / tmp_id
-else:
-    tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
-
+tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
 tmp.mkdir(parents=True, exist_ok=True)
-
-
-def _cleanup():
-    try:
-        if is_mpi:
-            comm.Barrier()
-            if comm.Get_rank() == 0:
-                shutil.rmtree(tmp, ignore_errors=True)
-        else:
-            shutil.rmtree(tmp, ignore_errors=True)
-    except Exception:
-        pass
-
-
-def _signal_handler(signum, frame):
-    _cleanup()
-
-
-# Register cleanup for normal exits and cancellation signals
-atexit.register(_cleanup)
-signal.signal(signal.SIGTERM, _signal_handler)
-signal.signal(signal.SIGINT, _signal_handler)
 
 
 current_dask_cluster = None
@@ -553,3 +503,12 @@ class RedirectStreams:
 
         if error is not None:
             raise error
+
+
+def _cleanup(*_):
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+atexit.register(_cleanup)
+signal.signal(signal.SIGTERM, _cleanup)
+signal.signal(signal.SIGINT, _cleanup)

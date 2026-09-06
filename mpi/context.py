@@ -8,17 +8,21 @@ and decorator-based MPI execution. The :data:`mpi` singleton uses
 # mpi.py
 from __future__ import annotations
 
+import atexit
 import builtins
 import functools
 import os
+import signal
 from collections.abc import Callable, Sequence
+from functools import partial
 from numbers import Integral
+from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from mpi4py import MPI
 
-from ..core.utils import _LAUNCH_ENV, LockFile, tmp
-from .diagnostics import MPIDiagnostics, MPIError
+from ..core.utils import LockFile
+from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,6 +31,16 @@ if TYPE_CHECKING:
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
+
+
+LAUNCH_ENV = (
+    "OMPI_COMM_WORLD_RANK",
+    "PMI_RANK",
+    "PMIX_RANK",
+    "SLURM_PROCID",
+    "MV2_COMM_WORLD_RANK",
+    "I_MPI_COMM_WORLD_RANK",
+)
 
 
 class ToChildrenContext:
@@ -267,13 +281,20 @@ class MPIContext(MPIDiagnostics):
     def __init__(self, comm: MPI.Intracomm | None = None) -> None:
         """Initialize an MPI communication context."""
         self.comm: MPI.Intracomm = comm if comm is not None else MPI.COMM_WORLD
-        self._mpi_lock = LockFile(tmp / ".mpi.lock")
         self._child: MPIContext | None = None
         self._to_children = ToChildrenContext(self)
         self._from_children = FromChildrenContext(self)
+        self._tmp: Path = get_tmpdir(self.comm)
+        self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
-        self._install_abort_hook()
+
+        if self.alive():
+            cleanup = partial(cleanup, self.comm, self._tmp)
+            atexit.register(cleanup)
+            signal.signal(signal.SIGTERM, cleanup)
+            signal.signal(signal.SIGINT, cleanup)
+            self._install_abort_hook()
 
     @property
     def to_children(self) -> ToChildrenContext:
@@ -323,9 +344,7 @@ class MPIContext(MPIDiagnostics):
         bool
             Whether MPI execution is detected.
         """
-        if comm.Get_size() > 1 or builtins.any(
-            key in os.environ for key in _LAUNCH_ENV
-        ):
+        if comm.Get_size() > 1 or builtins.any(key in os.environ for key in LAUNCH_ENV):
             return True
         try:
             return MPI.Comm.Get_parent() != MPI.COMM_NULL
