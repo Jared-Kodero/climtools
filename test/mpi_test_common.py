@@ -9,6 +9,7 @@ than duplicating fixture setup or the RESULTS/record/report machinery.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -86,8 +87,19 @@ def build_fixtures() -> Fixtures:
     partition (dim='time') and a 2D Cartesian partition (dims=('lat',
     'lon')) -- every test module compares against the same underlying
     data, just partitioned differently. Also builds a small, separate,
-    deliberately-uneven 1D DataArray fixture (see `UNEVEN_GLOBAL`)."""
-    create_dataset(n_time=24 * 30, resolution_deg=0.25, plev_step=100)
+    deliberately-uneven 1D DataArray fixture (see `UNEVEN_GLOBAL`).
+
+    Defaults are the production-scale config (721x1440 grid, 720 steps).
+    CLIMTOOLS_TEST_NTIME/_RESOLUTION/_PLEV_STEP override them for local
+    iteration on a machine that cannot hold it -- env/env.md previously
+    told the reader to edit this call by hand, which is easy to commit by
+    accident. The full-size defaults still apply to any run that does not
+    set them."""
+    create_dataset(
+        n_time=int(os.environ.get("CLIMTOOLS_TEST_NTIME") or 24 * 30),
+        resolution_deg=float(os.environ.get("CLIMTOOLS_TEST_RESOLUTION") or 0.25),
+        plev_step=float(os.environ.get("CLIMTOOLS_TEST_PLEV_STEP") or 100),
+    )
 
     native = xr.open_dataset(PATH).load()
     dist = xgeo.mpi_open_dataset(PATH, mpi, partition_dim="time", log_partitions=True)

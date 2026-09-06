@@ -10,8 +10,10 @@ gridded climate data with xarray:
 - ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib,
   and cmocean.
 - ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
-- ``mpi``       MPI context: ``mpi.comm`` for the raw communicator and
-  ``mpi.reduce`` for collective reductions.
+- ``MPIContext``  MPI context: ``MPIContext().comm`` for the raw
+  communicator and its reduce methods for collectives. Imported by name
+  rather than by star import, so analysis or plotting code never
+  initialises MPI by accident.
 
 Two access patterns are supported and are equivalent::
 
@@ -58,17 +60,25 @@ if TYPE_CHECKING:
         exclude_key,
         locked_print,
     )
-    from .mpi.context import MPIContext
+    from .mpi.context import MPIContext as MPIContext
     from .viz import cmaps, plotting
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("always", module=r"climtools\..*")
 
+#: Star-import surface. ``MPIContext`` is deliberately absent. ``__all__`` is
+#: exactly what ``from climtools import *`` resolves, and resolving that name
+#: runs the lazy import of ``.mpi.context``, which imports mpi4py and so calls
+#: ``MPI_Init`` -- as a side effect of a star import, in code that may never
+#: touch MPI. Inside a Slurm allocation that enrols the process as a PMI
+#: client of the job step, after which COMM_WORLD's default
+#: ``MPI_ERRORS_ARE_FATAL`` handler ties an ordinary Python error to the fate
+#: of the whole step. ``from climtools import MPIContext`` still works, going
+#: through ``__getattr__`` exactly as before.
 __all__ = [
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
-    "MPIContext",
     "RedirectStreams",
     "SerialProgressBar",
     "cdo",
@@ -90,7 +100,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "operator": (".core.operator", None),
     "plotting": (".viz.plotting", None),
     "xgeo": (".core.xgeo", None),
-    "mpi": (".mpi.context", "mpi"),
     "MPIContext": (".mpi.context", "MPIContext"),
     "LockedLogger": (".core.utils", "LockedLogger"),
     "LockFile": (".core.utils", "LockFile"),

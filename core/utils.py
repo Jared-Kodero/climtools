@@ -509,6 +509,31 @@ def _cleanup(*_):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+_previous_handlers: dict[int, Any] = {}
+
+
+def _cleanup_then_chain(signum, frame):
+    """Remove the scratch directory, then let the signal do its job.
+
+    Installing ``_cleanup`` directly as the handler silently cancelled the
+    signal, because a Python handler that returns normally suppresses it:
+    SIGINT stopped raising KeyboardInterrupt and SIGTERM stopped terminating,
+    for every program that imported climtools. A supervisor that asks politely
+    and is ignored escalates to SIGKILL, and an interactive user whose first
+    Ctrl-C appears to do nothing presses it again -- which under ``srun --pty``
+    tears down the job step. Cleanup is a side errand, not grounds for
+    swallowing the signal.
+    """
+    _cleanup()
+    previous = _previous_handlers.get(signum, signal.SIG_DFL)
+    if callable(previous):
+        previous(signum, frame)
+        return
+    signal.signal(signum, previous)
+    os.kill(os.getpid(), signum)
+
+
 atexit.register(_cleanup)
-signal.signal(signal.SIGTERM, _cleanup)
-signal.signal(signal.SIGINT, _cleanup)
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    _previous_handlers[_sig] = signal.getsignal(_sig)
+    signal.signal(_sig, _cleanup_then_chain)

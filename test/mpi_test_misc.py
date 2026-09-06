@@ -8,6 +8,8 @@ from __future__ import annotations
 import numpy as np
 from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
+from climtools.xarray.mpp import mpp_reproducing_prod
+from mpi4py import MPI
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
 
 import xarray as xr
@@ -74,12 +76,66 @@ def run(fx: Fixtures) -> None:
     check_reduce_2d(
         "prod", "lat", lambda: dist2d.prod(dim="lat"), lambda: native.prod(dim="lat")
     )
+    # A product along "time" is the one reduction whose native counterpart
+    # cannot serve as a reference on the raw fixture. "pr" is U(0, 50) in
+    # float32, so a 720-step product is of order 1e911 and every partial
+    # saturates to +inf long before the reduction ends. Overflow alone would
+    # compare equal, but rng.random(dtype=float32) draws from a 24-bit space,
+    # so exact zeros do occur (~10 of them at production size) -- and once a
+    # partial is inf, whether a zero is seen before or after it decides
+    # between 0.0 and inf * 0 = NaN. That made the old check depend on where
+    # a zero happened to land, hence on rank count, and it is what the
+    # unseeded RNG intermittently exposed.
+    #
+    # Two separate properties are checked instead. First, agreement with
+    # native on a field whose product is actually representable, which is the
+    # only regime where native is a valid reference at all.
+    scaled = dist / 25.0
+    native_scaled = native / 25.0
     check_reduce_1d(
         "prod",
-        lambda: dist.prod(dim="time"),
-        lambda: native.prod(dim="time"),
+        lambda: scaled.prod(dim="time"),
+        lambda: native_scaled.prod(dim="time"),
         case="1d(time), reduction+reconstruction",
     )
+    mpi.comm.barrier()
+
+    # Second, that the raw overflowing field still reduces to the same answer
+    # whatever the rank count -- the reproducibility guarantee FMS states for
+    # its own reductions, and the property the distributed implementation is
+    # responsible for even where native xarray itself is unreliable.
+    try:
+        result = dist.prod(dim="time")
+        raw = local_of(result)["pr"]
+        expected = xr.DataArray(
+            mpp_reproducing_prod(
+                np.asarray(native["pr"].values),
+                MPI.COMM_SELF,
+                axis=native["pr"].dims.index("time"),
+                dtype=np.dtype(np.float32),
+            ),
+            dims=[d for d in native["pr"].dims if d != "time"],
+        )
+        # The reduction result is repartitioned, so compare this rank's own
+        # slice of it -- same convention as check_reduce_1d above.
+        m = result.meta if isinstance(result, MPIXarray) else None
+        if m is not None:
+            d = m["dims"][0]
+            expected = expected.isel({d: slice(m["starts"][d], m["stops"][d])})
+        matches = np.array_equal(
+            np.asarray(raw.values), np.asarray(expected.values), equal_nan=True
+        )
+        agreed = mpi.comm.gather(matches, root=0)
+        if mpi.comm.rank == 0:
+            record("prod", "1d(time), overflowing, rank-count invariant", all(agreed))
+    except Exception as e:
+        if mpi.comm.rank == 0:
+            record(
+                "prod",
+                "1d(time), overflowing, rank-count invariant",
+                False,
+                f"{type(e).__name__}: {str(e)[:200]}",
+            )
     mpi.comm.barrier()
 
     def check_bool_reduce_1d(op_name, method, reduce_dim="lat", case="1d(time)"):

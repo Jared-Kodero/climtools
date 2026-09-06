@@ -327,11 +327,15 @@ def mpp_partition(
 
     if is_root:
         assert pieces is not None
-        for rank, piece in enumerate(pieces):
-            if rank == root:
-                output = piece
-            else:
-                mpi_context.send(piece, dest=rank, tag=_DISTRIBUTE_TAG)
+        output = pieces[root]
+        # Post every outgoing piece before waiting on any of them. The
+        # previous blocking loop completed one handshake before starting the
+        # next, so the scatter cost grew with rank count instead of staying
+        # flat -- see MPIContext.send_all.
+        mpi_context.send_all(
+            {rank: piece for rank, piece in enumerate(pieces) if rank != root},
+            tag=_DISTRIBUTE_TAG,
+        )
     else:
         output = mpi_context.receive(source=root, tag=_DISTRIBUTE_TAG)
 

@@ -6,6 +6,7 @@ from collections.abc import Hashable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+from mpi4py import MPI
 
 import xarray as xr
 
@@ -22,6 +23,7 @@ from .meta import (
     reattach_meta_after_collapse,
     strip_mpi_meta,
 )
+from .mpp import mpp_slice_compute_domain
 
 
 def _select_partition_dim(
@@ -119,20 +121,31 @@ def mpp_isel(
 
     global_size = int(meta["global_sizes"][dim])
     requested_start, requested_stop, _ = distributed_indexer.indices(global_size)
-    local_global_start = max(requested_start, int(meta["starts"][dim]))
-    local_global_stop = min(requested_stop, int(meta["stops"][dim]))
-    local_global_stop = max(local_global_start, local_global_stop)
+    requested_stop = max(requested_start, requested_stop)
 
-    local_start = local_global_start - int(meta["starts"][dim])
-    local_stop = local_global_stop - int(meta["starts"][dim])
+    # Index arithmetic only: a compute-domain partition is contiguous and
+    # ordered by rank, so this rank's post-slice global offset follows from
+    # its own bounds (see mpp.mpp_slice_compute_domain). FMS reads the same
+    # information out of its local copy of domain%list(:) rather than asking
+    # the other PEs, and the old allgather here was the only communication in
+    # what is otherwise a pure metadata operation.
+    local_start, local_stop, new_start = mpp_slice_compute_domain(
+        int(meta["starts"][dim]),
+        int(meta["stops"][dim]),
+        requested_start,
+        requested_stop,
+    )
     local_indexers = dict(supplied)
     local_indexers[dim] = slice(local_start, local_stop)
     output = value.isel(local_indexers)
 
-    dim_comm = _dim_comm(mpi_context, meta, dim)
-    counts = dim_comm.allgather(int(output.sizes[dim]))
-    new_global_size = sum(counts)
+    new_global_size = requested_stop - requested_start
     if new_global_size == 1 and partition_dim is not None:
+        # Rare enough not to be worth deriving every rank's share locally;
+        # the branch itself is taken identically on every rank, so the
+        # collective below stays consistent.
+        dim_comm = _dim_comm(mpi_context, meta, dim)
+        counts = dim_comm.allgather(int(output.sizes[dim]))
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
                 "cannot yet redistribute a partition slice "
@@ -142,8 +155,7 @@ def mpp_isel(
             )
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
-    new_start = sum(counts[: dim_comm.rank])
-    new_stop = new_start + counts[dim_comm.rank]
+    new_stop = new_start + (local_stop - local_start)
     chunk_info = prune_chunk_info(meta["chunk_info"], output)
     _merge_partition_meta(
         output,
@@ -292,9 +304,26 @@ def mpp_sel(
     local_indexers[dim] = distributed_indexer
     output = value.sel(local_indexers, method=method, tolerance=tolerance, drop=drop)
     dim_comm = _dim_comm(mpi_context, meta, dim)
-    counts = dim_comm.allgather(int(output.sizes[dim]))
-    new_global_size = sum(counts)
+
+    # Unlike isel, a label slice cannot be resolved locally: a rank only holds
+    # its own coordinate values, so it cannot know how many elements the ranks
+    # below it kept. It does not need the full per-rank vector to find out,
+    # though. The new global size is a SUM and this rank's new offset is the
+    # exclusive prefix sum of the same quantity, so two fixed-size buffer
+    # collectives replace a pickled allgather whose message grows with rank
+    # count.
+    local_length = np.array([int(output.sizes[dim])], dtype=np.int64)
+    total = np.empty_like(local_length)
+    dim_comm.Allreduce(local_length, total, op=MPI.SUM)
+    prefix = np.zeros_like(local_length)
+    dim_comm.Exscan(local_length, prefix, op=MPI.SUM)
+    if dim_comm.rank == 0:
+        prefix[0] = 0  # Exscan leaves rank 0's receive buffer undefined.
+
+    new_global_size = int(total[0])
+    new_start = int(prefix[0])
     if new_global_size == 1 and partition_dim is not None:
+        counts = dim_comm.allgather(int(local_length[0]))
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
                 "cannot yet redistribute a partition slice "
@@ -304,8 +333,7 @@ def mpp_sel(
             )
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
-    new_start = sum(counts[: dim_comm.rank])
-    new_stop = new_start + counts[dim_comm.rank]
+    new_stop = new_start + int(local_length[0])
     chunk_info = prune_chunk_info(meta["chunk_info"], output)
     _merge_partition_meta(
         output,

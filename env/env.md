@@ -58,3 +58,52 @@ at production scale or under real parallel filesystem conditions a small local r
 won't exercise. Also worth knowing: `mock_dataset.py`'s RNG is unseeded by default;
 seed it (`np.random.default_rng(0)`) for deterministic debugging, but test unseeded too
 since at least one real, data-dependent edge case was only ever found that way.
+## 2. Reproducing the environment without a source NetCDF build
+
+The from-scratch NetCDF-C build above is only necessary when no packaged
+parallel build exists. On Ubuntu 24.04 (noble) it does, and using it removes
+the longest step:
+
+```bash
+apt-get install -y --no-install-recommends \
+    openmpi-bin libopenmpi-dev libhdf5-openmpi-dev libnetcdf-mpi-dev
+# Verify: grep "NC-4 Parallel Support" \
+#   /usr/lib/x86_64-linux-gnu/netcdf/mpi/libnetcdf.settings  ->  must say "yes"
+
+python3 -m venv venv
+venv/bin/pip install --upgrade pip setuptools wheel "cython>=3,<4" numpy
+CC=mpicc HDF5_MPI=ON \
+NETCDF4_DIR=/usr/lib/x86_64-linux-gnu/netcdf/mpi \
+HDF5_INCDIR=/usr/include/hdf5/openmpi \
+HDF5_LIBDIR=/usr/lib/x86_64-linux-gnu/hdf5/openmpi \
+  venv/bin/pip install --no-binary netCDF4 --no-build-isolation "netCDF4==1.6.5"
+# Verify: python -c "import netCDF4; print(netCDF4.__has_parallel4_support__)" -> 1
+```
+
+Three things this session had to discover the hard way:
+
+* `HDF5_DIR`/`CPPFLAGS` are *not* enough for netCDF4's build script, which
+  looks for the headers under `$HDF5_DIR/include` and gives up before reading
+  `CPPFLAGS`. `HDF5_INCDIR`/`HDF5_LIBDIR` are the variables it honours for a
+  Debian-style split HDF5 layout.
+* netCDF4 must be pinned. Versions from 1.7 on ship a `netcdf-compat.h` that
+  redeclares `nc_def_var_bzip2`/`nc_inq_var_bzip2`/`nc_def_var_blosc`/
+  `nc_inq_var_blosc` as static, which collides with the non-static
+  declarations in the packaged netcdf-c 4.9.0 and fails to compile. 1.6.5
+  builds cleanly against it.
+* `apt-get update` fails on the NodeSource repository (403 on its InRelease
+  file) in a default container image. Remove or disable that source first,
+  or apt refuses to proceed even though the Ubuntu archives are reachable.
+
+Set `LD_LIBRARY_PATH` to include both
+`/usr/lib/x86_64-linux-gnu/hdf5/openmpi` and
+`/usr/lib/x86_64-linux-gnu/netcdf/mpi/lib` at runtime, for the same
+serial-picked-up-silently reason as above.
+
+**Running the test suite**: `build_fixtures()` defaults to the
+production-scale config and now reads `CLIMTOOLS_TEST_NTIME`,
+`CLIMTOOLS_TEST_RESOLUTION` and `CLIMTOOLS_TEST_PLEV_STEP` when they are set,
+so a small local run no longer means editing the call and risking committing
+the shrunk size. `CLIMTOOLS_TEST_NTIME=48 CLIMTOOLS_TEST_RESOLUTION=10` is a
+usable smoke-test size. The warning above still stands: run the full-size
+default at least once before trusting a change.

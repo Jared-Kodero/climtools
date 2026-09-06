@@ -37,6 +37,11 @@ from .planning import (
 )
 
 
+# Leading dimension the packed integer companions of a reproducing product
+# travel under, so mantissa and companions can each go through one collective.
+_PROD_FIELD_DIM = "_mpp_prod_field"
+
+
 def _combine_sum_or_prod(
     mpi_context: MPIContext,
     value: xr.DataArray,
@@ -58,19 +63,30 @@ def _combine_sum_or_prod(
     only its own post-reduction slice instead of materializing the full
     combined result -- see :func:`~.planning.mpp_scatter_target`.
     """
-    result = mpp_comm_reduce(
-        mpi_context,
-        partial,
-        op,
-        expect_dtype=partial_dtype(
-            value.dtype.str, "prod" if op_name(op) == "PROD" else "sum", skipna
-        ),
-        error=error,
-        phase="MPI xarray sum/prod reduction",
-        comm=comm,
-        replica_count=replica_count,
-        scatter=scatter,
-    )
+    if op_name(op) == "PROD":
+        result = _combine_prod(
+            mpi_context,
+            value,
+            partial,
+            dims,
+            skipna=skipna,
+            error=error,
+            comm=comm,
+            replica_count=replica_count,
+            scatter=scatter,
+        )
+    else:
+        result = mpp_comm_reduce(
+            mpi_context,
+            partial,
+            op,
+            expect_dtype=partial_dtype(value.dtype.str, "sum", skipna),
+            error=error,
+            phase="MPI xarray sum/prod reduction",
+            comm=comm,
+            replica_count=replica_count,
+            scatter=scatter,
+        )
     global_count = None
     if min_count is not None and skipna_enabled(value.dtype, skipna):
         global_count = mpp_count_valid_values(
@@ -91,6 +107,135 @@ def _combine_sum_or_prod(
             else masked.astype(result.dtype, keep_attrs=True)
         )
     return result
+
+
+def _combine_prod(
+    mpi_context: MPIContext,
+    value: xr.DataArray,
+    partial: xr.DataArray | None,
+    dims: tuple[Hashable, ...],
+    *,
+    skipna: bool | None,
+    error: BaseException | None,
+    comm: MPI.Comm | None,
+    replica_count: int,
+    scatter: tuple[Hashable, list[int]] | None,
+) -> xr.DataArray:
+    """Combine rank-local products without letting overflow decide the answer.
+
+    Multiplying rank-local ``np.prod`` partials is not associative once a
+    partial leaves the representable range: ``inf * 0`` is NaN, so the result
+    depends on which rank happened to hold the zero and therefore on the rank
+    count. Instead each rank contributes the over/underflow-free
+    ``(mantissa, companions)`` pair of :func:`~.mpp.mpp_prod_decompose`, and
+    the two halves reduce under ``PROD`` and ``SUM`` respectively -- both
+    associative -- through the same :func:`~.planning.mpp_comm_reduce` every
+    other reduction uses, so the scatter and replicated-axis handling is
+    inherited unchanged.
+
+    ``partial`` is used only for its coordinates and dtype; its values are
+    recomputed here in the safe representation.
+    """
+    from .mpp import mpp_prod_decompose, mpp_prod_recombine
+
+    mantissa_da: xr.DataArray | None = None
+    companion_da: xr.DataArray | None = None
+    if error is None and partial is not None:
+        try:
+            axes = tuple(value.dims.index(d) for d in dims)
+            mantissa, companions = mpp_prod_decompose(np.asarray(value.values), axes)
+            mantissa_da = partial.copy(data=mantissa.astype(np.float64))
+            companion_da = xr.DataArray(
+                companions,
+                dims=(_PROD_FIELD_DIM, *partial.dims),
+                coords={
+                    d: partial.coords[d] for d in partial.dims if d in partial.coords
+                },
+            )
+        except BaseException as exc:  # noqa: BLE001 - deferred to raise_if_error
+            error = exc
+
+    global_mantissa = mpp_comm_reduce(
+        mpi_context,
+        mantissa_da,
+        MPI.PROD,
+        expect_dtype=np.dtype(np.float64),
+        error=error,
+        phase="MPI xarray prod reduction (mantissa)",
+        comm=comm,
+        scatter=scatter,
+    )
+    global_companions = mpp_comm_reduce(
+        mpi_context,
+        companion_da,
+        MPI.SUM,
+        expect_dtype=np.dtype(np.int64),
+        error=error,
+        phase="MPI xarray prod reduction (exponent and tallies)",
+        comm=comm,
+        scatter=scatter,
+    )
+
+    mantissa_values = np.asarray(global_mantissa.values)
+    companion_values = np.asarray(global_companions.values)
+    if replica_count != 1:
+        # Each of the replica_count duplicate copies contributed one factor,
+        # so the raw product is the true one raised to that power. Undoing it
+        # is a root of the mantissa and an exact division of the exponent and
+        # of every tally -- mpp_comm_reduce only knows how to undo replication
+        # for SUM, which is why it is done here instead of being delegated.
+        # Every companion is an exact multiple of replica_count (the copies
+        # are bit-identical), so those divisions are exact; only the mantissa
+        # root is inexact, and it is taken on a value bounded in (0, 1].
+        mantissa_values = mantissa_values ** (1.0 / replica_count)
+        companion_values = companion_values // replica_count
+
+    expect = partial_dtype(value.dtype.str, "prod", skipna)
+    combined = mpp_prod_recombine(mantissa_values, companion_values, expect)
+    return global_mantissa.copy(data=combined)
+
+
+def _global_valid_count(
+    mpi_context: MPIContext,
+    value: xr.DataArray,
+    template: xr.DataArray,
+    dims: tuple[Hashable, ...],
+    *,
+    skipna: bool | None,
+    comm: MPI.Comm | None,
+    replica_count: int,
+    scatter: tuple[Hashable, list[int]] | None,
+) -> xr.DataArray:
+    """Global valid-value count for a mean, communicating only when necessary.
+
+    When missing values cannot occur -- an integer or boolean field, or an
+    explicit ``skipna=False`` -- every element counts, so the denominator is
+    just the product of the reduced dimensions' *global* extents. That is
+    already in the partition metadata, exactly as FMS reads ``gxsize``/
+    ``gysize`` off the domain in ``mpp_global_sum`` rather than reducing to
+    find them. Taking it from there removes both a second full pass over the
+    data and a second collective from the common case, leaving ``mean`` with
+    the same single ``Allreduce`` as ``sum``.
+
+    Otherwise the count genuinely depends on where the NaNs are and is
+    reduced as before.
+    """
+    if skipna_enabled(value.dtype, skipna):
+        return mpp_count_valid_values(
+            mpi_context,
+            value,
+            dims,
+            comm=comm,
+            replica_count=replica_count,
+            scatter=scatter,
+        )
+
+    meta = mpp_get_meta(value)
+    global_sizes = dict(meta["global_sizes"]) if meta is not None else {}
+    total = 1
+    for reduced in dims:
+        total *= int(global_sizes.get(reduced, value.sizes[reduced]))
+    return xr.full_like(template, total, dtype=np.int64)
 
 
 def _combine_mean(
@@ -123,10 +268,12 @@ def _combine_mean(
         replica_count=replica_count,
         scatter=scatter,
     )
-    global_count = mpp_count_valid_values(
+    global_count = _global_valid_count(
         mpi_context,
         value,
+        global_sum,
         dims,
+        skipna=skipna,
         comm=comm,
         replica_count=replica_count,
         scatter=scatter,
@@ -609,7 +756,9 @@ def mpp_mean_reduce(
         local_result = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
         return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = mpp_reduction_plan(mpi_context, value, dims, old_meta, operation="mean")
+    reduce_plan = mpp_reduction_plan(
+        mpi_context, value, dims, old_meta, operation="mean"
+    )
 
     if isinstance(value, xr.DataArray):
         if not dims:

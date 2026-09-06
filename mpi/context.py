@@ -9,19 +9,17 @@ and decorator-based MPI execution. The :data:`mpi` singleton uses
 from __future__ import annotations
 
 import atexit
-import builtins
 import functools
 import os
-import signal
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from mpi4py import MPI
 
-from ..core.utils import LockFile
+from ..core.utils import LockFile, tmp
 from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
 
 if TYPE_CHECKING:
@@ -33,14 +31,32 @@ R = TypeVar("R")
 T = TypeVar("T")
 
 
+#: Launcher variables reporting the *world size*. Deliberately not the rank
+#: variables (``SLURM_PROCID``, ``PMI_RANK``, ...): a rank variable is no
+#: evidence of an MPI launch. Slurm exports ``SLURM_PROCID`` into every task
+#: of every step and every child inherits it, so a login shell, a Jupyter
+#: kernel or any subprocess started inside an interactive allocation carries
+#: one. Treating that as "we are an MPI rank" made a single-process notebook
+#: take the distributed path in :meth:`MPIContext.alive` -- replacing the
+#: process's signal handlers and installing an excepthook that calls
+#: ``MPI_Abort``, which under PMI tears down the entire job step instead of
+#: reporting one error.
 LAUNCH_ENV = (
-    "OMPI_COMM_WORLD_RANK",
-    "PMI_RANK",
-    "PMIX_RANK",
-    "SLURM_PROCID",
-    "MV2_COMM_WORLD_RANK",
-    "I_MPI_COMM_WORLD_RANK",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PMIX_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "I_MPI_COMM_WORLD_SIZE",
 )
+
+
+def launch_world_size() -> int:
+    """World size reported by the launcher, or 1 when none reports one."""
+    for key in LAUNCH_ENV:
+        value = os.environ.get(key)
+        if value and value.isdigit():
+            return int(value)
+    return 1
 
 
 class ToChildrenContext:
@@ -284,17 +300,27 @@ class MPIContext(MPIDiagnostics):
         self._child: MPIContext | None = None
         self._to_children = ToChildrenContext(self)
         self._from_children = FromChildrenContext(self)
-        self._tmp: Path = get_tmpdir(self.comm)
-        self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
 
+        # get_tmpdir broadcasts, so it is a collective and must not run for a
+        # process that is not part of an MPI job; constructing a context in a
+        # notebook would otherwise post a bcast and create a directory under
+        # $SCRATCH for a single kernel. Non-MPI use falls back to the plain
+        # per-process scratch directory core.utils already made.
         if self.alive(self.comm):
-            cleanup = partial(tmp_cleanup, self.comm, self._tmp)
-            atexit.register(cleanup)
-            signal.signal(signal.SIGTERM, cleanup)
-            signal.signal(signal.SIGINT, cleanup)
+            self._tmp: Path = get_tmpdir(self.comm)
+            # atexit only. tmp_cleanup barriers twice, and a Python signal
+            # handler runs in the main thread at an arbitrary bytecode
+            # boundary -- possibly while a collective is already in flight on
+            # this rank, or on only some of the ranks if the signal is not
+            # delivered job-wide. Posting a Barrier from there deadlocks the
+            # job rather than cleaning up after it.
+            atexit.register(partial(tmp_cleanup, self.comm, self._tmp))
             self._install_abort_hook()
+        else:
+            self._tmp = tmp
+        self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
 
     @property
     def to_children(self) -> ToChildrenContext:
@@ -344,7 +370,7 @@ class MPIContext(MPIDiagnostics):
         bool
             Whether MPI execution is detected.
         """
-        if comm.Get_size() > 1 or builtins.any(key in os.environ for key in LAUNCH_ENV):
+        if comm.Get_size() > 1 or launch_world_size() > 1:
             return True
         try:
             return MPI.Comm.Get_parent() != MPI.COMM_NULL
@@ -441,6 +467,22 @@ class MPIContext(MPIDiagnostics):
             MPI message tag.
         """
         self.comm.send(value, dest=dest, tag=tag)
+
+    def send_all(self, pieces: Mapping[int, Any], *, tag: int = 0) -> None:
+        """Send one object to each of several ranks, then wait once.
+
+        ``send`` blocks until its message is taken, so scattering P pieces
+        with it serialises P handshakes on the sending rank and gets slower
+        as the job grows. FMS's ``mpp_do_redistribute`` avoids the same
+        pattern by posting every transfer before waiting on any of them;
+        this does the same with ``isend``, leaving one wait for the whole
+        set instead of one per destination.
+        """
+        requests = [
+            self.comm.isend(piece, dest=dest, tag=tag)
+            for dest, piece in sorted(pieces.items())
+        ]
+        MPI.Request.Waitall(requests)
 
     def receive(
         self,

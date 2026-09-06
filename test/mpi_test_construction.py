@@ -6,6 +6,7 @@ coverage) checks.
 
 from __future__ import annotations
 
+import math
 import shutil
 
 import numpy as np
@@ -395,8 +396,26 @@ def run(fx: Fixtures) -> None:
         )
 
         out_2d = parallel_dir / "parallel_2d.nc"
+        # One chunk per rank's compute domain, not one chunk spanning the
+        # whole global array. The old global-shape version asked for a
+        # 2.8 GiB chunk for "pr" at production resolution, which exceeds
+        # what a parallel NetCDF-4 write can safely emit and is correctly
+        # rejected by chunks._validate_explicit_chunk_bytes -- the failure
+        # was in the fixture, not the writer. Following the decomposition
+        # is also what fms2_io does when it registers a domain-decomposed
+        # variable.
+        meta2d = dist2d.meta
+        grid_shape = dict(
+            zip(meta2d["dims"], meta2d["cart"]["grid_shape"], strict=True)
+        )
+        chunk_length = {
+            d: math.ceil(int(meta2d["global_sizes"][d]) / grid_shape[d])
+            for d in meta2d["dims"]
+        }
         var_chunks = {
-            name: tuple(native.sizes[d] for d in native[name].dims)
+            name: tuple(
+                chunk_length.get(d, int(native.sizes[d])) for d in native[name].dims
+            )
             for name in native.data_vars
         }
         check_parallel_write(
