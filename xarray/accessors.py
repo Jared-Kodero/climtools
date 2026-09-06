@@ -304,24 +304,13 @@ class GeoBase:
         return xgeo.to_netcdf(self._obj, **kwargs)
 
 
-class PlotAccessor:
-    """Plotting namespace of the ``.xgeo`` accessor.
+@xr.register_dataarray_accessor("xgeo")
+class GeoDataArray(GeoBase):
+    """DataArray ``.xgeo`` accessor for geospatial, plotting, and calculation operations."""
 
-    Reached as ``da.xgeo.plot``. The bound array is supplied automatically, so
-    the methods take only the drawing options.
-    """
+    __slots__ = ()
 
-    __slots__ = ("_obj",)
-
-    def __init__(self, da: xr.DataArray) -> None:
-        """Initialize the plotting accessor."""
-        self._obj = da
-
-    def __repr__(self) -> str:
-        """Return the plotting accessor representation."""
-        return f"<xgeo plotting accessor on DataArray {self._obj.name!r}>"
-
-    def geo(
+    def geoplot(
         self,
         x: str | None = None,
         y: str | None = None,
@@ -747,20 +736,6 @@ class PlotAccessor:
 
         return plotting.plot_significance(self._obj, **kwargs)
 
-
-class CalcAccessor:
-    """Calc namespace of the ``.xgeo`` accessor."""
-
-    __slots__ = ("_obj",)
-
-    def __init__(self, da: xr.DataArray) -> None:
-        """Initialize the calculation accessor."""
-        self._obj = da
-
-    def __repr__(self) -> str:
-        """Return the calculation accessor representation."""
-        return f"<xgeo calc accessor on DataArray {self._obj.name!r}>"
-
     def corr(
         self,
         other: xr.DataArray,
@@ -899,39 +874,6 @@ class PreprocessAccessor:
             Preprocessed GPCP dataset.
         """
         return xgeo.preprocess.gpcp(self._obj)
-
-
-@xr.register_dataarray_accessor("xgeo")
-class GeoDataArray(GeoBase):
-    """``.xgeo`` accessor on a ``DataArray``.
-
-    Adds plotting and the single-field statistics to the shared geospatial
-    operations of :class:`GeoBase`.
-    """
-
-    __slots__ = ()
-
-    @property
-    def plot(self) -> PlotAccessor:
-        """Plotting namespace, for example ``da.xgeo.plot.geo(...)``.
-
-        Returns
-        -------
-        PlotAccessor
-            Plotting accessor.
-        """
-        return PlotAccessor(self._obj)
-
-    @property
-    def calc(self) -> CalcAccessor:
-        """Calc namespace for example ``da.xgeo.calc.trends(...)``.
-
-        Returns
-        -------
-        CalcAccessor
-            Calculation accessor.
-        """
-        return CalcAccessor(self._obj)
 
 
 @xr.register_dataset_accessor("xgeo")
