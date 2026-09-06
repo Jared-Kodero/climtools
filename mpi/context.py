@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 from mpi4py import MPI
 
 from ..core.utils import LockFile
-from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir
+from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
 
 if TYPE_CHECKING:
     import numpy as np
@@ -289,8 +289,8 @@ class MPIContext(MPIDiagnostics):
         self.info: tuple[int, ...] = ()
         self.task: int | None = None
 
-        if self.alive():
-            cleanup = partial(cleanup, self.comm, self._tmp)
+        if self.alive(self.comm):
+            cleanup = partial(tmp_cleanup, self.comm, self._tmp)
             atexit.register(cleanup)
             signal.signal(signal.SIGTERM, cleanup)
             signal.signal(signal.SIGINT, cleanup)
