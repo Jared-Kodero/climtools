@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from mpi4py import MPI
+
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,7 +33,9 @@ __all__ = [
     "PROD_NEGATIVE",
     "PROD_ZERO",
     "Domain",
+    "DomainUpdate",
     "mpp_chksum",
+    "mpp_complete_update_domains",
     "mpp_define_domains",
     "mpp_define_layout",
     "mpp_get_compute_domains",
@@ -45,6 +48,7 @@ __all__ = [
     "mpp_reproducing_prod",
     "mpp_reproducing_sum",
     "mpp_slice_compute_domain",
+    "mpp_start_update_domains",
     "mpp_sum",
     "mpp_update_domains",
 ]
@@ -378,7 +382,30 @@ def mpp_get_neighbor_pe(
     return left_rank, right_rank
 
 
-def mpp_update_domains(
+@dataclass
+class DomainUpdate:
+    """In-flight halo exchange, as returned by :func:`mpp_start_update_domains`.
+
+    FMS splits ``mpp_update_domains`` into a ``start``/``complete`` pair so a
+    PE can compute on its interior -- which needs no neighbour data -- while
+    the boundary exchange is still on the wire. This carries the state
+    between the two halves: the posted requests, the receive buffers, and
+    enough layout to unpack them.
+    """
+
+    items: dict[str, np.ndarray]
+    groups: dict[Any, list[str]]
+    recv_bufs: dict[tuple[Any, str], np.ndarray]
+    recv_reqs: list[Any]
+    send_reqs: list[Any]
+    axis: int
+    before: int
+    after: int
+    single: bool
+    unpack: Any
+
+
+def mpp_start_update_domains(
     fields: np.ndarray | Mapping[str, np.ndarray],
     domain: Domain,
     dim: str,
@@ -389,8 +416,8 @@ def mpp_update_domains(
     periodic: bool = False,
     left_rank: int | None = None,
     right_rank: int | None = None,
-) -> tuple[np.ndarray | dict[str, np.ndarray], int, int]:
-    """FMS's ``mpp_update_domains``: halo exchange with the neighbors along
+) -> DomainUpdate:
+    """FMS's ``mpp_start_update_domains``: post a halo exchange with the neighbors along
     ``dim``, via nonblocking ``Isend``/``Irecv`` + one shared ``Waitall``.
     A ``Mapping`` of same-``axis``-length fields is FMS's *group update*:
     every field's halo slab is packed into one contiguous buffer per
@@ -500,31 +527,101 @@ def mpp_update_domains(
         if can_send_left:
             send_reqs.append(comm.Isend(_pack(names, "left"), dest=left_rank))
 
-    MPI.Request.Waitall(recv_reqs)
-    MPI.Request.Waitall(send_reqs)
+    return DomainUpdate(
+        items=items,
+        groups=groups,
+        recv_bufs=recv_bufs,
+        recv_reqs=recv_reqs,
+        send_reqs=send_reqs,
+        axis=axis,
+        before=before,
+        after=after,
+        single=single,
+        unpack=_unpack,
+    )
+
+
+def mpp_complete_update_domains(
+    update: DomainUpdate,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], int, int]:
+    """FMS's ``mpp_complete_update_domains``: wait, then hand back the halos.
+
+    Returns ``(recv_before, recv_after, left_pad, right_pad)``. Deliberately
+    *not* the padded array: callers that only need the neighbours' slabs --
+    which is every caller in climtools, since the xarray layer re-joins the
+    pieces itself -- would otherwise pay a full copy of their own local array
+    to build a padded buffer whose interior is then discarded. In FMS terms
+    this is the difference between writing into the halo ring of an existing
+    data domain and reallocating the whole data domain per exchange.
+    """
+    MPI.Request.Waitall(update.recv_reqs)
+    MPI.Request.Waitall(update.send_reqs)
 
     recv_before: dict[str, np.ndarray] = {}
     recv_after: dict[str, np.ndarray] = {}
-    for dtype, names in groups.items():
-        if (dtype, "before") in recv_bufs:
-            recv_before.update(_unpack(recv_bufs[dtype, "before"], names, before))
-        if (dtype, "after") in recv_bufs:
-            recv_after.update(_unpack(recv_bufs[dtype, "after"], names, after))
+    for dtype, names in update.groups.items():
+        if (dtype, "before") in update.recv_bufs:
+            recv_before.update(
+                update.unpack(update.recv_bufs[dtype, "before"], names, update.before)
+            )
+        if (dtype, "after") in update.recv_bufs:
+            recv_after.update(
+                update.unpack(update.recv_bufs[dtype, "after"], names, update.after)
+            )
+
+    return (
+        recv_before,
+        recv_after,
+        update.before if recv_before else 0,
+        update.after if recv_after else 0,
+    )
+
+
+def mpp_update_domains(
+    fields: np.ndarray | Mapping[str, np.ndarray],
+    domain: Domain,
+    dim: str,
+    axis: int,
+    *,
+    before: int,
+    after: int,
+    periodic: bool = False,
+    left_rank: int | None = None,
+    right_rank: int | None = None,
+) -> tuple[np.ndarray | dict[str, np.ndarray], int, int]:
+    """FMS's blocking ``mpp_update_domains``: start, complete, and join.
+
+    Kept for callers that want the padded array in one call. Anything that
+    only needs the neighbours' slabs, or that has interior work to overlap
+    with the exchange, should use :func:`mpp_start_update_domains` and
+    :func:`mpp_complete_update_domains` directly and skip the concatenate
+    below -- which copies the entire local array.
+    """
+    update = mpp_start_update_domains(
+        fields,
+        domain,
+        dim,
+        axis,
+        before=before,
+        after=after,
+        periodic=periodic,
+        left_rank=left_rank,
+        right_rank=right_rank,
+    )
+    recv_before, recv_after, left_pad, right_pad = mpp_complete_update_domains(update)
 
     padded = {
         name: np.concatenate(
             [
-                p
-                for p in (recv_before.get(name), arr, recv_after.get(name))
-                if p is not None
+                piece
+                for piece in (recv_before.get(name), arr, recv_after.get(name))
+                if piece is not None
             ],
             axis=axis,
         )
-        for name, arr in items.items()
+        for name, arr in update.items.items()
     }
-    left_pad = before if recv_before else 0
-    right_pad = after if recv_after else 0
-    return (padded[""] if single else padded), left_pad, right_pad
+    return (padded[""] if update.single else padded), left_pad, right_pad
 
 
 # FMS: NUMBIT = 46, NUMINT = 6 (mpp_efp.F90). Six base-2**46 digits span

@@ -7,9 +7,9 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
+
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
@@ -17,20 +17,20 @@ if TYPE_CHECKING:
 from .common import partial_dtype
 from .meta import mpp_get_meta
 from .planning import (
-    mpp_comm_reduce,
-    mpp_count_valid_values,
     dataset_result,
-    mpp_finish,
-    mpp_finish_scatter,
-    mpp_plan_scatter_target,
-    mpp_scatter_replicated_slice,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
-    normalize_dim,
+    mpp_comm_reduce,
+    mpp_count_valid_values,
+    mpp_finish,
+    mpp_finish_scatter,
+    mpp_plan_scatter_target,
     mpp_reduction_plan,
-    repartition_candidates,
     mpp_resolve_comm,
+    mpp_scatter_replicated_slice,
+    normalize_dim,
+    repartition_candidates,
 )
 from .reductions import mpp_mean_reduce
 

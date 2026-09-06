@@ -8,9 +8,9 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
+
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
@@ -19,23 +19,22 @@ from .common import extreme_identity, op_name, partial_dtype
 from .meta import mpp_get_meta
 from .mpp import _mpp_reduce, mpp_reduce_scatter
 from .planning import (
-    mpp_comm_reduce,
-    mpp_count_valid_values,
     dataset_result,
-    mpp_finish,
-    mpp_finish_scatter,
-    mpp_plan_scatter_target,
-    mpp_scatter_replicated_slice,
     finish_local_reduction,
     guarded,
     local_reduction_meta,
-    normalize_dim,
+    mpp_comm_reduce,
+    mpp_count_valid_values,
+    mpp_finish,
+    mpp_finish_scatter,
+    mpp_plan_scatter_target,
     mpp_reduction_plan,
-    repartition_candidates,
     mpp_resolve_comm,
+    mpp_scatter_replicated_slice,
+    normalize_dim,
+    repartition_candidates,
     skipna_enabled,
 )
-
 
 # Leading dimension the packed integer companions of a reproducing product
 # travel under, so mantissa and companions can each go through one collective.
@@ -152,7 +151,7 @@ def _combine_prod(
                     d: partial.coords[d] for d in partial.dims if d in partial.coords
                 },
             )
-        except BaseException as exc:  # noqa: BLE001 - deferred to raise_if_error
+        except BaseException as exc:
             error = exc
 
     global_mantissa = mpp_comm_reduce(

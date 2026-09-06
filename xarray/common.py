@@ -7,10 +7,10 @@ from functools import cache
 from typing import Any, NamedTuple, cast
 
 import numpy as np
-from mpi4py import MPI
+import xarray as xr
 from mpi4py.util import dtlib as _dtlib
 
-import xarray as xr
+from ..mpi.mpi_init import MPI
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (
     (MPI.SUM, "SUM"),

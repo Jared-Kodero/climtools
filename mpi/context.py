@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import atexit
 import functools
-import os
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
-from mpi4py import MPI
-
-from ..core.utils import LockFile
+from ..core.utils import LockFile, tmp
 from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
+from .mpi_init import MPI, require_mpi, world_size
 
 if TYPE_CHECKING:
     import numpy as np
@@ -29,34 +27,6 @@ if TYPE_CHECKING:
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
-
-
-#: Launcher variables reporting the *world size*. Deliberately not the rank
-#: variables (``SLURM_PROCID``, ``PMI_RANK``, ...): a rank variable is no
-#: evidence of an MPI launch. Slurm exports ``SLURM_PROCID`` into every task
-#: of every step and every child inherits it, so a login shell, a Jupyter
-#: kernel or any subprocess started inside an interactive allocation carries
-#: one. Treating that as "we are an MPI rank" made a single-process notebook
-#: take the distributed path in :meth:`MPIContext.alive` -- replacing the
-#: process's signal handlers and installing an excepthook that calls
-#: ``MPI_Abort``, which under PMI tears down the entire job step instead of
-#: reporting one error.
-LAUNCH_ENV = (
-    "OMPI_COMM_WORLD_SIZE",
-    "PMI_SIZE",
-    "PMIX_SIZE",
-    "MV2_COMM_WORLD_SIZE",
-    "I_MPI_COMM_WORLD_SIZE",
-)
-
-
-def launch_world_size() -> int:
-    """World size reported by the launcher, or 1 when none reports one."""
-    for key in LAUNCH_ENV:
-        value = os.environ.get(key)
-        if value and value.isdigit():
-            return int(value)
-    return 1
 
 
 class ToChildrenContext:
@@ -296,6 +266,9 @@ class MPIContext(MPIDiagnostics):
 
     def __init__(self, comm: MPI.Intracomm | None = None) -> None:
         """Initialize an MPI communication context."""
+        # Before anything else: an MPI call made without MPI_Init does not
+        # raise, it aborts the process, so the check cannot wrap the call.
+        require_mpi()
         self.comm: MPI.Intracomm = comm if comm is not None else MPI.COMM_WORLD
         self._child: MPIContext | None = None
         self._to_children = ToChildrenContext(self)
@@ -312,6 +285,8 @@ class MPIContext(MPIDiagnostics):
             self._tmp: Path = get_tmpdir(self.comm)
             atexit.register(partial(tmp_cleanup, self.comm, self._tmp))
             self._install_abort_hook()
+        else:
+            self._tmp = tmp
 
         self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
 
@@ -363,7 +338,7 @@ class MPIContext(MPIDiagnostics):
         bool
             Whether MPI execution is detected.
         """
-        if comm.Get_size() > 1 or launch_world_size() > 1:
+        if comm.Get_size() > 1 or world_size() > 1:
             return True
         try:
             return MPI.Comm.Get_parent() != MPI.COMM_NULL

@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
-from mpi4py import MPI
-
 import xarray as xr
+
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext

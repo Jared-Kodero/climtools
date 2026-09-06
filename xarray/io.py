@@ -9,11 +9,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
 
 from ..mpi.context import MPIContext
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from .core import MPIXarray

@@ -5,10 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
 
+from ..mpi.mpi_init import MPI
 from .arithmetic import (
     check_partition_preserved,
     mpp_check_operands_distribution,

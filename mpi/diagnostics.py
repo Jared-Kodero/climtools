@@ -1,6 +1,7 @@
 import builtins
 import datetime
 import faulthandler
+import hashlib
 import json
 import os
 import shutil
@@ -14,13 +15,53 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from mpi4py import MPI
+import numpy as np
 
 from ..core.utils import LockFile
+from .mpi_init import MPI
 
 
 class MPIError(Exception):
     """MPI context or synchronized distributed-execution error."""
+
+
+def _all_agree(comm: MPI.Comm, healthy: bool, signature: Any) -> bool:
+    """Whether every rank is error-free and posted the same ``signature``.
+
+    ``raise_if_error`` used to answer this with ``allgather``, which moves a
+    pickled object per rank and so costs O(nranks) bytes and a pickle round
+    trip on *every* collective the library posts -- every reduction, every
+    halo exchange, every sort. Almost all of those calls agree, and the
+    agreeing case needs no per-rank detail at all: it needs one bit.
+
+    So the common path reduces a fixed 32-byte buffer instead. The signature
+    is hashed, and the digest's extremes are taken with MIN and MAX; the ranks
+    agree exactly when the two coincide and match this rank's own digest.
+    Returning False falls back to the original allgather, which is where the
+    per-rank message is built, so a mismatch or a failure still reports
+    precisely which rank did what.
+
+    A 128-bit digest is used rather than the signature itself because
+    signatures are arbitrary Python tuples of dtypes, shapes and names; two
+    distinct ones colliding is a 2**-128 event, against a certainty of paying
+    the pickle on every call otherwise.
+    """
+    digest = hashlib.blake2b(repr(signature).encode(), digest_size=16).digest()
+    low = int.from_bytes(digest[:8], "big", signed=True)
+    high = int.from_bytes(digest[8:], "big", signed=True)
+
+    # Packed as (-healthy, low, high, -low, -high) so a single MIN carries
+    # the error flag, the digest minimum and (negated) its maximum: one
+    # collective rather than three.
+    send = np.array([-int(healthy), low, high, -low, -high], dtype=np.int64)
+    recv = np.empty_like(send)
+    comm.Allreduce(send, recv, op=MPI.MIN)
+
+    if recv[0] != -1:  # some rank reported an error
+        return False
+    return bool(
+        recv[1] == low and recv[2] == high and -recv[3] == low and -recv[4] == high
+    )
 
 
 class MPIDiagnostics:
@@ -185,6 +226,9 @@ class MPIDiagnostics:
         """
         active_comm = self.comm if comm is None else comm
         detail = None if error is None else (type(error).__name__, str(error))
+
+        if active_comm.size > 1 and _all_agree(active_comm, error is None, signature):
+            return
 
         states = active_comm.allgather((detail, signature))
 

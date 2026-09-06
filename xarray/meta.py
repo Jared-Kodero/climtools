@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
-from mpi4py import MPI
+
+from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -759,4 +760,3 @@ def choose_partition_dim(
     dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
 
     return dim
-

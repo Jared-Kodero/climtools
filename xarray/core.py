@@ -7,8 +7,8 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import xarray as xr
-from mpi4py import MPI
 
+from ..mpi.mpi_init import MPI
 from .arithmetic import (
     mpp_align,
     mpp_apply,

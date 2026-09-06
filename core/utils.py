@@ -24,6 +24,7 @@ host = socket.gethostname()
 user = getpass.getuser()
 home = Path.home()
 
+mpi_enabled = False
 n_cpus = len(os.sched_getaffinity(0))
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel

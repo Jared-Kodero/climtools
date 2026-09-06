@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from mpi4py import MPI
-
+from ..mpi.mpi_init import MPI
 from .chunks import get_balanced_bounds
 
 if TYPE_CHECKING:

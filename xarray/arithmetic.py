@@ -9,10 +9,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
-from mpi4py import MPI
-
 import xarray as xr
 
+from ..mpi.mpi_init import MPI
 from .cartesian import mpp_dim_comm as _dim_comm
 from .chunks import get_balanced_bounds, prune_chunk_info
 from .meta import _partitions_match, mpp_get_meta, mpp_update_meta, strip_mpi_meta
@@ -23,7 +22,12 @@ if TYPE_CHECKING:
 
     from ..mpi.context import MPIContext
 
-from .mpp import Domain, mpp_get_neighbor_pe, mpp_update_domains
+from .mpp import (
+    Domain,
+    mpp_complete_update_domains,
+    mpp_get_neighbor_pe,
+    mpp_start_update_domains,
+)
 
 # Callables mpp_apply() recognizes and transparently redirects to their
 # dedicated implementation, so mpp_apply() is MPI-aware for them the same way
@@ -144,7 +148,7 @@ def _exchange_halo_blocks(
 
     Thin xarray-facing wrapper: extracts every variable that varies
     along ``partition_dim`` into a plain NumPy array, delegates the
-    actual point-to-point exchange to :func:`~.mpi.mpp.mpp_update_domains`
+    actual point-to-point exchange to :func:`~.mpi.mpp.mpp_start_update_domains`
     (one batched group update covering every such variable at once, not
     one call per variable), and reconstructs xarray objects -- labels,
     dims, attrs -- from what comes back. climtools' communication layer
@@ -173,7 +177,15 @@ def _exchange_halo_blocks(
         for name in haloed
     }
 
-    padded, left_pad, right_pad = mpp_update_domains(
+    # start/complete rather than the blocking mpp_update_domains: only the
+    # neighbours' slabs are wanted here, and the blocking form reaches them
+    # by concatenating [before | local | after] into a fresh array, copying
+    # every haloed variable in full, only for this function to slice the two
+    # ends off and drop the interior. xr.concat below then copies the same
+    # data a second time. Taking the slabs straight from the receive buffers
+    # removes one whole-array copy per haloed variable per halo exchange --
+    # so per rolling, coarsen, diff, differentiate, shift and roll call.
+    update = mpp_start_update_domains(
         fields,
         domain,
         str(partition_dim),
@@ -183,23 +195,15 @@ def _exchange_halo_blocks(
         left_rank=left_rank,
         right_rank=right_rank,
     )
+    recv_before, recv_after, left_pad, right_pad = mpp_complete_update_domains(update)
 
     def _received(name: Hashable, side: str) -> np.ndarray | None:
-        """This name's exchanged slab (moved back to its original axis), or None.
-
-        ``padded[name]``'s layout is ``[before-block | local | after-block]``,
-        with either block absent (0-length) at an unpadded edge -- so the
-        after-block's offset is ``local_len + left_pad``, not
-        ``local_len + right_pad`` (the two pads need not match: one side
-        can be a global edge with pad 0 while the other genuinely
-        exchanges data).
-        """
+        """This name's exchanged slab, moved back to its original axis, or None."""
         pad = left_pad if side == "before" else right_pad
         if pad == 0:
             return None
-        local_len = fields[name].shape[0]
-        start = 0 if side == "before" else local_len + left_pad
-        return np.moveaxis(padded[name][start : start + pad], 0, axes[name])
+        slab = (recv_before if side == "before" else recv_after)[name]
+        return np.moveaxis(slab, 0, axes[name])
 
     def _reconstruct(side: str) -> xr.Dataset | xr.DataArray | None:
         """Reconstruct an xarray object from the exchanged arrays, or None if unpadded."""
@@ -210,10 +214,14 @@ def _exchange_halo_blocks(
             for name, var in value.variables.items():
                 received = _received(name, side) if name in haloed else None
                 pieces[name] = (
-                    var if received is None else xr.Variable(var.dims, received, attrs=var.attrs)
+                    var
+                    if received is None
+                    else xr.Variable(var.dims, received, attrs=var.attrs)
                 )
             return xr.Dataset(pieces, attrs=value.attrs)
-        data_var = xr.Variable(value.dims, _received(value.name, side), attrs=value.attrs)
+        data_var = xr.Variable(
+            value.dims, _received(value.name, side), attrs=value.attrs
+        )
         new_coords = {}
         for coord_name, coord in value.coords.items():
             received = _received(coord_name, side) if coord_name in haloed else None
@@ -1180,7 +1188,13 @@ def mpp_halo_exchange(
 
     _agree(
         mpi_context,
-        ("mpp_halo_exchange", str(partition_dim), int(before), int(after), bool(periodic)),
+        (
+            "mpp_halo_exchange",
+            str(partition_dim),
+            int(before),
+            int(after),
+            bool(periodic),
+        ),
     )
 
     if before == 0 and after == 0:
@@ -1207,16 +1221,27 @@ def mpp_halo_exchange(
     # .meta, keeping the logic in one place rather than duplicated at
     # every halo-exchange call site.
     domain = Domain.from_meta(meta, comm)
-    left_rank, right_rank = mpp_get_neighbor_pe(domain, str(partition_dim), periodic=periodic)
+    left_rank, right_rank = mpp_get_neighbor_pe(
+        domain, str(partition_dim), periodic=periodic
+    )
 
     local_len = int(value.sizes[partition_dim])
-    lengths = comm.allgather(local_len)
-    deficient = [
-        (r, length)
-        for r, length in enumerate(lengths)
-        if length < before or length < after
-    ]
-    if deficient:
+    # Only whether *some* rank is too short matters here, and that is a
+    # fixed-size reduction. The allgather this replaces moved a pickled int
+    # per rank on every halo exchange -- so on every rolling, coarsen, diff,
+    # differentiate, shift, roll and ffill/bfill call -- and grew with rank
+    # count, for a check that almost always passes. The per-rank list is only
+    # needed to write the error message, so it is gathered on the failing
+    # path alone.
+    shortest = np.empty(1, dtype=np.int64)
+    comm.Allreduce(np.array([local_len], dtype=np.int64), shortest, op=MPI.MIN)
+    if int(shortest[0]) < max(before, after):
+        lengths = comm.allgather(local_len)
+        deficient = [
+            (r, length)
+            for r, length in enumerate(lengths)
+            if length < before or length < after
+        ]
         raise ValueError(
             f"rank(s) {deficient} ([rank, local_length]) have a local "
             + f"partition along {partition_dim!r} shorter than the "
@@ -1230,7 +1255,7 @@ def mpp_halo_exchange(
             + f"min_partition_size={max(before, after)} (or higher) for "
             + f"{partition_dim!r} -- this only clears this error "
             + "completely if it also keeps every rank active (i.e. "
-            + f"global size // rank count >= min_partition_size for "
+            + "global size // rank count >= min_partition_size for "
             + f"{partition_dim!r}); if it instead leaves some "
             + "highest-numbered ranks with an empty slice, a halo op "
             + "spanning the active/empty boundary still raises this same "

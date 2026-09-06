@@ -14,12 +14,11 @@ from typing import TYPE_CHECKING, Any
 import dask
 import netCDF4
 import numpy as np
-from mpi4py import MPI
-
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
+from ..mpi.mpi_init import MPI
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .encoding import encode_dataset_time, encode_time, is_time_like
 from .meta import mpp_get_meta, strip_export_attrs
@@ -291,7 +290,9 @@ def open_in_parallel(
     return netCDF4.Dataset(path, mode="r+")
 
 
-def mpp_close_writer(mpi_context: MPIContext, nc: netCDF4.Dataset | None, comm: MPI.Comm) -> None:
+def mpp_close_writer(
+    mpi_context: MPIContext, nc: netCDF4.Dataset | None, comm: MPI.Comm
+) -> None:
     """Close, free, and barrier after a parallel NetCDF write.
 
     Shared cleanup for :func:`mpp_write_distributed`/:func:`mpp_write_partitioned`
@@ -991,7 +992,9 @@ def mpp_to_netcdf_parallel(
         if distributed:
             if local_ds is None or local_meta is None:
                 raise AssertionError("Distributed rank-local data are missing.")
-            mpp_write_distributed(mpi_context, output_path, schema, local_ds, local_meta)
+            mpp_write_distributed(
+                mpi_context, output_path, schema, local_ds, local_meta
+            )
         else:
             mpp_write_partitioned(mpi_context, output_path, schema, local_ds)
     except BaseException:
