@@ -43,8 +43,8 @@ from .plot_utils import (
     add_contour_labels,
     add_cyclic_point,
     add_grid_boundary,
-    add_gridlines,
     add_map_features,
+    add_xy_ticks,
     enable_interactive_features,
     fmt_anim_title,
     get_facet_figsize,
@@ -73,12 +73,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from typing import Any, Literal, Self
 
-    import xarray as xr
     from matplotlib.colorbar import Colorbar
     from matplotlib.colors import Colormap, Normalize
     from matplotlib.figure import Figure
     from matplotlib.quiver import Quiver, QuiverKey
     from matplotlib.text import Text
+
+    import xarray as xr
 
 __all__ = [
     "Adder",
@@ -624,8 +625,12 @@ class FacetedPlot:
         Use a global map extent.
     set_extent : tuple of float, optional
         Explicit geographic extent.
-    gridlines : bool, default False
-        Draw labeled gridlines.
+    xy_ticks : bool, default False
+        Draw longitude and latitude ticks.
+    xticks_bins : float, default 5
+        Maximum number of longitude tick intervals.
+    yticks_bins : float, default 5
+        Maximum number of latitude tick intervals.
     add_grid_bounds:
        If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
@@ -662,7 +667,9 @@ class FacetedPlot:
         figsize: tuple[float, float] | None,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
-        gridlines: bool = False,
+        xy_ticks: bool = False,
+        xticks_bins: float = 5,
+        yticks_bins: float = 5,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -699,7 +706,7 @@ class FacetedPlot:
         self.artists: list[ScalarPrimitive] = []
         self.contour_labels: list[list[Text]] = []
         self.map_features: list[Artist] = []
-        self.gridliners: list[Any] = []
+        grid = data.coords.to_dataset()[[self.x, self.y]]
         axes_flat = list(self.axes.flat)
         for index, axis in enumerate(axes_flat):
             if index >= len(selectors):
@@ -721,8 +728,14 @@ class FacetedPlot:
                     land=land,
                 )
             )
-            if gridlines:
-                self.gridliners.append(add_gridlines(self.figure, axis))
+            if xy_ticks:
+                add_xy_ticks(
+                    self.figure,
+                    axis,
+                    grid,
+                    xticks_bins=xticks_bins,
+                    yticks_bins=yticks_bins,
+                )
             if add_grid_bounds:
                 add_grid_boundary(
                     axis,
@@ -952,8 +965,12 @@ class GeoPlot:
         Use a global map extent.
     set_extent : tuple of float, optional
         Explicit extent ``(lon_min, lon_max, lat_min, lat_max)``.
-    gridlines : bool, default False
-        Add labeled gridlines.
+    xy_ticks : bool, default False
+        Draw longitude and latitude ticks.
+    xticks_bins : float, default 5
+        Maximum number of longitude tick intervals.
+    yticks_bins : float, default 5
+        Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
@@ -1053,7 +1070,9 @@ class GeoPlot:
         cbar_label: str | None = None,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
-        gridlines: bool = False,
+        xy_ticks: bool = False,
+        xticks_bins: float = 5,
+        yticks_bins: float = 5,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -1099,7 +1118,6 @@ class GeoPlot:
         )
         self.layers: list[dict[str, Any]] = []
         self.map_features: list[Artist] = []
-        self.gridliners: list[Any] = []
         self.contour_labels: list[Text] | list[list[Text]] = []
         self.colorbar: Colorbar | None = None
         self.quiver: Quiver | list[Quiver] | None = None
@@ -1123,7 +1141,9 @@ class GeoPlot:
                 figsize=figsize,
                 global_extent=global_extent,
                 set_extent=set_extent,
-                gridlines=gridlines,
+                xy_ticks=xy_ticks,
+                xticks_bins=xticks_bins,
+                yticks_bins=yticks_bins,
                 add_grid_bounds=add_grid_bounds,
                 coastlines=coastlines,
                 borders=borders,
@@ -1157,7 +1177,6 @@ class GeoPlot:
             )
             self.contour_labels = facet.contour_labels
             self.map_features = facet.map_features
-            self.gridliners = facet.gridliners
 
             if isinstance(self.title, dict):
                 title_options = dict(self.title)
@@ -1188,8 +1207,14 @@ class GeoPlot:
                 ocean=ocean,
                 land=land,
             )
-            if gridlines:
-                self.gridliners.append(add_gridlines(self.figure, axis))
+            if xy_ticks:
+                add_xy_ticks(
+                    self.figure,
+                    axis,
+                    self.grid,
+                    xticks_bins=xticks_bins,
+                    yticks_bins=yticks_bins,
+                )
             self.artist = _plot_scalar(
                 self.data,
                 self.figure,
@@ -2262,8 +2287,14 @@ class Animate:
         Draw colorbar interval edges.
     cbar_label : str, optional
         Base colorbar label.
-    global_extent, gridlines : bool, default False
-        Map-layout options.
+    global_extent : bool, default False
+        Use a global map extent.
+    xy_ticks : bool, default False
+        Draw longitude and latitude ticks.
+    xticks_bins : float, default 5
+        Maximum number of longitude tick intervals.
+    yticks_bins : float, default 5
+        Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
@@ -2350,7 +2381,9 @@ class Animate:
         cbar_label: str | None = None,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
-        gridlines: bool = False,
+        xy_ticks: bool = False,
+        xticks_bins: float = 5,
+        yticks_bins: float = 5,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -2440,7 +2473,9 @@ class Animate:
             "cbar_label": cbar_label,
             "global_extent": global_extent,
             "set_extent": set_extent,
-            "gridlines": gridlines,
+            "xy_ticks": xy_ticks,
+            "xticks_bins": xticks_bins,
+            "yticks_bins": yticks_bins,
             "add_grid_bounds": add_grid_bounds,
             "coastlines": coastlines,
             "borders": borders,
@@ -2658,7 +2693,9 @@ def geo(
     cbar_label: str | None = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
-    gridlines: bool = False,
+    xy_ticks: bool = False,
+    xticks_bins: float = 5,
+    yticks_bins: float = 5,
     add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -2714,8 +2751,14 @@ def geo(
         Base colorbar controls.
     cbar_label : str, optional
         Explicit base colorbar label.
-    global_extent, gridlines : bool, default False
-        Map-layout controls.
+    global_extent : bool, default False
+        Use a global map extent.
+    xy_ticks : bool, default False
+        Draw longitude and latitude ticks.
+    xticks_bins : float, default 5
+        Maximum number of longitude tick intervals.
+    yticks_bins : float, default 5
+        Maximum number of latitude tick intervals.
     add_grid_bounds : bool
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
@@ -2791,7 +2834,9 @@ def animate(
     cbar_label: str | None = None,
     global_extent: bool = False,
     set_extent: tuple[float, float, float, float] | None = None,
-    gridlines: bool = False,
+    xy_ticks: bool = False,
+    xticks_bins: float = 5,
+    yticks_bins: float = 5,
     add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -2842,8 +2887,14 @@ def animate(
         Frame-title prefix.
     orientation, add_colorbar, drawedges, cbar_label, colorbar_kwargs : optional
         Per-frame colorbar options.
-    global_extent, set_extent, gridlines, coastlines, borders, states, ocean, land, lakes, rivers
+    global_extent, set_extent, coastlines, borders, states, ocean, land, lakes, rivers
         Per-frame map-feature options.
+    xy_ticks : bool, default False
+        Draw longitude and latitude ticks.
+    xticks_bins : float, default 5
+        Maximum number of longitude tick intervals.
+    yticks_bins : float, default 5
+        Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     u_component, v_component, quiver_kwargs : optional

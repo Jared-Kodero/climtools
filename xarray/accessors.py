@@ -367,7 +367,9 @@ class GeoDataArray(GeoBase):
         cbar_label: str | None = None,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
-        gridlines: bool = False,
+        xy_ticks: bool = False,
+        xticks_bins: float = 5,
+        yticks_bins: float = 5,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -429,8 +431,14 @@ class GeoDataArray(GeoBase):
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent, gridlines, add_grid_bounds : bool
-            Control geographic extent and grid annotations.
+        global_extent, add_grid_bounds : bool
+            Control geographic extent and grid-boundary annotations.
+        xy_ticks : bool, default False
+            Draw longitude and latitude ticks.
+        xticks_bins : float, default 5
+            Maximum number of longitude tick intervals.
+        yticks_bins : float, default 5
+            Maximum number of latitude tick intervals.
         set_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
         coastlines, borders, states, ocean, land, lakes, rivers : bool
@@ -511,7 +519,9 @@ class GeoDataArray(GeoBase):
         cbar_label: str | None = None,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
-        gridlines: bool = False,
+        xy_ticks: bool = False,
+        xticks_bins: float = 5,
+        yticks_bins: float = 5,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -577,8 +587,14 @@ class GeoDataArray(GeoBase):
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent, gridlines, add_grid_bounds : bool
-            Control geographic extent and grid annotations.
+        global_extent, add_grid_bounds : bool
+            Control geographic extent and grid-boundary annotations.
+        xy_ticks : bool, default False
+            Draw longitude and latitude ticks.
+        xticks_bins : float, default 5
+            Maximum number of longitude tick intervals.
+        yticks_bins : float, default 5
+            Maximum number of latitude tick intervals.
         set_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
         coastlines, borders, states, ocean, land, lakes, rivers : bool
@@ -1045,7 +1061,9 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                 ):
                     continue
 
-                raise RuntimeError(f"{module_name!r} missing dependency {missing!r}.") from exc
+                raise RuntimeError(
+                    f"{module_name!r} missing dependency {missing!r}."
+                ) from exc
 
             for name in names:
                 registered = False
@@ -1059,10 +1077,14 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                     registered = True
 
                     if not inspect.isclass(accessor):
-                        raise RuntimeError(f"{class_name}.{name} must be an accessor class.")
+                        raise RuntimeError(
+                            f"{class_name}.{name} must be an accessor class."
+                        )
 
                     if accessor.__qualname__ != accessor.__name__:
-                        raise RuntimeError(f"Nested accessor {class_name}.{name} is unsupported.")
+                        raise RuntimeError(
+                            f"Nested accessor {class_name}.{name} is unsupported."
+                        )
 
                     found[cls].append((name, accessor.__module__, accessor.__name__))
 

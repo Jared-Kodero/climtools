@@ -19,10 +19,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
+from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
+
+import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -36,7 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import Any, Literal
 
-    from cartopy.mpl.gridliner import Gridliner
     from matplotlib.artist import Artist
     from matplotlib.axes import Axes
     from matplotlib.cm import ScalarMappable
@@ -56,8 +57,8 @@ with warnings.catch_warnings():
 __all__ = [
     "add_colorbar",
     "add_contour_labels",
-    "add_gridlines",
     "add_map_features",
+    "add_xy_ticks",
     "get_cax",
     "get_facet_figsize",
     "get_map_aspect",
@@ -579,57 +580,30 @@ def add_contour_labels(
     return list(labels)
 
 
-def add_gridlines(
+def add_xy_ticks(
     fig: Figure,
     ax: cgeo.GeoAxes,
-    *,
-    draw_labels: bool = True,
-    linewidth: float = 0.5,
-    color: str = "gray",
-    alpha: float = 0.5,
-    linestyle: str = "--",
-    zorder: float = 1.0,
-) -> Gridliner:
-    """Add longitude and latitude gridlines to a Cartopy axis.
+    grid: xr.Dataset,
+    xticks_bins: float = 5,
+    yticks_bins: float = 5,
+) -> None:
+    """Add longitude and latitude ticks to a Cartopy axis."""
 
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-        Figure containing ``ax``.
-    ax : cartopy.mpl.geoaxes.GeoAxes
-        Geographic axis to modify.
-    draw_labels : bool, default True
-        Draw coordinate labels.
-    linewidth : float, default 0.5
-        Gridline width in points.
-    color : str, default "gray"
-        Gridline color.
-    alpha : float, default 0.5
-        Gridline opacity.
-    linestyle : str, default "--"
-        Gridline style.
-    zorder : float, default 1
-        Gridline drawing order.
+    lon = grid["lon"]
+    lat = grid["lat"]
 
-    Returns
-    -------
-    cartopy.mpl.gridliner.Gridliner
-        Created gridliner.
-    """
-
-    gridliner = ax.gridlines(
-        crs=ccrs.PlateCarree(),
-        draw_labels=draw_labels,
-        linewidth=linewidth,
-        color=color,
-        alpha=alpha,
-        linestyle=linestyle,
-        zorder=zorder,
+    xticks = MaxNLocator(nbins=xticks_bins).tick_values(
+        float(lon.min()), float(lon.max())
     )
-    gridliner.top_labels = False
-    gridliner.right_labels = False
+    yticks = MaxNLocator(nbins=yticks_bins).tick_values(
+        float(lat.min()), float(lat.max())
+    )
 
-    return gridliner
+    ax.set_xticks(xticks, crs=ccrs.PlateCarree())
+    ax.set_yticks(yticks, crs=ccrs.PlateCarree())
+
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
 
 
 def add_map_features(
