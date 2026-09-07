@@ -34,19 +34,7 @@ def normalize_dim(
     value: xr.Dataset | xr.DataArray,
     dim: str | Iterable[Hashable] | EllipsisType | None,
 ) -> tuple[Any, tuple[Hashable, ...]]:
-    """Normalize a reduction dimension specification.
-
-    Parameters
-    ----------
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    dim : str | Iterable[Hashable] | EllipsisType | None
-        Dimension to operate on.
-    Returns
-    -------
-    tuple[Any, tuple[Hashable, ...]]
-        Normalized local dimension argument and dimension tuple.
-    """
+    """Normalize a reduction dimension specification."""
     if not isinstance(value, (xr.DataArray, xr.Dataset)):
         raise TypeError("MPI xarray operations require an xarray DataArray or Dataset.")
     if dim is None or dim is ...:
@@ -58,19 +46,7 @@ def normalize_dim(
 
 
 def skipna_enabled(dtype: np.dtype[Any], skipna: bool | None) -> bool:
-    """Return the effective dtype-aware ``skipna`` setting.
-
-    Parameters
-    ----------
-    dtype : np.dtype[Any]
-        NumPy dtype.
-    skipna : bool | None
-        Whether to ignore missing values.
-    Returns
-    -------
-    bool
-        Effective missing-value policy.
-    """
+    """Return the effective dtype-aware ``skipna`` setting."""
     if skipna is not None:
         return skipna
     return dtype.kind in "fc"
@@ -102,21 +78,7 @@ def local_reduction_meta(
     *,
     partition_dim: Hashable | Literal["auto"] | None,
 ) -> Mapping[str, Any] | None:
-    """Return metadata when a reduction remains rank-local.
-
-    Parameters
-    ----------
-    meta : Mapping[str, Any] | None
-        MPI distribution metadata.
-    dims : tuple[Hashable, ...]
-        Dimensions to operate on.
-    partition_dim : Hashable | Literal['auto'] | None
-        Partition dimension to use for the result.
-    Returns
-    -------
-    Mapping[str, Any] | None
-        Metadata for a rank-local reduction, if applicable.
-    """
+    """Return metadata when a reduction remains rank-local."""
     if meta is None or any(dim in dims for dim in meta["dims"]):
         return None
     if partition_dim not in (None, "auto"):
@@ -130,19 +92,7 @@ def local_reduction_meta(
 def finish_local_reduction(
     result: xr.Dataset | xr.DataArray, *, old_meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
-    """Restore metadata after a rank-local reduction.
-
-    Parameters
-    ----------
-    result : xr.Dataset | xr.DataArray
-        Operation result.
-    old_meta : Mapping[str, Any]
-        Existing MPI distribution metadata.
-    Returns
-    -------
-    xr.Dataset | xr.DataArray
-        Reduction result with restored metadata.
-    """
+    """Restore metadata after a rank-local reduction."""
     dims = tuple(dim for dim in old_meta["dims"] if dim in result.dims)
     if not dims:
         return strip_mpi_meta(result)
@@ -178,25 +128,7 @@ def mpp_reduction_plan(
     *,
     operation: str,
 ) -> tuple[PlanEntry, ...]:
-    """Build and validate the rank-independent reduction plan.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    dims : tuple[Hashable, ...]
-        Dimensions to operate on.
-    meta : Mapping[str, Any] | None
-        MPI distribution metadata.
-    operation : str
-        Operation name used for planning.
-    Returns
-    -------
-    tuple[PlanEntry, ...]
-        Validated reduction plan entries.
-    """
+    """Build and validate the rank-independent reduction plan."""
     if isinstance(value, xr.DataArray):
         items: tuple[tuple[Hashable, xr.DataArray], ...] = ((value.name, value),)
     else:
@@ -305,21 +237,7 @@ def mpp_resolve_comm(
     meta: Mapping[str, Any] | None,
     comm_axes: Iterable[Hashable],
 ) -> MPI.Comm:
-    """Return the communicator a plan entry's collective should use.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    meta : Mapping[str, Any] | None
-        MPI distribution metadata.
-    comm_axes : Iterable[Hashable]
-        Partition axes included in the communicator.
-    Returns
-    -------
-    MPI.Comm
-        Communicator for the requested partition axes.
-    """
+    """Return the communicator a plan entry's collective should use."""
     axes = frozenset(comm_axes)
     if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
         return mpi_context.comm
@@ -330,17 +248,7 @@ def mpp_resolve_comm(
 
 
 def guarded(function: Any) -> tuple[Any, BaseException | None]:
-    """Run a local operation and defer any exception for synchronization.
-
-    Parameters
-    ----------
-    function : Any
-        Callable to execute.
-    Returns
-    -------
-    tuple[Any, BaseException | None]
-        Operation result and deferred exception.
-    """
+    """Run a local operation and defer any exception for synchronization."""
     try:
         return function(), None
     except BaseException as exc:
@@ -388,11 +296,13 @@ def mpp_comm_reduce(
         the caller was going to keep anyway (see :func:`mpp_scatter_target`
         and :func:`mpp_finish_scatter`). ``sum(counts)`` must equal
         ``value.sizes[dim]``.
+
     Returns
     -------
     xr.DataArray
         Globally reduced DataArray, or -- when ``scatter`` is given --
         this rank's own slice of it along ``scatter[0]``.
+
     """
     send: np.ndarray[Any, Any] | None = None
     if error is None:
@@ -463,28 +373,7 @@ def mpp_count_valid_values(
     replica_count: int = 1,
     scatter: tuple[Hashable, Sequence[int]] | None = None,
 ) -> xr.DataArray:
-    """Count valid values globally across the requested dimensions.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xr.DataArray
-        Distributed xarray object.
-    dims : tuple[Hashable, ...]
-        Dimensions to operate on.
-    comm : MPI.Comm | None
-        MPI communicator.
-    replica_count : int
-        Number of replicated contributions.
-    scatter : tuple[Hashable, Sequence[int]] | None, optional
-        Forwarded to :func:`mpp_comm_reduce`; see there.
-    Returns
-    -------
-    xr.DataArray
-        Global valid-value counts (this rank's slice only, when ``scatter``
-        is given).
-    """
+    """Count valid values globally across the requested dimensions."""
     count: xr.DataArray | None = None
     error: BaseException | None = None
     try:
@@ -509,21 +398,7 @@ def dataset_result(
     dims: tuple[Hashable, ...],
     variables: Mapping[Hashable, xr.DataArray],
 ) -> xr.Dataset:
-    """Rebuild a Dataset from reduced data variables.
-
-    Parameters
-    ----------
-    value : xr.Dataset
-        Distributed xarray object.
-    dims : tuple[Hashable, ...]
-        Dimensions to operate on.
-    variables : Mapping[Hashable, xr.DataArray]
-        Reduced data variables.
-    Returns
-    -------
-    xr.Dataset
-        Dataset rebuilt from reduced variables.
-    """
+    """Rebuild a Dataset from reduced data variables."""
     reduced = set(dims)
     coords = {
         name: coord
@@ -534,17 +409,7 @@ def dataset_result(
 
 
 def repartition_candidates(plan: tuple[PlanEntry, ...]) -> frozenset[Hashable]:
-    """Return dimensions eligible for post-reduction repartition.
-
-    Parameters
-    ----------
-    plan : tuple[PlanEntry, ...]
-        Reduction plan entries.
-    Returns
-    -------
-    frozenset[Hashable]
-        Eligible post-reduction partition dimensions.
-    """
+    """Return dimensions eligible for post-reduction repartition."""
     return frozenset(
         dim for entry in plan if entry.distributed for dim, _ in entry.shape
     )
@@ -595,6 +460,7 @@ def mpp_scatter_target(
         :attr:`~.common.PlanEntry.replica_count`). A replica subgroup keeps
         the Allreduce path: every member is supposed to end up with an
         identical answer, so scattering it apart would defeat that.
+
     Returns
     -------
     tuple[Hashable, list[int]] | None
@@ -605,6 +471,7 @@ def mpp_scatter_target(
         used instead (an explicit ``partition_dim``, no previous partition
         dimension being removed, a replica subgroup, a single rank, or no
         eligible dimension left to split across ranks).
+
     """
     if (
         partition_dim != "auto"
@@ -650,22 +517,6 @@ def mpp_finish_scatter(
     along ``target``; routing it back through :func:`mpp_finish` would
     incorrectly auto-choose and re-slice a *second* time, this time from
     each rank's already-local size rather than the true global one.
-
-    Parameters
-    ----------
-    result : xr.Dataset | xr.DataArray
-        Already-scattered reduction result (this rank's slice only).
-    target : Hashable
-        Dimension ``result`` is now distributed along.
-    counts : Sequence[int]
-        Per-rank element counts along ``target``, as returned by
-        :func:`mpp_scatter_target`.
-    comm : mpi4py.MPI.Comm
-        The same communicator used for the scattering collective.
-    Returns
-    -------
-    xr.Dataset | xr.DataArray
-        ``result`` with ``mpi_meta`` attached.
     """
     rank = comm.rank
     start = sum(counts[:rank])
@@ -701,19 +552,8 @@ def mpp_scatter_replicated_slice(
     the full extent, padding the gap with NaN, rather than raising --
     this keeps every variable a consistent size first.
 
-    Parameters
-    ----------
-    variable : xr.DataArray
-        A Dataset variable not touched by the reduction's combine step.
-    target : Hashable
-        The dimension the reduction is scattering along.
-    start, stop : int
-        This rank's half-open ``[start, stop)`` range along ``target``.
-    Returns
-    -------
-    xr.DataArray
-        ``variable`` sliced to ``[start, stop)`` along ``target`` if it
-        has that dimension, otherwise unchanged.
+    Returns ``variable`` sliced to ``[start, stop)`` along ``target`` when it
+    has that dimension, otherwise unchanged.
     """
     return (
         variable.isel({target: slice(start, stop)})
@@ -752,24 +592,13 @@ def mpp_plan_scatter_target(
       variables are all sliced to the same length along the same target
       dimension together in one :func:`mpp_finish_scatter` call.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    old_meta : mapping or None
-        Distribution metadata of the value being reduced.
-    dims : tuple of Hashable
-        Dimensions being reduced over.
-    partition_dim : Hashable or {"auto"} or None
-        Caller's requested partition placement, as passed to :func:`mpp_finish`.
-    reduce_plan : tuple[PlanEntry, ...]
-        Plan from :func:`mpp_reduction_plan`.
     Returns
     -------
     tuple[Hashable, list[int], MPI.Comm] | None
         ``(target_dim, counts, comm)`` ready for :func:`mpp_comm_reduce`'s
         ``scatter=`` argument and :func:`mpp_finish_scatter`, or ``None``
         when the Allreduce-then-:func:`mpp_finish` path should be used.
+
     """
     distributed_entries = [e for e in reduce_plan if e.dims and e.distributed]
     if not distributed_entries:
@@ -810,18 +639,6 @@ def mpp_finish(
 ) -> xr.Dataset | xr.DataArray:
     """Finalize metadata and optional repartition after a reduction.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    result : xr.Dataset | xr.DataArray
-        Operation result.
-    old_meta : Mapping[str, Any] | None
-        Existing MPI distribution metadata.
-    partition_dim : Hashable | Literal['auto'] | None
-        Partition dimension to use for the result.
-    auto_candidates : frozenset[Hashable]
-        Dimensions eligible for automatic repartitioning.
     Returns
     -------
     xr.Dataset | xr.DataArray
@@ -833,6 +650,7 @@ def mpp_finish(
         rank that shared that range before the reduction is left with
         a genuinely empty (``start == stop``) slice instead of a
         redundant copy.
+
     """
     result = strip_mpi_meta(result)
     old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]

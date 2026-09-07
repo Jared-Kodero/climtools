@@ -35,17 +35,7 @@ _dask_cluster = None
 
 
 def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
-    """Return the longitude and latitude coordinate names.
-
-    Parameters
-    ----------
-    da : xr.DataArray | xr.Dataset
-        Input DataArray or Dataset.
-    Returns
-    -------
-    tuple[str, str]
-        Longitude and latitude coordinate names.
-    """
+    """Return the longitude and latitude coordinate names."""
     ds = da if isinstance(da, xr.Dataset) else da.to_dataset(name=da.name or "data")
 
     if "latitude" not in ds.cf.coordinates or "longitude" not in ds.cf.coordinates:
@@ -65,21 +55,7 @@ def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
 def set_edges_to_nan(
     da: xr.DataArray, dims: str | Sequence[str], width: int = 1
 ) -> xr.DataArray:
-    """Set edge cells along selected dimensions to NaN.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        Input DataArray.
-    dims : str | Sequence[str]
-        Dimensions to operate on.
-    width : int
-        Transect or edge width.
-    Returns
-    -------
-    xr.DataArray
-        DataArray with selected edge cells masked.
-    """
+    """Set edge cells along selected dimensions to NaN."""
     if width < 0:
         raise ValueError("width must be non-negative")
 
@@ -111,19 +87,7 @@ def set_edges_to_nan(
 def add_cyclic_point(
     obj: xr.DataArray | xr.Dataset, lon: str = "lon"
 ) -> xr.DataArray | xr.Dataset:
-    """Add a cyclic point to a DataArray along the specified longitude dimension.
-
-    Parameters
-    ----------
-    obj : xarray.DataArray or xarray.Dataset
-        The input DataArray or Dataset to which a cyclic point will be added.
-    lon : str, optional
-        The name of the longitude dimension.
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        The object with a cyclic point added.
-    """
+    """Add a cyclic point to a DataArray along the specified longitude dimension."""
 
     dataset = False
 
@@ -188,10 +152,12 @@ def sel_transect(
         Snap the supplied centre coordinates to the nearest grid point.
     drop : bool
         Drop coordinate locations outside the transect.
+
     Returns
     -------
     xr.Dataset | xr.DataArray
         Selected transect subset.
+
     """
 
     if xdim not in data.coords or ydim not in data.coords:
@@ -370,19 +336,7 @@ def sel_transect(
 def to_lon180(
     data: xr.Dataset | xr.DataArray, lon: str = "lon"
 ) -> xr.Dataset | xr.DataArray:
-    """Standardize longitude coordinates to [-180, 180).
-
-    Parameters
-    ----------
-    data : xr.Dataset or xr.DataArray
-        The input dataset or data array containing a longitude coordinate.
-    lon : str, default 'lon'
-        The name of the longitude coordinate in the dataset.
-    Returns
-    -------
-    xr.Dataset or xr.DataArray
-        The dataset or data array with standardized longitude coordinates.
-    """
+    """Standardize longitude coordinates to [-180, 180)."""
     if lon not in data.coords:
         raise ValueError(f"Dataset must contain {lon!r} coordinate.")
 
@@ -393,17 +347,7 @@ def to_lon180(
 
 
 def coord_id(coord: xr.DataArray) -> str:
-    """Return a compact description of a regular coordinate.
-
-    Parameters
-    ----------
-    coord : xr.DataArray
-        Coord value.
-    Returns
-    -------
-    str
-        Compact coordinate descriptor.
-    """
+    """Return a compact description of a regular coordinate."""
     dim = coord.dims[0]
     step = float(coord.diff(dim).mean())
     mean = float(coord.mean(dim))
@@ -412,17 +356,7 @@ def coord_id(coord: xr.DataArray) -> str:
 
 
 def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
-    """Return a deterministic hexadecimal identifier for a lat-lon grid.
-
-    Parameters
-    ----------
-    coords : xr.DataArray | xr.Dataset
-        Coordinate specifications.
-    Returns
-    -------
-    str
-        Deterministic grid identifier.
-    """
+    """Return a deterministic hexadecimal identifier for a lat-lon grid."""
     signature = f"lat-{coord_id(coords['lat'])}_lon-{coord_id(coords['lon'])}"
 
     return hashlib.blake2b(signature.encode("utf-8"), digest_size=8).hexdigest()
@@ -441,23 +375,7 @@ def remap(
     ] = "bilinear",
     parallel: bool = False,
 ) -> xr.Dataset | xr.DataArray:
-    """Remap source data to the destination grid using xESMF.
-
-    Parameters
-    ----------
-    grid_in : xr.Dataset | xr.DataArray
-        Source xarray object.
-    grid_out : xr.Dataset | xr.DataArray
-        Target xarray grid.
-    method : Literal['bilinear', 'conservative', 'conservative_normed', 'patch', 'nearest_s2d', 'nearest_d2s']
-        Operation method.
-    parallel : bool
-        Whether to use parallel execution.
-    Returns
-    -------
-    xr.Dataset | xr.DataArray
-        Input data remapped to the target grid.
-    """
+    """Remap source data to the destination grid using xESMF."""
 
     import xesmf as xe
 
@@ -540,18 +458,6 @@ def mask(
 ) -> xr.DataArray | xr.Dataset:
     """Mask grid cells that do not match a specified land-sea mask value.
 
-    Parameters
-    ----------
-    data : xarray.DataArray or xarray.Dataset
-        Object to mask.
-    mask : xarray.DataArray, xarray.Dataset, str, pathlib.Path, or None, optional
-        Categorical land-sea mask.
-    data_var : str, default "land"
-        Name of the mask variable to extract when ``mask`` is a Dataset or a path to a Dataset.
-    valid_value : float or int, default 1
-        Mask value identifying grid cells to retain.
-    parallel : bool, default False
-        Whether to perform mask remapping in parallel with Dask.
     Returns
     -------
     xarray.DataArray or xarray.Dataset
@@ -563,6 +469,7 @@ def mask(
         If ``mask`` resolves to a Dataset that does not contain ``data_var``.
     TypeError
         If ``mask`` cannot be resolved to an xarray.DataArray.
+
     """
 
     if mask is None:
@@ -605,23 +512,7 @@ def add_local_solar_time(
     time: str = "time",
     name: str = "lst",
 ) -> xr.Dataset | xr.DataArray:
-    """Add mean local solar time as a coordinate.
-
-    Parameters
-    ----------
-    data : xarray.Dataset or xarray.DataArray
-        Object carrying a time coordinate and a longitude coordinate.
-    lon : str, default "lon"
-        Name of the longitude coordinate, in degrees east.
-    time : str, default "time"
-        Name of the UTC time coordinate.
-    name : str, default "lst"
-        Name given to the new coordinate.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The input object with the local solar time coordinate attached.
-    """
+    """Add mean local solar time as a coordinate."""
     for coord in (lon, time):
         if coord not in data.coords:
             raise ValueError(f"Input must contain a {coord!r} coordinate.")
@@ -669,6 +560,7 @@ class SetupDask:
         The active client, or None before :meth:`start` is called.
     cluster : dask.distributed.LocalCluster or None
         The active cluster, or None before :meth:`start` is called.
+
     """
 
     def __init__(
@@ -695,6 +587,7 @@ class SetupDask:
         -------
         dask.distributed.Client
             The active client.
+
         """
         global _dask_client, _dask_cluster
 

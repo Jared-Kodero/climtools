@@ -10,7 +10,6 @@ product analogue ``mpp_reproducing_prod`` that FMS has no counterpart for).
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -120,14 +119,45 @@ def mpp_reduce_scatter(
 
 
 def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]:
-    """FMS's ``mpp_define_layout2D`` (``mpp_domains_define.inc``): guess the
-    aspect-ratio-matching divisor, walk down until it evenly divides
-    ``ndivs``. 2D only -- the only case climtools partitions.
+    """Choose a 2D process grid for ``ndivs`` ranks over ``extent0 x extent1``.
+
+    FMS's ``mpp_define_layout2D`` guesses the aspect-ratio-matching divisor,
+    ``nint(sqrt(ndivs*isz/jsz))``, then walks it *down* until it divides
+    ``ndivs``. That search is one-directional, so it never reconsiders a
+    divisor above the guess and can land on a needlessly lopsided grid: for
+    721x1440 on 4 ranks it returns 1x4, giving 721x360 subdomains, where 2x2
+    gives 360x720 and a slightly smaller halo perimeter. FMS's own comment on
+    the neighbouring balancing routine concedes the point -- "It is very hard
+    to make it balance for all the situation. Hopefully some smart idea will
+    come up someday."
+
+    ``ndivs`` has few divisors, so the exact search FMS approximates is
+    affordable: enumerate every factor pair and take the one minimising the
+    per-subdomain halo perimeter ``extent0/rows + extent1/cols``, which is the
+    quantity the aspect-ratio heuristic is a proxy for. Ties go to the more
+    square grid.
+
+    Layouts giving every rank points are preferred. FMS treats an empty
+    subdomain as fatal (``mpp_compute_extent``: "domain extents must be
+    positive definite"), but climtools tolerates them deliberately --
+    ``get_balanced_bounds`` hands out empty ``(length, length)`` slabs when a
+    dimension is shorter than the rank count -- so when no factor pair fits,
+    the one leaving the fewest ranks idle is returned rather than raising.
     """
-    idiv = max(round(math.sqrt(ndivs * extent0 / extent1)), 1)
-    while ndivs % idiv != 0:
-        idiv -= 1
-    return idiv, ndivs // idiv
+    if ndivs < 1:
+        raise ValueError(f"ndivs must be positive, got {ndivs}.")
+
+    pairs = [(rows, ndivs // rows) for rows in range(1, ndivs + 1) if ndivs % rows == 0]
+
+    def cost(layout: tuple[int, int]) -> tuple[int, float, int]:
+        rows, cols = layout
+        # Ranks left with nothing dominate; then the halo perimeter of one
+        # subdomain; then squareness, purely to make ties deterministic.
+        idle = max(0, rows - extent0) * cols + max(0, cols - extent1) * rows
+        perimeter = extent0 / rows + extent1 / cols
+        return idle, perimeter, abs(rows - cols)
+
+    return min(pairs, key=cost)
 
 
 def mpp_define_domains(

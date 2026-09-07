@@ -26,21 +26,11 @@ __all__ = [
 def compute_layout(extents: Sequence[int], nranks: int) -> tuple[int, ...]:
     """Choose a process-grid shape balancing work per rank across axes.
 
-    Parameters
-    ----------
-    extents : sequence of int
-        Global length of each partition dimension, in axis order.
-    nranks : int
-        Number of MPI ranks (process-grid cells) to lay out.
-    Returns
-    -------
-    tuple of int
-        Process-grid shape, one entry per axis, with ``math.prod(shape) == nranks``.
-
     Raises
     ------
     ValueError
         If ``extents`` is empty, any extent is not positive, or ``nranks`` is not positive.
+
     """
     if not extents:
         raise ValueError("requires at least one extent")
@@ -108,6 +98,7 @@ class CartesianTopology:
         Per-dimension ``(lower_rank, upper_rank)`` face neighbors in the
         *original* (non-Cartesian) communicator's rank numbering. None at
         a non-periodic global boundary.
+
     """
 
     dims: tuple[str, ...]
@@ -127,6 +118,7 @@ class CartesianTopology:
         -------
         dict[str, Any]
             Cartesian topology metadata descriptor.
+
         """
         return {
             "grid_shape": self.grid_shape,
@@ -141,10 +133,12 @@ class CartesianTopology:
         ----------
         merge_axes : sequence of str
             Subset of :attr:`dims` to group ranks across.
+
         Returns
         -------
         mpi4py.MPI.Comm
             The (possibly cached) sub-communicator.
+
         """
         key = frozenset(merge_axes)
         cached = self._sub_comm_cache.get(key)
@@ -168,23 +162,11 @@ def build_cartesian_topology(
 ) -> CartesianTopology:
     """Build a rank's Cartesian topology for a multi-dimensional partition.
 
-    Parameters
-    ----------
-    comm : mpi4py.MPI.Intracomm
-        Communicator to lay out.
-    dims : sequence of str
-        Partition dimension names, in the order they should be laid out across Cartesian axes.
-    sizes : mapping of str to int
-        Global length of each dimension in ``dims``.
-    Returns
-    -------
-    CartesianTopology
-        This rank's view of the process grid.
-
     Raises
     ------
     ValueError
         If fewer than two dimensions are given.
+
     """
     if len(dims) < 2:
         raise ValueError(
@@ -238,21 +220,7 @@ def get_cartesian_topology(
     dims: Sequence[str],
     sizes: Mapping[str, int],
 ) -> CartesianTopology:
-    """Return (building and caching once) a rank's Cartesian topology.
-
-    Parameters
-    ----------
-    comm : mpi4py.MPI.Intracomm
-        Communicator to lay out.
-    dims : sequence of str
-        Partition dimension names, in Cartesian-axis order.
-    sizes : mapping of str to int
-        Global length of each dimension in ``dims``.
-    Returns
-    -------
-    CartesianTopology
-        This rank's (cached) view of the process grid.
-    """
+    """Return (building and caching once) a rank's Cartesian topology."""
     dims = tuple(dims)
     # Keyed by (dims, sizes), not dims alone: two calls sharing dimension
     # *names* (e.g. both ("x", "y")) but different *sizes* -- two
@@ -276,20 +244,9 @@ def get_cartesian_topology(
 def mpp_dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
     """Return the communicator whose ranks vary along ``dim`` alone.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        Runtime whose communicator this resolves against.
-    meta : mapping
-        Distribution metadata (as returned by :func:`~.meta.mpp_get_meta`) of the object being operated on.
-    dim : str
-        The single partition dimension to resolve a communicator for.
-    Returns
-    -------
-    mpi4py.MPI.Comm
-        The full mpi_context communicator for the one-dimensional case (unchanged behavior),or
-        the cached Cartesian sub-communicator fixed on every other partition axis otherwise
-        -- see :meth:`CartesianTopology.sub_comm`.
+    The full communicator when the partition is one-dimensional, otherwise
+    the cached Cartesian sub-communicator holding every other partition axis
+    fixed (:meth:`CartesianTopology.sub_comm`).
     """
     dims = meta["dims"]
     if len(dims) <= 1 or "cart" not in meta:

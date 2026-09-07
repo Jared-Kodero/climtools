@@ -15,17 +15,7 @@ if TYPE_CHECKING:
 
 
 def is_cftime(da: xr.DataArray) -> bool:
-    """Report whether an object-dtype variable holds cftime datetimes.
-
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Variable to inspect.
-    Returns
-    -------
-    bool
-        ``True`` when the first element is a :class:`cftime.datetime`.
-    """
+    """Report whether an object-dtype variable holds cftime datetimes."""
     if da.dtype != object:
         return False
     values = np.asarray(da.values).reshape(-1)
@@ -35,14 +25,11 @@ def is_cftime(da: xr.DataArray) -> bool:
 def is_time_like(da: xr.DataArray) -> bool:
     """Report whether a variable carries datetime, cftime or timedelta values.
 
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Variable to inspect.
     Returns
     -------
     bool
         ``True`` when the variable requires CF numeric encoding before it can be written through the ``netCDF4`` interface.
+
     """
     return (
         np.issubdtype(da.dtype, np.datetime64)
@@ -58,18 +45,11 @@ def encode_time(
 ) -> xr.DataArray:
     """Encode datetime64, cftime or timedelta64 values to CF numeric values.
 
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Variable to encode.
-    units : str or None, optional
-        Target CF units, for example ``"seconds since 1970-01-01"``.
-    calendar : str or None, optional
-        Target CF calendar.
     Returns
     -------
     xarray.DataArray
         Numeric variable carrying ``units`` and, where applicable, ``calendar`` in both ``attrs`` and ``encoding``.
+
     """
     if np.issubdtype(da.dtype, np.datetime64) and not is_cftime(da):
         target_units = units or "seconds since 1970-01-01 00:00:00"
@@ -112,17 +92,7 @@ def encode_time(
 
 
 def encode_dataset_time(ds: xr.Dataset) -> xr.Dataset:
-    """Encode every time-like variable of a dataset without touching the input.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset to encode.
-    Returns
-    -------
-    xarray.Dataset
-        Shallow copy in which time-like variables carry CF numeric values.
-    """
+    """Encode every time-like variable of a dataset without touching the input."""
     out = ds.copy()
     replacements: dict[Any, xr.DataArray] = {}
     for name in list(out.variables):

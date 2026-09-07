@@ -124,7 +124,17 @@ def run(fx: Fixtures) -> None:
         # square one, which is the whole point of matching the aspect ratio.
         square_rows, _ = mpp_define_layout(100, 100, 8)
         wide_rows, _ = mpp_define_layout(10, 1000, 8)
-        return wide_rows <= square_rows, "aspect ratio ignored"
+        if wide_rows > square_rows:
+            return False, "aspect ratio ignored"
+        # The case FMS's walk-down search gets lopsided: 721x1440 on 4 ranks
+        # is 1x4 there, 2x2 here, which has the smaller halo perimeter.
+        if mpp_define_layout(721, 1440, 4) != (2, 2):
+            return False, f"721x1440 on 4 -> {mpp_define_layout(721, 1440, 4)}"
+        # No factor pair fits, so the layout wasting the fewest ranks wins
+        # rather than the call failing.
+        if mpp_define_layout(1, 1, 4)[0] * mpp_define_layout(1, 1, 4)[1] != 4:
+            return False, "degenerate extents did not still cover ndivs"
+        return True, ""
 
     _check("mpp_define_layout", "factorises the rank count exactly", define_layout)
 

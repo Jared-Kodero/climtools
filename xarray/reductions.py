@@ -482,27 +482,12 @@ def mpp_sum_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Sum a distributed xarray object over one or more dimensions.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    min_count : int or None, optional
-        Minimum number of valid values required.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _sum_prod(
         mpi_context,
@@ -529,27 +514,12 @@ def mpp_prod_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Multiply a distributed xarray object over one or more dimensions.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    min_count : int or None, optional
-        Minimum number of valid values required.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _sum_prod(
         mpi_context,
@@ -728,25 +698,12 @@ def mpp_mean_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the mean of a distributed xarray object.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     local_dim, dims = normalize_dim(value, dim)
     old_meta = mpp_get_meta(value)
@@ -880,25 +837,12 @@ def mpp_min_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the minimum of a distributed xarray object.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _min_max(
         mpi_context,
@@ -922,25 +866,12 @@ def mpp_max_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the maximum of a distributed xarray object.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _min_max(
         mpi_context,
@@ -1114,24 +1045,13 @@ def mpp_any_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Return whether any value is true over the requested dimensions.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Logical OR over the requested dimensions -- see
         :func:`~.planning.finish` for the exact replication/
         no-duplication guarantee this carries.
+
     """
     return _logical(
         mpi_context,
@@ -1154,24 +1074,13 @@ def mpp_all_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Return whether all values are true over the requested dimensions.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Logical AND over the requested dimensions -- see
         :func:`~.planning.finish` for the exact replication/
         no-duplication guarantee this carries.
+
     """
     return _logical(
         mpi_context,
@@ -1426,26 +1335,13 @@ def mpp_first_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Select the first valid value along one dimension.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    dim : str
-        Dimension to operate on.
-    skipna : bool | None
-        Whether to ignore missing values.
-    keep_attrs : bool | None
-        Whether to preserve xarray attributes.
-    partition_dim : Hashable | Literal['auto'] | None
-        Partition dimension to use for the result.
     Returns
     -------
     xr.Dataset | xr.DataArray
         First valid value along the requested dimension -- see
         :func:`~.planning.finish` for the exact replication/
         no-duplication guarantee this carries.
+
     """
     return _first_or_last(
         mpi_context,
@@ -1469,26 +1365,13 @@ def mpp_last_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Select the last valid value along one dimension.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    dim : str
-        Dimension to operate on.
-    skipna : bool | None
-        Whether to ignore missing values.
-    keep_attrs : bool | None
-        Whether to preserve xarray attributes.
-    partition_dim : Hashable | Literal['auto'] | None
-        Partition dimension to use for the result.
     Returns
     -------
     xr.Dataset | xr.DataArray
         Last valid value along the requested dimension -- see
         :func:`~.planning.finish` for the exact replication/
         no-duplication guarantee this carries.
+
     """
     return _first_or_last(
         mpi_context,

@@ -65,10 +65,12 @@ class GeoBase:
             ESMF regridding method.
         parallel : bool, default False
             Build the weights in parallel with Dask.
+
         Returns
         -------
         xarray.Dataset or xarray.DataArray
             The object on the target grid.
+
         """
 
         kwargs = exclude_key("self", dict(locals()))
@@ -93,6 +95,7 @@ class GeoBase:
             Mask value identifying grid cells to retain.
         parallel : bool, default False
             Whether to perform mask remapping in parallel with Dask.
+
         Returns
         -------
         xarray.DataArray or xarray.Dataset
@@ -104,6 +107,7 @@ class GeoBase:
             If ``mask`` resolves to a Dataset that does not contain ``data_var``.
         TypeError
             If ``mask`` cannot be resolved to an xarray.DataArray.
+
         """
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.mask(self._obj, **kwargs)
@@ -126,10 +130,12 @@ class GeoBase:
             Name of the UTC time coordinate.
         name : str, default "lst"
             Name given to the new coordinate.
+
         Returns
         -------
         xarray.Dataset or xarray.DataArray
             The object with the local solar time coordinate attached.
+
         """
         return xgeo.add_local_solar_time(self._obj, lon=lon, time=time, name=name)
 
@@ -140,10 +146,12 @@ class GeoBase:
         ----------
         lon : str, default "lon"
             Name of the longitude coordinate.
+
         Returns
         -------
         xarray.Dataset or xarray.DataArray
             The object with wrapped and sorted longitudes.
+
         """
         return xgeo.to_lon180(self._obj, lon=lon)
 
@@ -154,10 +162,12 @@ class GeoBase:
         ----------
         lon : str, default "lon"
             Name of the longitude dimension.
+
         Returns
         -------
         xarray.Dataset or xarray.DataArray
             The object with one extra longitude point.
+
         """
         from .utils import add_cyclic_point
 
@@ -195,10 +205,12 @@ class GeoBase:
             Snap the supplied centre coordinates to the nearest grid point.
         drop : bool
             Drop coordinate locations outside the transect.
+
         Returns
         -------
         xr.Dataset | xr.DataArray
             Selected transect subset.
+
         """
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.sel_transect(self._obj, **kwargs)
@@ -232,9 +244,11 @@ class GeoBase:
             Whether to apply zlib compression to newly created variables.
         complevel : int, optional
             Compression level, between 1 and 9.
+
         Returns
         -------
         None
+
         """
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.nc_append(self._obj, **kwargs)
@@ -295,9 +309,11 @@ class GeoBase:
             Disable NetCDF pre-filling during parallel initialization.
         allow_serial : bool, default False
             Permit execution when running with a single MPI rank.
+
         Returns
         -------
         None
+
         """
 
         kwargs = exclude_key("self", dict(locals()))
@@ -459,10 +475,12 @@ class GeoDataArray(GeoBase):
             If True, append a cyclic longitude point before plotting.
         **kwargs : Any
             Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
+
         Returns
         -------
         GeoPlot
             Composable map holding the base artists, with chainable overlay methods.
+
         """
 
         opts = exclude_key("self", dict(locals()))
@@ -631,10 +649,12 @@ class GeoDataArray(GeoBase):
             If True add frame id to title
         **kwargs : Any
             Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
+
         Returns
         -------
         IPython.display.DisplayHandle or None
             Inside a Jupyter kernel, the encoded MP4 is embedded and its display handle is returned.
+
         """
 
         opts = exclude_key("self", dict(locals()))
@@ -678,10 +698,12 @@ class GeoDataArray(GeoBase):
             Units shown on the key.
         **kwargs : Any
             Additional arguments forwarded to ``Axes.quiver``.
+
         Returns
         -------
         tuple
             ``(ax, quiver, quiver_key)``.
+
         """
         from ..viz import plotting
 
@@ -726,10 +748,12 @@ class GeoDataArray(GeoBase):
             Grid stride used to thin the markers.
         size : float, default 0.25
             Marker size.
+
         Returns
         -------
         matplotlib.collections.PathCollection
             The scatter artist holding the markers.
+
         """
 
         kwargs = exclude_key("self", dict(locals()))
@@ -759,10 +783,12 @@ class GeoDataArray(GeoBase):
             Alternative hypothesis used for the p-value.
         dask_scheduler : {"threads", "processes"}, default "threads"
             Scheduler used to evaluate a chunked input.
+
         Returns
         -------
         xarray.Dataset
             Dataset holding ``corr`` and ``p_value``.
+
         """
 
         kwargs = exclude_key("self", dict(locals()))
@@ -778,10 +804,12 @@ class GeoDataArray(GeoBase):
             Second sample, for example a second period.
         dim : str, default "time"
             Sample dimension.
+
         Returns
         -------
         xarray.DataArray
             Pointwise p-values of a Welch t-test.
+
         """
 
         return calc.pvalues(self._obj, other, dim=dim)
@@ -806,10 +834,12 @@ class GeoDataArray(GeoBase):
             Scheduler used to evaluate a chunked input.
         polyfit : bool, default False
             Use ordinary least squares instead of the modified Mann-Kendall test.
+
         Returns
         -------
         xarray.Dataset
             Trend statistics, including the slope and its p-value.
+
         """
 
         kwargs = exclude_key("self", dict(locals()))
@@ -832,6 +862,7 @@ class PreprocessAccessor:
         -------
         xr.Dataset
             Preprocessed ERA5 dataset.
+
         """
         return xgeo.preprocess.era5(self._obj)
 
@@ -842,6 +873,7 @@ class PreprocessAccessor:
         -------
         xr.Dataset
             Preprocessed ERA5-Land dataset.
+
         """
         return xgeo.preprocess.era5_land(self._obj)
 
@@ -852,6 +884,7 @@ class PreprocessAccessor:
         -------
         xr.Dataset
             Preprocessed IMERG dataset.
+
         """
         return xgeo.preprocess.imerg(self._obj)
 
@@ -862,6 +895,7 @@ class PreprocessAccessor:
         -------
         xr.Dataset
             Preprocessed CMORPH dataset.
+
         """
         return xgeo.preprocess.cmorph(self._obj)
 
@@ -872,6 +906,7 @@ class PreprocessAccessor:
         -------
         xr.Dataset
             Preprocessed GPCP dataset.
+
         """
         return xgeo.preprocess.gpcp(self._obj)
 
@@ -894,6 +929,7 @@ class GeoDataset(GeoBase):
         -------
         PreprocessAccessor
             Preprocessing accessor.
+
         """
         return PreprocessAccessor(self._obj)
 
@@ -905,10 +941,12 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
     ----------
     force : bool
         Whether to rebuild an existing source patch.
+
     Returns
     -------
     tuple[Path, ...]
         Paths modified by the xarray source patch.
+
     """
 
     from importlib.util import find_spec

@@ -242,6 +242,7 @@ def mpp_partition(
         Effective chunk-size hints.
     log_partitions : bool, optional
         Log the resulting rank layout.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -251,6 +252,7 @@ def mpp_partition(
     ------
     ValueError
         If ownership, metadata, or ``dim`` is invalid.
+
     """
     comm = mpi_context.comm
     is_root = mpi_context.is_root(root)
@@ -537,6 +539,7 @@ def mpp_create_dataarray(
         "local partition shorter than the requested halo" ``ValueError``
         for that dimension regardless of rank count. See
         :func:`~.chunks.get_balanced_bounds`.
+
     Returns
     -------
     xarray.DataArray
@@ -546,6 +549,7 @@ def mpp_create_dataarray(
     ------
     ValueError
         If ``dim`` is invalid or global sizes cannot be resolved.
+
     """
     partition_dims = _normalize_create_dim(dim, dims)
     min_chunk_map = (
@@ -673,6 +677,7 @@ def mpp_create_dataset(
         along a partitioned dimension, or a per-dimension mapping of the
         same. See :func:`create_dataarray`'s parameter of the same name
         and :func:`~.chunks.get_balanced_bounds`.
+
     Returns
     -------
     xarray.Dataset
@@ -682,6 +687,7 @@ def mpp_create_dataset(
     ------
     ValueError
         If sizes cannot be resolved or a partitioned DataArray has the wrong local length.
+
     """
     if isinstance(dim, (list, tuple)):
         if not dim:
@@ -825,6 +831,7 @@ def mpp_repartition(
         Effective chunk-size hints.
     log_partitions : bool, optional
         Log the resulting rank layout.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -834,6 +841,7 @@ def mpp_repartition(
     ------
     ValueError
         If ``value`` is already distributed or ``dim`` is invalid.
+
     """
     if mpp_get_meta(value) is not None:
         raise ValueError(
@@ -902,6 +910,7 @@ def mpp_attach_save_chunks(
         MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
         Distributed rank-local object.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -911,6 +920,7 @@ def mpp_attach_save_chunks(
     ------
     ValueError
         If required partition chunk metadata are missing.
+
     """
     meta = mpp_get_meta(value)
     if meta is None:
@@ -955,10 +965,12 @@ def mpi_open_dataset(
         Print one aligned table showing which global interval each rank received.
     **kwargs : Any
         Additional arguments passed unchanged to ``xarray.open_dataset``/ ``xarray.open_mfdataset`` (e.g.
+
     Returns
     -------
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
+
     """
 
     if not isinstance(mpi_context, MPIContext):
@@ -1045,10 +1057,12 @@ def mpi_create_dataarray(
         every active rank at or above the minimum get an empty local
         slice for that dimension instead. See
         :func:`~.chunks.get_balanced_bounds`.
+
     Returns
     -------
     MPIXarray
         Lazy rank-local DataArray with ``.meta`` set.
+
     """
     from .core import MPIXarray
 
@@ -1110,10 +1124,12 @@ def mpi_create_dataset(
         per-dimension mapping of the same. See
         :func:`mpi_create_dataarray`'s parameter of the same name and
         :func:`~.chunks.get_balanced_bounds`.
+
     Returns
     -------
     MPIXarray
         Lazy rank-local Dataset with ``.meta`` set.
+
     """
     from .core import MPIXarray
 
@@ -1159,10 +1175,12 @@ def mpi_partition_data(
         Effective chunk-size hints.
     log_partitions : bool, optional
         Log the resulting rank layout.
+
     Returns
     -------
     MPIXarray
         Rank-local slice with ``.meta`` set.
+
     """
     from .core import MPIXarray, unwrap
 
@@ -1187,6 +1205,7 @@ def mpi_empty_dataset() -> xr.Dataset:
     -------
     xarray.Dataset
         Dataset marked as containing no rank-local data.
+
     """
     return xr.Dataset(attrs={_NO_DATA_ATTR: True})
 
@@ -1198,10 +1217,12 @@ def mpi_dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
     ----------
     data : xarray.Dataset or xarray.DataArray
         Object to inspect.
+
     Returns
     -------
     bool
         True when ``data`` is an MPI placeholder Dataset.
+
     """
     return isinstance(data, xr.Dataset) and data.attrs.get(_NO_DATA_ATTR) is True
 
@@ -1264,9 +1285,11 @@ def to_netcdf(
         Disable NetCDF pre-filling during parallel initialization.
     allow_serial : bool, default: False
         Permit the parallel writer with one MPI rank.
+
     Returns
     -------
     None
+
     """
 
     if not isinstance(data, (xr.Dataset, xr.DataArray)):

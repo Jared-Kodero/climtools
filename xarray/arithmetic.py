@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
-
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -324,6 +323,7 @@ def mpp_align(
         Forwarded to ``repartition``.
     log_partitions : bool, optional
         Forwarded to ``repartition``.
+
     Returns
     -------
     tuple of xarray.Dataset or xarray.DataArray
@@ -333,6 +333,7 @@ def mpp_align(
     ------
     ValueError
         If neither operand is distributed and ``dim`` is omitted.
+
     """
     from .io import mpp_repartition
 
@@ -615,6 +616,7 @@ def mpp_reindex(
         Currently unused by the redistributing path.
     **indexers_kwargs : Any
         Additional indexers given as keywords, merged with ``indexers``.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -626,6 +628,7 @@ def mpp_reindex(
         If no indexers are given.
     NotImplementedError
         If more than one active partition dimension is reindexed at once, or a reindexed partition dimension's new coordinate is not one-dimensional.
+
     """
     indexers = {**(indexers or {}), **indexers_kwargs}
     if not indexers:
@@ -722,6 +725,7 @@ def mpp_sortby(
         Reserved for parity with ``repartition``'s signature; not consulted by the redistributing path, which always balances.
     log_partitions : bool, optional
         Currently unused by the redistributing path.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -731,6 +735,7 @@ def mpp_sortby(
     ------
     NotImplementedError
         If the sort key(s) together vary along more than one active partition dimension under a multi-dimensional (Cartesian) partition, or a key is not one-dimensional along the partition dimension it varies along.
+
     """
     meta = mpp_get_meta(value)
     if meta is None:
@@ -822,16 +827,11 @@ def _operand_meta(operand: Any) -> dict[str, Any] | None:
 def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
     """Tag ``result`` with ``meta`` if it is an xarray object.
 
-    Parameters
-    ----------
-    result : Any
-        The computation result to be tagged.
-    meta : dict[str, Any]
-        The distribution metadata dictionary to reattach.
     Returns
     -------
     Any
         The tagged result object if it is an xarray dataset or dataarray, otherwise returned unmodified.
+
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
         mpp_update_meta(
@@ -851,12 +851,6 @@ def mpp_check_operands_distribution(
 ) -> tuple[dict[str, Any] | None, Any]:
     """Return the mpi_meta to attach to a multi-operand call's result.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    operands : iterable of Any
-        Every positional and keyword argument passed to :meth:`apply`.
     Returns
     -------
     tuple[dict[str, Any] | None, Any]
@@ -866,6 +860,7 @@ def mpp_check_operands_distribution(
     ------
     ValueError
         If two operands are distributed over different partitions, if a replicated operand carries the distributed dimension at a different length than the partition owns, if a replicated operand's coordinate labels along the distributed dimension do not match the distributed partition's labels for this rank's slice (equal length alone does not imply equal coordinates), or (on more than one rank) if that coordinate check cannot even run because either side has no coordinate for the distributed dimension -- equal length alone is not enough evidence the operand is genuinely this rank's own data rather than another rank's same-length slice by coincidence.
+
     """
     operands = list(operands)
     metas = [_operand_meta(item) for item in operands]
@@ -949,10 +944,12 @@ def check_partition_preserved(
         The distribution metadata captured before the call.
     reference : Any
         The distributed operand the metadata was taken from, used as the coordinate baseline for the label check below.
+
     Raises
     ------
     ValueError
         If the distributed dimension is missing from ``result``, its local length changed, or its coordinate labels no longer match this rank's owned interval.
+
     """
     if not isinstance(result, (xr.Dataset, xr.DataArray)):
         return
@@ -1003,6 +1000,7 @@ def mpp_apply(
         Positional arguments to ``func``: xarray Datasets or DataArrays (distributed or not) or plain scalars and arrays, in any mix.
     **kwargs : Any
         Keyword arguments to ``func``, checked for distribution metadata exactly like ``args``.
+
     Returns
     -------
     Any
@@ -1012,6 +1010,7 @@ def mpp_apply(
     ------
     ValueError
         If the xarray arguments are distributed over incompatible partitions or their coordinates disagree, or if the callable's result no longer represents the same owned partition (missing dimension, changed local length, or changed coordinate labels).
+
     """
     if func in _MATMUL_CALLABLES and not kwargs and len(args) == 2:
         return mpp_matmul(mpi_context, *args)
@@ -1073,6 +1072,7 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
         Left operand.
     right : Any
         Right operand: an ``xarray.DataArray`` (distributed or not) or a plain array/scalar ``left`` can be matrix-multiplied with.
+
     Returns
     -------
     xarray.DataArray
@@ -1084,6 +1084,7 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
         If ``left``/``right`` are distributed over incompatible partitions (see :meth:`apply`).
     TypeError
         If the dtype involved has no MPI reduction datatype, when the distributed dimension is contracted.
+
     """
     meta, _reference = mpp_check_operands_distribution(mpi_context, (left, right))
     if meta is None:
@@ -1168,6 +1169,7 @@ def mpp_halo_exchange(
         extent, measured here at roughly four times the cost of joining the
         data alone. Pass False when the caller restores the coordinate
         itself; the padded object then carries none along ``dim``.
+
     Returns
     -------
     tuple[xarray.Dataset or xarray.DataArray, int, int]
@@ -1177,6 +1179,7 @@ def mpp_halo_exchange(
     ------
     ValueError
         If ``value`` is not distributed, ``dim`` is missing or disagrees with an active partition dimension, ``before``/``after`` are negative, or any rank's local partition along ``dim`` is shorter than ``before``/``after``.
+
     """
     meta = _operand_meta(value)
     if meta is None:
@@ -1334,26 +1337,11 @@ def mpp_rolling_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Windowed reduction along ``dim``, correct when ``dim`` is distributed.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to roll over.
-    dim : Hashable
-        Dimension to roll over.
-    window : int
-        Window size, as in ``xarray.DataArray.rolling``.
-    reduce : str, optional
-        Name of the reduction to call on the rolling object (e.g.
-    center : bool, optional
-        As in ``xarray.DataArray.rolling``.
-    min_periods : int or None, optional
-        As in ``xarray.DataArray.rolling``.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         The rolled-and-reduced result, with the same local length and distribution metadata as the input when ``dim`` is the partition dimension.
+
     """
     meta = _operand_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -1404,24 +1392,6 @@ def mpp_coarsen_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Block reduction along ``dim``, correct when ``dim`` is distributed.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to coarsen.
-    dim : Hashable
-        Dimension to coarsen along.
-    window : int
-        Block size, as in ``xarray.DataArray.coarsen``.
-    reduce : str, optional
-        Name of the reduction to call on the coarsen object (e.g.
-    boundary : {"exact", "trim", "pad"}, optional
-        As in ``xarray.DataArray.coarsen``.
-    side : {"left"}, optional
-        As in ``xarray.DataArray.coarsen``.
-    coord_func : str, optional
-        As in ``xarray.DataArray.coarsen``.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -1433,6 +1403,7 @@ def mpp_coarsen_reduce(
         If ``boundary="exact"`` and the global size is not evenly divisible by ``window``.
     NotImplementedError
         If ``side="right"`` is requested on a distributed ``dim``.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -1642,6 +1613,7 @@ def mpp_evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) 
         A Python expression referencing ``variables`` by name, for example ``"(a + b) * c - d / e"``.
     **variables : Any
         Values bound to the names used in ``expression``: xarray Datasets/DataArrays (distributed or not) or plain scalars.
+
     Returns
     -------
     Any
@@ -1653,6 +1625,7 @@ def mpp_evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) 
         If ``expression`` fails to parse, uses an unsupported operator or expression element, or chains comparisons.
     NameError
         If ``expression`` references a name not present in ``variables``.
+
     """
     try:
         tree = ast.parse(expression, mode="eval")

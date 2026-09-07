@@ -22,21 +22,14 @@ if TYPE_CHECKING:
 MAX_SAVE_CHUNK_BYTES = 2**31
 
 
-
-
 def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
     """Return the common native-aligned boundary interval for a dimension.
 
-    Parameters
-    ----------
-    data : xarray.Dataset
-        Dataset to inspect for native chunk sizes.
-    dim : hashable
-        Dimension name to evaluate.
     Returns
     -------
     int or None
         Smallest interval whose boundaries align with every available native chunk grid, or None if native chunking is unavailable.
+
     """
     sizes: set[int] = set()
     for variable in data.data_vars.values():
@@ -58,19 +51,7 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
 
 
 def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
-    """Return whether a native chunk provides a useful on-disk partition.
-
-    Parameters
-    ----------
-    length : int
-        Total length of the dimension.
-    native_chunk : int or None
-        Representative native chunk size.
-    Returns
-    -------
-    bool
-        True if the native chunk provides a valid multi-chunk partition.
-    """
+    """Return whether a native chunk provides a useful on-disk partition."""
     if length <= 1 or native_chunk is None or native_chunk <= 1:
         return False
     return math.ceil(length / native_chunk) > 1
@@ -79,21 +60,7 @@ def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
 def get_effective_chunk_size(
     length: int, native_chunk: int | None, mpi_size: int
 ) -> int:
-    """Return the distribution_chunk length climtools should retain for one dimension.
-
-    Parameters
-    ----------
-    length : int
-        Total dimension length.
-    native_chunk : int or None
-        Representative native chunk size.
-    mpi_size : int
-        Number of MPI ranks.
-    Returns
-    -------
-    int
-        Effective chunk size for the dimension.
-    """
+    """Return the distribution_chunk length climtools should retain for one dimension."""
     if length <= 0:
         return 1
 
@@ -104,19 +71,7 @@ def get_effective_chunk_size(
 
 
 def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
-    """Calculate effective distribution_chunk sizes for all Dataset dimensions.
-
-    Parameters
-    ----------
-    data : xarray.Dataset
-        Dataset to evaluate.
-    mpi_size : int
-        Number of MPI ranks.
-    Returns
-    -------
-    dict
-        Mapping from dimension name to effective chunk size.
-    """
+    """Calculate effective distribution_chunk sizes for all Dataset dimensions."""
     return {
         str(dim): get_effective_chunk_size(
             int(length), get_native_chunk_sizes(data, dim), mpi_size
@@ -146,10 +101,12 @@ def get_balanced_bounds(
         will need (e.g. the largest ``rolling_reduce`` window) to avoid
         ``mpp_halo_exchange``'s "local partition shorter than the
         requested halo" error on that dimension.
+
     Returns
     -------
     tuple of int
         Start and stop indices for the given rank.
+
     """
     if min_chunk is not None and min_chunk > 0 and size > 1 and length > 0:
         active = max(1, min(size, length // min_chunk))
@@ -164,21 +121,7 @@ def get_balanced_bounds(
 
 
 def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
-    """Return whether rank bounds for this ``(length, chunk_size, size)`` fall on chunk edges.
-
-    Parameters
-    ----------
-    length : int
-        Global length of the dimension being partitioned.
-    chunk_size : int
-        Candidate distribution_chunk length.
-    size : int
-        Number of MPI ranks.
-    Returns
-    -------
-    bool
-        True if chunk-aligned bounds apply; False if falling back to balanced bounds.
-    """
+    """Return whether rank bounds for this ``(length, chunk_size, size)`` fall on chunk edges."""
     if length <= 0:
         return True
     chunk_count = math.ceil(length / chunk_size)
@@ -188,23 +131,7 @@ def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
 def get_chunk_bounds(
     length: int, chunk_size: int, rank: int, size: int
 ) -> tuple[int, int]:
-    """Partition a dimension into per-rank distribution_chunk bounds on chunk boundaries.
-
-    Parameters
-    ----------
-    length : int
-        Global length of the dimension.
-    chunk_size : int
-        Chunk size to align boundaries to.
-    rank : int
-        Current MPI rank.
-    size : int
-        Total number of MPI ranks.
-    Returns
-    -------
-    tuple of int
-        Start and stop indices for the given rank.
-    """
+    """Partition a dimension into per-rank distribution_chunk bounds on chunk boundaries."""
     if length <= 0:
         return 0, 0
 
@@ -223,26 +150,12 @@ def get_chunk_bounds(
 def prune_chunk_info(
     chunk_info: Mapping[str, int], value: xr.Dataset | xr.DataArray
 ) -> dict[str, int]:
-    """Restrict a distribution_chunk mapping to dimensions actually present on ``value``.
-
-    Parameters
-    ----------
-    chunk_info : mapping
-        Full mapping of chunk sizes.
-    value : xarray.Dataset or xarray.DataArray
-        Object whose dimensions are used as a filter.
-    Returns
-    -------
-    dict
-        Pruned mapping containing only dimensions present on the object.
-    """
+    """Restrict a distribution_chunk mapping to dimensions actually present on ``value``."""
     return {
         str(dim): int(chunk_info[str(dim)])
         for dim in value.dims
         if str(dim) in chunk_info
     }
-
-
 
 
 def _other_dims_bytes(
@@ -267,21 +180,7 @@ def _cap_partition_chunk_to_hdf5_limit(preferred: int, other_bytes: int) -> int:
 def get_partition_chunk_size(
     ds: xr.Dataset, partition_dim: str | None, mpi_size: int
 ) -> int | None:
-    """Return the per-rank-aligned HDF5 save_chunk length for ``partition_dim``.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset being written.
-    partition_dim : str or None
-        Dimension that MPI ranks write disjoint slabs of.
-    mpi_size : int
-        Number of MPI ranks participating in the write.
-    Returns
-    -------
-    int or None
-        Optimized save chunk size for the partition dimension.
-    """
+    """Return the per-rank-aligned HDF5 save_chunk length for ``partition_dim``."""
     if partition_dim is None or partition_dim not in ds.sizes:
         return ds.sizes.get(partition_dim)
 
@@ -340,23 +239,7 @@ def get_chunks(
     partition_dim: str | None = None,
     partition_length: int | None = None,
 ) -> dict[str, tuple[int, ...]]:
-    """Return explicit or existing save_chunk shapes for every variable.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset whose variable save_chunks are inspected.
-    chunks : mapping, optional
-        Explicit variable save_chunk shapes.
-    partition_dim : str, optional
-        Dimension that MPI ranks write disjoint slabs of.
-    partition_length : int, optional
-        Global size of ``partition_dim``.
-    Returns
-    -------
-    dict
-        Mapping from variable name to NetCDF save_chunk shape.
-    """
+    """Return explicit or existing save_chunk shapes for every variable."""
     if chunks is not None:
         explicit = {
             name: tuple(int(length) for length in shape)
@@ -423,6 +306,7 @@ def compute_save_chunks(
         exactly).
     mpi_size : int
         Number of MPI ranks the data is distributed across.
+
     Returns
     -------
     dict
@@ -432,6 +316,7 @@ def compute_save_chunks(
     ------
     ValueError
         If ``meta["chunk_info"]`` lacks a partition dimension.
+
     """
     dims = tuple(str(d) for d in meta["dims"])
     global_sizes = {str(d): int(sz) for d, sz in meta["global_sizes"].items()}
@@ -496,11 +381,7 @@ def compute_save_chunks(
             # that axis's own cap, computed in this same loop, isn't
             # available yet to tighten this).
             other_bytes = variable.dtype.itemsize * math.prod(
-                (
-                    global_sizes[d]
-                    if d in dims and d != var_dim
-                    else int(blk_length)
-                )
+                (global_sizes[d] if d in dims and d != var_dim else int(blk_length))
                 for d, blk_length in zip(var_dims, shape, strict=True)
                 if d != var_dim
             )

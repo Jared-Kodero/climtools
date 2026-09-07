@@ -40,16 +40,23 @@ import mpi_test_misc
 import mpi_test_mpp
 import mpi_test_reductions
 import mpi_test_scans
-from mpi_test_common import build_fixtures, report
+from mpi_test_common import build_fixtures, phase, report
 
-fixtures = build_fixtures()
+_MODULES = (
+    ("construction", mpi_test_construction),
+    ("reductions", mpi_test_reductions),
+    ("halo_ops", mpi_test_halo_ops),
+    ("scans", mpi_test_scans),
+    ("groupby", mpi_test_groupby),
+    ("misc", mpi_test_misc),
+    ("mpp", mpi_test_mpp),
+)
 
-mpi_test_construction.run(fixtures)
-mpi_test_reductions.run(fixtures)
-mpi_test_halo_ops.run(fixtures)
-mpi_test_scans.run(fixtures)
-mpi_test_groupby.run(fixtures)
-mpi_test_misc.run(fixtures)
-mpi_test_mpp.run(fixtures)
+with phase("build_fixtures"):
+    fixtures = build_fixtures()
+
+for _label, _module in _MODULES:
+    with phase(_label):
+        _module.run(fixtures)
 
 report()

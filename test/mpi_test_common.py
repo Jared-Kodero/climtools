@@ -10,6 +10,7 @@ than duplicating fixture setup or the RESULTS/record/report machinery.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -35,11 +36,42 @@ RESULTS: list[tuple[str, str, bool | None, str]] = []
 UNEVEN_GLOBAL = 21
 
 
+#: Stream each check to stdout as it completes, in addition to the summary
+#: report at the end. Without this the suite is silent from the partition
+#: reports until `report()`, so a run that stalls -- or is killed by the
+#: scheduler -- leaves a log that cannot distinguish "deadlocked early" from
+#: "was nearly finished". Rank 0 only, because interleaved output from every
+#: rank is unreadable; a stall on another rank shows up as rank 0 blocking in
+#: the next collective, which the watchdog then reports. Set
+#: CLIMTOOLS_TEST_QUIET=1 to suppress.
+_STREAM = os.environ.get("CLIMTOOLS_TEST_QUIET") != "1"
+_STARTED = time.monotonic()
+
+
 def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
     """Record one check's outcome. `ok=None` means a declared
     NotImplementedError under an unsupported partition shape -- reported
     as SKIP, not FAIL."""
     RESULTS.append((op, case, ok, msg))
+    if _STREAM and mpi.comm.rank == 0:
+        status = "SKIP" if ok is None else ("ok  " if ok else "FAIL")
+        elapsed = time.monotonic() - _STARTED
+        print(f"  [{elapsed:7.1f}s] {status} {op} :: {case}", flush=True)
+
+
+def phase(label: str, timeout: float = 900.0):
+    """Announce a stage and dump every rank's stack if it stalls.
+
+    Wraps `MPIDiagnostics.watchdog`, which was already written for exactly
+    this and previously had no callers. The timeout matters more than the
+    announcement: a job cancelled by the scheduler reports only that it was
+    cancelled, whereas the watchdog fires first and prints where each rank
+    actually was.
+    """
+    if _STREAM and mpi.comm.rank == 0:
+        elapsed = time.monotonic() - _STARTED
+        print(f"\n=== [{elapsed:7.1f}s] {label} ===", flush=True)
+    return mpi.watchdog(label, timeout=timeout)
 
 
 #: Substring of the ValueError mpp_halo_exchange() raises when some rank's

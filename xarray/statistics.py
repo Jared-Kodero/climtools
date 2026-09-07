@@ -248,27 +248,12 @@ def mpp_var(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the variance of a distributed xarray object.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    ddof : int, optional
-        Delta degrees of freedom; the divisor is ``N - ddof``.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _var_or_std(
         mpi_context,
@@ -294,27 +279,12 @@ def mpp_std(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the standard deviation of a distributed xarray object.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : str, iterable of Hashable, ..., or None, optional
-        Dimensions to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    ddof : int, optional
-        Delta degrees of freedom; the divisor is ``N - ddof``.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after reducing the active partition dimension.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced object -- see :func:`~.planning.finish` for the exact
         replication/no-duplication guarantee this carries.
+
     """
     return _var_or_std(
         mpi_context,

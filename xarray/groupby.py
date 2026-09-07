@@ -314,10 +314,12 @@ def mpp_groupby_reduce(
         Whether to preserve attributes.
     partition_dim : Hashable or {"auto"} or None, optional
         Partition placement after grouping; ``"auto"`` may place the result on the new group dimension.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Reduced over ``dim``, with a new dimension of the same name indexed by the sorted, global set of group labels.
+
     """
     if op not in _GROUP_OPS:
         raise ValueError(f"Unsupported groupby op: {op!r}. Supported: {_GROUP_OPS}.")
@@ -567,31 +569,7 @@ def mpp_resample_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Resample a datetime dimension to ``freq``, then reduce.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    dim : Hashable
-        Dimension to operate on.
-    freq : str
-        Resampling frequency.
-    op : Literal['sum', 'mean', 'count', 'min', 'max']
-        Reduction or MPI operation.
-    skipna : bool | None
-        Whether to ignore missing values.
-    keep_attrs : bool | None
-        Whether to preserve xarray attributes.
-    partition_dim : Hashable | Literal['auto'] | None
-        Partition dimension to use for the result.
-    Returns
-    -------
-    xr.Dataset | xr.DataArray
-        Resampled distributed reduction.
-    """
+    """Resample a datetime dimension to ``freq``, then reduce."""
     timestamps = pd.DatetimeIndex(value[dim].values)
     labels = _resample_bin_labels(timestamps, freq, mpi_context.comm)
     result = mpp_groupby_reduce(

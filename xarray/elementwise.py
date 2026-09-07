@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -40,27 +39,11 @@ def mpp_where(
 ) -> xr.Dataset | xr.DataArray:
     """Elementwise selection (``value.where(cond, other)``), MPI-safe.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to select from.
-    cond : Any
-        Boolean condition, following ``xarray.DataArray.where``.
-    other : Any, optional
-        Fill value where ``cond`` is False.
-    drop : bool, optional
-        Must be False for a distributed object.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The selected object, with ``.meta`` preserved unchanged.
-
     Raises
     ------
     ValueError
         If ``drop=True`` is requested on a distributed object, or the operands are distributed over incompatible partitions (see :meth:`~.arithmetic.Arithmetic.apply`).
+
     """
     operands = (value, cond, other)
     meta, reference = mpp_check_operands_distribution(mpi_context, operands)
@@ -106,10 +89,12 @@ def mpp_cumsum(
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes on the rank-local cumulative sum step; lost by the subsequent addition of the cross-rank prefix.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Cumulative sum with the same local length and ``.meta`` as ``value``.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -246,10 +231,12 @@ def mpp_cumprod(
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes on the rank-local cumulative product step; lost by the subsequent multiplication by the cross-rank prefix.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Cumulative product with the same local length and ``.meta`` as ``value``.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -328,23 +315,7 @@ def mpp_ffill(
     dim: Hashable,
     limit: int | None = None,
 ) -> xr.Dataset | xr.DataArray:
-    """Forward-fill along ``dim``, correct when ``dim`` is distributed.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to fill.
-    dim : Hashable
-        Dimension to fill along.
-    limit : int or None, optional
-        As in ``xarray.DataArray.ffill``.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The forward-filled object, same shape and distribution as the input.
-    """
+    """Forward-fill along ``dim``, correct when ``dim`` is distributed."""
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.ffill(dim, limit=limit)
@@ -369,23 +340,7 @@ def mpp_bfill(
     dim: Hashable,
     limit: int | None = None,
 ) -> xr.Dataset | xr.DataArray:
-    """Backward-fill along ``dim``, correct when ``dim`` is distributed.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to fill.
-    dim : Hashable
-        Dimension to fill along.
-    limit : int or None, optional
-        As in ``xarray.DataArray.bfill``.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The backward-filled object, same shape and distribution as the input.
-    """
+    """Backward-fill along ``dim``, correct when ``dim`` is distributed."""
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.bfill(dim, limit=limit)
@@ -490,10 +445,12 @@ def mpp_interp(
         As in ``xarray.DataArray.interp``.
     **kwargs : Any
         Forwarded to ``xarray.DataArray.interp``.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Interpolated onto this rank's ``new_coord``, with ``.meta`` recomputed for the new length along ``dim`` (an allgather of each rank's own new local length, the same mechanism :func:`diff`/:func:`~.arithmetic.coarsen_reduce` use for their own length-changing case).
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -542,18 +499,6 @@ def mpp_median(
 ) -> xr.Dataset | xr.DataArray:
     """Median over ``dim``, correct when ``dim`` is distributed.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    dim : Hashable
-        Dimension to reduce.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -566,6 +511,7 @@ def mpp_median(
         other rank that shared that range before the reduction is left
         with a genuinely empty (``start == stop``) slice instead of a
         redundant copy.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -665,22 +611,6 @@ def mpp_quantile(
     behind each step; only the reduction call itself and the extra
     ``quantile`` dimension a sequence ``q`` adds differ here.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to reduce.
-    q : float or iterable of float
-        Quantile(s) to compute, in ``[0, 1]``, following ``xarray.DataArray.quantile``.
-    dim : Hashable
-        Dimension to reduce.
-    method : str, optional
-        Interpolation method, following ``xarray.DataArray.quantile``.
-    skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
-    keep_attrs : bool or None, optional
-        Whether to preserve attributes.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -690,6 +620,7 @@ def mpp_quantile(
         nothing remains distributed; under a multi-dimensional partition,
         exactly one rank per distinct surviving range keeps the real
         result, matching :func:`mpp_median`.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -757,18 +688,6 @@ def mpp_diff(
 ) -> xr.Dataset | xr.DataArray:
     """``n``-th order difference along ``dim``, correct when ``dim`` is distributed.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to difference.
-    dim : Hashable
-        Dimension to difference along.
-    n : int, optional
-        Order of the difference.
-    label : {"upper", "lower"}, optional
-        As in ``xarray.DataArray.diff``.
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -778,6 +697,7 @@ def mpp_diff(
     ------
     ValueError
         If ``n`` is negative, ``label`` is not "upper"/"lower", or any rank's local length along ``dim`` is shorter than ``n`` (this last case is caught by :meth:`~.arithmetic.mpp_halo_exchange` itself, which checks every rank's local length together via a synchronized ``allgather`` before raising, so the error is consistent and every rank raises together rather than some hanging).
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -840,10 +760,12 @@ def mpp_shift(
         Number of positions to shift by; positive shifts values toward higher indices (as in ``xarray.DataArray.shift``).
     fill_value : Any, optional
         As in ``xarray.DataArray.shift``; defaults to xarray's own dtype-aware NA fill when omitted.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         The shifted object, same shape and distribution as the input.
+
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -915,6 +837,7 @@ def mpp_pad(
         Fill value(s) for ``mode="constant"``, as in ``xarray.DataArray.pad``.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
@@ -923,10 +846,12 @@ def mpp_pad(
         global edges, where ``.meta``'s ``global_size`` grows by
         ``sum(pad_width)`` and every rank's ``start``/``stop`` shifts to
         match.
+
     Raises
     ------
     NotImplementedError
         If ``dim`` is distributed and ``mode`` is not ``"constant"``.
+
     """
     before, after = pad_width
     meta = mpp_get_meta(value)
@@ -1000,23 +925,7 @@ def mpp_roll(
     dim: Hashable,
     shift: int,
 ) -> xr.Dataset | xr.DataArray:
-    """Circularly shift ``value`` by ``shift`` along ``dim``, wrapping at the edge.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to roll.
-    dim : Hashable
-        Dimension to roll along.
-    shift : int
-        Number of positions to roll by; positive rolls toward higher indices.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The rolled object, same shape and distribution as the input.
-    """
+    """Circularly shift ``value`` by ``shift`` along ``dim``, wrapping at the edge."""
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
         return value.roll({dim: shift}, roll_coords=False)
@@ -1072,27 +981,11 @@ def mpp_differentiate(
 ) -> xr.Dataset | xr.DataArray:
     """Differentiate ``value`` along ``coord``, correct when ``coord`` is distributed.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Object to differentiate.
-    coord : Hashable
-        Coordinate to differentiate along.
-    edge_order : {1, 2}, optional
-        As in ``xarray.DataArray.differentiate``.
-    datetime_unit : Any, optional
-        As in ``xarray.DataArray.differentiate``.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        The derivative, same shape and distribution as the input.
-
     Raises
     ------
     ValueError
         If any rank's local length along ``coord`` is shorter than 1 (see ``mpp_halo_exchange``'s own synchronized length check) or too short overall for ``edge_order`` (raised by xarray itself).
+
     """
     meta = mpp_get_meta(value)
     if meta is None or coord not in meta["dims"]:

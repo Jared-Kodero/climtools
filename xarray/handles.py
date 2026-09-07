@@ -101,10 +101,12 @@ class _PartitionReduceMixin:
             Whether to preserve xarray attributes.
         partition_dim : Hashable | Literal['auto'] | None
             Partition dimension to use for the result.
+
         Returns
         -------
         MPIXarray
             Reduced result.
+
         """
         return self._reduce_kw("sum", skipna, keep_attrs, partition_dim)
 
@@ -125,10 +127,12 @@ class _PartitionReduceMixin:
             Whether to preserve xarray attributes.
         partition_dim : Hashable | Literal['auto'] | None
             Partition dimension to use for the result.
+
         Returns
         -------
         MPIXarray
             Reduced result.
+
         """
         return self._reduce_kw("mean", skipna, keep_attrs, partition_dim)
 
@@ -149,10 +153,12 @@ class _PartitionReduceMixin:
             Whether to preserve xarray attributes.
         partition_dim : Hashable | Literal['auto'] | None
             Partition dimension to use for the result.
+
         Returns
         -------
         MPIXarray
             Reduced result.
+
         """
         return self._reduce_kw("count", skipna, keep_attrs, partition_dim)
 
@@ -173,10 +179,12 @@ class _PartitionReduceMixin:
             Whether to preserve xarray attributes.
         partition_dim : Hashable | Literal['auto'] | None
             Partition dimension to use for the result.
+
         Returns
         -------
         MPIXarray
             Reduced result.
+
         """
         return self._reduce_kw("min", skipna, keep_attrs, partition_dim)
 
@@ -197,10 +205,12 @@ class _PartitionReduceMixin:
             Whether to preserve xarray attributes.
         partition_dim : Hashable | Literal['auto'] | None
             Partition dimension to use for the result.
+
         Returns
         -------
         MPIXarray
             Reduced result.
+
         """
         return self._reduce_kw("max", skipna, keep_attrs, partition_dim)
 
@@ -224,6 +234,7 @@ class MPIRolling(_RollingReduceMixin):
         As in ``xarray.DataArray.rolling``.
     min_periods : int or None, optional
         As in ``xarray.DataArray.rolling``.
+
     """
 
     def __init__(
@@ -268,6 +279,7 @@ class MPIGroupBy(_PartitionReduceMixin):
         Dimension being grouped and reduced.
     labels : array-like
         Group key for every position along this rank's local ``dim`` axis.
+
     """
 
     def __init__(
@@ -320,6 +332,7 @@ class MPIResample(_PartitionReduceMixin):
         Datetime dimension to resample.
     freq : str
         Pandas offset alias (e.g. "D", "MS", "YS").
+
     """
 
     def __init__(self, parent: MPIXarray, dim: Hashable, freq: str) -> None:
@@ -380,6 +393,7 @@ class MPIXarrayWeighted:
         weights that don't vary along the partition dimension (the
         common case -- e.g. ``cos(lat)`` area weights on a
         time-partitioned object) need no special handling at all.
+
     """
 
     def __init__(

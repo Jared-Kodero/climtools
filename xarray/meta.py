@@ -136,17 +136,7 @@ def _validate_mpi_meta(
 
 
 def mpp_get_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
-    """Return validated MPI distribution metadata.
-
-    Parameters
-    ----------
-    value : xarray.Dataset or xarray.DataArray
-        Object whose distribution metadata is requested.
-    Returns
-    -------
-    dict or None
-        Distribution metadata when valid, otherwise None.
-    """
+    """Return validated MPI distribution metadata."""
     meta = _validate_mpi_meta(value, value.attrs.get(MPI_META))
     if meta is not None:
         return meta
@@ -172,15 +162,7 @@ def mpp_get_meta(value: xr.Dataset | xr.DataArray) -> dict[str, Any] | None:
 
 
 def mpp_set_meta(value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]) -> None:
-    """Attach an already-built ``meta`` dict to ``value`` and its variables.
-
-    Parameters
-    ----------
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    meta : Mapping[str, Any]
-        MPI distribution metadata.
-    """
+    """Attach an already-built ``meta`` dict to ``value`` and its variables."""
     dims = meta["dims"]
     value.attrs[MPI_META] = dict(meta)
     if isinstance(value, xr.Dataset):
@@ -244,6 +226,7 @@ def mpp_update_meta(
         Effective climtools chunk size for every retained dimension.
     cart : mapping, optional
         Cartesian topology descriptor (``grid_shape``, ``coords``, ``periods``), attached only for a multi-dimensional partition.
+
     """
     dims = _as_dims(dim)
     global_sizes = _as_dim_map(dims, global_size, "global_size")
@@ -283,10 +266,12 @@ def set_save_chunks(
         Rank-local xarray object that already carries valid MPI distribution metadata (see :func:`mpp_get_meta`).
     save_chunks : mapping
         Mapping from variable name to save_chunk shape.
+
     Raises
     ------
     ValueError
         If ``value`` carries no valid MPI distribution metadata to attach ``save_chunks`` to.
+
     """
     meta = mpp_get_meta(value)
     if meta is None:
@@ -310,19 +295,12 @@ def reattach_meta_after_collapse(
     replacement value; other active partition dimensions carry over
     unchanged.
 
-    Parameters
-    ----------
-    result : xr.Dataset | xr.DataArray
-        Already-replicated result, with ``dim`` no longer a dimension.
-    meta : Mapping[str, Any]
-        Pre-collapse distribution metadata.
-    dim : str
-        The dimension that collapsed away.
     Returns
     -------
     xr.Dataset | xr.DataArray
         ``result`` with metadata reattached for any surviving partition
         dimension, or unchanged if none survive.
+
     """
     from .chunks import prune_chunk_info
 
@@ -348,17 +326,7 @@ def reattach_meta_after_collapse(
 
 
 def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
-    """Return a shallow copy without MPI distribution metadata.
-
-    Parameters
-    ----------
-    value : xr.Dataset | xr.DataArray
-        Distributed xarray object.
-    Returns
-    -------
-    xr.Dataset | xr.DataArray
-        Shallow copy without internal MPI metadata.
-    """
+    """Return a shallow copy without MPI distribution metadata."""
     output = value.copy(deep=False)
     for key in _INTERNAL_ATTRS:
         output.attrs.pop(key, None)
@@ -370,33 +338,14 @@ def strip_mpi_meta(value: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArra
 
 
 def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
-    """Return ``attrs`` without internal MPI bookkeeping keys.
-
-    Parameters
-    ----------
-    attrs : Mapping[str, Any]
-        Source attributes, e.g.
-    Returns
-    -------
-    dict[str, Any]
-        Copy of ``attrs`` with every key in :data:`_INTERNAL_ATTRS` removed.
-    """
+    """Return ``attrs`` without internal MPI bookkeeping keys."""
     return {key: value for key, value in attrs.items() if key not in _INTERNAL_ATTRS}
 
 
 def mpp_should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
     """Collectively resolve whether to call :func:`mpp_log_partition_report`.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        Runtime whose communicator backs the collective.
-    log_partitions : bool
-        This rank's own request.
-    Returns
-    -------
-    bool
-        Identical on every rank: whether to call :func:`mpp_log_partition_report`.
+    The answer is identical on every rank, since any rank asking is enough.
     """
     return bool(mpi_context.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
@@ -572,14 +521,11 @@ def mpp_log_partition_report(
 def indexer_is_scalar(indexer: Any) -> bool:
     """Return whether an isel/sel indexer selects a single position.
 
-    Parameters
-    ----------
-    indexer : Any
-        Value passed as an index.
     Returns
     -------
     bool
         True when ``indexer`` selects exactly one position and therefore drops its dimension, rather than keeping it with length one.
+
     """
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
 
@@ -596,21 +542,7 @@ def resolve_sizes(
     sizes: Mapping[Hashable, int] | None,
     coords: Mapping[Hashable, Any] | None,
 ) -> dict[Hashable, int]:
-    """Fill in any dimension length missing from ``sizes`` using ``coords``.
-
-    Parameters
-    ----------
-    required_dims : Iterable[Hashable]
-        Dimensions whose sizes must be resolved.
-    sizes : Mapping[Hashable, int] | None
-        Known dimension sizes.
-    coords : Mapping[Hashable, Any] | None
-        Coordinate specifications.
-    Returns
-    -------
-    dict[Hashable, int]
-        Resolved dimension-size mapping.
-    """
+    """Fill in any dimension length missing from ``sizes`` using ``coords``."""
     resolved = dict(sizes) if sizes else {}
     coords = coords or {}
     missing = []
@@ -633,23 +565,7 @@ def resolve_sizes(
 
 
 def localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
-    """Slice a coordinate spec to ``[start:stop)`` if it is full-length.
-
-    Parameters
-    ----------
-    spec : Any
-        Coordinate specification.
-    global_size : int
-        Global dimension length.
-    start : int
-        Global inclusive start index.
-    stop : int
-        Global exclusive stop index.
-    Returns
-    -------
-    Any
-        Localized coordinate specification.
-    """
+    """Slice a coordinate spec to ``[start:stop)`` if it is full-length."""
     if isinstance(spec, tuple):
         coord_dims, coord_array, *rest = spec
     else:
@@ -665,23 +581,7 @@ def localize_coord(spec: Any, global_size: int, start: int, stop: int) -> Any:
 def delayed_local(
     fn: Callable[..., Any], args: tuple[Any, ...], shape: tuple[int, ...], dtype: Any
 ) -> Any:
-    """Wrap ``fn(*args)`` as one rank's own slice, not yet computed.
-
-    Parameters
-    ----------
-    fn : Callable[..., Any]
-        Callable used to construct local data.
-    args : tuple[Any, ...]
-        Arguments passed to the callable.
-    shape : tuple[int, ...]
-        Expected local array shape.
-    dtype : Any
-        NumPy dtype.
-    Returns
-    -------
-    Any
-        Delayed Dask array for the local slice.
-    """
+    """Wrap ``fn(*args)`` as one rank's own slice, not yet computed."""
     import dask
     import dask.array as dask_array
 
@@ -717,6 +617,7 @@ def choose_partition_dim(
         Dimensions that must not be chosen, for example a dimension the caller intends to reduce over.
     rank : int, optional
         Calling rank, used only to gate the short-partition warning below to rank 0.
+
     Returns
     -------
     hashable
@@ -726,6 +627,7 @@ def choose_partition_dim(
     ------
     ValueError
         If no dimension is available.
+
     """
     blocked = set(exclude)
     candidates = [

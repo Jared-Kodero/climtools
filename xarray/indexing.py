@@ -91,10 +91,12 @@ def mpp_isel(
         Only consulted when a *slice* on the partition dimension leaves a single global element behind (a scalar indexer already collapses the dimension entirely and broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Indexed object with updated distribution metadata.
+
     """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
@@ -178,27 +180,11 @@ def mpp_isel_scalar(
 ) -> xr.Dataset | xr.DataArray:
     """Select one global integer index from the partition dimension.
 
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Distributed object.
-    dim : Hashable
-        Partition dimension.
-    index : int
-        Global integer index.
-    other_indexers : mapping
-        Additional local ``isel`` indexers.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Replicated selected slice.
-
     Raises
     ------
     IndexError
         If ``index`` is outside the global dimension.
+
     """
     meta = mpp_get_meta(value)
     if meta is None:
@@ -277,10 +263,12 @@ def mpp_sel(
         Only consulted when a label *slice* on the partition dimension leaves a single global element behind (a scalar label already collapses the dimension entirely and broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Indexed object with updated distribution metadata.
+
     """
     supplied = dict(indexers or {})
     supplied.update(indexers_kwargs)
@@ -368,31 +356,7 @@ def mpp_sel_scalar(
     tolerance: Any,
     drop: bool,
 ) -> xr.Dataset | xr.DataArray:
-    """Select one global label from the partition dimension.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Distributed object.
-    dim : Hashable
-        Partition dimension.
-    label : Any
-        Global coordinate label.
-    other_indexers : mapping
-        Additional non-partition ``sel`` indexers.
-    method : str or None
-        Inexact matching method.
-    tolerance : Any
-        Maximum distance for inexact matches.
-    drop : bool
-        Whether to drop selected coordinates.
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Replicated selected slice.
-    """
+    """Select one global label from the partition dimension."""
     if method is not None:
         meta = mpp_get_meta(value)
         if meta is None:

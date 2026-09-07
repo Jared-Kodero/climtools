@@ -195,6 +195,7 @@ class MPIXarray:
     only while an engine operation is executing. Replicated input is assumed to be
     present on every rank; use :func:`~.constructors.mpi_partition_data` for
     root-owned input.
+
     """
 
     #: NumPy ufunc dispatch (`np.log(mpixarray)`, `np.add(a, b)`, ...): for
@@ -552,6 +553,7 @@ class MPIXarray:
         MPIXarray
             ``self``, mutated in place so this chains onto a constructor
             call, e.g. ``xgeo.mpi_create_dataarray(...).load()``.
+
         """
         self.data = self.data.load()
         return self
@@ -609,10 +611,12 @@ class MPIXarray:
             Disable NetCDF pre-filling for parallel output.
         allow_serial : bool, default False
             Allow the parallel writer to run with one MPI rank.
+
         Raises
         ------
         ValueError
             If distributed data are passed to the serial writer.
+
         """
         from .io import to_netcdf
 
@@ -668,10 +672,12 @@ class MPIXarray:
             Effective chunk-size hints.
         log_partitions : bool, optional
             Log the resulting rank layout.
+
         Returns
         -------
         MPIXarray
             Rank-local slice with ``.meta`` set.
+
         """
         return finalize(
             mpp_repartition(
@@ -701,10 +707,12 @@ class MPIXarray:
             Dimension to scatter a resulting single-element partition dimension across, when a slice indexer collapses it to length one.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
+
         Returns
         -------
         MPIXarray
             Indexed object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_isel(
@@ -743,10 +751,12 @@ class MPIXarray:
             Dimension to scatter a resulting single-element partition dimension across, when a label slice collapses it to length one.
         **indexers_kwargs : Any
             Additional indexers passed by dimension name.
+
         Returns
         -------
         MPIXarray
             Indexed object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_sel(
@@ -785,10 +795,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_sum_reduce(
@@ -826,10 +838,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_prod_reduce(
@@ -864,10 +878,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_mean_reduce(
@@ -901,10 +917,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_min_reduce(
@@ -938,10 +956,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_max_reduce(
@@ -972,10 +992,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Logical OR over the requested dimensions, with ``.meta`` updated.
+
         """
         return finalize(
             mpp_any_reduce(
@@ -1005,10 +1027,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Logical AND over the requested dimensions, with ``.meta`` updated.
+
         """
         return finalize(
             mpp_all_reduce(
@@ -1041,10 +1065,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Selected object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_first_reduce(
@@ -1078,10 +1104,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Selected object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_last_reduce(
@@ -1118,10 +1146,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_var(
@@ -1159,10 +1189,12 @@ class MPIXarray:
             Whether to preserve attributes.
         partition_dim : Hashable or {"auto"} or None, optional
             Where to (re)partition the result once the active partition dimension is reduced away.
+
         Returns
         -------
         MPIXarray
             Reduced object with ``.meta`` updated.
+
         """
         return finalize(
             mpp_std(
@@ -1189,11 +1221,13 @@ class MPIXarray:
             Dimension being grouped and reduced.
         labels : array-like
             Group key for every position along this rank's local ``dim`` axis.
+
         Returns
         -------
         MPIGroupBy
             Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
             ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
+
         """
         return MPIGroupBy(self, dim, labels)
 
@@ -1206,11 +1240,13 @@ class MPIXarray:
             Datetime dimension to resample.
         freq : str
             Pandas offset alias (e.g.
+
         Returns
         -------
         MPIResample
             Chainable handle; call ``.sum()``, ``.mean()``, ``.count()``,
             ``.min()``, or ``.max()`` on it to get the reduced :class:`MPIXarray`.
+
         """
         return MPIResample(self, dim, freq)
 
@@ -1233,11 +1269,13 @@ class MPIXarray:
             already-distributed ``MPIXarray`` is also accepted and, like
             any other binary operand, must be compatibly partitioned with
             ``self``.
+
         Returns
         -------
         MPIXarrayWeighted
             Chainable handle; call ``.sum()``, ``.mean()``, or
             ``.sum_of_weights()`` on it to get the reduced :class:`MPIXarray`.
+
         """
         return MPIXarrayWeighted(self, weights)
 
@@ -1261,10 +1299,12 @@ class MPIXarray:
             Forwarded to ``repartition`` when neither operand is yet distributed.
         log_partitions : bool, optional
             Forwarded to ``repartition`` when neither operand is yet distributed.
+
         Returns
         -------
         tuple of MPIXarray
             ``(left, right)``, each with matching distribution metadata.
+
         """
         left, right = mpp_align(
             self._runtime,
@@ -1305,10 +1345,12 @@ class MPIXarray:
             Forwarded to ``repartition`` when a partition dimension is reindexed.
         **indexers_kwargs : Any
             Additional indexers given as keywords.
+
         Returns
         -------
         MPIXarray
             The reindexed object.
+
         """
         kwargs: dict[str, Any] = {
             "method": method,
@@ -1345,10 +1387,12 @@ class MPIXarray:
             Forwarded to ``repartition`` when a partition dimension is sorted.
         log_partitions : bool, optional
             Forwarded to ``repartition`` when a partition dimension is sorted.
+
         Returns
         -------
         MPIXarray
             The sorted object.
+
         """
         return finalize(
             mpp_sortby(
@@ -1373,10 +1417,12 @@ class MPIXarray:
             Positional arguments to ``func``.
         **kwargs : Any
             Keyword arguments to ``func``.
+
         Returns
         -------
         MPIXarray or Any
             ``func``'s result, wrapped if it is an xarray Dataset/DataArray, otherwise returned as-is.
+
         """
         unwrapped_args = tuple(unwrap(arg) for arg in args)
         unwrapped_kwargs = {name: unwrap(value) for name, value in kwargs.items()}
@@ -1390,10 +1436,12 @@ class MPIXarray:
         ----------
         right : MPIXarray or Any
             Right operand: an xarray DataArray (distributed or not, wrapped or not) or a plain array/scalar.
+
         Returns
         -------
         MPIXarray
             The matrix product.
+
         """
         result = mpp_matmul(self._runtime, self._prepare(), unwrap(right))
         return finalize(result, self._runtime)
@@ -1421,10 +1469,12 @@ class MPIXarray:
             As in ``xarray.DataArray.rolling``.
         min_periods : int or None, optional
             As in ``xarray.DataArray.rolling``.
+
         Returns
         -------
         MPIXarray
             Rolled-and-reduced object with ``.meta`` preserved.
+
         """
         result = mpp_rolling_reduce(
             self._runtime,
@@ -1463,10 +1513,12 @@ class MPIXarray:
             Only "left" (the ``xarray`` default) is supported for a distributed dimension so far.
         coord_func : str, optional
             As in ``xarray.DataArray.coarsen``.
+
         Returns
         -------
         MPIXarray
             Coarsened-and-reduced object with ``.meta`` updated to match the new, block-reduced length along ``dim``.
+
         """
         result = mpp_coarsen_reduce(
             self._runtime,
@@ -1500,10 +1552,12 @@ class MPIXarray:
             As in ``xarray.DataArray.rolling``.
         min_periods : int or None, optional
             As in ``xarray.DataArray.rolling``.
+
         Returns
         -------
         MPIRolling
             Chainable handle; call ``.mean()``, ``.sum()``, ``.min()``, ``.max()``, ``.std()``, or ``.count()`` on it to get the rolled-and-reduced :class:`MPIXarray`.
+
         """
         return MPIRolling(self, dim, window, center=center, min_periods=min_periods)
 
@@ -1516,10 +1570,12 @@ class MPIXarray:
             A Python expression referencing ``variables`` by name, e.g.
         **variables : Any
             Values bound to the names used in ``expression``.
+
         Returns
         -------
         MPIXarray or Any
             The expression's value, wrapped if it is an xarray Dataset/DataArray, otherwise returned as-is.
+
         """
         unwrapped = {name: unwrap(value) for name, value in variables.items()}
         result = mpp_evaluate(self._runtime, expression, **unwrapped)
@@ -1542,10 +1598,12 @@ class MPIXarray:
             Fill value where ``cond`` is False.
         drop : bool, optional
             Must be False when ``self`` is distributed; ``drop=True`` can remove a different number of positions on different ranks.
+
         Returns
         -------
         MPIXarray
             The selected object, with ``.meta`` unchanged.
+
         """
         args = (cond,) if other is _WHERE_UNSET else (cond, other)
         return finalize(
@@ -1575,10 +1633,12 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
+
         Returns
         -------
         MPIXarray
             Cumulative sum with ``.meta`` unchanged.
+
         """
         return finalize(
             mpp_cumsum(
@@ -1608,10 +1668,12 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
+
         Returns
         -------
         MPIXarray
             Cumulative product with ``.meta`` unchanged.
+
         """
         return finalize(
             mpp_cumprod(
@@ -1641,10 +1703,12 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
+
         Returns
         -------
         MPIXarray
             Reduced object.
+
         """
         return finalize(
             mpp_median(
@@ -1680,11 +1744,13 @@ class MPIXarray:
             Missing-value behavior, following xarray semantics.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
+
         Returns
         -------
         MPIXarray
             Reduced object, with a new ``quantile`` dimension/coordinate
             when ``q`` is a sequence of more than one value.
+
         """
         return finalize(
             mpp_quantile(
@@ -1716,10 +1782,12 @@ class MPIXarray:
             Order of the difference.
         label : {"upper", "lower"}, optional
             As in ``xarray.DataArray.diff``.
+
         Returns
         -------
         MPIXarray
             The differenced object, ``n`` elements shorter along ``dim`` globally, with ``.meta`` updated to match.
+
         """
         return finalize(
             mpp_diff(self._runtime, self._prepare(), dim, n, label=label), self._runtime
@@ -1742,10 +1810,12 @@ class MPIXarray:
             Number of positions to shift by.
         fill_value : Any, optional
             As in ``xarray.DataArray.shift``; defaults to xarray's own dtype-aware NA fill when omitted.
+
         Returns
         -------
         MPIXarray
             The shifted object, same shape and distribution as ``self``.
+
         """
         kwargs: dict[str, Any] = {}
         if fill_value is not _FILL_VALUE_UNSET:
@@ -1779,14 +1849,17 @@ class MPIXarray:
             Fill value(s) for ``mode="constant"``.
         keep_attrs : bool or None, optional
             Whether to preserve attributes.
+
         Returns
         -------
         MPIXarray
             The padded object.
+
         Raises
         ------
         NotImplementedError
             If ``dim`` is distributed and ``mode`` is not ``"constant"``.
+
         """
         return finalize(
             mpp_pad(
@@ -1810,10 +1883,12 @@ class MPIXarray:
             Dimension to roll along.
         shift_by : int
             Number of positions to roll by; positive rolls toward higher indices, matching ``xarray.DataArray.roll``.
+
         Returns
         -------
         MPIXarray
             The rolled object, same shape and distribution as ``self``.
+
         """
         return finalize(
             mpp_roll(self._runtime, self._prepare(), dim, shift_by), self._runtime
@@ -1828,10 +1903,12 @@ class MPIXarray:
             Dimension to fill along.
         limit : int or None, optional
             As in ``xarray.DataArray.ffill``.
+
         Returns
         -------
         MPIXarray
             The forward-filled object, same shape and distribution as ``self``.
+
         """
         return finalize(
             mpp_ffill(self._runtime, self._prepare(), dim, limit), self._runtime
@@ -1846,10 +1923,12 @@ class MPIXarray:
             Dimension to fill along.
         limit : int or None, optional
             As in ``xarray.DataArray.bfill``.
+
         Returns
         -------
         MPIXarray
             The backward-filled object, same shape and distribution as ``self``.
+
         """
         return finalize(
             mpp_bfill(self._runtime, self._prepare(), dim, limit), self._runtime
@@ -1870,10 +1949,12 @@ class MPIXarray:
             As in ``xarray.DataArray.interp``.
         **kwargs : Any
             Forwarded to ``xarray.DataArray.interp``.
+
         Returns
         -------
         MPIXarray
             Interpolated result, with ``.meta`` recomputed for the new length along ``dim``.
+
         """
         return finalize(
             mpp_interp(
@@ -1898,10 +1979,12 @@ class MPIXarray:
             As in ``xarray.DataArray.differentiate``.
         datetime_unit : Any, optional
             As in ``xarray.DataArray.differentiate``.
+
         Returns
         -------
         MPIXarray
             The derivative, same shape and distribution as ``self``.
+
         """
         return finalize(
             mpp_differentiate(
@@ -1926,10 +2009,12 @@ def mark_partitioned(
         Object to copy and mark.
     meta : dict or None
         Distribution metadata, or None for replicated data.
+
     Returns
     -------
     xarray.Dataset or xarray.DataArray
         Shallow copy whose partition marker matches ``meta``.
+
     """
     marked = data.copy(deep=False)
     if meta is None:
@@ -1958,10 +2043,12 @@ def finalize(result: Any, mpi_context: MPIContext) -> Any:
         Result returned by ``_MPIXarrayOps``.
     mpi_context : MPIContext
         Runtime bound to the wrapped result.
+
     Returns
     -------
     MPIXarray or Any
         Wrapped xarray result, or the original non-xarray value.
+
     """
     if isinstance(result, (xr.Dataset, xr.DataArray)):
         return MPIXarray(result, mpi_context, auto_partition=False)
@@ -1975,10 +2062,12 @@ def unwrap(value: Any) -> Any:
     ----------
     value : Any
         Candidate operand.
+
     Returns
     -------
     Any
         Prepared xarray data for ``MPIXarray`` input, otherwise ``value``.
+
     """
     return value._prepare() if isinstance(value, MPIXarray) else value
 
