@@ -742,14 +742,29 @@ def mpp_reproducing_sum(
         If the rank count is unsupported or input contains non-finite values.
     """
     if comm.size > MAX_EFP_RANKS:
+        # Every rank sees the same communicator size, so this raises on all of
+        # them or none: safe to do before a collective.
         raise ValueError(f"mpp_reproducing_sum supports at most {MAX_EFP_RANKS} ranks.")
-    if not np.all(np.isfinite(local)):
-        raise ValueError("mpp_reproducing_sum requires finite input.")
+
     flat = np.asarray(local).reshape(-1) if axis is None else local
     digits = _to_digits(flat, 0 if axis is None else axis)
-    total = np.empty_like(digits)
-    comm.Allreduce(np.ascontiguousarray(digits), total, op=MPI.SUM)
-    return _from_digits(total)
+
+    # Whether a rank holds non-finite input is a rank-local fact, so raising
+    # on it directly would let one rank leave while the others waited in the
+    # Allreduce below -- deadlocking the job over a data error. The flag rides
+    # along in the reduction instead, so every rank learns of it at the same
+    # point and they all raise together.
+    payload = np.empty(digits.size + 1, dtype=np.int64)
+    payload[:-1] = digits.reshape(-1)
+    payload[-1] = 0 if np.all(np.isfinite(flat)) else 1
+    total = np.empty_like(payload)
+    comm.Allreduce(payload, total, op=MPI.SUM)
+    if total[-1]:
+        raise ValueError(
+            f"mpp_reproducing_sum requires finite input; {int(total[-1])} of "
+            f"{comm.size} ranks hold NaN or infinity."
+        )
+    return _from_digits(total[:-1].reshape(digits.shape))
 
 
 # Order of the integer companions packed alongside the mantissa, so that the

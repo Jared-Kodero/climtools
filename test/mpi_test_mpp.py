@@ -85,33 +85,45 @@ def run(fx: Fixtures) -> None:
         """The offsets isel derives locally must match an allgather's answer."""
         global_length = 997
         start, stop = _local_slice(global_length)
+        # Every iteration posts an allgather, so no branch may leave the loop
+        # early: a rank that bails on iteration 2 while the others go on to
+        # iteration 3 leaves the communicator misaligned, and the next
+        # collective anywhere in the suite deadlocks. Faults are collected
+        # and reported after the loop has run to completion on every rank.
+        faults = []
         for lo, hi in ((0, global_length), (10, 500), (496, 997), (300, 301)):
             local_start, local_stop, new_start = mpp_slice_compute_domain(
                 start, stop, lo, hi
             )
-            kept = local_stop - local_start
-            counts = comm.allgather(kept)
+            counts = comm.allgather(local_stop - local_start)
             expected_start = sum(counts[: comm.rank])
             if new_start != expected_start:
-                return False, f"slice({lo},{hi}): {new_start} != {expected_start}"
+                faults.append(f"slice({lo},{hi}): {new_start} != {expected_start}")
             if sum(counts) != hi - lo:
-                return False, f"slice({lo},{hi}): kept {sum(counts)} of {hi - lo}"
-        return True, ""
+                faults.append(f"slice({lo},{hi}): kept {sum(counts)} of {hi - lo}")
+        return not faults, "; ".join(faults)
 
     _check("mpp_slice_compute_domain", "offsets match an allgather", slice_domain)
 
     def partition_offsets() -> tuple[bool, str]:
         """Exscan-derived offsets must match the allgather they replaced."""
+        # Same rule as above, and it matters more here: the lengths differ per
+        # rank, so the comparison itself can succeed on some ranks and fail on
+        # others. Returning from inside the loop would then desynchronise the
+        # ranks on a *disagreement*, which is exactly when it is least
+        # affordable.
+        faults = []
         for length in (0, 1, 7 + comm.rank, 100):
             total, start, stop = mpp_partition_offsets(comm, length)
             counts = comm.allgather(length)
-            if (total, start, stop) != (
+            expected = (
                 sum(counts),
                 sum(counts[: comm.rank]),
                 sum(counts[: comm.rank]) + length,
-            ):
-                return False, f"length={length}: got {(total, start, stop)}"
-        return True, ""
+            )
+            if (total, start, stop) != expected:
+                faults.append(f"length={length}: got {(total, start, stop)}")
+        return not faults, "; ".join(faults)
 
     _check(
         "mpp_partition_offsets", "matches an allgather, incl. empty", partition_offsets
@@ -229,16 +241,21 @@ def run(fx: Fixtures) -> None:
         field = (rng.standard_normal(length) * 100.0).astype(np.float32)
         field[5] = np.nan
         start, stop = _local_slice(length)
+        # Both collectives are issued before any comparison, so no branch can
+        # leave a rank short of one that the others have posted.
         distributed = mpp_chksum(field[start:stop], comm)
-        serial = mpp_chksum(field)
-        if distributed != serial:
-            return False, f"{distributed} != serial {serial}"
         masked = mpp_chksum(field[start:stop], comm, mask_val=float("nan"))
+        serial = mpp_chksum(field)
+        serial_masked = mpp_chksum(field, mask_val=float("nan"))
+
+        faults = []
+        if distributed != serial:
+            faults.append(f"{distributed} != serial {serial}")
         if masked == distributed:
-            return False, "mask_val=nan did not exclude the NaN"
-        if masked != mpp_chksum(field, mask_val=float("nan")):
-            return False, "masked checksum is not rank-count invariant"
-        return True, ""
+            faults.append("mask_val=nan did not exclude the NaN")
+        if masked != serial_masked:
+            faults.append("masked checksum is not rank-count invariant")
+        return not faults, "; ".join(faults)
 
     _check("mpp_chksum", "invariant to rank count", chksum_invariant)
 

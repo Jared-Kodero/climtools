@@ -71,7 +71,11 @@ def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
     if _STREAM and mpi.comm.rank == 0:
         status = "SKIP" if ok is None else ("ok  " if ok else "FAIL")
         elapsed = time.monotonic() - _STARTED
-        print(f"  [{elapsed:7.1f}s] {status} {op} :: {case}", flush=True)
+        # The reason belongs on the streamed line, not only in the summary
+        # report: a run killed by the scheduler never reaches the report, so
+        # a bare FAIL leaves nothing to work from.
+        reason = f" -- {msg}" if msg and ok is not True else ""
+        print(f"  [{elapsed:7.1f}s] {status} {op} :: {case}{reason}", flush=True)
 
 
 def phase(label: str, timeout: float | None = None):

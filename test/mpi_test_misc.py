@@ -5,6 +5,8 @@ align, evaluate, roll, repartition, apply.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
@@ -21,47 +23,69 @@ def run(fx: Fixtures) -> None:
     native, dist, dist2d = fx.native, fx.dist, fx.dist2d
     start, stop = dist.meta["start"], dist.meta["stop"]
 
-    def check_reduce_1d(op_name, apply_fn, native_fn, case="1d(time)"):
+    def check_reduce_1d(op_name, apply_fn, native_fn, case="1d(time)", rtol=1e-5):
         try:
             result = apply_fn()
             local = local_of(result)
             m = result.meta if isinstance(result, MPIXarray) else None
             expected_full = native_fn()
             if m is None:
-                xr.testing.assert_allclose(local, expected_full, rtol=1e-5)
+                xr.testing.assert_allclose(local, expected_full, rtol=rtol)
             else:
                 d = m["dims"][0]
                 s, e = m["starts"][d], m["stops"][d]
                 xr.testing.assert_allclose(
-                    local, expected_full.isel({d: slice(s, e)}), rtol=1e-5
+                    local, expected_full.isel({d: slice(s, e)}), rtol=rtol
                 )
             record(op_name, case, True)
         except Exception as e:
             record(op_name, case, False, f"{type(e).__name__}: {str(e)[:200]}")
 
-    def check_reduce_2d(op_name, reduce_dim, apply_fn, native_fn):
+    def check_reduce_2d(op_name, reduce_dim, apply_fn, native_fn, rtol=1e-5):
+        # The two gathers below must run on every rank whatever happens above
+        # them. They used to sit inside the try, after the comparison, so a
+        # rank whose slice failed assert_allclose skipped both while its peers
+        # posted them -- and from that point every collective in the job was
+        # paired with the wrong one. That is how a single mismatched value in
+        # this check turned into a deadlock two phases later.
+        s = e = 0
+        ok = False
+        detail = ""
+        surviving = None
         try:
             result = apply_fn()
             m = result.meta
             surviving = m["dims"][0]
             s, e = m["starts"][surviving], m["stops"][surviving]
             local = local_of(result)
-            shape_ok = local.sizes.get(surviving, 0) == (e - s)
-            if e > s:
+            ok = local.sizes.get(surviving, 0) == (e - s)
+            if ok and e > s:
                 expected = native_fn().isel({surviving: slice(s, e)})
-                xr.testing.assert_allclose(local, expected, rtol=1e-5)
-            bounds = mpi.comm.gather((s, e), root=0)
-            ok = shape_ok
-            if mpi.comm.rank == 0:
-                coverage = np.zeros(fx.gsize(surviving), dtype=int)
-                for s_, e_ in bounds:
+                try:
+                    xr.testing.assert_allclose(local, expected, rtol=rtol)
+                except AssertionError as exc:
+                    ok, detail = False, str(exc)[:200]
+        except Exception as exc:
+            ok, detail = False, f"{type(exc).__name__}: {str(exc)[:200]}"
+
+        bounds = mpi.comm.gather((surviving, s, e), root=0)
+        states = mpi.comm.gather((ok, detail), root=0)
+        if mpi.comm.rank == 0:
+            named = [d for d, _, _ in bounds if d is not None]
+            covered = False
+            if named:
+                coverage = np.zeros(fx.gsize(named[0]), dtype=int)
+                for _, s_, e_ in bounds:
                     coverage[s_:e_] += 1
-                ok = ok and bool(np.all(coverage == 1))
-            all_ok = mpi.comm.gather(ok, root=0)
-            if mpi.comm.rank == 0:
-                record(op_name, f"2d(lat,lon)/{reduce_dim}", all(all_ok))
-        except Exception as e:
-            record(op_name, f"2d(lat,lon)/{reduce_dim}", False, str(e)[:200])
+                covered = bool(np.all(coverage == 1))
+            failures = [d for good, d in states if not good]
+            record(
+                op_name,
+                f"2d(lat,lon)/{reduce_dim}",
+                covered and not failures,
+                "; ".join(d for d in failures if d)[:200]
+                or ("" if covered else "partition coverage is not exactly 1"),
+            )
 
     # -- prod, any, all: standard reductions, same shape as sum/mean.
     #    dim="lat" is rank-local for `dist` (partitioned along "time"),
@@ -70,11 +94,38 @@ def run(fx: Fixtures) -> None:
     #    distributed along, the same "reduction+reconstruction" case
     #    mpi_test_reductions.py's mean(dim='time') deliberately tests)
     #    had never been exercised for any of these three. -------------
+    #    Every prod check below runs on the rescaled field. "pr" is U(0, 50)
+    #    in float32, whose geometric mean is 50/e, so an unscaled product over
+    #    hundreds of points leaves the float32 range entirely -- and once a
+    #    partial saturates, whether an exact zero is met before or after it
+    #    decides between 0.0 and inf * 0 = NaN, which depends on which rank
+    #    held the zero. Dividing by the geometric mean centres the product on
+    #    1 regardless of the reduction length, so native is a valid reference.
+    #    (Dividing by any other constant is not enough: at 721 points, /25
+    #    underflows every column to 0.0 and the comparison passes vacuously.)
+    prod_scale = 50.0 / math.e
+    scaled_1d = dist / prod_scale
+    scaled_2d = dist2d / prod_scale
+    native_scaled = native / prod_scale
+    #    The tolerance is looser than the 1e-5 the other reductions use, and
+    #    has to be: a product of n float32 values accumulates a relative error
+    #    of order n * 2**-24, which is 4e-5 at n = 721, and native's sequential
+    #    order and the distributed tree order do not make the same roundings.
+    #    Demanding 1e-5 of a 721-term float32 product asks for agreement finer
+    #    than the arithmetic supports.
+    prod_rtol = 1e-3
     check_reduce_1d(
-        "prod", lambda: dist.prod(dim="lat"), lambda: native.prod(dim="lat")
+        "prod",
+        lambda: scaled_1d.prod(dim="lat"),
+        lambda: native_scaled.prod(dim="lat"),
+        rtol=prod_rtol,
     )
     check_reduce_2d(
-        "prod", "lat", lambda: dist2d.prod(dim="lat"), lambda: native.prod(dim="lat")
+        "prod",
+        "lat",
+        lambda: scaled_2d.prod(dim="lat"),
+        lambda: native_scaled.prod(dim="lat"),
+        rtol=prod_rtol,
     )
     # A product along "time" is the one reduction whose native counterpart
     # cannot serve as a reference on the raw fixture. "pr" is U(0, 50) in
@@ -90,13 +141,12 @@ def run(fx: Fixtures) -> None:
     # Two separate properties are checked instead. First, agreement with
     # native on a field whose product is actually representable, which is the
     # only regime where native is a valid reference at all.
-    scaled = dist / 25.0
-    native_scaled = native / 25.0
     check_reduce_1d(
         "prod",
-        lambda: scaled.prod(dim="time"),
+        lambda: scaled_1d.prod(dim="time"),
         lambda: native_scaled.prod(dim="time"),
         case="1d(time), reduction+reconstruction",
+        rtol=prod_rtol,
     )
     mpi.comm.barrier()
 

@@ -73,13 +73,12 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from typing import Any, Literal, Self
 
+    import xarray as xr
     from matplotlib.colorbar import Colorbar
     from matplotlib.colors import Colormap, Normalize
     from matplotlib.figure import Figure
     from matplotlib.quiver import Quiver, QuiverKey
     from matplotlib.text import Text
-
-    import xarray as xr
 
 __all__ = [
     "Adder",
