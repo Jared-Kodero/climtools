@@ -1881,85 +1881,147 @@ class Adder:
 
     def scatter(
         self,
-        data: xr.DataArray,
+        data: xr.DataArray | tuple[np.ndarray, np.ndarray],
         *,
-        x: str | None = None,
-        y: str | None = None,
         hue: str | xr.DataArray | None = None,
         markersize: str | xr.DataArray | None = None,
+        s: float | np.ndarray | None = None,
+        c: Any = None,
+        marker: str | None = None,
         cmap: str | Colormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
         vmax: float | None = None,
-        marker: str | None = None,
-        size: float | None = None,
         alpha: float | None = None,
-        edgecolors: str | Sequence[str] | None = None,
         linewidths: float | Sequence[float] | None = None,
+        edgecolors: str | Sequence[str] | None = None,
+        colorizer: Any = None,
+        plotnonfinite: bool = False,
+        size: float | None = None,
         zorder: float = 3.0,
         add_labels: bool = False,
         **kwargs: Any,
     ) -> GeoPlot:
         """Add a scatter layer.
 
+        ``data`` may be an xarray field or a two-element ``(x, y)`` tuple of
+        NumPy arrays. DataArray inputs follow the parent plot's coordinate and
+        facet selection. Tuple inputs contain final point coordinates and are
+        drawn directly on each target axis without xarray normalization or
+        selector application.
+
         Parameters
         ----------
-        data : xarray.DataArray
-            Source field containing point coordinates.
-        x, y : str, optional
-            Point-coordinate names.
+        data : xarray.DataArray or tuple of numpy.ndarray
+            Source field for xarray scatter plotting, or a two-element
+            ``(x, y)`` tuple containing point-coordinate arrays.
         hue, markersize : str or xarray.DataArray, optional
-            Variables controlling point color and size.
-        cmap, norm, vmin, vmax : optional
-            Scalar-color mapping parameters.
+            Xarray variables controlling point color and size. Used only for
+            DataArray input.
+        s : float or numpy.ndarray, optional
+            Marker area in points squared, matching :meth:`Axes.scatter`.
+        c : color or array-like, optional
+            Marker colors or scalar values mapped through ``cmap`` and ``norm``.
         marker : str, optional
             Marker style.
-        size : float, optional
-            Constant marker area.
+        cmap : str or matplotlib.colors.Colormap, optional
+            Colormap used for scalar marker colors.
+        norm : matplotlib.colors.Normalize, optional
+            Scalar normalization used with ``cmap``.
+        vmin, vmax : float, optional
+            Scalar-color limits.
         alpha : float, optional
             Marker opacity.
-        edgecolors : str or sequence of str, optional
-            Marker-edge colors.
         linewidths : float or sequence of float, optional
             Marker-edge widths.
+        edgecolors : str or sequence of str, optional
+            Marker-edge colors.
+        colorizer : matplotlib.colorizer.Colorizer, optional
+            Matplotlib colorizer used to map scalar values to colors.
+        plotnonfinite : bool, default False
+            Plot points with nonfinite color values using the colormap bad color.
+        size : float, optional
+            Constant marker area retained as an alias for ``s``. ``s`` takes
+            precedence when both are provided.
         zorder : float, default 3
             Drawing order.
         add_labels : bool, default False
-            Let xarray add labels.
+            Let xarray add labels for DataArray input. Ignored for tuple input.
         **kwargs
-            Additional arguments forwarded to :func:`plot_scatter`.
+            Additional keyword arguments forwarded to :func:`plot_scatter` and
+            ultimately to xarray scatter plotting or :meth:`Axes.scatter`.
 
         Returns
         -------
         GeoPlot
             Parent plot.
         """
-        data = self._normalized(data)
         artists: list[PathCollection] = []
-        for axis, selector in self._plot.iter_axes():
-            artists.append(
-                plot_scatter(
-                    self._plot.select(data, selector),
-                    self._plot.figure,
-                    axis,
-                    x=x or self._plot.x,
-                    y=y or self._plot.y,
-                    hue=hue,
-                    markersize=markersize,
-                    cmap=cmap,
-                    norm=norm,
-                    vmin=vmin,
-                    vmax=vmax,
-                    marker=marker,
-                    size=size,
-                    alpha=alpha,
-                    edgecolors=edgecolors,
-                    linewidths=linewidths,
-                    zorder=zorder,
-                    add_labels=add_labels,
-                    **kwargs,
+
+        if isinstance(data, xr.DataArray):
+            data = self._normalized(data)
+            for axis, selector in self._plot.iter_axes():
+                artists.append(
+                    plot_scatter(
+                        self._plot.select(data, selector),
+                        self._plot.figure,
+                        axis,
+                        x=self._plot.x,
+                        y=self._plot.y,
+                        hue=hue,
+                        markersize=markersize,
+                        s=s,
+                        c=c,
+                        marker=marker,
+                        cmap=cmap,
+                        norm=norm,
+                        vmin=vmin,
+                        vmax=vmax,
+                        alpha=alpha,
+                        linewidths=linewidths,
+                        edgecolors=edgecolors,
+                        colorizer=colorizer,
+                        plotnonfinite=plotnonfinite,
+                        size=size,
+                        zorder=zorder,
+                        add_labels=add_labels,
+                        **kwargs,
+                    )
                 )
+        elif isinstance(data, tuple) and len(data) == 2:
+            x, y = data
+            if not isinstance(x, np.ndarray) or not isinstance(y, np.ndarray):
+                raise TypeError("tuple data must contain two numpy.ndarray objects")
+            if x.shape != y.shape:
+                raise ValueError("scatter x and y arrays must have matching shapes")
+            for axis, _ in self._plot.iter_axes():
+                artists.append(
+                    plot_scatter(
+                        (x, y),
+                        self._plot.figure,
+                        axis,
+                        s=s,
+                        c=c,
+                        marker=marker,
+                        cmap=cmap,
+                        norm=norm,
+                        vmin=vmin,
+                        vmax=vmax,
+                        alpha=alpha,
+                        linewidths=linewidths,
+                        edgecolors=edgecolors,
+                        colorizer=colorizer,
+                        plotnonfinite=plotnonfinite,
+                        size=size,
+                        zorder=zorder,
+                        **kwargs,
+                    )
+                )
+        else:
+            raise TypeError(
+                "data must be an xarray.DataArray or an (x, y) tuple of numpy arrays"
             )
+
         self._plot.register_layer("scatter", artists)
         return self._plot
 

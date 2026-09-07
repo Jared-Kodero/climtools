@@ -19,12 +19,11 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
-
-import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -1589,86 +1588,125 @@ def plot_imshow(
 
 
 def plot_scatter(
-    data: xr.DataArray,
+    data: xr.DataArray | tuple[np.ndarray, np.ndarray],
     fig: Figure,
     ax: Axes | cgeo.GeoAxes,
     *,
-    x: str,
-    y: str,
+    x: str | None = None,
+    y: str | None = None,
     hue: str | xr.DataArray | None = None,
     markersize: str | xr.DataArray | None = None,
+    s: float | np.ndarray | None = None,
+    c: Any = None,
+    marker: str | None = None,
     cmap: str | Colormap | None = None,
     norm: Normalize | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
-    marker: str | None = None,
-    size: float | None = None,
     alpha: float | None = None,
-    edgecolors: str | Sequence[str] | None = None,
     linewidths: float | Sequence[float] | None = None,
+    edgecolors: str | Sequence[str] | None = None,
+    colorizer: Any = None,
+    plotnonfinite: bool = False,
+    size: float | None = None,
     zorder: float = 2.0,
     add_labels: bool = False,
     **kwargs: Any,
 ) -> PathCollection:
     """Draw a scatter layer and return its ``PathCollection`` primitive.
 
+    ``data`` may be an xarray field, in which case point coordinates are
+    resolved through xarray, or a two-element ``(x, y)`` tuple of NumPy arrays,
+    in which case the values are passed directly to :meth:`Axes.scatter`.
+
     Parameters
     ----------
-    data : xarray.DataArray
-        Source data containing ``x`` and ``y`` coordinates.
+    data : xarray.DataArray or tuple of numpy.ndarray
+        Source field containing point coordinates, or a two-element ``(x, y)``
+        tuple containing the point positions directly.
     fig : matplotlib.figure.Figure
         Figure containing ``ax``.
     ax : matplotlib.axes.Axes or cartopy.mpl.geoaxes.GeoAxes
         Destination axis.
-    x, y : str
-        Coordinate or variable names used for point locations.
+    x, y : str, optional
+        Coordinate or variable names used for point locations when ``data`` is
+        an xarray.DataArray. Ignored for tuple input.
     hue, markersize : str or xarray.DataArray, optional
-        Variables controlling point color and marker size.
-    cmap, norm, vmin, vmax : optional
-        Scalar-color mapping parameters.
+        Xarray variables controlling point color and marker size. Ignored for
+        tuple input.
+    s : float or array-like, optional
+        Marker area in points squared, matching :meth:`Axes.scatter`.
+    c : color or array-like, optional
+        Marker colors or scalar values mapped through ``cmap`` and ``norm``.
     marker : str, optional
         Marker style.
-    size : float, optional
-        Constant marker area passed as ``s``.
+    cmap : str or matplotlib.colors.Colormap, optional
+        Colormap used for scalar marker colors.
+    norm : matplotlib.colors.Normalize, optional
+        Scalar normalization used with ``cmap``.
+    vmin, vmax : float, optional
+        Scalar-color limits.
     alpha : float, optional
         Marker opacity.
-    edgecolors : str or sequence of str, optional
-        Marker-edge colors.
     linewidths : float or sequence of float, optional
         Marker-edge widths.
+    edgecolors : str or sequence of str, optional
+        Marker-edge colors.
+    colorizer : matplotlib.colorizer.Colorizer, optional
+        Matplotlib colorizer used to map scalar values to colors.
+    plotnonfinite : bool, default False
+        Plot points with nonfinite color values using the colormap bad color.
+    size : float, optional
+        Constant marker area retained as an alias for ``s``. ``s`` takes
+        precedence when both are provided.
     zorder : float, default 2
         Drawing order.
     add_labels : bool, default False
-        Let xarray add labels.
+        Let xarray add labels for DataArray input. Ignored for tuple input.
     **kwargs
-        Additional arguments forwarded to xarray scatter plotting.
+        Additional keyword arguments forwarded to xarray scatter plotting for
+        DataArray input or directly to :meth:`Axes.scatter` for tuple input.
+        This includes Matplotlib collection properties such as ``color``,
+        ``transform``, ``label``, ``picker``, and ``rasterized``.
 
     Returns
     -------
     matplotlib.collections.PathCollection
         Created scatter primitive.
     """
-
+    scatter_size = s if s is not None else size
     options = is_defined(
-        x=x,
-        y=y,
-        hue=hue,
-        markersize=markersize,
+        s=scatter_size,
+        c=c,
+        marker=marker,
         cmap=cmap,
         norm=norm,
         vmin=vmin,
         vmax=vmax,
-        marker=marker,
-        s=size,
         alpha=alpha,
-        edgecolors=edgecolors,
         linewidths=linewidths,
+        edgecolors=edgecolors,
+        colorizer=colorizer,
+        plotnonfinite=plotnonfinite,
         zorder=zorder,
-        add_labels=add_labels,
-        add_colorbar=False,
     )
     options.update(kwargs)
     options = is_geoaxes(ax, options)
+
+    if isinstance(data, tuple):
+        x_data, y_data = data
+        return ax.scatter(x_data, y_data, **options)
+
+    options.update(
+        is_defined(
+            x=x,
+            y=y,
+            hue=hue,
+            markersize=markersize,
+            add_labels=add_labels,
+            add_colorbar=False,
+        )
+    )
     return data.plot.scatter(ax=ax, **options)
 
 
