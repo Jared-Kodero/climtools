@@ -25,12 +25,11 @@ from .meta import mpp_get_meta, strip_export_attrs
 from .planning import mpp_resolve_comm
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable
     from os import PathLike
     from typing import Any, Literal
 
     from ..mpi.context import MPIContext
-
 
 
 class NetCDFWriteError(MPIError):
@@ -45,7 +44,9 @@ def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
             target.setncattr(str(key), value)
 
 
-def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray[Any, Any], str | np.dtype[Any]]:
+def _normalise_variable(
+    source: xr.DataArray,
+) -> tuple[np.ndarray[Any, Any], str | np.dtype[Any]]:
     """Normalize an xarray variable for NetCDF output."""
     variable = encode_time(source) if is_time_like(source) else source
     values = np.asarray(variable.values)
@@ -68,7 +69,7 @@ def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray[Any, Any], str
 
 
 @contextlib.contextmanager
-def quiet_netcdf4_writes() -> Iterator[None]:
+def quiet_netcdf4_writes():
     """Suppress the netCDF4 NumPy shape-assignment warning.
 
     Yields
@@ -201,7 +202,9 @@ def open_in_parallel(
                     continue
                 key, separator, value = item.partition("=")
                 if not separator or not key.strip():
-                    raise ValueError(f"Invalid MPI-IO hint {item!r}; expected key=value.")
+                    raise ValueError(
+                        f"Invalid MPI-IO hint {item!r}; expected key=value."
+                    )
                 info.Set(key.strip(), value.strip())
             return netCDF4.Dataset(
                 path,
@@ -1074,7 +1077,9 @@ def nc_append(
             arr = da.transpose(*ncvar.dimensions).values
 
             if arr.dtype.kind in "mMO":
-                raise TypeError(f"Variable {varname!r} has unencoded dtype {arr.dtype}.")
+                raise TypeError(
+                    f"Variable {varname!r} has unencoded dtype {arr.dtype}."
+                )
 
             if ncvar.dtype != arr.dtype:
                 arr = arr.astype(ncvar.dtype)
