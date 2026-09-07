@@ -1,0 +1,237 @@
+diff --git a/mpi/diagnostics.py b/mpi/diagnostics.py
+index 63c6504..2afe4fd 100644
+--- a/mpi/diagnostics.py
++++ b/mpi/diagnostics.py
+@@ -134,8 +134,9 @@ class MPIDiagnostics:
+         timeout: float = 3600.0,
+         *,
+         abort: bool = True,
++        progress: Callable[[], float] | None = None,
+     ) -> Generator[None, None, None]:
+-        """Dump every rank's stack if the enclosed block stalls.
++        """Dump every rank's stack if the enclosed block stops making progress.
+ 
+         Parameters
+         ----------
+@@ -145,6 +146,15 @@ class MPIDiagnostics:
+             Seconds of no progress before dumping. <= 0 disables the watchdog.
+         abort : bool, optional
+             Call ``MPI_Abort`` after dumping. Default True.
++        progress : callable, optional
++            Returns a ``time.monotonic()`` stamp of the last progress the
++            caller made. Without it the timeout is measured against the whole
++            block, which is only correct when the block is expected to be
++            short: a long but healthy phase then trips the watchdog purely for
++            taking a while, and with ``abort=True`` that kills a working job.
++            Supplying a heartbeat makes the timeout mean what the message
++            already claims -- *no progress* for this long, rather than *not
++            finished* within it.
+ 
+         Yields
+         ------
+@@ -158,8 +168,21 @@ class MPIDiagnostics:
+         rank = self.comm.rank
+         label = phase or "unnamed phase"
+ 
++        def _stalled() -> bool:
++            """Wait for the block to finish, or return True once it stalls."""
++            if progress is None:
++                return not finished.wait(timeout)
++            while True:
++                idle = time.monotonic() - progress()
++                # Wait only for the time left on the current quiet period, so
++                # a heartbeat arriving late still resets the countdown.
++                if finished.wait(max(timeout - idle, 0.1)):
++                    return False
++                if time.monotonic() - progress() >= timeout:
++                    return True
++
+         def _fire() -> None:
+-            if finished.wait(timeout):
++            if not _stalled():
+                 return
+ 
+             sys.stderr.write(
+diff --git a/test/mpi_test_common.py b/test/mpi_test_common.py
+index b667be3..c0b8720 100644
+--- a/test/mpi_test_common.py
++++ b/test/mpi_test_common.py
+@@ -15,6 +15,7 @@ from dataclasses import dataclass
+ 
+ import numpy as np
+ from climtools import MPIContext, xgeo
++from climtools.xarray.arithmetic import HaloWidthError
+ from climtools.xarray.core import MPIXarray
+ from mock_dataset import PATH, PATH2D, create_dataset
+ 
+@@ -47,31 +48,52 @@ UNEVEN_GLOBAL = 21
+ _STREAM = os.environ.get("CLIMTOOLS_TEST_QUIET") != "1"
+ _STARTED = time.monotonic()
+ 
++#: Monotonic stamp of the last completed check, on this rank. The phase
++#: watchdog measures against this rather than against the phase's own start:
++#: at production scale a single halo_ops check can run for minutes and the
++#: whole phase for well over an hour, so a timeout measured from the start
++#: fires on a perfectly healthy run.
++_LAST_PROGRESS = time.monotonic()
++
++#: Seconds without a completed check before the watchdog dumps every rank's
++#: stack. Long enough to clear the slowest single check at production scale
++#: (assert_allclose over a multi-GB variable is minutes on its own).
++_WATCHDOG_TIMEOUT = float(os.environ.get("CLIMTOOLS_TEST_WATCHDOG") or 1800.0)
++
+ 
+ def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
+     """Record one check's outcome. `ok=None` means a declared
+     NotImplementedError under an unsupported partition shape -- reported
+     as SKIP, not FAIL."""
++    global _LAST_PROGRESS
+     RESULTS.append((op, case, ok, msg))
++    _LAST_PROGRESS = time.monotonic()
+     if _STREAM and mpi.comm.rank == 0:
+         status = "SKIP" if ok is None else ("ok  " if ok else "FAIL")
+         elapsed = time.monotonic() - _STARTED
+         print(f"  [{elapsed:7.1f}s] {status} {op} :: {case}", flush=True)
+ 
+ 
+-def phase(label: str, timeout: float = 900.0):
+-    """Announce a stage and dump every rank's stack if it stalls.
++def phase(label: str, timeout: float | None = None):
++    """Announce a stage and dump every rank's stack if it stops progressing.
+ 
+-    Wraps `MPIDiagnostics.watchdog`, which was already written for exactly
+-    this and previously had no callers. The timeout matters more than the
+-    announcement: a job cancelled by the scheduler reports only that it was
+-    cancelled, whereas the watchdog fires first and prints where each rank
+-    actually was.
++    The watchdog is armed with `record`'s heartbeat, so it reports a phase
++    that has genuinely stopped rather than one that is merely long. It also
++    does not abort: an earlier version killed a healthy run at 1489 s because
++    `halo_ops` legitimately exceeded a fixed 900 s, and losing a
++    twenty-five-minute job to a false positive costs far more than letting a
++    real deadlock run on to the scheduler's own wall limit. The stack dump --
++    the part with the diagnostic value -- happens either way.
+     """
+     if _STREAM and mpi.comm.rank == 0:
+         elapsed = time.monotonic() - _STARTED
+         print(f"\n=== [{elapsed:7.1f}s] {label} ===", flush=True)
+-    return mpi.watchdog(label, timeout=timeout)
++    return mpi.watchdog(
++        label,
++        timeout=_WATCHDOG_TIMEOUT if timeout is None else timeout,
++        abort=False,
++        progress=lambda: _LAST_PROGRESS,
++    )
+ 
+ 
+ #: Substring of the ValueError mpp_halo_exchange() raises when some rank's
+@@ -93,8 +115,15 @@ _DECLARED_HALO_REFUSAL = "shorter than the requested halo"
+ 
+ def is_declared_halo_refusal(exc: Exception) -> bool:
+     """True if `exc` is mpp_halo_exchange()'s declared undersized-partition
+-    ValueError rather than a genuine, unexpected failure."""
+-    return isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
++    refusal rather than a genuine, unexpected failure.
++
++    By type first. The substring fallback only covers a climtools built
++    before HaloWidthError existed; matching on message text is what let a
++    reworded error turn a whole class of expected skips into failures.
++    """
++    return isinstance(exc, HaloWidthError) or (
++        isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
++    )
+ 
+ 
+ def local_of(value):
+diff --git a/test/mpi_test_mpp.py b/test/mpi_test_mpp.py
+index 770a820..9c6cb1d 100644
+--- a/test/mpi_test_mpp.py
++++ b/test/mpi_test_mpp.py
+@@ -16,6 +16,8 @@ that drifts with rank count fails even when it is self-consistent.
+ from __future__ import annotations
+ 
+ import numpy as np
++from climtools import xgeo
++from climtools.xarray.arithmetic import HaloWidthError, mpp_halo_exchange
+ from climtools.xarray.chunks import get_balanced_bounds
+ from climtools.xarray.mpp import (
+     Domain,
+@@ -34,6 +36,8 @@ from climtools.xarray.mpp import (
+ from mpi4py import MPI
+ from mpi_test_common import Fixtures, mpi, record
+ 
++import xarray as xr
++
+ 
+ def _local_slice(global_length: int) -> tuple[int, int]:
+     """This rank's half-open share of ``global_length``, balanced."""
+@@ -354,4 +358,37 @@ def run(fx: Fixtures) -> None:
+ 
+     _check("mpp_update_domains", "mixed-dtype group update", halo_group_update)
+ 
++    def halo_refusal_type() -> tuple[bool | None, str]:
++        """An undersized partition must raise HaloWidthError, not a bare ValueError.
++
++        The suite reports this refusal as a skip rather than a failure, and it
++        decides which is which from the exception. Shortening the message once
++        already turned every one of those skips into a failure, so the type is
++        pinned here.
++        """
++        if nranks == 1:
++            return None, "one rank owns everything, so no halo can be short"
++        length = nranks  # one element per rank; any halo above 1 is too wide
++        distributed = xgeo.mpi_partition_data(
++            xr.DataArray(np.arange(length, dtype=np.float64), dims=("t",), name="v")
++            if comm.rank == 0
++            else None,
++            mpi,
++            dim="t",
++            log_partitions=False,
++        )
++        try:
++            mpp_halo_exchange(mpi, distributed._prepare(), "t", before=8, after=0)
++        except HaloWidthError:
++            return True, ""
++        except Exception as exc:  # noqa: BLE001 - matches the suite's convention
++            return False, f"raised {type(exc).__name__}, wanted HaloWidthError"
++        return False, "no error raised for a halo wider than the local partition"
++
++    _check(
++        "mpp_halo_exchange",
++        "undersized partition raises HaloWidthError",
++        halo_refusal_type,
++    )
++
+     mpi.comm.barrier()
+diff --git a/xarray/arithmetic.py b/xarray/arithmetic.py
+index 3639f16..0d9023e 100644
+--- a/xarray/arithmetic.py
++++ b/xarray/arithmetic.py
+@@ -988,6 +988,18 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
+     return strip_mpi_meta(total)
+ 
+ 
++class HaloWidthError(ValueError):
++    """A rank's local partition is shorter than the halo an op asked for.
++
++    Its own type rather than a bare ``ValueError`` because callers have to
++    tell this architectural refusal apart from a genuine failure -- the test
++    suite reports it as a skip, not a failure. That classification used to
++    match a substring of the message, so shortening the message silently
++    turned every one of those skips into a failure. Subclasses ``ValueError``
++    so existing ``except ValueError`` handlers are unaffected.
++    """
++
++
+ def mpp_halo_exchange(
+     mpi_context: MPIContext,
+     value: xr.Dataset | xr.DataArray,
+@@ -1100,7 +1112,7 @@ def mpp_halo_exchange(
+             for r, length in enumerate(lengths)
+             if length < before or length < after
+         ]
+-        raise ValueError(
++        raise HaloWidthError(
+             f"Halo ({before}, {after}) exceeds local {partition_dim!r} size "
+             + f"on ranks {deficient}."
+         )

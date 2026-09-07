@@ -134,8 +134,9 @@ class MPIDiagnostics:
         timeout: float = 3600.0,
         *,
         abort: bool = True,
+        progress: Callable[[], float] | None = None,
     ) -> Generator[None, None, None]:
-        """Dump every rank's stack if the enclosed block stalls.
+        """Dump every rank's stack if the enclosed block stops making progress.
 
         Parameters
         ----------
@@ -145,6 +146,15 @@ class MPIDiagnostics:
             Seconds of no progress before dumping. <= 0 disables the watchdog.
         abort : bool, optional
             Call ``MPI_Abort`` after dumping. Default True.
+        progress : callable, optional
+            Returns a ``time.monotonic()`` stamp of the last progress the
+            caller made. Without it the timeout is measured against the whole
+            block, which is only correct when the block is expected to be
+            short: a long but healthy phase then trips the watchdog purely for
+            taking a while, and with ``abort=True`` that kills a working job.
+            Supplying a heartbeat makes the timeout mean what the message
+            already claims -- *no progress* for this long, rather than *not
+            finished* within it.
 
         Yields
         ------
@@ -158,8 +168,21 @@ class MPIDiagnostics:
         rank = self.comm.rank
         label = phase or "unnamed phase"
 
+        def _stalled() -> bool:
+            """Wait for the block to finish, or return True once it stalls."""
+            if progress is None:
+                return not finished.wait(timeout)
+            while True:
+                idle = time.monotonic() - progress()
+                # Wait only for the time left on the current quiet period, so
+                # a heartbeat arriving late still resets the countdown.
+                if finished.wait(max(timeout - idle, 0.1)):
+                    return False
+                if time.monotonic() - progress() >= timeout:
+                    return True
+
         def _fire() -> None:
-            if finished.wait(timeout):
+            if not _stalled():
                 return
 
             sys.stderr.write(

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from climtools import MPIContext, xgeo
+from climtools.xarray.arithmetic import HaloWidthError
 from climtools.xarray.core import MPIXarray
 from mock_dataset import PATH, PATH2D, create_dataset
 
@@ -47,31 +48,52 @@ UNEVEN_GLOBAL = 21
 _STREAM = os.environ.get("CLIMTOOLS_TEST_QUIET") != "1"
 _STARTED = time.monotonic()
 
+#: Monotonic stamp of the last completed check, on this rank. The phase
+#: watchdog measures against this rather than against the phase's own start:
+#: at production scale a single halo_ops check can run for minutes and the
+#: whole phase for well over an hour, so a timeout measured from the start
+#: fires on a perfectly healthy run.
+_LAST_PROGRESS = time.monotonic()
+
+#: Seconds without a completed check before the watchdog dumps every rank's
+#: stack. Long enough to clear the slowest single check at production scale
+#: (assert_allclose over a multi-GB variable is minutes on its own).
+_WATCHDOG_TIMEOUT = float(os.environ.get("CLIMTOOLS_TEST_WATCHDOG") or 1800.0)
+
 
 def record(op: str, case: str, ok: bool | None, msg: str = "") -> None:
     """Record one check's outcome. `ok=None` means a declared
     NotImplementedError under an unsupported partition shape -- reported
     as SKIP, not FAIL."""
+    global _LAST_PROGRESS
     RESULTS.append((op, case, ok, msg))
+    _LAST_PROGRESS = time.monotonic()
     if _STREAM and mpi.comm.rank == 0:
         status = "SKIP" if ok is None else ("ok  " if ok else "FAIL")
         elapsed = time.monotonic() - _STARTED
         print(f"  [{elapsed:7.1f}s] {status} {op} :: {case}", flush=True)
 
 
-def phase(label: str, timeout: float = 900.0):
-    """Announce a stage and dump every rank's stack if it stalls.
+def phase(label: str, timeout: float | None = None):
+    """Announce a stage and dump every rank's stack if it stops progressing.
 
-    Wraps `MPIDiagnostics.watchdog`, which was already written for exactly
-    this and previously had no callers. The timeout matters more than the
-    announcement: a job cancelled by the scheduler reports only that it was
-    cancelled, whereas the watchdog fires first and prints where each rank
-    actually was.
+    The watchdog is armed with `record`'s heartbeat, so it reports a phase
+    that has genuinely stopped rather than one that is merely long. It also
+    does not abort: an earlier version killed a healthy run at 1489 s because
+    `halo_ops` legitimately exceeded a fixed 900 s, and losing a
+    twenty-five-minute job to a false positive costs far more than letting a
+    real deadlock run on to the scheduler's own wall limit. The stack dump --
+    the part with the diagnostic value -- happens either way.
     """
     if _STREAM and mpi.comm.rank == 0:
         elapsed = time.monotonic() - _STARTED
         print(f"\n=== [{elapsed:7.1f}s] {label} ===", flush=True)
-    return mpi.watchdog(label, timeout=timeout)
+    return mpi.watchdog(
+        label,
+        timeout=_WATCHDOG_TIMEOUT if timeout is None else timeout,
+        abort=False,
+        progress=lambda: _LAST_PROGRESS,
+    )
 
 
 #: Substring of the ValueError mpp_halo_exchange() raises when some rank's
@@ -93,8 +115,15 @@ _DECLARED_HALO_REFUSAL = "shorter than the requested halo"
 
 def is_declared_halo_refusal(exc: Exception) -> bool:
     """True if `exc` is mpp_halo_exchange()'s declared undersized-partition
-    ValueError rather than a genuine, unexpected failure."""
-    return isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
+    refusal rather than a genuine, unexpected failure.
+
+    By type first. The substring fallback only covers a climtools built
+    before HaloWidthError existed; matching on message text is what let a
+    reworded error turn a whole class of expected skips into failures.
+    """
+    return isinstance(exc, HaloWidthError) or (
+        isinstance(exc, ValueError) and _DECLARED_HALO_REFUSAL in str(exc)
+    )
 
 
 def local_of(value):

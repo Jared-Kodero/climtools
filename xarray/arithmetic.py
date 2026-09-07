@@ -988,6 +988,18 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
     return strip_mpi_meta(total)
 
 
+class HaloWidthError(ValueError):
+    """A rank's local partition is shorter than the halo an op asked for.
+
+    Its own type rather than a bare ``ValueError`` because callers have to
+    tell this architectural refusal apart from a genuine failure -- the test
+    suite reports it as a skip, not a failure. That classification used to
+    match a substring of the message, so shortening the message silently
+    turned every one of those skips into a failure. Subclasses ``ValueError``
+    so existing ``except ValueError`` handlers are unaffected.
+    """
+
+
 def mpp_halo_exchange(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -1100,7 +1112,7 @@ def mpp_halo_exchange(
             for r, length in enumerate(lengths)
             if length < before or length < after
         ]
-        raise ValueError(
+        raise HaloWidthError(
             f"Halo ({before}, {after}) exceeds local {partition_dim!r} size "
             + f"on ranks {deficient}."
         )

@@ -16,6 +16,8 @@ that drifts with rank count fails even when it is self-consistent.
 from __future__ import annotations
 
 import numpy as np
+from climtools import xgeo
+from climtools.xarray.arithmetic import HaloWidthError, mpp_halo_exchange
 from climtools.xarray.chunks import get_balanced_bounds
 from climtools.xarray.mpp import (
     Domain,
@@ -33,6 +35,8 @@ from climtools.xarray.mpp import (
 )
 from mpi4py import MPI
 from mpi_test_common import Fixtures, mpi, record
+
+import xarray as xr
 
 
 def _local_slice(global_length: int) -> tuple[int, int]:
@@ -353,5 +357,38 @@ def run(fx: Fixtures) -> None:
         return True, ""
 
     _check("mpp_update_domains", "mixed-dtype group update", halo_group_update)
+
+    def halo_refusal_type() -> tuple[bool | None, str]:
+        """An undersized partition must raise HaloWidthError, not a bare ValueError.
+
+        The suite reports this refusal as a skip rather than a failure, and it
+        decides which is which from the exception. Shortening the message once
+        already turned every one of those skips into a failure, so the type is
+        pinned here.
+        """
+        if nranks == 1:
+            return None, "one rank owns everything, so no halo can be short"
+        length = nranks  # one element per rank; any halo above 1 is too wide
+        distributed = xgeo.mpi_partition_data(
+            xr.DataArray(np.arange(length, dtype=np.float64), dims=("t",), name="v")
+            if comm.rank == 0
+            else None,
+            mpi,
+            dim="t",
+            log_partitions=False,
+        )
+        try:
+            mpp_halo_exchange(mpi, distributed._prepare(), "t", before=8, after=0)
+        except HaloWidthError:
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - matches the suite's convention
+            return False, f"raised {type(exc).__name__}, wanted HaloWidthError"
+        return False, "no error raised for a halo wider than the local partition"
+
+    _check(
+        "mpp_halo_exchange",
+        "undersized partition raises HaloWidthError",
+        halo_refusal_type,
+    )
 
     mpi.comm.barrier()
