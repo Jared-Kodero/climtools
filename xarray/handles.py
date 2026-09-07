@@ -8,7 +8,7 @@ import xarray as xr
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable
-    from typing import Literal
+    from typing import Any, Literal
 
     import numpy as np
 
@@ -16,12 +16,7 @@ if TYPE_CHECKING:
 
 
 class _RollingReduceMixin:
-    """Shared zero-argument reduce methods for :class:`MPIRolling`.
-
-    Each of these previously hand-duplicated, in full, as its own
-    ``def name(self) -> MPIXarray: return self._reduce("name")`` method;
-    factored here since the six only ever differed in that one string.
-    """
+    """Provide zero-argument rolling reductions."""
 
     def _reduce(self, reduce: str) -> MPIXarray:
         raise NotImplementedError
@@ -52,15 +47,7 @@ class _RollingReduceMixin:
 
 
 class _PartitionReduceMixin:
-    """Shared reduce methods for :class:`MPIGroupBy` and :class:`MPIResample`.
-
-    Both handles partition the data (into groups or resample bins) and
-    then reduce within each partition via their own ``_reduce`` dispatch
-    (``mpp_groupby_reduce``/``mpp_resample_reduce`` respectively) -- the
-    two classes previously each hand-duplicated an identical five-method
-    ``sum``/``mean``/``count``/``min``/``max`` surface differing only in
-    which module function ``_reduce`` called; factored here instead.
-    """
+    """Provide partition-aware groupby and resample reductions."""
 
     def _reduce(
         self,
@@ -283,7 +270,7 @@ class MPIGroupBy(_PartitionReduceMixin):
     """
 
     def __init__(
-        self, parent: MPIXarray, dim: Hashable, labels: xr.DataArray | np.ndarray
+        self, parent: MPIXarray, dim: Hashable, labels: xr.DataArray | np.ndarray[Any, Any]
     ) -> None:
         """Initialize a groupby-operation handle."""
         self._parent = parent
@@ -369,31 +356,14 @@ class MPIResample(_PartitionReduceMixin):
 
 
 class MPIXarrayWeighted:
-    """Chainable weighted-reduction handle, mirroring ``xarray``'s ``.weighted(...)``.
-
-    Returned by :meth:`MPIXarray.weighted`. Built entirely from
-    :class:`MPIXarray`'s own already-distribution-safe elementwise
-    multiply (``self * weights``, going through the same
-    ``mpp_check_operands_distribution`` compatibility check every binary
-    operator gets) and :meth:`MPIXarray.sum` -- no new communication
-    primitive of its own. FMS has no weighted-mean routine to adapt: a
-    model diagnostic that needs an area-weighted global mean builds it by
-    hand from ``mpp_global_sum`` plus a separately precomputed weight
-    sum, which is exactly the composition this class performs, so this
-    is bespoke xarray-style logic throughout, not an adaptation of any
-    FMS routine.
+    """Represent weighted reductions on an :class:`MPIXarray`.
 
     Parameters
     ----------
     parent : MPIXarray
         Object to reduce.
-    weights : MPIXarray
-        Weights, following ``xarray.DataArray.weighted``. Broadcast
-        against ``parent`` the same way any other binary operand is;
-        weights that don't vary along the partition dimension (the
-        common case -- e.g. ``cos(lat)`` area weights on a
-        time-partitioned object) need no special handling at all.
-
+    weights : MPIXarray or xarray object
+        Weights broadcast against ``parent`` using normal binary-operation rules.
     """
 
     def __init__(
@@ -409,16 +379,19 @@ class MPIXarrayWeighted:
         *,
         keep_attrs: bool | None = None,
     ) -> MPIXarray:
-        """Sum of weights actually applied, mirroring ``DataArrayWeighted.sum_of_weights``.
+        """Sum weights applied to valid parent values.
 
-        Masked to where ``parent`` is valid first: a NaN in ``parent``
-        contributes nothing to a skipna-masked sum/mean, so its weight
-        must not count toward the denominator either. Built as
-        ``mask * weights`` (boolean-times-value gives the weight where
-        valid, 0 where not) rather than ``weights.where(mask, 0)``, so
-        ``weights`` never needs its own ``.where()`` -- it stays exactly
-        what was passed in, raw array or ``MPIXarray`` either way (see
-        :meth:`MPIXarray.weighted`).
+        Parameters
+        ----------
+        dim : Hashable or iterable of Hashable, optional
+            Dimension or dimensions to reduce.
+        keep_attrs : bool or None, optional
+            Preserve attributes.
+
+        Returns
+        -------
+        MPIXarray
+            Sum of weights after masking invalid parent values.
         """
         mask = self._parent.notnull()
         masked_weights = mask * self._weights

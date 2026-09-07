@@ -48,10 +48,7 @@ def mpp_where(
     operands = (value, cond, other)
     meta, reference = mpp_check_operands_distribution(mpi_context, operands)
     if meta is not None and drop:
-        raise ValueError(
-            "drop=True is not supported on a distributed object "
-            + "(result length could differ across ranks)"
-        )
+        raise ValueError("drop=True is unsupported for distributed data.")
 
     _agree(
         mpi_context,
@@ -103,19 +100,8 @@ def mpp_cumsum(
     _agree(mpi_context, ("cumsum", str(dim), int(meta["global_size"])))
 
     if isinstance(value, xr.Dataset):
-        # Only data variables that actually carry `dim` may enter the
-        # cross-rank prefix scan below. xarray's own `.sum(dim)` (and
-        # `.cumsum(dim)`) silently leave a variable lacking `dim`
-        # completely unchanged rather than reducing it to a scalar --
-        # every rank's "total" for such a variable is really just its
-        # own already-identical, unreduced, replicated array. Feeding
-        # that into the same gather/scatter prefix machinery as the
-        # genuinely-reduced variables would silently add rank_index
-        # extra copies of that array onto itself (rank r's exclusive
-        # prefix becomes the sum of r copies of the same array, not the
-        # additive identity 0 it needs to be for a variable with
-        # nothing to accumulate), corrupting a variable that `dim`
-        # never touched at all.
+        # Prefix scans include only variables carrying ``dim``; replicated variables
+        # stay unchanged.
         touched = [name for name, var in value.data_vars.items() if dim in var.dims]
         if not touched:
             return strip_mpi_meta(value.copy(deep=False))
@@ -161,36 +147,12 @@ def _cumsum_scan(
         error, "MPI xarray cumsum", signature=("cumsum", str(dim))
     )
     local_cumsum, local_total = locals_or_none
-    # Materialize before gathering, for the same reason mpp_median() does:
-    # `.sum(dim)` alone does not force a still-lazy dask-backed `value` to
-    # compute, so `local_total` can still be lazy here, and `comm.gather`
-    # pickles it as-is -- a lazy graph is not guaranteed picklable (e.g. a
-    # local-closure `fill` passed to `mpi_create_dataarray`, as in this
-    # project's own test fixtures). `local_cumsum` does not need the same
-    # treatment: it is never pickled, only added to `exclusive_prefix`
-    # below, and whatever laziness it still carries is resolved by
-    # whatever later materializes the final returned result.
+    # Materialize local values before object collectives so lazy Dask graphs are never
+    # pickled.
     local_total = local_total.load()
 
     comm = _dim_comm(mpi_context, meta, dim)
-    # MPI_EXSCAN computes exactly the exclusive running total this needs
-    # (rank r's prefix = sum of every totals[0..r-1]) directly, via a
-    # proper distributed scan algorithm (mpi4py's object-based
-    # `exscan`, which pickles `local_total` and reduces with Python's
-    # own `+` -- xr.Dataset/DataArray both support it, so no manual
-    # tree logic is needed here). The previous implementation instead
-    # gathered every rank's total onto rank 0, computed every prefix
-    # there in a serial Python loop, and scattered them back out --
-    # correct, but a gather+scatter round trip through a single root is
-    # the one thing MPI's own MPI_EXSCAN exists specifically to avoid,
-    # and it does not scale as favorably to a large rank count.
-    #
-    # MPI_EXSCAN leaves rank 0's result undefined (there is no
-    # predecessor to sum), which mpi4py surfaces as `None`; the correct
-    # exclusive prefix there is a genuine zero, not `local_total * 0` --
-    # if any rank's own total contains +-inf (routine in real
-    # geophysical fields, e.g. log of a non-positive value), `inf * 0`
-    # is NaN, corrupting what should be a clean +-inf result.
+    # Use ``MPI_EXSCAN`` for exclusive prefixes; rank 0 uses the true additive identity.
     exclusive_prefix = comm.exscan(local_total, op=MPI.SUM)
     if exclusive_prefix is None:
         exclusive_prefix = xr.zeros_like(local_total)
@@ -206,37 +168,25 @@ def mpp_cumprod(
     skipna: bool | None = None,
     keep_attrs: bool | None = None,
 ) -> xr.Dataset | xr.DataArray:
-    """Cumulative product along ``dim``, correct when ``dim`` is distributed.
-
-    Mirrors :func:`mpp_cumsum` exactly, substituting multiplication for
-    addition throughout: same rank-local-step + ``MPI_EXSCAN`` structure
-    (see :func:`_cumsum_scan`'s docstring for why ``exscan`` over a
-    gather-to-root-then-scatter), same per-``Dataset``-variable
-    untouched/touched split, same reasoning for why rank 0's undefined
-    ``exscan`` result must become a genuine identity rather than
-    ``local_total * 0`` (here the multiplicative identity ``1``, not
-    ``0`` -- and for the same reason: a real geophysical field can
-    contain +-inf, and ``inf * 0`` is NaN where ``inf * 1`` is the
-    correct, clean +-inf).
+    """Compute a cumulative product along a distributed dimension.
 
     Parameters
     ----------
     mpi_context : MPIContext
         MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
-        Object to accumulate.
+        Input object.
     dim : Hashable
-        Dimension to accumulate along.
+        Cumulative-product dimension.
     skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
+        Skip missing values according to xarray semantics.
     keep_attrs : bool or None, optional
-        Whether to preserve attributes on the rank-local cumulative product step; lost by the subsequent multiplication by the cross-rank prefix.
+        Preserve attributes.
 
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Cumulative product with the same local length and ``.meta`` as ``value``.
-
+        Cumulative product with the original partition layout.
     """
     meta = mpp_get_meta(value)
     if meta is None or dim not in meta["dims"]:
@@ -245,12 +195,8 @@ def mpp_cumprod(
     _agree(mpi_context, ("cumprod", str(dim), int(meta["global_size"])))
 
     if isinstance(value, xr.Dataset):
-        # See the matching comment in mpp_cumsum: a variable lacking `dim`
-        # must never enter the cross-rank prefix scan below, or its
-        # per-rank "total" (really its own unreduced, replicated array)
-        # would get multiplied into itself rank_index extra times instead
-        # of by the multiplicative identity 1 it needs for a variable
-        # `dim` never touched at all.
+        # Prefix products include only variables carrying ``dim``; replicated variables
+        # stay unchanged.
         touched = [name for name, var in value.data_vars.items() if dim in var.dims]
         if not touched:
             return strip_mpi_meta(value.copy(deep=False))
@@ -376,10 +322,8 @@ def _fill_scan(
         local_filled = value.ffill(dim) if forward else value.bfill(dim)
         edge_slice = local_filled.isel({dim: edge_index}, drop=True)
         has_valid = bool(edge_slice.notnull().all())
-        # Materialize before it gets pickled by comm.exscan() below, for
-        # the same reason mpp_median()/mpp_cumsum() do: computing has_valid above
-        # forces *that* particular reduction, not edge_slice itself, which
-        # can still carry a lazy dask graph when `value` does.
+        # Materialize edge slices before object-based scans to avoid pickling lazy Dask
+        # graphs.
         return local_filled, edge_slice.load(), has_valid
 
     local_or_none, error = guarded(_local)
@@ -395,19 +339,8 @@ def _fill_scan(
         """Combine two (has_valid, edge_slice) pairs, keeping the more recent valid one."""
         return current if current[0] else carry
 
-    # An exclusive scan of "last valid value seen so far" -- MPI_EXSCAN's
-    # own textbook use case, just with a custom combine instead of SUM.
-    # Ascending rank order is `forward`'s fill direction directly; `bfill`
-    # needs the same scan walked from the *last* rank toward the first,
-    # which MPI_EXSCAN has no "reverse" mode for, so it runs on a
-    # same-ranks-different-numbering sub-communicator instead: `Split`
-    # with `key = size - 1 - rank` relabels rank `size-1` as scan-rank 0
-    # and rank 0 as scan-rank `size-1`, without moving any data or
-    # posting any extra messages beyond the scan itself. This replaces
-    # the previous gather-every-edge-value-to-rank-0 -> serial Python
-    # loop -> scatter round trip (every rank waiting on one root for
-    # both halves of that trip) with the same proper distributed
-    # algorithm mpp_cumsum uses.
+    # Use ``EXSCAN`` for forward fill and reverse communicator numbering for backward
+    # fill.
     scan_comm = comm if forward else comm.Split(0, comm.size - 1 - comm.rank)
     try:
         carry_in_pair = scan_comm.exscan((has_valid, edge_slice), op=_last_valid)
@@ -519,18 +452,8 @@ def mpp_median(
 
     _agree(mpi_context, ("median", str(dim), int(meta["global_size"])))
     comm = _dim_comm(mpi_context, meta, dim)
-    # Materialize before gathering: `comm.gather` (unlike the small-scalar
-    # Allreduce every other reduction in this module uses) pickles `value`
-    # itself, and a still-lazy dask-backed array's graph is not guaranteed
-    # picklable in general -- in particular, `mpi_create_dataarray`'s public
-    # `fill` callable is commonly a local closure (as in this project's own
-    # test fixtures), which the standard `pickle` module cannot serialize at
-    # all. `.load()` forces exactly the same local computation every other
-    # reduction here already forces implicitly when it extracts a plain
-    # scalar/small array from `value` before its own Allreduce, so this
-    # costs nothing extra other operations don't already pay, and it makes
-    # mpp_median() robust to any construction pattern rather than only ones
-    # whose graph happens to be picklable.
+    # Materialize local values before object collectives so lazy Dask graphs are never
+    # pickled.
     value = value.load()
     pieces = comm.gather(value, root=0)
 
@@ -547,21 +470,8 @@ def mpp_median(
     mpi_context.raise_if_error(
         error, "MPI xarray median", signature=("median", str(dim)), comm=comm
     )
-    # Every member of this sub-communicator shares identical bounds along
-    # every surviving dimension (they differ only along `dim`, which is
-    # now reduced away), so broadcasting the small, already-reduced
-    # result to all of them and letting every rank keep its own full
-    # copy would leave `comm.size`-many redundant, byte-identical copies
-    # of the same slice -- multiple ranks claiming ownership of the same
-    # range, violating the no-overlap partition invariant every other
-    # operation in this package relies on. Only rank 0 of this
-    # sub-communicator keeps the real data; every other member is
-    # assigned a genuinely empty (start == stop) slice instead, exactly
-    # like a rank `get_balanced_bounds` leaves idle when a dimension is
-    # shorter than the rank count -- not a second copy of someone else's
-    # data. The broadcast itself still reaches everyone, since a
-    # non-owner still needs the result's dtype/other-dims shape to build
-    # its own correctly-typed empty slice.
+    # Keep reduced data on one subgroup rank; mark replicas empty to preserve unique
+    # ownership.
     result = comm.bcast(result, root=0)
     result = strip_mpi_meta(result)
 
@@ -796,28 +706,7 @@ def mpp_pad(
     constant_values: Any = None,
     keep_attrs: bool | None = None,
 ) -> xr.Dataset | xr.DataArray:
-    """Pad ``value`` along ``dim``, correct when ``dim`` is distributed.
-
-    Unlike :func:`mpp_shift`/:func:`mpp_ffill`/:func:`mpp_differentiate`,
-    padding never needs a neighbor's actual data: it only ever adds new
-    values at the two true *global* edges of ``dim``, so the only
-    distributed-aware decision is whether *this* rank happens to own
-    one of those edges (``meta["starts"][dim] == 0`` for the lower edge,
-    ``meta["stops"][dim] == meta["global_sizes"][dim]`` for the upper
-    one) -- a purely interior rank calls ``value.pad()`` at all. No
-    ``Isend``/``Irecv`` of any kind is required, which is also why this
-    has no FMS routine to adapt: FMS's own domain padding
-    (``mpp_domains``' halo update) always exchanges real neighbor data,
-    the opposite of what a genuine edge-only pad needs.
-
-    Only ``mode="constant"`` is supported when ``dim`` is the active
-    partition dimension: ``"edge"``, ``"reflect"``, ``"wrap"``, and the
-    other modes read from data near the edge, which for an *interior*
-    rank's edge (adjacent to another rank's real data, not a true global
-    boundary) would need exactly the kind of halo exchange this function
-    exists to avoid paying for. Not attempted here; raises
-    ``NotImplementedError`` instead of silently padding with the wrong
-    values.
+    """Pad a distributed dimension at its global edges.
 
     Parameters
     ----------
@@ -826,32 +715,25 @@ def mpp_pad(
     value : xarray.Dataset or xarray.DataArray
         Object to pad.
     dim : Hashable
-        Dimension to pad along.
+        Dimension to pad.
     pad_width : tuple[int, int]
-        ``(before, after)`` -- number of values to add at the lower and
-        upper edge of ``dim``, as in ``xarray.DataArray.pad``.
-    mode : str, optional
-        Padding mode, as in ``xarray.DataArray.pad``. Only ``"constant"``
-        is supported when ``dim`` is distributed (see above).
+        Number of values added before and after ``dim``.
+    mode : str, default "constant"
+        Xarray padding mode. Distributed dimensions support only ``"constant"``.
     constant_values : Any, optional
-        Fill value(s) for ``mode="constant"``, as in ``xarray.DataArray.pad``.
+        Fill value for constant padding.
     keep_attrs : bool or None, optional
-        Whether to preserve attributes.
+        Preserve attributes when supported by xarray.
 
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The padded object. ``.meta`` is unchanged on every rank except
-        whichever one, two, or (single-rank case) both own the two
-        global edges, where ``.meta``'s ``global_size`` grows by
-        ``sum(pad_width)`` and every rank's ``start``/``stop`` shifts to
-        match.
+        Padded object with updated partition metadata.
 
     Raises
     ------
     NotImplementedError
-        If ``dim`` is distributed and ``mode`` is not ``"constant"``.
-
+        If a distributed dimension uses a non-constant padding mode.
     """
     before, after = pad_width
     meta = mpp_get_meta(value)
@@ -861,12 +743,7 @@ def mpp_pad(
     if before == 0 and after == 0:
         return value
     if mode != "constant":
-        raise NotImplementedError(
-            f"pad(mode={mode!r}) is not supported along the distributed "
-            + f"dimension {dim!r}; only mode='constant' avoids needing a "
-            + "neighboring rank's actual data at an interior rank's own "
-            + "edge (see mpp_pad's docstring)."
-        )
+        raise NotImplementedError(f"Distributed pad supports only mode='constant'; got {mode!r}.")
 
     _agree(mpi_context, ("pad", str(dim), int(before), int(after), mode))
 
@@ -894,12 +771,7 @@ def mpp_pad(
     new_start = 0 if is_lower_edge else start + before
     new_stop = stop + before + (after if is_upper_edge else 0)
 
-    # Preserve every other partition dimension's bounds (and the
-    # Cartesian topology, for a 2D+ partition) unchanged -- unlike
-    # mpp_median/mpp_quantile's post-reduction call, `dim` is not the
-    # *only* partition dimension left here, so rebuilding meta from just
-    # `dim` alone would silently drop every other one, corrupting a 2D
-    # Cartesian partition's own second axis.
+    # Preserve metadata for every other partition dimension unchanged.
     global_sizes = dict(meta["global_sizes"])
     starts = dict(meta["starts"])
     stops = dict(meta["stops"])
@@ -932,13 +804,8 @@ def mpp_roll(
 
     global_size = int(meta["global_sizes"][dim])
     if global_size > 0:
-        # Normalize to the smallest-magnitude equivalent shift, not
-        # just into [0, global_size): e.g. shift=-2 on a length-8 array
-        # is mathematically identical to shift=6, but would request an
-        # unnecessarily wide (6-element) halo instead of the genuinely
-        # sufficient 2-element one -- exactly the "don't exchange more
-        # than the operation actually needs" rule applied to the wrap
-        # case too.
+        # Normalize periodic shifts to the smallest equivalent magnitude to minimize
+        # halo width.
         shift = shift % global_size
         if shift > global_size // 2:
             shift -= global_size
@@ -953,15 +820,8 @@ def mpp_roll(
 
     local_len = int(value.sizes[dim])
     trimmed = shifted.isel({dim: slice(left_pad, left_pad + local_len)})
-    # `.shift()` unconditionally reserves a float NaN fill value for the
-    # boundary it introduces, upcasting any integer/bool variable to
-    # float even though, by construction, that boundary is never
-    # actually missing here: `mpp_halo_exchange(..., periodic=True)` already
-    # padded with genuine neighbor data (wrapping at the true global
-    # edge), so every position `trimmed` keeps is real, borrowed data,
-    # never a fill value. Restore each variable's original dtype now
-    # that the shift itself is done -- safe precisely because nothing
-    # in `trimmed` can be NaN from this operation.
+    # Restore original dtypes after periodic shift because halo padding supplies real
+    # values, not NaNs.
     if isinstance(value, xr.Dataset):
         original_dtypes = {name: var.dtype for name, var in value.variables.items()}
         for name, dtype in original_dtypes.items():
@@ -996,17 +856,8 @@ def mpp_differentiate(
     padded, left_pad, _right_pad = mpp_halo_exchange(
         mpi_context, value, coord, before=1, after=1
     )
-    # dask's gradient (unlike every other mpp_halo_exchange consumer -- shift,
-    # diff, rolling_reduce, coarsen_reduce, ffill/bfill) requires every
-    # individual chunk along the differentiated axis, not just the total
-    # local length, to exceed edge_order + 1. mpp_halo_exchange's padding
-    # arrives as its own separate, unconsolidated 1-element chunk (e.g.
-    # local shape 125000 pads to chunks (125000, 1), not one (125002,)
-    # chunk), which is too small on its own regardless of how large the
-    # rank's real local data is. Consolidating to a single chunk here
-    # only touches this local, already-fully-materialized-by-mpp_halo_exchange
-    # piece -- it does not change mpp_halo_exchange's own chunking for any of
-    # its other, unaffected callers.
+    # Rechunk the local haloed axis once because ``dask.gradient`` requires sufficiently
+    # wide chunks.
     if padded.chunks:
         padded = padded.chunk({coord: -1})
     derivative = padded.differentiate(

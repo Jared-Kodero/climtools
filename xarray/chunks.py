@@ -12,13 +12,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping
 
-# A single HDF5 chunk's byte size must stay strictly under 2**32 bytes (4
-# GiB) -- confirmed directly against this build with a binary search: a
-# (16383, 256, 256) float32 chunk (3.9998 GiB) succeeds, (16384, 256, 256)
-# (4.0000 GiB) raises "NetCDF: Bad chunk sizes." from the netCDF-C library.
-# Half that hard limit is used as the working target below, leaving headroom
-# for HDF5/filter (zlib, shuffle) bookkeeping overhead per chunk rather than
-# skimming the exact boundary.
+# Keep chunks below HDF5's 4 GiB hard limit; target half the limit for filter overhead.
 MAX_SAVE_CHUNK_BYTES = 2**31
 
 
@@ -203,15 +197,7 @@ def get_partition_chunk_size(
 def _validate_explicit_chunk_bytes(
     ds: xr.Dataset, explicit: Mapping[str, tuple[int, ...]]
 ) -> None:
-    """Reject an explicit ``chunks=`` shape that would exceed ``MAX_SAVE_CHUNK_BYTES``.
-
-    Unlike the auto-inferred path (capped via
-    ``_cap_partition_chunk_to_hdf5_limit``), nothing previously checked an
-    explicit shape's byte size -- an oversized chunk could pass variable
-    creation and still fail the collective write with an opaque
-    ``RuntimeError: NetCDF: HDF error``. Raises early instead, with a
-    clear message, before any write is attempted.
-    """
+    """Reject explicit chunks that exceed the save-size limit."""
     offenders: list[str] = []
     for name, shape in explicit.items():
         if name not in ds.variables:
@@ -224,13 +210,7 @@ def _validate_explicit_chunk_bytes(
                 f"{nbytes / 2**30:.2f} GiB (limit {MAX_SAVE_CHUNK_BYTES / 2**30:.0f} GiB)"
             )
     if offenders:
-        raise ValueError(
-            "Explicit chunks= would create an HDF5 chunk larger than the "
-            "safe per-chunk byte limit for parallel NetCDF-4 output "
-            "(a chunk this large can pass variable creation and still fail "
-            "the collective write with an opaque 'NetCDF: HDF error'). "
-            "Pass a smaller chunk shape for: " + "; ".join(offenders)
-        )
+        raise ValueError("Explicit chunks exceed the HDF5 4 GiB limit: " + "; ".join(offenders))
 
 
 def get_chunks(
@@ -323,11 +303,7 @@ def compute_save_chunks(
     chunk_info = meta["chunk_info"]
     missing = [d for d in dims if d not in chunk_info]
     if missing:
-        raise ValueError(
-            "mpi_meta['chunk_info'] does not include partition "
-            + f"dimension(s) {missing!r}; cannot bound save_chunks "
-            + "against distribution_chunks without it."
-        )
+        raise ValueError(f"chunk_info missing partition dimensions: {missing!r}.")
 
     cart = meta.get("cart")
     divisor_source: dict[str, int] = {}
@@ -374,12 +350,8 @@ def compute_save_chunks(
                 save_chunk.append(proposed)
                 continue
 
-            # A safe (if occasionally conservative) upper bound on the
-            # bytes every other axis of this chunk could contribute:
-            # non-partition axes at their own proposed chunk size, and
-            # any *other* partition axis at its full global size (since
-            # that axis's own cap, computed in this same loop, isn't
-            # available yet to tighten this).
+            # Bound other axes conservatively; other partition axes may span their full
+            # global size.
             other_bytes = variable.dtype.itemsize * math.prod(
                 (global_sizes[d] if d in dims and d != var_dim else int(blk_length))
                 for d, blk_length in zip(var_dims, shape, strict=True)

@@ -70,20 +70,10 @@ def _var_or_std(
         replica_count: int = 1,
         scatter: tuple[Hashable, list[int]] | None = None,
     ) -> xr.DataArray:
-        """Combine local squared deviations into global variance or standard deviation.
-
-        ``scatter``, when given, is forwarded to both the squared-deviation
-        sum and the valid-value count (see :func:`~.planning.mpp_scatter_target`),
-        so this rank only ever holds its own post-reduction slice.
-        """
+        """Combine local squared deviations into global variance or standard deviation."""
         deviation = variable - mean
-        # `deviation`'s dtype (always floating: subtracting a float
-        # `mean` promotes even an integer `variable`) is what the
-        # squared-deviation sum below actually produces -- using
-        # `variable.dtype` here instead would predict an *integer*
-        # expected dtype for an integer-typed variable, silently
-        # truncating the genuinely-fractional sum of squares to an
-        # integer before the Allreduce ever runs.
+        # Use ``deviation.dtype`` for squared deviations because integer inputs are
+        # promoted before reduction.
         partial_sq_sum, error = guarded(
             lambda: (deviation * deviation).sum(
                 dim=variable_dims, skipna=skipna, min_count=None, keep_attrs=False

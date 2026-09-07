@@ -6,6 +6,7 @@ import getpass
 import inspect
 import logging
 import os
+import random
 import shutil
 import signal
 import socket
@@ -170,6 +171,7 @@ class LockFile:
 
     def acquire(self):
         """Acquire an exclusive lock on the file."""
+        time.sleep(random.uniform(0, self.delay))
         start_time = time.time()
         self.fd = os.open(self.filepath, os.O_RDWR | os.O_CREAT)
 
@@ -186,7 +188,7 @@ class LockFile:
                         raise TimeoutError(
                             f"Could not acquire lock on {self.filepath} within {self.timeout}s"
                         )
-                    time.sleep(self.delay)
+                    time.sleep(self.delay + random.uniform(0, self.delay * 0.1))
         except Exception:
             os.close(self.fd)
             self.fd = None

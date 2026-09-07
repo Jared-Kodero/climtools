@@ -14,6 +14,8 @@ import xarray as xr
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from ..mpi.context import MPIContext
 
 from .common import extreme_identity, partial_dtype
@@ -44,20 +46,13 @@ def _group_combine_scatter(
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
-    global_labels: np.ndarray,
+    global_labels: np.ndarray[Any, Any],
     *,
     op: str,
     skipna: bool | None,
     comm: MPI.Comm,
 ) -> tuple[xr.DataArray, int, int]:
-    """Like :func:`_group_combine`, but each rank keeps only its own slice.
-
-    Uses ``mpp_reduce_scatter`` instead of ``Allreduce`` so no rank ever
-    materializes the full grouped result -- only worthwhile when the
-    result will actually be distributed; a replicated partition
-    dimension (no ``replica_count`` param here) stays on the Allreduce
-    path in :func:`_group_combine` instead.
-    """
+    """Combine grouped partials and retain each rank’s target slice."""
     counts = _balanced_counts(len(global_labels), comm.size)
     start = sum(counts[: comm.rank])
     stop = start + counts[comm.rank]
@@ -123,14 +118,8 @@ def _resample_bin_labels(
     """Rank-consistent resample bin-start label per element of ``timestamps``."""
     offset = pd.tseries.frequencies.to_offset(freq)
 
-    # Fixed-duration ("Tick"-like) frequencies expose a working `.nanos`
-    # property; note that pandas' own `Tick` base class is, confusingly,
-    # NOT the right classifier here -- `pandas.tseries.offsets.Day` (so
-    # `"D"`/`"7D"`) has a perfectly well-defined, always-24h `.nanos` but
-    # is NOT a `Tick` subclass in this pandas version (only sub-day
-    # units -- h/min/s/ms/us/ns -- are). Checking `.nanos` directly
-    # covers both correctly instead of misclassifying `"D"`-and-coarser
-    # Tick-equivalents as calendar-anchored.
+    # Detect fixed-duration offsets via ``.nanos``; pandas ``Tick`` subclasses are
+    # incomplete for this purpose.
     try:
         delta_ns = int(offset.nanos)
         fixed_duration = True
@@ -146,19 +135,8 @@ def _resample_bin_labels(
         positions = edges.searchsorted(timestamps, side="right") - 1
         return edges[positions]
 
-    # Tick-based: reproduce xarray/pandas' own default `origin="start_day"`
-    # -- midnight of the day containing the *global* first timestamp --
-    # via a single MPI.MIN reduction of every rank's local minimum, so
-    # every rank bins against the identical anchor without gathering the
-    # coordinate itself. A rank with no local timestamps contributes the
-    # int64 maximum as a no-op sentinel rather than skewing the MIN.
-    #
-    # pandas (>=2.0) DatetimeIndex can carry any of several time
-    # resolutions ("ns"/"us"/"ms"/"s"; `pd.date_range`'s own default
-    # changed to "us" in pandas 3.0), and `.asi8` counts in *that*
-    # index's own unit, not always nanoseconds -- normalize to "ns"
-    # first so the raw-integer arithmetic below has an unambiguous,
-    # fixed-width unit regardless of the caller's input resolution.
+    # Derive one global start-day anchor with ``MPI.MIN`` and normalize timestamps to
+    # nanoseconds.
     timestamps_ns = timestamps.as_unit("ns")
     local_min_ns = (
         int(timestamps_ns.asi8.min()) if len(timestamps_ns) else np.iinfo(np.int64).max
@@ -202,7 +180,7 @@ def _group_combine(
     variable: xr.DataArray,
     dim: Hashable,
     group: xr.DataArray,
-    global_labels: np.ndarray,
+    global_labels: np.ndarray[Any, Any],
     *,
     op: str,
     skipna: bool | None,
@@ -239,17 +217,8 @@ def _group_combine(
         )
         with np.errstate(divide="ignore", invalid="ignore"):
             result = global_sum / global_count
-        # A groupby-mean's result is always array-shaped (one value per
-        # group -- reducing to a single group still leaves a size-1
-        # group axis, never a bare scalar), so it follows the same
-        # dtype rule confirmed for an ordinary *partial* (array-result)
-        # xarray reduction, not a full/scalar one: a non-floating dtype
-        # promotes to float64 (the plain division above already does
-        # this correctly on its own), but xarray keeps a floating or
-        # complex dtype exactly as it was, which the plain division
-        # above does NOT (float32/int64 division always promotes to
-        # float64 -- confirmed directly against native
-        # DataArray.groupby(...).mean(), which stays float32).
+        # Match xarray groupby-mean promotion: preserve floating/complex dtypes and
+        # promote non-floating inputs.
         if variable.dtype.kind in "fc" and result.dtype != variable.dtype:
             result = result.astype(variable.dtype, keep_attrs=True)
         return result.where(global_count > 0)
@@ -287,7 +256,7 @@ def mpp_groupby_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
     dim: Hashable,
-    labels: xr.DataArray | np.ndarray,
+    labels: xr.DataArray | np.ndarray[Any, Any],
     op: Literal["sum", "mean", "count", "min", "max"] = "mean",
     *,
     skipna: bool | None = None,
@@ -357,22 +326,8 @@ def mpp_groupby_reduce(
         partition_removed_da = old_meta is not None and not any(
             d != dim for d in old_dims_da
         )
-        # Scatter apart instead of Allreduce-then-slice whenever the
-        # result is actually going to end up distributed: skips ever
-        # materializing the full grouped/resampled result on every rank
-        # (see _group_combine_scatter's docstring). Not applicable when
-        # the caller explicitly wants a replicated result
-        # (partition_dim=None), there's nothing worth splitting (a
-        # single group, or a single rank), plan[0] is itself a replica
-        # subgroup (every member of a replica group is *supposed* to
-        # end up with the same answer, so scattering apart would defeat
-        # that), or -- matching mpp_finish()'s own "at least one, but not
-        # every, previous partition dimension survived" branch -- some
-        # OTHER active partition dimension besides `dim` is still
-        # present (a multi-dim Cartesian partition where only one axis
-        # is being grouped over): that case keeps distributing on the
-        # surviving dimension, exactly as before this reduction, not on
-        # the new group dimension, so there is nothing to scatter onto.
+        # Scatter combined groups only when the result will be partitioned on the new
+        # group dimension.
         if (
             partition_removed_da
             and partition_dim is not None
@@ -431,16 +386,8 @@ def mpp_groupby_reduce(
             auto_candidates=frozenset({_GROUP_DIM}),
         )
 
-    # Same Reduce_scatter question as the DataArray branch above, but for
-    # a whole Dataset every variable in `variables` must end up the same
-    # length along _GROUP_DIM -- so the choice is made once, for every
-    # entry together, not per variable. Only usable when no entry needing
-    # cross-rank combination is itself a replica subgroup (see the
-    # DataArray branch's docstring on why that path stays Allreduce), and
-    # every one of them shares the same combine communicator size (a
-    # different-sized sub-comm per variable would need a different
-    # counts split per variable, defeating a single consistent
-    # _GROUP_DIM length across the Dataset).
+    # Dataset scatter requires common group lengths and compatible combine
+    # communicators.
     old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
     remaining_dims = tuple(d for d in old_dims if d != dim)
     partition_removed = old_meta is not None and not remaining_dims
@@ -486,13 +433,8 @@ def mpp_groupby_reduce(
                     comm=combine_comms[entry.name],
                 )
             else:
-                # Already fully replicated pre-reduction, so its local
-                # reduce alone already covers every group in
-                # `global_labels` (see the module-level note this
-                # mirrors in _group_combine's docstring) -- reindexed by
-                # *label value*, not position, since nothing guarantees
-                # this variable's own local group order matches
-                # `global_labels`'s sorted order.
+                # Replicated variables already cover all groups locally; reindex them by
+                # label.
                 full = _group_reduce_local(
                     mpi_context, variable, dim, group, op=op, skipna=skipna
                 )
@@ -583,24 +525,13 @@ def mpp_resample_reduce(
         partition_dim=partition_dim,
     )
 
-    # mpp_groupby_reduce() always names its new dimension _GROUP_DIM
-    # ("_mpi_group"), an internal convention appropriate for an
-    # arbitrary label array. resample() groups by intervals of `dim`
-    # itself, so -- mirroring plain xarray's own
-    # `Dataset.resample(**{dim: freq}).mean()`, which keeps the
-    # dimension named "time" (or whatever `dim` was), not some generic
-    # group name -- the result is renamed back to `dim` here.
+    # Rename the internal group dimension back to the resampled source dimension.
     if _GROUP_DIM not in getattr(result, "dims", ()):
         return result
     meta = mpp_get_meta(result)
     renamed = strip_mpi_meta(result).rename({_GROUP_DIM: dim})
     if meta is not None and _GROUP_DIM in meta["dims"]:
-        # _GROUP_DIM is itself an active partition dimension only when
-        # mpp_groupby_reduce() took its cross-rank combine path and
-        # mpp_finish() then (auto-)redistributed the reduced result onto
-        # the new group dimension -- rename that one entry to `dim`,
-        # keeping every other partition dimension (relevant under a
-        # multi-dimensional partition) unchanged.
+        # Rename only the partition metadata entry for the internal group dimension.
         new_dims = tuple(dim if d == _GROUP_DIM else d for d in meta["dims"])
         remap = {(dim if d == _GROUP_DIM else d): d for d in meta["dims"]}
         mpp_update_meta(
@@ -613,19 +544,8 @@ def mpp_resample_reduce(
             cart=meta.get("cart"),
         )
     elif meta is not None:
-        # The active partition dimension is something else entirely
-        # (the common resample() case: `dim` -- the axis being
-        # resampled -- is not the distributed axis at all, so
-        # mpp_groupby_reduce() took its local, non-communicating path and
-        # returned `meta` describing that other, untouched dimension
-        # unchanged). That metadata is still exactly correct for
-        # `renamed` (only `_GROUP_DIM` was renamed; every other
-        # dimension, including the real partition one, is untouched)
-        # and must be reattached as-is -- an earlier version of this
-        # function instead force-relabeled it under `dim`, mislabeling
-        # that other dimension's own start/stop/global_size as if they
-        # belonged to `dim` and corrupting `.meta` for every resample()
-        # call where the partition dimension isn't the one resampled.
+        # If another partition dimension remains active, reattach its metadata
+        # unchanged.
         mpp_update_meta(
             renamed,
             dim=meta["dims"],

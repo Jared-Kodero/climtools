@@ -55,13 +55,7 @@ def _combine_sum_or_prod(
     replica_count: int = 1,
     scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local sum or product partials.
-
-    ``scatter``, when given, is forwarded to :func:`~.planning.mpp_comm_reduce`
-    (and to the ``min_count`` valid-value count below) so each rank keeps
-    only its own post-reduction slice instead of materializing the full
-    combined result -- see :func:`~.planning.mpp_scatter_target`.
-    """
+    """Combine rank-local sum or product partials."""
     if op_name(op) == "PROD":
         result = _combine_prod(
             mpi_context,
@@ -120,21 +114,7 @@ def _combine_prod(
     replica_count: int,
     scatter: tuple[Hashable, list[int]] | None,
 ) -> xr.DataArray:
-    """Combine rank-local products without letting overflow decide the answer.
-
-    Multiplying rank-local ``np.prod`` partials is not associative once a
-    partial leaves the representable range: ``inf * 0`` is NaN, so the result
-    depends on which rank happened to hold the zero and therefore on the rank
-    count. Instead each rank contributes the over/underflow-free
-    ``(mantissa, companions)`` pair of :func:`~.mpp.mpp_prod_decompose`, and
-    the two halves reduce under ``PROD`` and ``SUM`` respectively -- both
-    associative -- through the same :func:`~.planning.mpp_comm_reduce` every
-    other reduction uses, so the scatter and replicated-axis handling is
-    inherited unchanged.
-
-    ``partial`` is used only for its coordinates and dtype; its values are
-    recomputed here in the safe representation.
-    """
+    """Combine rank-local products with explicit overflow handling."""
     from .mpp import mpp_prod_decompose, mpp_prod_recombine
 
     mantissa_da: xr.DataArray | None = None
@@ -178,14 +158,8 @@ def _combine_prod(
     mantissa_values = np.asarray(global_mantissa.values)
     companion_values = np.asarray(global_companions.values)
     if replica_count != 1:
-        # Each of the replica_count duplicate copies contributed one factor,
-        # so the raw product is the true one raised to that power. Undoing it
-        # is a root of the mantissa and an exact division of the exponent and
-        # of every tally -- mpp_comm_reduce only knows how to undo replication
-        # for SUM, which is why it is done here instead of being delegated.
-        # Every companion is an exact multiple of replica_count (the copies
-        # are bit-identical), so those divisions are exact; only the mantissa
-        # root is inexact, and it is taken on a value bounded in (0, 1].
+        # Undo replicated products in mantissa/exponent space; companion tallies divide
+        # exactly.
         mantissa_values = mantissa_values ** (1.0 / replica_count)
         companion_values = companion_values // replica_count
 
@@ -205,20 +179,7 @@ def _global_valid_count(
     replica_count: int,
     scatter: tuple[Hashable, list[int]] | None,
 ) -> xr.DataArray:
-    """Global valid-value count for a mean, communicating only when necessary.
-
-    When missing values cannot occur -- an integer or boolean field, or an
-    explicit ``skipna=False`` -- every element counts, so the denominator is
-    just the product of the reduced dimensions' *global* extents. That is
-    already in the partition metadata, exactly as FMS reads ``gxsize``/
-    ``gysize`` off the domain in ``mpp_global_sum`` rather than reducing to
-    find them. Taking it from there removes both a second full pass over the
-    data and a second collective from the common case, leaving ``mean`` with
-    the same single ``Allreduce`` as ``sum``.
-
-    Otherwise the count genuinely depends on where the NaNs are and is
-    reduced as before.
-    """
+    """Compute the global valid-value count when communication is required."""
     if skipna_enabled(value.dtype, skipna):
         return mpp_count_valid_values(
             mpi_context,
@@ -249,13 +210,7 @@ def _combine_mean(
     replica_count: int = 1,
     scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local sums and counts into a global mean.
-
-    ``scatter``, when given, is forwarded to both the sum and the
-    valid-value count below (see :func:`~.planning.mpp_scatter_target`), so
-    the division that follows happens between two already-matching local
-    slices instead of two full replicated arrays.
-    """
+    """Combine rank-local sums and counts into a global mean."""
     global_sum = mpp_comm_reduce(
         mpi_context,
         partial_sum,
@@ -277,27 +232,8 @@ def _combine_mean(
         replica_count=replica_count,
         scatter=scatter,
     )
-    # Divide in the dtype xarray's own .mean() would produce for this
-    # input. This is genuinely shape-dependent, not just dtype-dependent:
-    # confirmed directly, a float32 array reduced over one dimension
-    # while keeping others (an ordinary partial reduction) stays float32
-    # in xarray's own .mean(), but the same array reduced over *every*
-    # dimension to a scalar promotes to float64 -- an earlier version of
-    # this line asked a synthetic size-1 array for its dtype, which
-    # reliably reproduces the partial-reduction case (kept-dimension
-    # size is what governs it, confirmed across several shapes) but not
-    # the full-reduction one, where a genuinely size-1 sample take the
-    # *other*, non-promoting branch a real, larger reduction does not
-    # -- so a same-dtype full reduction of, e.g., a length-3 real array
-    # silently disagreed with xarray by staying in the narrower dtype.
-    # Rather than chase further shape-dependent thresholds, this uses
-    # the two independently-verified, stable end cases directly:
-    # non-floating dtypes always promote to float64 (confirmed for
-    # int32); floating dtypes are dtype-preserving for a partial
-    # reduction and promote to float64 for a full one *except*
-    # complex, which never promotes either way (confirmed both ways
-    # for complex64) -- xarray evidently special-cases complex
-    # dtype preservation the same way regardless of reduction shape.
+    # Match xarray mean promotion: full real reductions promote to float64; partial real
+    # and complex reductions preserve floating dtype.
     kind = value.dtype.kind
     if kind not in "fc":
         target = np.dtype(np.float64)
@@ -350,24 +286,8 @@ def _combine_extreme(
     comm: MPI.Comm | None = None,
     scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
-    """Combine rank-local min/max partials across ranks.
-
-    ``scatter``, when given (see :func:`~.planning.mpp_scatter_target`),
-    is forwarded to :func:`~.planning.mpp_comm_reduce` for the boolean and
-    non-float dtype branches below (which route through it directly), and
-    handled explicitly for the float branch's own ``Reduce_scatter`` call,
-    since that branch packs value and validity into one ``(2, N)`` buffer
-    and calls :func:`~.mpp.mpp_reduce_scatter`/`_mpp_reduce` directly
-    rather than going through :func:`~.planning.mpp_comm_reduce`. FMS's
-    own ``mpp_max``/``mpp_min`` always broadcast the full reduced result
-    to every PE (see ``mpp.F90``); this scattering behavior has no FMS
-    counterpart at all, same as the sum/mean case (see
-    :func:`~.mpp.mpp_reduce_scatter`).
-    """
-    # Use the agreed variable dtype, not a rank-local partial dtype. Empty
-    # partitions follow a different local path, and dtype-dependent branching
-    # could desynchronize collectives. Min/max also require no promotion; using
-    # the declared dtype avoids bottleneck's float32-to-float64 scalar promotion.
+    """Combine rank-local minimum or maximum partials."""
+    # Use the agreed dtype so empty partitions cannot alter collective control flow.
     operation = "min" if minimum else "max"
     expect_dtype = value.dtype
     kind = value.dtype.kind
@@ -678,12 +598,7 @@ def _sum_prod(
 
 
 def _materialize_local(value: xr.DataArray) -> xr.DataArray:
-    """Force a dask-backed local array to a concrete, in-memory one.
-
-    Avoids re-running the upstream task graph once per derived quantity
-    (mean's sum and valid-count both read ``value`` independently) --
-    already this rank's own slice, so no extra data volume is read.
-    """
+    """Materialize a local Dask-backed array in memory."""
     return value.load() if getattr(value, "chunks", None) is not None else value
 
 
@@ -1265,21 +1180,7 @@ def _first_last_combine(
     )
     result = combined.where(owner != sentinel) if kind in "fc" else combined
 
-    # Any coordinate of `variable` that itself varies along `dim` (most
-    # commonly `dim`'s own dimension coordinate, e.g. "lat" or a real
-    # "time" axis) rides along with the vectorized `.isel(dim=index,
-    # drop=True)` inside `_first_last_local`: `candidate` ends up
-    # carrying that coordinate's value *at the locally-picked index*,
-    # not a scalar. `mpp_comm_reduce` above only Allreduces the requested
-    # data array and otherwise copies `payload`'s own (rank-local)
-    # coordinates onto the result verbatim -- correct for every other
-    # caller in this module, where a surviving coordinate is already
-    # identical on every rank, but wrong here: each rank's own local
-    # pick differs, so left alone this coordinate silently reports
-    # whichever value *this* rank's own local slice happened to pick,
-    # not the value at the true, cross-rank-elected first/last
-    # position. It needs the identical owner-election combine the data
-    # itself just got.
+    # Elect first/last coordinates with the same owner selected for the data value.
     index_coords = {
         name: coord for name, coord in variable.coords.items() if dim in coord.dims
     }
@@ -1288,11 +1189,7 @@ def _first_last_combine(
         for name, coord in index_coords.items():
             local_coord = candidate.coords[name]
             coord_kind = local_coord.dtype.kind
-            # datetime64/timedelta64 (a real "time" axis, most commonly)
-            # have no MPI reduction operator; Allreduce their lossless
-            # int64 view instead -- the same reinterpretation
-            # mpi.mpp.mpp_update_domains's `_view` uses for halo exchange
-            # -- and cast back afterward.
+            # Reduce datetime/timedelta coordinates through lossless int64 views.
             as_int = coord_kind in "mM"
             reducible = local_coord.astype(np.int64) if as_int else local_coord
             reducible_kind = reducible.dtype.kind

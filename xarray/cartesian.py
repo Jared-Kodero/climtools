@@ -39,15 +39,8 @@ def compute_layout(extents: Sequence[int], nranks: int) -> tuple[int, ...]:
     if nranks <= 0:
         raise ValueError(f"nranks must be positive; got {nranks}.")
 
-    # The 2D case is the only one climtools' own Cartesian partitioning
-    # ever actually poses (every mpi_open_dataset/mpi_create_dataset
-    # call in this codebase partitions exactly two dimensions, e.g.
-    # ("lat", "lon")) -- use FMS's own mpp_define_layout2D algorithm for
-    # it directly, rather than the general N-dimensional heuristic below,
-    # which solves a harder problem than the one ever actually asked of
-    # it here. That heuristic is kept only as a fallback for a
-    # hypothetical 1- or 3+-dimensional partition, a case this codebase
-    # does not exercise anywhere today.
+    # Use FMS's 2-D layout algorithm for the supported Cartesian case; keep the N-D
+    # heuristic as fallback.
     if len(extents) == 2:
         from .mpp import mpp_define_layout
 
@@ -200,18 +193,8 @@ def build_cartesian_topology(
     )
 
 
-# One MPI communicator "attribute" keyval, created once at import time, used
-# to cache each communicator's CartesianTopology objects on the communicator
-# itself via Comm.Set_attr/Get_attr -- MPI's own mechanism for attaching
-# application state to a communicator's lifetime. This is deliberately not a
-# plain module-level dict keyed by id(comm): a communicator can be freed and
-# a new, unrelated one later allocated at the same id(), which would silently
-# return a stale, wrong topology from an id-keyed cache. Comm.Set_attr avoids
-# that: the attribute lives and dies with the specific communicator object
-# (mpi4py calls the delete callback -- none is registered here, so this is a
-# no-op cleanup -- when the communicator is freed), and a Dup()'d or
-# otherwise distinct communicator starts with no attribute at all rather than
-# inheriting one, which was confirmed directly against this mpi4py build.
+# Cache topologies on the communicator so cache lifetime follows the MPI communicator
+# lifetime.
 _TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
 
 
@@ -222,12 +205,8 @@ def get_cartesian_topology(
 ) -> CartesianTopology:
     """Return (building and caching once) a rank's Cartesian topology."""
     dims = tuple(dims)
-    # Keyed by (dims, sizes), not dims alone: two calls sharing dimension
-    # *names* (e.g. both ("x", "y")) but different *sizes* -- two
-    # differently-shaped objects partitioned on the same communicator,
-    # not a hypothetical -- must not collide on a single cached
-    # topology; the second would silently inherit the first's bounds,
-    # computed for the wrong extents entirely.
+    # Include sizes in the cache key so same-named dimensions with different extents
+    # cannot collide.
     cache_key = (dims, tuple(int(sizes[d]) for d in dims))
     cache = comm.Get_attr(_TOPOLOGY_KEYVAL)
     if cache is None:
@@ -242,11 +221,21 @@ def get_cartesian_topology(
 
 
 def mpp_dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
-    """Return the communicator whose ranks vary along ``dim`` alone.
+    """Return the communicator varying only along one partition dimension.
 
-    The full communicator when the partition is one-dimensional, otherwise
-    the cached Cartesian sub-communicator holding every other partition axis
-    fixed (:meth:`CartesianTopology.sub_comm`).
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    meta : mapping
+        Canonical MPI metadata.
+    dim : str
+        Partition dimension.
+
+    Returns
+    -------
+    mpi4py.MPI.Comm
+        Full communicator for 1-D partitions or the corresponding Cartesian subcommunicator.
     """
     dims = meta["dims"]
     if len(dims) <= 1 or "cart" not in meta:

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     import numpy as np
     from IPython.display import DisplayHandle
     from matplotlib.collections import PathCollection
-    from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+    from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
     from mpi4py import MPI
 
     from ..mpi.context import MPIContext
@@ -351,16 +351,16 @@ class GeoDataArray(GeoBase):
             "SouthPolarStereo",
         ]
         | None = None,
-        cmap: str | LinearSegmentedColormap | ListedColormap = None,
-        norm: Any = None,
+        cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
+        norm: Normalize | None = None,
         vmin: float | None = None,
         vmax: float | None = None,
         units: str | None = None,
-        levels: int | list | None = None,
+        levels: int | list[float] | tuple[float, ...] | None = None,
         extend: str | None = None,
         robust: bool = False,
         rasterized: bool = False,
-        title: str | dict | None = None,
+        title: str | dict[str, Any] | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
         drawedges: bool = False,
@@ -376,111 +376,92 @@ class GeoDataArray(GeoBase):
         land: bool = True,
         lakes: bool = False,
         rivers: bool = False,
-        p_value: xr.DataArray = None,
-        pvalue_kwargs: dict | None = None,
-        u_component: xr.DataArray = None,
-        v_component: xr.DataArray = None,
-        quiver_kwargs: dict | None = None,
-        colorbar_kwargs: dict | None = None,
+        p_value: xr.DataArray | None = None,
+        pvalue_kwargs: dict[str, Any] | None = None,
+        u_component: xr.DataArray | None = None,
+        v_component: xr.DataArray | None = None,
+        quiver_kwargs: dict[str, Any] | None = None,
+        colorbar_kwargs: dict[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
         clabel_fontsize: float = 8,
         clabel_inline: bool = True,
         clabel_colors: str | None = None,
-        clabel_kwargs: dict | None = None,
+        clabel_kwargs: dict[str, Any] | None = None,
         cyclic: bool = False,
         **kwargs: Any,
     ) -> GeoPlot:
-        """Draw a scalar field on a Cartopy map and return a composable :class:`GeoPlot`.
+        """Plot the bound DataArray on a Cartopy map.
 
         Parameters
         ----------
-        x, y : str, optional
-            Coordinate names passed to the selected xarray plotting method.
-        col, row : str, optional
-            Faceting coordinate names.
+        x, y, col, row : str, optional
+            Coordinate names used for plotting and faceting.
         col_wrap : int, optional
-            Number of columns used when wrapping faceted subplots.
-        figsize : tuple of float, optional
-            Figure size in inches used when creating a new figure.
-        interactive : bool, optional
-            If True, configures matplotlib for interactive use in Jupyter notebooks.
-        method : {"default", "pcolormesh", "contourf", "contour", "imshow"}, default "default"
-            Xarray plotting method used for the scalar field.
-        projection : str, default "PlateCarree"
-            Cartopy projection used when creating the axes.
+            Number of columns for wrapped facets.
+        figsize : tuple[float, float], optional
+            Figure size in inches.
+        interactive : bool, default False
+            Configure Matplotlib for interactive notebook use.
+        method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
+            Xarray plotting method.
+        projection : str, optional
+            Cartopy projection name.
         cmap : str or matplotlib colormap, optional
-            Colormap used for the scalar field.
-        norm : matplotlib normalization, optional
-            Normalization applied to the field.
+            Colormap for the scalar field.
+        norm : matplotlib.colors.Normalize, optional
+            Color normalization.
         vmin, vmax : float, optional
-            Lower and upper scalar color limits.
+            Scalar color limits.
         units : str, optional
             Units used for colorbar labeling.
         levels : int or sequence of float, optional
-            Contour levels for contour-based methods.
-        extend : {"neither", "both", "min", "max"}, optional
-            Colorbar extension behavior.
-        robust : bool, default False
-            Whether to request percentile-based color scaling.
-        rasterized : bool, default False
-            Whether dense scalar artists should be rasterized.
-        title : str | Dict, default None
-            Plot title.
+            Contour levels.
+        extend : str, optional
+            Colorbar extension mode.
+        robust, rasterized : bool, default False
+            Enable percentile scaling or rasterized artists.
+        title : str or dict, optional
+            Plot title specification.
         orientation : {"vertical", "horizontal"}, optional
             Colorbar orientation.
-        add_colorbar : bool, default True
-            Whether to add a colorbar for the base field.
-        drawedges : bool, default False
-            Whether to draw edges between colorbar intervals.
+        add_colorbar, drawedges : bool
+            Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent : bool, default False
-            If True, set the map extent to the full globe.
-        set_extent : tuple of float, optional
-            Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
-        gridlines : bool, default False
-            Whether to draw labeled longitude and latitude gridlines.
-        add_grid_bounds : bool
-            If True, draw an outline along the outer perimeter of the plotted grid domain.
-        coastlines, borders, states : bool, default True
-            Switches controlling common Cartopy geographic feature overlays.
-        ocean, land : bool, default True
-            Switches controlling ocean and land background features.
-        lakes, rivers : bool, default False
-            Switches controlling optional Cartopy inland water feature overlays.
+        global_extent, gridlines, add_grid_bounds : bool
+            Control geographic extent and grid annotations.
+        set_extent : tuple[float, float, float, float], optional
+            ``(lon_min, lon_max, lat_min, lat_max)``.
+        coastlines, borders, states, ocean, land, lakes, rivers : bool
+            Toggle Cartopy geographic features.
         p_value : xarray.DataArray, optional
-            Pointwise p-value field.
+            Pointwise p-values for significance markers.
         pvalue_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`significance`.
+            Arguments passed to :meth:`significance`.
         u_component, v_component : xarray.DataArray, optional
-            Zonal and meridional vector components for a base quiver overlay.
-        quiver_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`quiver`.
-        colorbar_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`colorbar`.
+            Vector components for a quiver overlay.
+        quiver_kwargs, colorbar_kwargs : dict, optional
+            Quiver and colorbar options.
         clabel : bool, default False
-            Label line contours.
-        clabel_fmt : str, default "%1.0f"
-            Contour-label format.
+            Label contour lines.
+        clabel_fmt, clabel_colors : str, optional
+            Contour-label format and color.
         clabel_fontsize : float, default 8
             Contour-label font size.
         clabel_inline : bool, default True
             Draw contour labels inline.
-        clabel_colors : str, optional
-            Contour-label color.
         clabel_kwargs : dict, optional
-            Additional arguments forwarded to ``Axes.clabel``.
+            Additional ``Axes.clabel`` arguments.
         cyclic : bool, default False
-            If True, append a cyclic longitude point before plotting.
+            Append a cyclic longitude point before plotting.
         **kwargs : Any
-            Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
+            Additional xarray plotting arguments.
 
         Returns
         -------
         GeoPlot
-            Composable map holding the base artists, with chainable overlay methods.
-
+            Composable map object.
         """
 
         opts = exclude_key("self", dict(locals()))
@@ -514,12 +495,12 @@ class GeoDataArray(GeoBase):
             "SouthPolarStereo",
         ]
         | None = None,
-        cmap: str | LinearSegmentedColormap | ListedColormap = None,
-        norm: Any = None,
+        cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
+        norm: Normalize | None = None,
         vmin: float | None = None,
         vmax: float | None = None,
         units: str | None = None,
-        levels: int | list | None = None,
+        levels: int | list[float] | tuple[float, ...] | None = None,
         extend: str | None = None,
         robust: bool = False,
         rasterized: bool = False,
@@ -539,18 +520,18 @@ class GeoDataArray(GeoBase):
         land: bool = True,
         lakes: bool = False,
         rivers: bool = False,
-        u_component: xr.DataArray = None,
-        v_component: xr.DataArray = None,
-        colorbar_kwargs: dict | None = None,
-        quiver_kwargs: dict | None = None,
+        u_component: xr.DataArray | None = None,
+        v_component: xr.DataArray | None = None,
+        colorbar_kwargs: dict[str, Any] | None = None,
+        quiver_kwargs: dict[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
         clabel_fontsize: float = 8,
         clabel_inline: bool = True,
         clabel_colors: str | None = None,
-        clabel_kwargs: dict | None = None,
+        clabel_kwargs: dict[str, Any] | None = None,
         cyclic: bool = False,
-        indices: tuple | list | np.ndarray = None,
+        indices: tuple[int, ...] | list[int] | np.ndarray[Any, Any] | None = None,
         outfile: Path | str | None = None,
         quality: Literal["low", "medium", "high"] = "medium",
         fps: int = 1,
@@ -558,103 +539,83 @@ class GeoDataArray(GeoBase):
         frame_id: bool = True,
         **kwargs: Any,
     ) -> DisplayHandle | None:
-        """Render a map animation from an xarray DataArray and encode it as MP4.
+        """Render the bound DataArray as an MP4 map animation.
 
         Parameters
         ----------
         dim : str, default "time"
-            Dimension used for animation frames.
-        x, y : str, optional
-            Coordinate names passed to the selected xarray plotting method when supported.
-        col, row : str, optional
-            Faceting coordinate names passed to the selected xarray plotting method when supported.
+            Animation dimension.
+        x, y, col, row : str, optional
+            Coordinate names used for plotting and faceting.
         col_wrap : int, optional
-            Number of columns used when wrapping faceted subplots.
-        figsize : tuple of float, optional
-            Figure size in inches for each rendered frame.
-        method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}, default "default"
-            Xarray plotting method used for the scalar field.
-        projection : str, default "PlateCarree"
-            Cartopy projection used for each frame.
+            Number of columns for wrapped facets.
+        figsize : tuple[float, float], optional
+            Figure size in inches.
+        method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
+            Xarray plotting method.
+        projection : str, optional
+            Cartopy projection name.
         cmap : str or matplotlib colormap, optional
-            Colormap used for the scalar field.
-        norm : matplotlib normalization, optional
-            Normalization applied to the field.
+            Colormap for the scalar field.
+        norm : matplotlib.colors.Normalize, optional
+            Color normalization.
         vmin, vmax : float, optional
-            Lower and upper scalar color limits.
+            Scalar color limits.
         units : str, optional
             Units used for colorbar labeling.
         levels : int or sequence of float, optional
-            Contour levels for contour-based methods.
-        extend : {"neither", "both", "min", "max"}, optional
-            Colorbar extension behavior.
-        robust : bool, default False
-            Whether to request percentile-based color scaling when supported.
-        rasterized : bool, default False
-            Whether dense scalar artists should be rasterized when supported.
+            Contour levels.
+        extend : str, optional
+            Colorbar extension mode.
+        robust, rasterized : bool, default False
+            Enable percentile scaling or rasterized artists.
         title : str, optional
-            Base title passed to frame plotting routines.
+            Base frame title.
         orientation : {"vertical", "horizontal"}, default "vertical"
-            Colorbar orientation for non-faceted frames.
-        add_colorbar : bool, default True
-            Whether to add a colorbar.
-        drawedges : bool, default False
-            Whether to draw edges between colorbar intervals.
+            Colorbar orientation.
+        add_colorbar, drawedges : bool
+            Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent : bool, default False
-            If True, set each map extent to the full globe.
-        set_extent : tuple of float, optional
-            Geographic extent as ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
-        gridlines : bool, default False
-            Whether to draw labeled longitude and latitude gridlines.
-        add_grid_bounds : bool
-            If True, draw an outline along the outer perimeter of the plotted grid domain.
-        coastlines, borders, states : bool, default True
-            Switches controlling common Cartopy geographic feature overlays.
-        ocean, land : bool, default True
-            Switches controlling ocean and land background features.
-        lakes, rivers : bool, default False
-            Switches controlling optional Cartopy inland water feature overlays.
+        global_extent, gridlines, add_grid_bounds : bool
+            Control geographic extent and grid annotations.
+        set_extent : tuple[float, float, float, float], optional
+            ``(lon_min, lon_max, lat_min, lat_max)``.
+        coastlines, borders, states, ocean, land, lakes, rivers : bool
+            Toggle Cartopy geographic features.
         u_component, v_component : xarray.DataArray, optional
-            Zonal and meridional vector components for quiver overlays.
-        colorbar_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`colorbar`.
-        quiver_kwargs : dict, optional
-            Keyword arguments forwarded to :func:`quiver`.
+            Vector components for a quiver overlay.
+        colorbar_kwargs, quiver_kwargs, clabel_kwargs : dict, optional
+            Overlay and labeling options.
         clabel : bool, default False
-            Label line contours.
-        clabel_fmt : str, default "%1.0f"
-            Contour-label format.
+            Label contour lines.
+        clabel_fmt, clabel_colors : str, optional
+            Contour-label format and color.
         clabel_fontsize : float, default 8
             Contour-label font size.
         clabel_inline : bool, default True
             Draw contour labels inline.
-        clabel_colors : str, optional
-            Contour-label color.
-        clabel_kwargs : dict, optional
         cyclic : bool, default False
-            If True, append a cyclic longitude point before plotting each frame.
-        indices : tuple of int, list of int, or numpy.ndarray, optional
-            Positional indices along ``dim`` to render.
+            Append a cyclic longitude point to each frame.
+        indices : sequence of int or numpy.ndarray, optional
+            Positional frame indices along ``dim``.
         outfile : str or pathlib.Path, optional
-            Output path for the MP4 animation.
+            MP4 output path.
         quality : {"low", "medium", "high"}, default "medium"
-            Frame-resolution preset used during PNG rendering.
+            Frame-resolution preset.
         fps : int, default 1
-            Frames per second passed to ffmpeg.
+            Frames per second.
         parallel : bool, default True
-            Whether to render frames with multiprocessing.
-        frame_id : bool default True
-            If True add frame id to title
+            Render frames with multiprocessing.
+        frame_id : bool, default True
+            Include the frame identifier in titles.
         **kwargs : Any
-            Additional keyword arguments forwarded to the selected xarray plotting method after signature filtering.
+            Additional xarray plotting arguments.
 
         Returns
         -------
         IPython.display.DisplayHandle or None
-            Inside a Jupyter kernel, the encoded MP4 is embedded and its display handle is returned.
-
+            Notebook display handle when available.
         """
 
         opts = exclude_key("self", dict(locals()))
@@ -913,11 +874,7 @@ class PreprocessAccessor:
 
 @xr.register_dataset_accessor("xgeo")
 class GeoDataset(GeoBase):
-    """``.xgeo`` accessor on a ``Dataset``.
-
-    Adds preprocessing and Dataset-specific operations to the shared
-    geospatial operations of :class:`GeoBase`.
-    """
+    """Dataset accessor extending the shared geographic operations."""
 
     __slots__ = ()
 
@@ -1045,9 +1002,9 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
 
         return [stat.st_size, stat.st_mtime_ns]
 
-    def signature() -> dict:
+    def signature() -> dict[str, Any]:
         """Return a stable signature for a source file."""
-        integrations: dict[str, dict | None] = {}
+        integrations: dict[str, dict[str, Any] | None] = {}
 
         for name in integration_names:
             try:
@@ -1088,10 +1045,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                 ):
                     continue
 
-                raise RuntimeError(
-                    f"{module_name!r} is installed but dependency "
-                    + f"{missing!r} is missing."
-                ) from exc
+                raise RuntimeError(f"{module_name!r} missing dependency {missing!r}.") from exc
 
             for name in names:
                 registered = False
@@ -1105,15 +1059,10 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
                     registered = True
 
                     if not inspect.isclass(accessor):
-                        raise RuntimeError(
-                            f"{class_name}.{name} is not an accessor class."
-                        )
+                        raise RuntimeError(f"{class_name}.{name} must be an accessor class.")
 
                     if accessor.__qualname__ != accessor.__name__:
-                        raise RuntimeError(
-                            f"{class_name}.{name} is a nested class "
-                            + "and cannot be imported."
-                        )
+                        raise RuntimeError(f"Nested accessor {class_name}.{name} is unsupported.")
 
                     found[cls].append((name, accessor.__module__, accessor.__name__))
 

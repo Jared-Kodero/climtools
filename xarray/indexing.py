@@ -35,8 +35,7 @@ def _select_partition_dim(
         return None
     if len(hit) > 1:
         raise NotImplementedError(
-            f"{caller} cannot yet index more than one active partition "
-            + f"dimension in a single call: {hit!r}"
+            f"{caller} supports one partition dimension per call; got {hit!r}."
         )
     return hit[0]
 
@@ -115,9 +114,7 @@ def mpp_isel(
         )
 
     if not isinstance(distributed_indexer, slice):
-        raise NotImplementedError(
-            "Distributed isel currently supports slices and scalar indices."
-        )
+        raise NotImplementedError("Distributed isel supports only slices or scalar indices.")
     if distributed_indexer.step not in (None, 1):
         raise NotImplementedError("Distributed isel currently requires slice step 1.")
 
@@ -125,12 +122,8 @@ def mpp_isel(
     requested_start, requested_stop, _ = distributed_indexer.indices(global_size)
     requested_stop = max(requested_start, requested_stop)
 
-    # Index arithmetic only: a compute-domain partition is contiguous and
-    # ordered by rank, so this rank's post-slice global offset follows from
-    # its own bounds (see mpp.mpp_slice_compute_domain). FMS reads the same
-    # information out of its local copy of domain%list(:) rather than asking
-    # the other PEs, and the old allgather here was the only communication in
-    # what is otherwise a pure metadata operation.
+    # Compute slice offsets from local contiguous bounds; no cross-rank metadata
+    # exchange is needed.
     local_start, local_stop, new_start = mpp_slice_compute_domain(
         int(meta["starts"][dim]),
         int(meta["stops"][dim]),
@@ -149,12 +142,7 @@ def mpp_isel(
         dim_comm = _dim_comm(mpi_context, meta, dim)
         counts = dim_comm.allgather(int(output.sizes[dim]))
         if len(meta["dims"]) > 1:
-            raise NotImplementedError(
-                "cannot yet redistribute a partition slice "
-                + f"({dim!r}) that collapsed to a single global element "
-                + "under a multi-dimensional partition; pass "
-                + "partition_dim=None to keep it where it landed."
-            )
+            raise NotImplementedError(f"Cannot redistribute collapsed partition dimension {dim!r}.")
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_stop = new_start + (local_stop - local_start)
@@ -193,17 +181,11 @@ def mpp_isel_scalar(
     global_size = int(meta["global_sizes"][dim])
     normalized = index + global_size if index < 0 else index
     if normalized < 0 or normalized >= global_size:
-        raise IndexError(
-            f"index {index} is out of bounds for dimension {dim!r} "
-            + f"with size {global_size}."
-        )
+        raise IndexError(f"Index {index} is out of bounds for {dim!r} (size {global_size}).")
 
     dim_comm = _dim_comm(mpi_context, meta, dim)
-    # Whether *this* rank owns the index is a local question, so finding the
-    # owner is a one-integer maximum rather than a gather of every rank's
-    # bounds: a rank that owns it offers its own number, one that does not
-    # offers -1. Fixed-size, and it does not grow with rank count the way
-    # collecting the whole bounds table did.
+    # Find a scalar index owner with a fixed-size reduction instead of gathering rank
+    # bounds.
     claim = np.array(
         [
             dim_comm.rank
@@ -222,10 +204,8 @@ def mpp_isel_scalar(
     if dim_comm.rank == owner:
         local_index = normalized - int(meta["starts"][dim])
         result = strip_mpi_meta(value).isel({dim: local_index, **other_indexers})
-        # Materialize before it gets pickled by bcast below, for the same
-        # reason median()/cumsum()/the unbounded fill scan do: an isel
-        # slice of a still-lazy `value` stays lazy, and a lazy dask
-        # graph is not guaranteed picklable.
+        # Materialize scalar selections before broadcast to avoid pickling lazy Dask
+        # graphs.
         result = result.load()
     result = dim_comm.bcast(result, root=owner)
     result = reattach_meta_after_collapse(result, meta, dim)
@@ -294,22 +274,15 @@ def mpp_sel(
         )
 
     if not isinstance(distributed_indexer, slice):
-        raise NotImplementedError(
-            "Distributed sel currently supports slices and scalar labels."
-        )
+        raise NotImplementedError("Distributed sel supports only slices or scalar labels.")
 
     local_indexers = dict(supplied)
     local_indexers[dim] = distributed_indexer
     output = value.sel(local_indexers, method=method, tolerance=tolerance, drop=drop)
     dim_comm = _dim_comm(mpi_context, meta, dim)
 
-    # Unlike isel, a label slice cannot be resolved locally: a rank only holds
-    # its own coordinate values, so it cannot know how many elements the ranks
-    # below it kept. It does not need the full per-rank vector to find out,
-    # though. The new global size is a SUM and this rank's new offset is the
-    # exclusive prefix sum of the same quantity, so two fixed-size buffer
-    # collectives replace a pickled allgather whose message grows with rank
-    # count.
+    # Use a global sum and exclusive prefix sum to resolve label-slice sizes and
+    # offsets.
     local_length = np.array([int(output.sizes[dim])], dtype=np.int64)
     total = np.empty_like(local_length)
     dim_comm.Allreduce(local_length, total, op=MPI.SUM)
@@ -323,12 +296,7 @@ def mpp_sel(
     if new_global_size == 1 and partition_dim is not None:
         counts = dim_comm.allgather(int(local_length[0]))
         if len(meta["dims"]) > 1:
-            raise NotImplementedError(
-                "cannot yet redistribute a partition slice "
-                + f"({dim!r}) that collapsed to a single global element "
-                + "under a multi-dimensional partition; pass "
-                + "partition_dim=None to keep it where it landed."
-            )
+            raise NotImplementedError(f"Cannot redistribute collapsed partition dimension {dim!r}.")
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_stop = new_start + int(local_length[0])
@@ -374,18 +342,8 @@ def mpp_sel_scalar(
             local_coord = np.arange(int(meta["starts"][dim]), int(meta["stops"][dim]))
         local_start = int(meta["starts"][dim])
 
-        # Resolve the match using only this rank's own local coordinate
-        # slice -- no other rank's coordinate values are needed to know
-        # how good this rank's own candidate is, so this is entirely
-        # rank-local (zero communication). "nearest" ranks candidates by
-        # distance to `label`; "pad"/"ffill" and "backfill"/"bfill" rank
-        # by the matched coordinate value itself, since xarray's own
-        # per-rank `.sel(method=...)` already finds this rank's tightest
-        # local bound (largest local coord <= label, or smallest local
-        # coord >= label respectively) -- the true global bound is then
-        # just the max (ffill) or min (bfill) of those local bounds
-        # across ranks, exactly like a bounded reduction rather than a
-        # full-object allgather.
+        # Resolve each rank's best inexact match locally; reduce only the candidate
+        # metadata globally.
         if method in ("nearest",):
             rank_fn = min
         elif method in ("pad", "ffill"):
@@ -393,9 +351,7 @@ def mpp_sel_scalar(
         elif method in ("backfill", "bfill"):
             rank_fn = min
         else:
-            raise NotImplementedError(
-                f"Distributed inexact sel does not support method={method!r}."
-            )
+            raise NotImplementedError(f"Distributed sel does not support method={method!r}.")
 
         candidate: tuple[int, Any] | None = None
         if local_coord.size:
@@ -410,9 +366,7 @@ def mpp_sel_scalar(
                 selected = None
             if selected is not None:
                 if selected.ndim != 0:
-                    raise NotImplementedError(
-                        "Inexact distributed sel requires a unique one-dimensional index."
-                    )
+                    raise NotImplementedError("Inexact sel requires a unique 1-D index.")
                 local_index = int(selected.item())
                 matched_coord = local_coord[local_index]
                 key = (
@@ -420,10 +374,7 @@ def mpp_sel_scalar(
                 )
                 candidate = (local_start + local_index, key)
 
-        # A small, fixed-size (one tuple per rank) collective -- not the
-        # coordinate data itself -- is all that is genuinely required to
-        # pick the global winner among each rank's already-resolved local
-        # candidate.
+        # Exchange only one candidate tuple per rank to choose the global match.
         candidates = [c for c in dim_comm.allgather(candidate) if c is not None]
         if not candidates:
             raise KeyError(f"No match for label {label!r} on {dim!r}.")
@@ -474,10 +425,7 @@ def mpp_sel_scalar(
 
     meta = mpp_get_meta(value)
     dim_comm = mpi_context.comm if meta is None else _dim_comm(mpi_context, meta, dim)
-    # How many ranks matched, and which one, in a single fixed-size sum
-    # rather than a gathered flag per rank. The rank total is only read when
-    # exactly one rank contributed, in which case it *is* that rank's number;
-    # the ambiguous case is rejected below before it is used.
+    # Use one fixed-size sum to detect and identify a unique matching rank.
     claim = np.array([int(found), dim_comm.rank if found else 0], dtype=np.int64)
     tally = np.empty_like(claim)
     dim_comm.Allreduce(claim, tally, op=MPI.SUM)
@@ -485,9 +433,7 @@ def mpp_sel_scalar(
     if owner_count == 0:
         raise KeyError(f"No rank contains label {label!r} on {dim!r}.")
     if owner_count > 1:
-        raise NotImplementedError(
-            "Distributed scalar sel requires labels to be owned by one rank."
-        )
+        raise NotImplementedError("Scalar sel requires a unique owning rank.")
     owner = int(tally[1])
     payload = result if dim_comm.rank == owner else None
     # Materialize before it gets pickled by bcast below (same reasoning as
@@ -536,22 +482,13 @@ def _repartition_singleton(
             return _keep_single_owner()
         target = choose_partition_dim(candidates, comm.size, rank=comm.rank)
     elif target not in candidates:
-        raise ValueError(
-            f"partition_dim={target!r} is not a surviving dimension of "
-            + f"the selection result (old partition dimension {old_dim!r} "
-            + "has already collapsed to a single global element and "
-            + "cannot be reused)."
-        )
+        raise ValueError(f"partition_dim={target!r} is absent after selection.")
 
     target_length = candidates[target]
     chunk_size = get_effective_chunk_size(target_length, None, comm.size)
 
-    # Only the owner rank does any real work here (slicing its local
-    # data into comm.size pieces); every other rank just receives.
-    # Guard the owner's slicing so a failure there can't strand every
-    # other rank blocked forever inside scatter() waiting on a root
-    # that already raised and never called it -- the same hazard
-    # IOMixin.partition() guards against for its own root-side prep.
+    # Guard owner-side slicing before scatter so root failures cannot strand other
+    # ranks.
     error: BaseException | None = None
     parts: list[xr.Dataset | xr.DataArray] | None = None
     if comm.rank == owner:

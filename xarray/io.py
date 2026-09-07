@@ -48,7 +48,7 @@ def _open_dataset_1d(
     mpi_context: MPIContext,
     filename_or_obj: Any,
     partition_dim: Hashable | Literal["auto"],
-    open_fn: Callable,
+    open_fn: Callable[..., xr.Dataset],
     chunks: Any,
     log_partitions: bool,
     **kwargs: Any,
@@ -69,10 +69,7 @@ def _open_dataset_1d(
                         rank=mpi_context.comm.rank,
                     )
                 if partition_dim not in metadata.dims:
-                    raise ValueError(
-                        f"partition_dim {partition_dim!r} is not in "
-                        + f"{list(metadata.dims)!r}."
-                    )
+                    raise ValueError(f"Unknown partition dimension {partition_dim!r}.")
                 chunk_info = get_chunk_info(metadata, mpi_context.comm.size)
                 global_size = int(metadata.sizes[partition_dim])
 
@@ -137,7 +134,7 @@ def _open_dataset_cartesian(
     mpi_context: MPIContext,
     filename_or_obj: Any,
     dims: tuple[Hashable, ...],
-    open_fn: Callable,
+    open_fn: Callable[..., xr.Dataset],
     chunks: Any,
     log_partitions: bool,
     **kwargs: Any,
@@ -152,10 +149,7 @@ def _open_dataset_cartesian(
             with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
                 for d in dims:
                     if d not in metadata.dims:
-                        raise ValueError(
-                            f"partition_dim {d!r} is not in "
-                            + f"{list(metadata.dims)!r}."
-                        )
+                        raise ValueError(f"Unknown partition dimension {d!r}.")
                 plan = {"extents": tuple(int(metadata.sizes[d]) for d in dims)}
         except BaseException as exc:
             error = exc
@@ -269,10 +263,7 @@ def mpp_partition(
             if value is None:
                 raise ValueError(f"Rank {root} (root) must provide a value, not None.")
             if mpp_get_meta(value) is not None:
-                raise ValueError(
-                    "Cannot partition an already distributed object. "
-                    + "Reduce or gather its distributed dimension first."
-                )
+                raise ValueError("Object is already distributed.")
             stripped = strip_mpi_meta(value)
 
             if not stripped.dims:
@@ -299,17 +290,12 @@ def mpp_partition(
                         stripped.sizes, comm.size, rank=comm.rank
                     )
                 if resolved_dim not in stripped.dims:
-                    raise ValueError(
-                        f"Distribution dimension {resolved_dim!r} does not exist."
-                    )
+                    raise ValueError(f"Unknown partition dimension {resolved_dim!r}.")
                 pieces = _partition_pieces_1d(
                     stripped, resolved_dim, comm.size, chunk_info
                 )
         elif value is not None:
-            raise ValueError(
-                f"Only rank {root} (root) may provide a value; "
-                + f"got one on rank {comm.rank}."
-            )
+            raise ValueError(f"Only root rank {root} may provide value; got rank {comm.rank}.")
     except BaseException as exc:
         error = exc
     mpi_context.raise_if_error(error, "partition")
@@ -329,10 +315,8 @@ def mpp_partition(
     if is_root:
         assert pieces is not None
         output = pieces[root]
-        # Post every outgoing piece before waiting on any of them. The
-        # previous blocking loop completed one handshake before starting the
-        # next, so the scatter cost grew with rank count instead of staying
-        # flat -- see MPIContext.send_all.
+        # Post all sends before waiting so scatter latency does not serialize with rank
+        # count.
         mpi_context.send_all(
             {rank: piece for rank, piece in enumerate(pieces) if rank != root},
             tag=_DISTRIBUTE_TAG,
@@ -436,7 +420,7 @@ def _partition_pieces_nd(
     """Slice ``stripped`` into one piece per rank on a Cartesian grid."""
     for d in dims:
         if d not in stripped.dims:
-            raise ValueError(f"Distribution dimension {d!r} does not exist.")
+            raise ValueError(f"Unknown partition dimension {resolved_dim!r}.")
     extents = tuple(int(stripped.sizes[d]) for d in dims)
     sizes = dict(zip(dims, extents, strict=True))
 
@@ -506,50 +490,35 @@ def mpp_create_dataarray(
     mpi_context : MPIContext
         MPI context used for communication.
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension.
+        Function producing this rank's local values.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
         Global dimension sizes.
-    dim : Hashable, int, or sequence of Hashable, optional
-        Dimension or axis to partition.
+    dim : Hashable, int, or sequence of Hashable
+        Dimension or dimensions to partition.
     dtype : Any, optional
-        Data type returned by ``fill``.
+        Fill-function output dtype.
     coords : mapping, optional
-        Coordinates passed to :class:`xarray.DataArray`.
+        DataArray coordinates.
     name : Hashable, optional
         DataArray name.
     attrs : mapping, optional
         DataArray attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout.
-    min_partition_size : int, mapping, or None, optional
-        Guaranteed minimum local length for any rank that receives data
-        along a partitioned dimension, or a per-dimension mapping of the
-        same (missing dimensions get no minimum). When the requested rank
-        count would otherwise leave some rank with fewer elements than
-        this along a given dimension, that dimension's data is instead
-        spread across only as many ranks as keep every active rank at or
-        above the minimum -- the remaining, highest-numbered ranks get an
-        empty local slice for that dimension, the same outcome already
-        used when the global size is smaller than the rank count. Set
-        this to the widest halo width, ``rolling_reduce``/``coarsen_reduce``
-        window, or ``ffill``/``bfill`` ``limit`` you plan to call on the
-        result, so :func:`~.arithmetic.mpp_halo_exchange` never raises its
-        "local partition shorter than the requested halo" ``ValueError``
-        for that dimension regardless of rank count. See
-        :func:`~.chunks.get_balanced_bounds`.
+        Log the rank layout.
+    min_partition_size : int or mapping, optional
+        Minimum non-empty local extent per partition dimension.
 
     Returns
     -------
     xarray.DataArray
-        Lazy rank-local DataArray carrying ``mpi_meta``.
+        Rank-local DataArray carrying MPI metadata.
 
     Raises
     ------
     ValueError
-        If ``dim`` is invalid or global sizes cannot be resolved.
-
+        If partition dimensions or global sizes are invalid.
     """
     partition_dims = _normalize_create_dim(dim, dims)
     min_chunk_map = (
@@ -564,9 +533,7 @@ def mpp_create_dataarray(
         explicit_sizes = dict(shape) if shape else None
     else:
         if len(shape) != len(dims):
-            raise ValueError(
-                f"shape has {len(shape)} entries but dims has {len(dims)}."
-            )
+            raise ValueError(f"shape has {len(shape)} entries; dims has {len(dims)}.")
         explicit_sizes = dict(zip(dims, shape, strict=True))
     resolved_sizes = resolve_sizes(dims, explicit_sizes, coords)
 
@@ -659,35 +626,24 @@ def mpp_create_dataset(
     mpi_context : MPIContext
         MPI context used for communication.
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs.
+        DataArrays or ``(dims, fill)`` variable specifications.
     sizes : mapping, optional
         Global dimension sizes.
     dim : Hashable or sequence of Hashable
-        Dimension(s) to partition.
+        Dimension or dimensions to partition.
     dtype : Any or mapping, optional
         Default or per-variable fill dtype.
-    coords : mapping, optional
-        Coordinates passed to :class:`xarray.Dataset`.
-    attrs : mapping, optional
-        Dataset attributes.
+    coords, attrs : mapping, optional
+        Dataset coordinates and attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout.
-    min_partition_size : int, mapping, or None, optional
-        Guaranteed minimum local length for any rank that receives data
-        along a partitioned dimension, or a per-dimension mapping of the
-        same. See :func:`create_dataarray`'s parameter of the same name
-        and :func:`~.chunks.get_balanced_bounds`.
+        Log the rank layout.
+    min_partition_size : int or mapping, optional
+        Minimum non-empty local extent per partition dimension.
 
     Returns
     -------
     xarray.Dataset
-        Lazy rank-local Dataset carrying ``mpi_meta``.
-
-    Raises
-    ------
-    ValueError
-        If sizes cannot be resolved or a partitioned DataArray has the wrong local length.
-
+        Rank-local Dataset carrying MPI metadata.
     """
     if isinstance(dim, (list, tuple)):
         if not dim:
@@ -732,10 +688,8 @@ def mpp_create_dataset(
                     expected_len = d_stop - d_start
                     if int(spec.sizes[d]) != expected_len:
                         raise ValueError(
-                            f"data_vars[{var_name!r}] is a DataArray of "
-                            + f"length {spec.sizes[d]} along {d!r}, but "
-                            + f"this rank owns [{d_start}:{d_stop}) "
-                            + f"({expected_len} elements)"
+                            f"data_vars[{var_name!r}] has local {d!r} length "
+                            + f"{spec.sizes[d]}; expected {expected_len}."
                         )
             built_vars[var_name] = spec
             continue
@@ -844,10 +798,7 @@ def mpp_repartition(
 
     """
     if mpp_get_meta(value) is not None:
-        raise ValueError(
-            "Cannot repartition an already distributed object. "
-            + "Reduce or gather its distributed dimension first."
-        )
+        raise ValueError("Object is already distributed.")
 
     automatic = dim == "auto"
     if automatic:
@@ -981,7 +932,9 @@ def mpi_open_dataset(
     use_mfdataset = (isinstance(filename, str) and "*" in filename) or isinstance(
         filename, (list, tuple)
     )
-    open_fn: Callable = xr.open_mfdataset if use_mfdataset else xr.open_dataset
+    open_fn: Callable[..., xr.Dataset] = (
+        xr.open_mfdataset if use_mfdataset else xr.open_dataset
+    )
 
     requested_dims = _as_partition_dims(partition_dim)
     if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
@@ -1027,42 +980,37 @@ def mpi_create_dataarray(
     log_partitions: bool = False,
     min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> MPIXarray:
-    """Create a distributed DataArray from a rank-local fill function.
+    """Create an :class:`MPIXarray` DataArray from a fill function.
 
     Parameters
     ----------
     mpi_context : MPIContext or mpi4py.MPI.Intracomm
-        Runtime or communicator the result is bound to.
+        MPI context or communicator.
     fill : callable
-        Function called as ``fill(start, stop)`` for this rank's bounds when ``dim`` names a single dimension, or as ``fill(start_0, stop_0, start_1, stop_1, ...)`` -- one pair per partitioned dimension, in ``dim``'s order -- when ``dim`` names two or more.
+        Function producing rank-local values.
     dims : sequence of Hashable
         Dimension names.
     shape : sequence of int, mapping, or None, optional
         Global dimension sizes.
-    dim : Hashable, int, or sequence of Hashable, optional
-        Dimension or axis to partition.
+    dim : Hashable, int, or sequence of Hashable
+        Partition dimension or dimensions.
     dtype : Any, optional
-        Data type returned by ``fill``.
+        Fill-function output dtype.
     coords : mapping, optional
-        Coordinates passed to ``xarray.DataArray``.
+        DataArray coordinates.
     name : Hashable, optional
         DataArray name.
     attrs : mapping, optional
         DataArray attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout.
-    min_partition_size : int, mapping, or None, optional
-        Guaranteed minimum local length per partitioned dimension, or a
-        per-dimension mapping of the same; ranks beyond however many keep
-        every active rank at or above the minimum get an empty local
-        slice for that dimension instead. See
-        :func:`~.chunks.get_balanced_bounds`.
+        Log the rank layout.
+    min_partition_size : int or mapping, optional
+        Minimum non-empty local extent per partition dimension.
 
     Returns
     -------
     MPIXarray
-        Lazy rank-local DataArray with ``.meta`` set.
-
+        Distributed DataArray wrapper.
     """
     from .core import MPIXarray
 
@@ -1099,37 +1047,31 @@ def mpi_create_dataset(
     log_partitions: bool = True,
     min_partition_size: int | Mapping[Hashable, int] | None = None,
 ) -> MPIXarray:
-    """Create a distributed Dataset from rank-local variables.
+    """Create an :class:`MPIXarray` Dataset from rank-local variables.
 
     Parameters
     ----------
     mpi_context : MPIContext or mpi4py.MPI.Intracomm
-        Runtime or communicator the result is bound to.
+        MPI context or communicator.
     data_vars : mapping
-        Variables as DataArrays or ``(dims, fill)`` pairs.
+        DataArrays or ``(dims, fill)`` variable specifications.
     sizes : mapping, optional
         Global dimension sizes.
     dim : Hashable or sequence of Hashable
-        Dimension(s) to partition.
+        Partition dimension or dimensions.
     dtype : Any or mapping, optional
         Default or per-variable fill dtype.
-    coords : mapping, optional
-        Coordinates passed to ``xarray.Dataset``.
-    attrs : mapping, optional
-        Dataset attributes.
+    coords, attrs : mapping, optional
+        Dataset coordinates and attributes.
     log_partitions : bool, optional
-        Log the resulting rank layout.
-    min_partition_size : int, mapping, or None, optional
-        Guaranteed minimum local length per partitioned dimension, or a
-        per-dimension mapping of the same. See
-        :func:`mpi_create_dataarray`'s parameter of the same name and
-        :func:`~.chunks.get_balanced_bounds`.
+        Log the rank layout.
+    min_partition_size : int or mapping, optional
+        Minimum non-empty local extent per partition dimension.
 
     Returns
     -------
     MPIXarray
-        Lazy rank-local Dataset with ``.meta`` set.
-
+        Distributed Dataset wrapper.
     """
     from .core import MPIXarray
 
@@ -1247,7 +1189,7 @@ def to_netcdf(
     nofill: bool = True,
     allow_serial: bool = False,
 ) -> None:
-    """Write a Dataset or DataArray to NetCDF.
+    """Write an xarray object to NetCDF.
 
     Parameters
     ----------
@@ -1258,38 +1200,31 @@ def to_netcdf(
     mpi_context : MPIContext or mpi4py.MPI.Intracomm, optional
         MPI context or communicator.
     unlimited_dim : str or iterable of str, optional
-        Dimension or dimensions made unlimited.
+        Unlimited dimension names.
     partition_dim : str, optional
         MPI partition dimension.
-    parallel : bool, default: False
+    parallel : bool, default False
         Use MPI-parallel NetCDF-4 output.
-    batch_size : int, default: 24
-        Number of slices written per serial append.
-    format : str, default: "NETCDF4"
+    batch_size : int, default 24
+        Slices written per serial append.
+    format : str, default "NETCDF4"
         NetCDF format for serial output.
-    shuffle : bool, default: True
-        Apply the HDF5 shuffle filter.
-    zlib : bool, default: True
-        Apply zlib compression.
-    complevel : int, default: 4
-        Compression level from 0 through 9.
-    show_progress : bool, default: True
+    shuffle, zlib : bool, default True
+        HDF5 filters.
+    complevel : int, default 4
+        Compression level.
+    show_progress : bool, default True
         Display serial write progress.
     stdout : Any, optional
-        Serial progress output stream.
-    chunks : mapping of str to iterable of int, optional
-        Explicit NetCDF variable chunk shapes.
+        Progress output stream.
+    chunks : mapping, optional
+        Explicit NetCDF chunk shapes.
     hints : str, optional
-        Semicolon-separated MPI-IO hints in ``key=value`` form.
-    nofill : bool, default: True
-        Disable NetCDF pre-filling during parallel initialization.
-    allow_serial : bool, default: False
+        Semicolon-separated MPI-IO ``key=value`` hints.
+    nofill : bool, default True
+        Disable NetCDF pre-filling in parallel mode.
+    allow_serial : bool, default False
         Permit the parallel writer with one MPI rank.
-
-    Returns
-    -------
-    None
-
     """
 
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
@@ -1316,18 +1251,14 @@ def to_netcdf(
             disagreeing = [
                 rank for rank, state in enumerate(agreed) if state != agreed[0]
             ]
-            raise mpi_context.MPIError(
-                "MPI ranks disagree about whether the object is distributed; "
-                + f"ranks {disagreeing} differ from rank 0. Parallel NetCDF "
-                + "output requires the same distribution state on every rank."
-            )
+            raise mpi_context.MPIError(f"MPI ranks disagree on distribution state: {disagreeing}.")
 
         if distributed:
             distributed_dim = str(mpi_meta["dim"])
             if partition_dim is not None and partition_dim != distributed_dim:
                 raise ValueError(
-                    f"partition_dim {partition_dim!r} does not match "
-                    + f"distributed dimension {distributed_dim!r}."
+                    f"partition_dim={partition_dim!r} differs from distributed "
+                    + f"dim={distributed_dim!r}."
                 )
             partition_dim = distributed_dim
         elif mpi_context.comm.rank != 0:

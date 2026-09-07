@@ -63,18 +63,7 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 
-#: Attrs key for the lightweight boolean flag :func:`mark_partitioned`
-#: stamps onto ``MPIXarray.data`` (and, for a Dataset, every distributed
-#: variable) after the full ``mpi_meta`` dict is popped into ``.meta``.
-#: ``.meta`` (or, inside the engine, the ``mpi_meta`` dict reattached
-#: transiently by :meth:`MPIXarray._prepare`) remains the source of truth
-#: for distribution state; this exists so code that sees ``.data`` on its
-#: own (e.g. after it is handed to a plain xarray function) has a cheap,
-#: human-inspectable hint that it was part of an MPI partition. Defined in
-#: :mod:`.meta` as :data:`~.meta.PARTITIONED_ATTR` (imported here under its
-#: original name) so :func:`~.meta.strip_mpi_meta` and every NetCDF
-#: attribute writer in :mod:`.netcdf` filter the identical key -- see
-#: :func:`~.meta.strip_export_attrs`.
+#: Lightweight partition marker; full distribution state remains in ``mpi_meta``.
 
 #: Sentinel distinguishing "no fill value given" from a genuine ``other=None``
 #: in :meth:`MPIXarray.where`.
@@ -84,12 +73,7 @@ _WHERE_UNSET = object()
 #: ``NaN`` default) from a genuine ``fill_value=None`` in :meth:`MPIXarray.reindex`.
 _FILL_VALUE_UNSET = object()
 
-#: Explicit allowlist of read-only xarray properties ``MPIXarray.__getattr__``
-#: forwards to ``self.data``. Deliberately a fixed list, not a
-#: ``callable(...)`` check: a heuristic based on callability would pass
-#: through non-callable-but-still-wrong things (e.g. accessor namespaces)
-#: just as easily as it would block a legitimate future property, and is
-#: no easier to audit than this list is.
+#: Read-only xarray properties safe to expose without changing partition ownership.
 _SAFE_PASSTHROUGH_ATTRS: frozenset[str] = frozenset(
     {
         "attrs",
@@ -114,30 +98,8 @@ _SAFE_PASSTHROUGH_ATTRS: frozenset[str] = frozenset(
     }
 )
 
-#: Explicit allowlist of xarray methods ``MPIXarray.__getattr__`` forwards
-#: to ``self.apply(...)`` -- i.e. runs rank-locally, through the same
-#: partition-preservation check every other ``mpp_apply()`` call gets, and
-#: with zero MPI communication when the partition dimension isn't touched
-#: at all (which for every method below is *always*, regardless of what
-#: dimension name is passed).
-#:
-#: Deliberately an allowlist, not a blocklist of "known-dangerous" names:
-#: several xarray methods are *structurally* partition-preserving (same
-#: length, same coordinate labels -- passes ``mpp_apply()``'s existing
-#: post-call check) while being *value*-wrong without a neighboring
-#: rank's data when applied along the partition dimension --
-#: ``shift``, ``rolling(...).reduce()``, ``differentiate``, ``pad``,
-#: ``interpolate_na``/``ffill``/``bfill``, roughly the same family
-#: ``rolling_reduce``/``mpp_halo_exchange`` exist to handle correctly. Those
-#: would silently produce wrong values through a blind passthrough, not
-#: raise -- the structural check has no way to catch them. Only names
-#: individually verified never to depend on dimension content this way,
-#: for any arguments, belong here. ``squeeze`` is deliberately excluded
-#: for a related but distinct reason: whether it removes the partition
-#: dimension can depend on this rank's own local length in an uneven
-#: partition, which risks the exact asymmetric-raise hazard (one rank's
-#: post-call check fails, others' don't, and only the failing rank ever
-#: raises) fixed for ``mpp_halo_exchange`` earlier -- not addressed here.
+#: Allow only methods proven rank-local and partition-preserving.
+#: Communication-dependent methods require dedicated implementations.
 _SAFE_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
     {
         "astype",
@@ -198,27 +160,8 @@ class MPIXarray:
 
     """
 
-    #: NumPy ufunc dispatch (`np.log(mpixarray)`, `np.add(a, b)`, ...): for
-    #: an elementwise call (`method == "__call__"`, the overwhelming
-    #: majority of ufuncs -- `log`, `sqrt`, `exp`, `sin`, `add`,
-    #: `multiply`, `isnan`, ...), every input is elementwise-independent
-    #: by definition, so it is exactly the kind of partition-preserving,
-    #: rank-local callable `mpp_apply()` exists for: no communication, and
-    #: the result stays a distributed MPIXarray rather than being
-    #: silently gathered onto every rank (`mpp_apply()`/`mpp_check_operands_distribution`
-    #: already validate any MPIXarray operands share a compatible
-    #: partition -- the same check `__add__`/etc. below rely on -- and a
-    #: plain scalar or numpy array operand is left untouched, so ordinary
-    #: broadcasting applies exactly as it would for `self.data`). Any
-    #: other method (`reduce`, `accumulate`, `outer`, `at`, ...) is a
-    #: non-elementwise, potentially cross-rank operation (`np.add.reduce`
-    #: is a sum across the array, for instance) that must not be routed
-    #: through this rank-local path -- returning `NotImplemented` lets
-    #: NumPy raise its own clear error rather than silently mishandling
-    #: it; use the dedicated distributed method (`.sum()`, `.cumsum()`,
-    #: ...) instead. `out=` is similarly refused: MPIXarray is immutable
-    #: by construction (see the class docstring), so there is no rank-local
-    #: buffer to write into in place.
+    #: Route elementwise ufunc calls through ``mpp_apply``; reject reductions and
+    #: in-place ``out=`` writes.
     def __array_ufunc__(
         self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any
     ) -> Any:
@@ -289,12 +232,7 @@ class MPIXarray:
             return getattr(self.data, name)
         if name in _SAFE_PASSTHROUGH_METHODS:
             return self._safe_method_wrapper(name)
-        raise AttributeError(
-            f"{name!r} is not an MPI-aware method or an allowlisted "
-            + f"passthrough. Use `.data.{name}` for xarray's plain, "
-            + f"rank-local version, or add `{name}` to MPIXarray if it "
-            + "needs to be distribution-safe."
-        )
+        raise AttributeError(f"MPIXarray has no distribution-safe attribute {name!r}.")
 
     def _safe_method_wrapper(self, name: str) -> Callable[..., Any]:
         """Return a bound, ``mpp_apply()``-based forward of ``self.data.<name>``."""
@@ -320,63 +258,9 @@ class MPIXarray:
         if netCDF4.__has_parallel4_support__:
             return
         else:
-            raise RuntimeError("netCDF4 lacks parallel support!")
+            raise RuntimeError("netCDF4 lacks parallel HDF5 support.")
 
-    #
-    # Each redirects to `mpp_apply()`, so operand handling is exactly `mpp_apply()`'s
-    # (and `mpp_where()`'s) existing, already-tested contract -- no new rules:
-    #
-    # - MPIXarray + MPIXarray: must share the same partition (same dim,
-    #   same start/stop on this rank) or raises, pointing at `.align()`.
-    # - MPIXarray + a raw xarray.Dataset/DataArray: fine if it doesn't
-    #   carry the partition dimension at all (broadcasts normally); if it
-    #   does, it must already be sized -- and, where both sides have an
-    #   index, exactly labeled -- to match this rank's own local slice, or
-    #   raises pointing at `.align()`. A *replicated* full-size object is
-    #   not auto-repartitioned to fit -- that would be a silent guess
-    #   about intent; wrap it first (`MPIXarray(full_array, mpi_context)`,
-    #   which auto-partitions replicated input) if that is what you want.
-    # - MPIXarray + a plain scalar or numpy array: never carries
-    #   distribution info, so it is never partition-checked at all --
-    #   xarray's ordinary shape-based broadcasting applies, exactly as it
-    #   would for `self.data + other` directly. A numpy array meant to
-    #   line up with the partition dimension must already be sized to
-    #   this rank's own local length, the same requirement as above.
-    #
-    # Reversed operand order (`other + self`) works reliably when `other`
-    # is a plain scalar or numpy array (`5 + ds`, `np.array([1, 2]) * ds`
-    # -- verified: `__array_ufunc__ = None` above makes Python's own
-    # numeric protocol and numpy's ufunc machinery correctly defer to
-    # `__radd__`/etc.). It does NOT work when `other` is a raw
-    # `xarray.Dataset`/`DataArray` (`raw_dataset + ds`): xarray's own
-    # `Dataset._binary_op`/`DataArray._binary_op` only return
-    # `NotImplemented` for `DataTree`/`GroupBy`, not for an unrecognized
-    # type generally, and do not consult `__array_ufunc__`/
-    # `__array_priority__` at that level -- so it fails inside xarray's
-    # own internals rather than reaching `MPIXarray.__radd__` at all. Not
-    # fixable from this side without monkeypatching xarray itself. Put
-    # the `MPIXarray` operand on the left instead (`ds + raw_dataset`,
-    # which does work, verified above).
-    #
-    # No in-place operators (`__iadd__` etc.): MPIXarray is immutable by
-    # construction (`.data`/`.meta` are only ever assigned in `__init__`;
-    # see its class docstring), so `x += y` falls back to Python's default
-    # `x = x.__add__(y)` and rebinds the name, consistent with every other
-    # method here returning a new MPIXarray rather than mutating `self`.
-    #
-    # `@`/`__matmul__` is the one exception: matrix multiplication can
-    # reduce across the partition dimension, so it is not just an
-    # elementwise `mpp_apply()` call -- it redirects to the dedicated
-    # MPI-aware `mpp_matmul()` instead.
-    #
-    # `__len__`/`__iter__` are deliberately not defined. `self.data` (a
-    # rank-local slice) already has both, but exposing them directly on
-    # MPIXarray would silently return this rank's own local length/items
-    # for a distributed object where a caller is far more likely to mean
-    # the global ones -- an AttributeError/TypeError on `len(mpixarray)`
-    # is safer than a number that is quietly rank-dependent. Use
-    # `.meta["global_size"]` (distributed) or `len(.data)` (local, or
-    # replicated) explicitly instead.
+    # Binary operators require compatible partition ownership; matmul may contract it.
 
     def __add__(self, other: Any) -> Any:
         """Elementwise addition (``self + other``); see the note above."""
@@ -498,31 +382,21 @@ class MPIXarray:
         """Elementwise ``self != other`` -- returns an array, not a bool."""
         return self.apply(_operator.ne, self, other)
 
-    # Elementwise `__eq__` (returning an array, not a bool -- matching
-    # xarray's own DataArray/Dataset) makes MPIXarray unhashable, exactly
-    # as xarray's own Dataset/DataArray already are. Not overridden back
-    # to identity hashing: nothing here needs MPIXarray instances to be
-    # usable as dict keys or set members.
+    # Elementwise equality intentionally leaves ``MPIXarray`` unhashable, matching
+    # xarray.
     __hash__ = None  # type: ignore[assignment]
 
     def __bool__(self) -> bool:
         """Truth value (``if mpixarray:``, ``bool(mpixarray)``)."""
         if self.meta is not None:
-            raise ValueError(
-                "the truth value of a distributed MPIXarray is ambiguous: "
-                + "different ranks could take different branches and "
-                + "deadlock on a later collective"
-            )
+            raise ValueError("Distributed MPIXarray has no single truth value.")
         return bool(self.data)
 
     def __getitem__(self, key: Any) -> Any:
         """Select a Dataset variable by name; mirrors ``xarray.Dataset[key]``."""
         if isinstance(key, str):
             return self.apply(lambda d, k: d[k], self, key)
-        raise TypeError(
-            "only a str key is supported to select a Dataset variable "
-            + f"by name; got {key!r} ({type(key).__name__})"
-        )
+        raise TypeError(f"Dataset variable key must be str, got {type(key).__name__}.")
 
     def __matmul__(self, other: Any) -> MPIXarray:
         """Matrix multiplication (``self @ other``); redirects to :meth:`matmul`."""
@@ -621,12 +495,7 @@ class MPIXarray:
         from .io import to_netcdf
 
         if not parallel and self.meta is not None:
-            raise ValueError(
-                "data is distributed but parallel=False (the default) "
-                + "would silently write only this rank's local slice as "
-                + "the whole file. Pass parallel=True, or gather/"
-                + "replicate to one rank first for serial output."
-            )
+            raise ValueError("Distributed data requires parallel=True for NetCDF output.")
 
         prepared = self._prepare()
         if parallel:
@@ -1212,7 +1081,7 @@ class MPIXarray:
     # -- Groupby (xarray-styled entry points; mpp_groupby_reduce/mpp_resample_reduce
     #    are internal engine dispatch names, not part of this public surface) -
 
-    def groupby(self, dim: Hashable, labels: xr.DataArray | np.ndarray) -> MPIGroupBy:
+    def groupby(self, dim: Hashable, labels: xr.DataArray | np.ndarray[Any, Any]) -> MPIGroupBy:
         """Group by ``labels`` along ``dim``, mirroring ``xarray.Dataset.groupby``.
 
         Parameters

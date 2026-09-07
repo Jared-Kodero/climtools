@@ -45,9 +45,7 @@ def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
     lat = ds.cf["latitude"]
 
     if lon.name is None or lat.name is None:
-        raise ValueError(
-            "Could not determine longitude and latitude coordinate names, specify x= and y="
-        )
+        raise ValueError("Could not infer longitude/latitude coordinates; pass x= and y=.")
 
     return lon.name, lat.name
 
@@ -92,9 +90,7 @@ def add_cyclic_point(
     dataset = False
 
     if isinstance(obj, xr.Dataset) and len(obj.data_vars) > 1:
-        raise ValueError(
-            "Input object must be a DataArray or a Dataset with only one data variable."
-        )
+        raise ValueError("Expected a DataArray or single-variable Dataset.")
 
     if isinstance(obj, xr.Dataset):
         obj = list(obj.data_vars.values())[0]
@@ -176,40 +172,30 @@ def sel_transect(
     yc = data[ydim]
 
     if xc.ndim != 1 or yc.ndim != 1 or xc.dims != (xdim,) or yc.dims != (ydim,):
-        raise ValueError(
-            "Coordinates must define a rectilinear grid with one-dimensional coordinate variables."
-        )
+        raise ValueError("Coordinates must be 1-D on a rectilinear grid.")
 
     if xc.size < 2 or yc.size < 2:
         raise ValueError("Each coordinate must contain at least two points.")
 
     if x is None and y is None:
         if auto_infer_xy is None:
-            raise ValueError(
-                "Both `x` and `y` are missing. Provide at least one coordinate or set `auto_infer_xy` explicitly to 'min' or 'max'."
-            )
+            raise ValueError("Provide x or y, or set auto_infer_xy to 'min' or 'max'.")
 
         if isinstance(data, xr.DataArray):
             inference_data = data
         elif len(data.data_vars) == 1:
             inference_data = next(iter(data.data_vars.values()))
         else:
-            raise ValueError(
-                "Automatic x/y inference for a Dataset requires exactly one data variable."
-            )
+            raise ValueError("Automatic x/y inference requires a single-variable Dataset.")
 
         if inference_data.ndim != 2 or set(inference_data.dims) != {xdim, ydim}:
-            raise ValueError(
-                "Automatic x/y inference requires data with exactly the x and y dimensions."
-            )
+            raise ValueError("Automatic x/y inference requires exactly the x and y dimensions.")
 
         point_dim = "__transect_point"
         flattened = inference_data.stack({point_dim: (ydim, xdim)})
 
         if not bool(flattened.notnull().any().compute().item()):
-            raise ValueError(
-                "Cannot infer x and y from data containing only missing values."
-            )
+            raise ValueError("Cannot infer x/y from all-missing data.")
 
         if auto_infer_xy == "max":
             point_index = flattened.argmax(point_dim, skipna=True)
@@ -482,9 +468,7 @@ def mask(
 
     if isinstance(mask, xr.Dataset):
         if data_var not in mask:
-            raise KeyError(
-                f"Mask variable {data_var!r} not found; available: {list(mask.data_vars)}."
-            )
+            raise KeyError(f"Mask variable {data_var!r} not found.")
         mask = mask[data_var].load()
 
     if not isinstance(mask, xr.DataArray):
@@ -530,37 +514,27 @@ def add_local_solar_time(
 
 
 class SetupDask:
-    """
-    Manage a local Dask cluster and client.
-
-    The cluster and client are shared at module level, so repeated
-    instantiation reuses one cluster rather than starting several. The object
-    can be used directly or as a context manager::
-
-        with SetupDask(workers=4) as dask_setup:
-            result = data.mean("time").compute()
+    """Manage a reusable local Dask cluster.
 
     Parameters
     ----------
     workers : int, default 1
-        Number of worker processes in the cluster.
+        Number of workers.
     threads_per_worker : int, optional
-        Threads per worker. Defaults to the number of available CPUs.
+        Threads per worker.
     processes : bool, default False
-        Use separate processes for the workers rather than threads. Processes
-        avoid the global interpreter lock but pay a serialization cost.
+        Use worker processes instead of threads.
     filter_warnings : bool, default True
-        Silence Dask logging below the error level.
+        Suppress Dask logs below error level.
     memory_limit : str or int, default "auto"
-        Memory limit per worker, for example ``"8GB"``. Set to 0 for no limit.
+        Per-worker memory limit.
 
     Attributes
     ----------
     client : dask.distributed.Client or None
-        The active client, or None before :meth:`start` is called.
+        Active client.
     cluster : dask.distributed.LocalCluster or None
-        The active cluster, or None before :meth:`start` is called.
-
+        Active local cluster.
     """
 
     def __init__(

@@ -1,12 +1,4 @@
-"""FMS/mpp-style distributed-memory primitives, adapted from GFDL FMS.
-
-Covers three FMS layers: the domain decomposition and domain table of
-``mpp_domains_mod`` (``mpp_define_domains``, ``mpp_get_compute_domains``,
-``mpp_get_neighbor_pe``, ``mpp_update_domains``), the plain collectives of
-``mpp_mod`` (``mpp_sum``/``mpp_max``/``mpp_min``), and the extended
-fixed-point reductions of ``mpp_efp_mod`` (``mpp_reproducing_sum``, plus the
-product analogue ``mpp_reproducing_prod`` that FMS has no counterpart for).
-"""
+"""Provide FMS-style MPI domain, halo, reduction, and checksum primitives."""
 
 from __future__ import annotations
 
@@ -56,14 +48,20 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Domain:
-    """This rank's partition: FMS's ``domain2D``/``domain1D``, no data or labels.
+    """Describe one rank's distributed compute domain.
 
-    dims : partitioned dimension names.
-    global_sizes, starts, stops : global length and this rank's
-        half-open ``[start, stop)`` interval per dim (FMS's ``isc:iec``).
-    comm : communicator owning the full global array.
-    cart : ``{grid_shape, coords, periods}`` for a multi-dim partition,
-        else ``None``.
+    Attributes
+    ----------
+    dims : tuple[str, ...]
+        Partitioned dimension names.
+    global_sizes : dict[str, int]
+        Global size of each partitioned dimension.
+    starts, stops : dict[str, int]
+        Rank-local half-open ownership bounds.
+    comm : mpi4py.MPI.Comm
+        Communicator owning the global array.
+    cart : dict or None
+        Cartesian topology descriptor for multi-dimensional partitions.
     """
 
     dims: tuple[str, ...]
@@ -75,7 +73,20 @@ class Domain:
 
     @classmethod
     def from_meta(cls, meta: Mapping[str, Any], comm: MPI.Comm) -> Domain:
-        """Build from climtools' ``.meta`` dict (see ``xarray/meta.py``)."""
+        """Build a domain from climtools MPI metadata.
+
+        Parameters
+        ----------
+        meta : mapping
+            Canonical MPI metadata.
+        comm : mpi4py.MPI.Comm
+            Owning communicator.
+
+        Returns
+        -------
+        Domain
+            Rank-local domain descriptor.
+        """
         dims = tuple(str(d) for d in meta["dims"])
         return cls(
             dims=dims,
@@ -88,25 +99,32 @@ class Domain:
 
 
 def mpp_reduce_scatter(
-    local: np.ndarray,
+    local: np.ndarray[Any, Any],
     op: MPI.Op,
     comm: MPI.Comm,
     recvcounts: Sequence[int],
     *,
     axis: int = 0,
-) -> np.ndarray:
-    """Elementwise-reduce ``local`` (identical shape on every rank) so each
-    rank keeps only its own contiguous slice along ``axis`` -- MPI's
-    ``Reduce_scatter``, generalized to any axis via ``moveaxis`` (it
-    natively splits a flat buffer, so ``axis`` is brought to position 0,
-    split by element count, then moved back). Where :func:`_mpp_reduce`'s
-    ``Allreduce`` gives every rank the full result (needed when every rank
-    genuinely wants a full copy), this gives each rank only the part it
-    will end up owning -- for a result about to be redistributed anyway,
-    that's the same answer without ever materializing the full array on
-    every rank. ``recvcounts[r]`` is rank ``r``'s share of ``axis``, in
-    elements along that axis (not flattened count); their sum must equal
-    ``local.shape[axis]``.
+) -> np.ndarray[Any, Any]:
+    """Reduce an array and retain each rank's contiguous slice.
+
+    Parameters
+    ----------
+    local : numpy.ndarray
+        Equal-shaped local reduction buffer on every rank.
+    op : mpi4py.MPI.Op
+        Reduction operator.
+    comm : mpi4py.MPI.Comm
+        Reduction communicator.
+    recvcounts : sequence of int
+        Elements retained by each rank along ``axis``.
+    axis : int, default 0
+        Axis split among ranks.
+
+    Returns
+    -------
+    numpy.ndarray
+        This rank's reduced slice.
     """
     moved = np.ascontiguousarray(np.moveaxis(local, axis, 0))
     per_slice = moved[0].size if moved.ndim > 1 else 1
@@ -119,30 +137,24 @@ def mpp_reduce_scatter(
 
 
 def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]:
-    """Choose a 2D process grid for ``ndivs`` ranks over ``extent0 x extent1``.
+    """Choose a two-dimensional process-grid layout.
 
-    FMS's ``mpp_define_layout2D`` guesses the aspect-ratio-matching divisor,
-    ``nint(sqrt(ndivs*isz/jsz))``, then walks it *down* until it divides
-    ``ndivs``. That search is one-directional, so it never reconsiders a
-    divisor above the guess and can land on a needlessly lopsided grid: for
-    721x1440 on 4 ranks it returns 1x4, giving 721x360 subdomains, where 2x2
-    gives 360x720 and a slightly smaller halo perimeter. FMS's own comment on
-    the neighbouring balancing routine concedes the point -- "It is very hard
-    to make it balance for all the situation. Hopefully some smart idea will
-    come up someday."
+    Parameters
+    ----------
+    extent0, extent1 : int
+        Global grid extents.
+    ndivs : int
+        Number of MPI ranks.
 
-    ``ndivs`` has few divisors, so the exact search FMS approximates is
-    affordable: enumerate every factor pair and take the one minimising the
-    per-subdomain halo perimeter ``extent0/rows + extent1/cols``, which is the
-    quantity the aspect-ratio heuristic is a proxy for. Ties go to the more
-    square grid.
+    Returns
+    -------
+    tuple[int, int]
+        Process-grid shape minimizing idle ranks, then halo perimeter.
 
-    Layouts giving every rank points are preferred. FMS treats an empty
-    subdomain as fatal (``mpp_compute_extent``: "domain extents must be
-    positive definite"), but climtools tolerates them deliberately --
-    ``get_balanced_bounds`` hands out empty ``(length, length)`` slabs when a
-    dimension is shorter than the rank count -- so when no factor pair fits,
-    the one leaving the fewest ranks idle is returned rather than raising.
+    Raises
+    ------
+    ValueError
+        If ``ndivs`` is not positive.
     """
     if ndivs < 1:
         raise ValueError(f"ndivs must be positive, got {ndivs}.")
@@ -150,6 +162,7 @@ def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]
     pairs = [(rows, ndivs // rows) for rows in range(1, ndivs + 1) if ndivs % rows == 0]
 
     def cost(layout: tuple[int, int]) -> tuple[int, float, int]:
+        """Return idle-rank, halo-perimeter, and aspect-ratio costs."""
         rows, cols = layout
         # Ranks left with nothing dominate; then the halo perimeter of one
         # subdomain; then squareness, purely to make ties deterministic.
@@ -168,21 +181,25 @@ def mpp_define_domains(
     min_partition_size: int | Mapping[str, int] | None = None,
     rank: int | None = None,
 ) -> Domain:
-    """FMS's ``mpp_define_domains``. One dim: balanced ``[start, stop)``
-    slabs (``chunks.get_balanced_bounds``). Two or more: a Cartesian
-    process grid (``cartesian.get_cartesian_topology``). ``min_partition_size``
-    is ``get_balanced_bounds``'s ``min_chunk``, per dimension for either case.
+    """Define balanced rank-local compute domains.
 
-    ``rank`` defaults to the caller's own rank (the common case: "what is
-    my own domain"). Pass another rank's number to compute *its* domain
-    instead -- e.g. a root building every rank's piece for a scatter,
-    the way FMS itself keeps every PE's domain in one shared table rather
-    than each PE only knowing its own. For the multi-dim case this bypasses
-    ``get_cartesian_topology``'s cached, calling-rank-only Cartcomm lookup
-    in favor of computing that rank's grid coordinates directly (the same
-    row-major mapping ``get_cartesian_topology`` itself relies on for a
-    non-reordered communicator, confirmed to agree with it across many
-    rank counts before this was ever used for a rank other than one's own).
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    global_sizes : mapping[str, int]
+        Global sizes of partitioned dimensions.
+    dims : str or sequence of str
+        Partition dimensions.
+    min_partition_size : int or mapping, optional
+        Minimum non-empty local extent.
+    rank : int, optional
+        Rank whose domain to compute; defaults to the caller.
+
+    Returns
+    -------
+    Domain
+        Rank-local domain descriptor.
     """
     from .chunks import get_balanced_bounds
 
@@ -254,18 +271,21 @@ def mpp_get_compute_domains(
     *,
     min_partition_size: int | None = None,
 ) -> list[tuple[int, int]]:
-    """FMS's ``mpp_get_compute_domains``: every rank's ``[begin, end)`` on ``dim``.
+    """Return balanced ownership bounds for every division of a dimension.
 
-    FMS fills ``domain%list(0:ndivs-1)`` inside ``mpp_define_domains`` and every
-    PE keeps the whole table, so ``mpp_get_compute_domains`` answers "which PE
-    owns which indices" by a local array read rather than a collective. The
-    decomposition rule is deterministic, so this reconstructs the same table
-    from ``global_size`` and the number of divisions alone -- no communication,
-    and no dependence on any rank's own position.
+    Parameters
+    ----------
+    global_size : int
+        Global dimension length.
+    dim_size : int
+        Number of divisions along the dimension.
+    min_partition_size : int, optional
+        Minimum non-empty local extent.
 
-    ``dim_size`` is the number of divisions along the dimension: the
-    communicator size for a 1-D partition, or that axis's extent in the
-    Cartesian process grid.
+    Returns
+    -------
+    list[tuple[int, int]]
+        Half-open bounds for each division.
     """
     from .chunks import get_balanced_bounds
 
@@ -281,20 +301,19 @@ def mpp_slice_compute_domain(
     requested_start: int,
     requested_stop: int,
 ) -> tuple[int, int, int]:
-    """Intersect one rank's compute domain with a global slice, without communicating.
+    """Intersect one compute domain with a global slice.
 
-    Returns ``(local_start, local_stop, new_global_start)``: the half-open
-    interval to take from this rank's local array, and the offset this rank's
-    surviving elements occupy in the sliced global array.
+    Parameters
+    ----------
+    start, stop : int
+        Rank-local global ownership bounds.
+    requested_start, requested_stop : int
+        Requested global half-open slice.
 
-    The third value is what a naive implementation reaches for an ``allgather``
-    to obtain. It needs no communication because a compute-domain partition is
-    contiguous and ordered by rank: everything owned by lower ranks is exactly
-    the global interval ``[0, start)``, so the number of lower-rank elements
-    surviving the slice is ``|[0, start) & [requested_start, requested_stop)|``,
-    which this rank can evaluate from its own bounds alone. This is the same
-    property FMS relies on when it reads ``domain%list(:)`` locally instead of
-    querying other PEs.
+    Returns
+    -------
+    tuple[int, int, int]
+        Local slice bounds and the surviving global start offset.
     """
     lower = max(requested_start, start)
     upper = max(lower, min(requested_stop, stop))
@@ -303,21 +322,9 @@ def mpp_slice_compute_domain(
 
 
 def _mpp_reduce(
-    local: np.ndarray, op: MPI.Op, comm: MPI.Comm | None, domain: Domain | None = None
-) -> np.ndarray:
-    """Global elementwise reduction under any MPI op (generic kernel behind
-    ``mpp_sum``/``mpp_max``/``mpp_min``): a single ``Allreduce``, as FMS's
-    ``MPP_REDUCE_`` (``mpp_reduce_mpi.fh``) does. No agreement handshake --
-    unlike ``mpp_comm_reduce`` above this, FMS trusts SPMD by construction, and
-    so does this: every rank must reach it with the same op and a
-    compatible ``local`` shape/dtype. Always calls ``Allreduce`` even for a
-    size-1 comm (cheap no-op in MPI; a short-circuit here broke
-    ``mpp_comm_reduce``'s replicated-axis path, which can hand different ranks
-    different-sized comms).
-
-    ``comm`` takes priority over ``domain`` (used only for its ``.comm``)
-    when both are given.
-    """
+    local: np.ndarray[Any, Any], op: MPI.Op, comm: MPI.Comm | None, domain: Domain | None = None
+) -> np.ndarray[Any, Any]:
+    """Reduce rank-local arrays with an MPI reduction operator."""
     active_comm = (
         comm if comm is not None else (domain.comm if domain else MPI.COMM_WORLD)
     )
@@ -327,22 +334,22 @@ def _mpp_reduce(
 
 
 def mpp_sum(
-    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
-) -> np.ndarray:
+    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_sum``. Pass ``domain`` or ``comm``."""
     return _mpp_reduce(local, MPI.SUM, comm, domain)
 
 
 def mpp_max(
-    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
-) -> np.ndarray:
+    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_max``."""
     return _mpp_reduce(local, MPI.MAX, comm, domain)
 
 
 def mpp_min(
-    local: np.ndarray, domain: Domain | None = None, *, comm: MPI.Comm | None = None
-) -> np.ndarray:
+    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_min``."""
     return _mpp_reduce(local, MPI.MIN, comm, domain)
 
@@ -350,12 +357,21 @@ def mpp_min(
 def mpp_get_neighbor_pe(
     domain: Domain, dim: str, *, periodic: bool = False
 ) -> tuple[int | None, int | None]:
-    """FMS's ``mpp_get_neighbor_pe``, adapted to return both directions in
-    one call (FMS takes a ``direction`` argument and returns one PE per
-    call) rather than one call per side -- ``Domain`` only has two
-    directions per axis, so there's no direction enum to take. Single
-    dim: linear ``rank -+ 1``. Multi-dim: Cartesian face neighbor (not
-    ``rank -+ 1`` in general). ``None`` on a non-periodic edge.
+    """Return neighboring ranks along one partition dimension.
+
+    Parameters
+    ----------
+    domain : Domain
+        Rank-local domain descriptor.
+    dim : str
+        Partition dimension.
+    periodic : bool, default False
+        Wrap neighbors across global edges.
+
+    Returns
+    -------
+    tuple[int or None, int or None]
+        Lower- and upper-side neighbor ranks.
     """
     comm = domain.comm
     rank = comm.rank
@@ -385,18 +401,31 @@ def mpp_get_neighbor_pe(
 
 @dataclass
 class DomainUpdate:
-    """In-flight halo exchange, as returned by :func:`mpp_start_update_domains`.
+    """Store state for an in-flight halo exchange.
 
-    FMS splits ``mpp_update_domains`` into a ``start``/``complete`` pair so a
-    PE can compute on its interior -- which needs no neighbour data -- while
-    the boundary exchange is still on the wire. This carries the state
-    between the two halves: the posted requests, the receive buffers, and
-    enough layout to unpack them.
+    Attributes
+    ----------
+    items : dict[str, numpy.ndarray]
+        Fields being exchanged.
+    groups : dict
+        Fields grouped by wire dtype.
+    recv_bufs : dict
+        Receive buffers keyed by dtype and side.
+    recv_reqs, send_reqs : list
+        Outstanding MPI requests.
+    axis : int
+        Exchanged array axis.
+    before, after : int
+        Requested halo widths.
+    single : bool
+        Whether the input was a single array.
+    unpack : Any
+        Callable restoring wire representations.
     """
 
-    items: dict[str, np.ndarray]
+    items: dict[str, np.ndarray[Any, Any]]
     groups: dict[Any, list[str]]
-    recv_bufs: dict[tuple[Any, str], np.ndarray]
+    recv_bufs: dict[tuple[Any, str], np.ndarray[Any, Any]]
     recv_reqs: list[Any]
     send_reqs: list[Any]
     axis: int
@@ -407,7 +436,7 @@ class DomainUpdate:
 
 
 def mpp_start_update_domains(
-    fields: np.ndarray | Mapping[str, np.ndarray],
+    fields: np.ndarray[Any, Any] | Mapping[str, np.ndarray[Any, Any]],
     domain: Domain,
     dim: str,
     axis: int,
@@ -418,29 +447,32 @@ def mpp_start_update_domains(
     left_rank: int | None = None,
     right_rank: int | None = None,
 ) -> DomainUpdate:
-    """FMS's ``mpp_start_update_domains``: post a halo exchange with the neighbors along
-    ``dim``, via nonblocking ``Isend``/``Irecv`` + one shared ``Waitall``.
-    A ``Mapping`` of same-``axis``-length fields is FMS's *group update*:
-    every field's halo slab is packed into one contiguous buffer per
-    neighbor per dtype -- FMS's own ``buffer_pos`` accumulation in
-    ``mpp_do_update.fh`` -- so message count per exchange is
-    ``2 * (distinct dtypes present)``, not ``2 * (fields present)``. FMS
-    groups this same way, not across dtypes: its group-update routines
-    are compiled per Fortran kind (``mpp_do_update_r8_3d``/``_r4_3d``/
-    ``_i4_3d``, ...), so a Fortran group update never mixes dtypes into
-    one buffer either -- this mirrors that constraint rather than forcing
-    heterogeneous dtypes into one raw byte buffer, which FMS has no
-    equivalent for. A single array is the plain case (one field, one
-    dtype, same code path), and the return shape mirrors whichever was
-    passed. ``before``/``after`` are the halo width from the lower/upper
-    neighbor; at a non-periodic global edge that side is left unpadded
-    (``left_pad``/``right_pad`` report 0 there instead of raising).
-    ``left_rank``/``right_rank`` default to :func:`mpp_get_neighbor_pe`;
-    a Cartesian caller should pass them explicitly (its neighbors are not
-    ``rank -+ 1``).
+    """Start a nonblocking halo exchange.
+
+    Parameters
+    ----------
+    fields : numpy.ndarray or mapping[str, numpy.ndarray]
+        Field or fields sharing the exchanged axis.
+    domain : Domain
+        Rank-local domain descriptor.
+    dim : str
+        Partition dimension.
+    axis : int
+        Array axis corresponding to ``dim``.
+    before, after : int
+        Lower and upper halo widths.
+    periodic : bool, default False
+        Wrap across global edges.
+    left_rank, right_rank : int or None, optional
+        Explicit neighboring ranks.
+
+    Returns
+    -------
+    DomainUpdate
+        In-flight exchange state.
     """
     single = isinstance(fields, np.ndarray)
-    items: dict[str, np.ndarray] = {"": fields} if single else dict(fields)
+    items: dict[str, np.ndarray[Any, Any]] = {"": fields} if single else dict(fields)
 
     comm = domain.comm
     if left_rank is None or right_rank is None:
@@ -450,11 +482,11 @@ def mpp_start_update_domains(
         left_rank = default_left if left_rank is None else left_rank
         right_rank = default_right if right_rank is None else right_rank
 
-    def _view(arr: np.ndarray) -> np.ndarray:
+    def _view(arr: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
         """View as a dtype the raw MPI buffer protocol accepts."""
         return arr.view(np.int64) if arr.dtype.kind in "mM" else arr
 
-    def _slab(arr: np.ndarray, start: int, stop: int) -> np.ndarray:
+    def _slab(arr: np.ndarray[Any, Any], start: int, stop: int) -> np.ndarray[Any, Any]:
         idx = [slice(None)] * arr.ndim
         idx[axis] = slice(start, stop)
         return np.ascontiguousarray(arr[tuple(idx)])
@@ -463,17 +495,15 @@ def mpp_start_update_domains(
         arr = items[name]
         return (*arr.shape[:axis], width, *arr.shape[axis + 1 :])
 
-    # Group by wire dtype, sorted for a deterministic pack/unpack order
-    # every rank derives independently from its own, structurally
-    # identical copy of `items` -- no layout information travels over
-    # the wire, only each dtype group's one packed buffer.
-    groups: dict[np.dtype, list[str]] = {}
+    # Pack fields by wire dtype in deterministic order; no layout metadata is
+    # transmitted.
+    groups: dict[np.dtype[Any], list[str]] = {}
     for name, arr in items.items():
         groups.setdefault(_view(arr).dtype, []).append(name)
     for names in groups.values():
         names.sort()
 
-    def _pack(names: list[str], side: str) -> np.ndarray:
+    def _pack(names: list[str], side: str) -> np.ndarray[Any, Any]:
         pieces = []
         for name in names:
             arr = items[name]
@@ -486,18 +516,15 @@ def mpp_start_update_domains(
         return np.concatenate(pieces)
 
     def _unpack(
-        flat: np.ndarray, names: list[str], width: int
-    ) -> dict[str, np.ndarray]:
-        out: dict[str, np.ndarray] = {}
+        flat: np.ndarray[Any, Any], names: list[str], width: int
+    ) -> dict[str, np.ndarray[Any, Any]]:
+        out: dict[str, np.ndarray[Any, Any]] = {}
         pos = 0
         for name in names:
             shape = _halo_shape(name, width)
             count = int(np.prod(shape)) if shape else 1
-            # `flat` carries the group's wire dtype (e.g. int64 for a
-            # datetime64/timedelta64 field, per `_view`); reinterpret each
-            # field's slice back to its own original dtype before handing
-            # it back -- `padded`'s concatenate below needs it to match
-            # `arr`'s dtype, not the wire view's.
+            # Restore each field's original dtype after unpacking the wire
+            # representation.
             out[name] = flat[pos : pos + count].reshape(shape).view(items[name].dtype)
             pos += count
         return out
@@ -507,7 +534,7 @@ def mpp_start_update_domains(
     can_recv_before = left_rank is not None and before > 0
     can_recv_after = right_rank is not None and after > 0
 
-    recv_bufs: dict[tuple[np.dtype, str], np.ndarray] = {}
+    recv_bufs: dict[tuple[np.dtype[Any], str], np.ndarray[Any, Any]] = {}
     recv_reqs = []
     for dtype, names in groups.items():
         if can_recv_before:
@@ -544,22 +571,24 @@ def mpp_start_update_domains(
 
 def mpp_complete_update_domains(
     update: DomainUpdate,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], int, int]:
-    """FMS's ``mpp_complete_update_domains``: wait, then hand back the halos.
+) -> tuple[dict[str, np.ndarray[Any, Any]], dict[str, np.ndarray[Any, Any]], int, int]:
+    """Complete a halo exchange and return received slabs.
 
-    Returns ``(recv_before, recv_after, left_pad, right_pad)``. Deliberately
-    *not* the padded array: callers that only need the neighbours' slabs --
-    which is every caller in climtools, since the xarray layer re-joins the
-    pieces itself -- would otherwise pay a full copy of their own local array
-    to build a padded buffer whose interior is then discarded. In FMS terms
-    this is the difference between writing into the halo ring of an existing
-    data domain and reallocating the whole data domain per exchange.
+    Parameters
+    ----------
+    update : DomainUpdate
+        In-flight exchange state.
+
+    Returns
+    -------
+    tuple[dict, dict, int, int]
+        Lower halos, upper halos, and realized lower/upper pad widths.
     """
     MPI.Request.Waitall(update.recv_reqs)
     MPI.Request.Waitall(update.send_reqs)
 
-    recv_before: dict[str, np.ndarray] = {}
-    recv_after: dict[str, np.ndarray] = {}
+    recv_before: dict[str, np.ndarray[Any, Any]] = {}
+    recv_after: dict[str, np.ndarray[Any, Any]] = {}
     for dtype, names in update.groups.items():
         if (dtype, "before") in update.recv_bufs:
             recv_before.update(
@@ -579,7 +608,7 @@ def mpp_complete_update_domains(
 
 
 def mpp_update_domains(
-    fields: np.ndarray | Mapping[str, np.ndarray],
+    fields: np.ndarray[Any, Any] | Mapping[str, np.ndarray[Any, Any]],
     domain: Domain,
     dim: str,
     axis: int,
@@ -589,14 +618,30 @@ def mpp_update_domains(
     periodic: bool = False,
     left_rank: int | None = None,
     right_rank: int | None = None,
-) -> tuple[np.ndarray | dict[str, np.ndarray], int, int]:
-    """FMS's blocking ``mpp_update_domains``: start, complete, and join.
+) -> tuple[np.ndarray[Any, Any] | dict[str, np.ndarray[Any, Any]], int, int]:
+    """Exchange halos and return padded local fields.
 
-    Kept for callers that want the padded array in one call. Anything that
-    only needs the neighbours' slabs, or that has interior work to overlap
-    with the exchange, should use :func:`mpp_start_update_domains` and
-    :func:`mpp_complete_update_domains` directly and skip the concatenate
-    below -- which copies the entire local array.
+    Parameters
+    ----------
+    fields : numpy.ndarray or mapping[str, numpy.ndarray]
+        Field or fields to exchange.
+    domain : Domain
+        Rank-local domain descriptor.
+    dim : str
+        Partition dimension.
+    axis : int
+        Array axis corresponding to ``dim``.
+    before, after : int
+        Lower and upper halo widths.
+    periodic : bool, default False
+        Wrap across global edges.
+    left_rank, right_rank : int or None, optional
+        Explicit neighboring ranks.
+
+    Returns
+    -------
+    tuple[numpy.ndarray or dict, int, int]
+        Padded field(s) and realized lower/upper pad widths.
     """
     update = mpp_start_update_domains(
         fields,
@@ -644,21 +689,12 @@ _SCALES = np.array([_PREC ** (2 - n) for n in range(_NUMINT)], dtype=np.float64)
 # float64 (>= 2**-1022) bounds the usable rank count.
 MAX_PROD_RANKS = 1000
 
-# Longest run of mantissas multiplied before renormalising. Each is in
-# [0.5, 1), so a block product is >= 2**-_PROD_BLOCK, still normal in
-# float64. frexp renormalisation is exact, so blocking changes nothing
-# except the exponent bookkeeping.
+# Renormalize mantissa products before they can become subnormal.
 _PROD_BLOCK = 512
 
 
-def _to_digits(array: np.ndarray, axis: int) -> np.ndarray:
-    """Split ``array`` into ``_NUMINT`` signed integer digits along a new axis 0.
-
-    The NumPy analogue of FMS's ``real_to_ints`` + ``increment_ints``: the
-    digits are extracted in descending scale order and each is exact, so
-    summing them as int64 reproduces the real sum to within the truncation
-    of the smallest digit, independent of order.
-    """
+def _to_digits(array: np.ndarray[Any, Any], axis: int) -> np.ndarray[Any, Any]:
+    """Split values into signed integer digits along a new leading axis."""
     values = np.asarray(array, dtype=np.float64)
     sign = np.where(values < 0.0, -1.0, 1.0)
     residual = np.abs(values)
@@ -670,7 +706,7 @@ def _to_digits(array: np.ndarray, axis: int) -> np.ndarray:
     return digits.sum(axis=axis + 1 if axis >= 0 else axis, dtype=np.int64)
 
 
-def _from_digits(digits: np.ndarray) -> np.ndarray:
+def _from_digits(digits: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     """Inverse of :func:`_to_digits`, summing smallest scale first."""
     total = np.zeros(digits.shape[1:], dtype=np.float64)
     for n in range(_NUMINT - 1, -1, -1):
@@ -679,34 +715,36 @@ def _from_digits(digits: np.ndarray) -> np.ndarray:
 
 
 def mpp_reproducing_sum(
-    local: np.ndarray,
+    local: np.ndarray[Any, Any],
     comm: MPI.Comm,
     *,
     axis: int | None = None,
-) -> np.ndarray:
-    """FMS's ``mpp_reproducing_sum``: a sum invariant to rank count and order.
+) -> np.ndarray[Any, Any]:
+    """Compute a rank-count-invariant distributed sum.
 
-    ``local`` is this rank's slab. When ``axis`` is given the local slab is
-    first reduced along that axis; the remaining shape must then match on
-    every rank. The reduction itself is a single integer ``Allreduce``, so
-    the result is bitwise identical for any partition of the same global
-    array across any number of ranks.
+    Parameters
+    ----------
+    local : numpy.ndarray
+        Rank-local values.
+    comm : mpi4py.MPI.Comm
+        Reduction communicator.
+    axis : int or None, optional
+        Local reduction axis before the global sum.
 
-    Raises ``ValueError`` when the communicator is large enough that the
-    int64 digit accumulators could overflow, mirroring FMS's
-    ``max_count_prec`` check.
+    Returns
+    -------
+    numpy.ndarray
+        Reproducible global sum.
+
+    Raises
+    ------
+    ValueError
+        If the rank count is unsupported or input contains non-finite values.
     """
     if comm.size > MAX_EFP_RANKS:
-        raise ValueError(
-            f"mpp_reproducing_sum: {comm.size} ranks exceeds the "
-            f"{MAX_EFP_RANKS}-rank limit set by the {_NUMBIT}-bit EFP digit "
-            "width; the integer accumulators could overflow."
-        )
+        raise ValueError(f"mpp_reproducing_sum supports at most {MAX_EFP_RANKS} ranks.")
     if not np.all(np.isfinite(local)):
-        raise ValueError(
-            "mpp_reproducing_sum: input contains NaN or infinity, which have "
-            "no extended-fixed-point representation."
-        )
+        raise ValueError("mpp_reproducing_sum requires finite input.")
     flat = np.asarray(local).reshape(-1) if axis is None else local
     digits = _to_digits(flat, 0 if axis is None else axis)
     total = np.empty_like(digits)
@@ -721,7 +759,7 @@ PROD_EXPONENT, PROD_NAN, PROD_INF, PROD_ZERO, PROD_NEGATIVE = range(5)
 _PROD_FIELDS = 5
 
 
-def _moved_to_front(values: np.ndarray, axes: Sequence[int]) -> np.ndarray:
+def _moved_to_front(values: np.ndarray[Any, Any], axes: Sequence[int]) -> np.ndarray[Any, Any]:
     """Collapse ``axes`` into a single leading axis, preserving the rest."""
     ordered = tuple(a % values.ndim for a in axes)
     moved = np.moveaxis(values, ordered, range(len(ordered)))
@@ -730,22 +768,21 @@ def _moved_to_front(values: np.ndarray, axes: Sequence[int]) -> np.ndarray:
 
 
 def mpp_prod_decompose(
-    local: np.ndarray, axes: int | Sequence[int] = 0
-) -> tuple[np.ndarray, np.ndarray]:
-    """Reduce ``local`` along ``axes`` into an over/underflow-free partial product.
+    local: np.ndarray[Any, Any], axes: int | Sequence[int] = 0
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    """Decompose a product into a stable mantissa and integer companions.
 
-    Returns ``(mantissa, companions)``. ``mantissa`` is float64 in ``[0.5, 1)``
-    and ``companions`` is an int64 array whose leading axis is indexed by the
-    ``PROD_*`` constants: the base-2 exponent, and the counts of NaN, infinite,
-    zero and negative entries. Both have the shape of the reduced result, so
-    combining two partials is a ``PROD`` on the mantissa and a ``SUM`` on the
-    companions -- both associative and commutative, which is what makes the
-    distributed product agree with the serial one whatever the rank count.
+    Parameters
+    ----------
+    local : numpy.ndarray
+        Rank-local values.
+    axes : int or sequence of int, default 0
+        Local reduction axes.
 
-    The mantissa is renormalised with ``frexp`` every ``_PROD_BLOCK`` terms.
-    ``frexp`` only moves bits between the significand and the exponent field,
-    so blocking is exact: the rounding is identical to multiplying the same
-    values directly in float64, minus the overflow.
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Mantissa and packed exponent/exception tallies.
     """
     axis_tuple = (axes,) if isinstance(axes, int) else tuple(axes)
     work = _moved_to_front(np.asarray(local).astype(np.float64, copy=False), axis_tuple)
@@ -777,23 +814,25 @@ def mpp_prod_decompose(
 
 
 def mpp_prod_recombine(
-    mantissa: np.ndarray,
-    companions: np.ndarray,
+    mantissa: np.ndarray[Any, Any],
+    companions: np.ndarray[Any, Any],
     dtype: np.dtype[Any] | None = None,
-) -> np.ndarray:
-    """Rebuild a product from the reduced output of :func:`mpp_prod_decompose`.
+) -> np.ndarray[Any, Any]:
+    """Reconstruct a product from reduced decomposition fields.
 
-    The exceptional cases are decided from the exact global tallies rather than
-    from floating-point accidents, which is the whole point of carrying them:
-    a plain distributed product evaluates ``inf * 0`` whenever overflow and a
-    zero land on different ranks, so its answer depends on the rank count.
+    Parameters
+    ----------
+    mantissa : numpy.ndarray
+        Reduced mantissa.
+    companions : numpy.ndarray
+        Reduced exponent and exception tallies.
+    dtype : numpy.dtype, optional
+        Output dtype.
 
-    * any NaN input, or a zero and an infinity anywhere in the global array,
-      gives NaN;
-    * otherwise any zero gives a correctly signed zero, and any infinity a
-      correctly signed infinity;
-    * otherwise ``ldexp(mantissa, exponent)``, which is infinite only when the
-      true product genuinely overflows ``dtype``.
+    Returns
+    -------
+    numpy.ndarray
+        Reconstructed product with signed zero/inf and NaN handling.
     """
     n_nan = companions[PROD_NAN]
     n_inf = companions[PROD_INF]
@@ -814,29 +853,37 @@ def mpp_prod_recombine(
 
 
 def mpp_reproducing_prod(
-    local: np.ndarray,
+    local: np.ndarray[Any, Any],
     comm: MPI.Comm,
     *,
     axis: int | Sequence[int] = 0,
     dtype: np.dtype[Any] | None = None,
-) -> np.ndarray:
-    """Product along ``axis`` of a distributed array, invariant to rank count.
+) -> np.ndarray[Any, Any]:
+    """Compute a rank-count-invariant distributed product.
 
-    The multiplicative counterpart of :func:`mpp_reproducing_sum`. FMS has no
-    equivalent -- ``mpp_efp_mod`` only covers sums -- but the requirement is
-    the same one FMS states for reductions, that the answer must not depend on
-    how the global array was divided among PEs.
+    Parameters
+    ----------
+    local : numpy.ndarray
+        Rank-local values.
+    comm : mpi4py.MPI.Comm
+        Reduction communicator.
+    axis : int or sequence of int, default 0
+        Local reduction axes.
+    dtype : numpy.dtype, optional
+        Output dtype.
 
-    Two collectives: a ``PROD`` on the mantissa and a ``SUM`` on the packed
-    integer companions. See :func:`mpp_prod_decompose` for the representation
-    and :func:`mpp_prod_recombine` for the reassembly.
+    Returns
+    -------
+    numpy.ndarray
+        Reproducible global product.
+
+    Raises
+    ------
+    ValueError
+        If the communicator exceeds the supported rank limit.
     """
     if comm.size > MAX_PROD_RANKS:
-        raise ValueError(
-            f"mpp_reproducing_prod: {comm.size} ranks exceeds the "
-            f"{MAX_PROD_RANKS}-rank limit; the combined mantissa would "
-            "become subnormal and lose precision."
-        )
+        raise ValueError(f"mpp_reproducing_prod supports at most {MAX_PROD_RANKS} ranks.")
     values = np.asarray(local)
     out_dtype = np.dtype(dtype) if dtype is not None else values.dtype
     mantissa, companions = mpp_prod_decompose(values, axis)
@@ -849,28 +896,31 @@ def mpp_reproducing_prod(
 
 
 def mpp_chksum(
-    local: np.ndarray,
+    local: np.ndarray[Any, Any],
     comm: MPI.Comm | None = None,
     *,
     mask_val: float | None = None,
 ) -> int:
-    """FMS's ``mpp_chksum``: a bitwise checksum of a distributed field.
+    """Compute a rank-order-independent bitwise checksum.
 
-    FMS reinterprets each element's bits as an integer and sums those with
-    ``mpp_sum`` (``mpp/include/mpp_chksum.fh``). Integer addition is exact and
-    commutative, so the checksum depends only on the set of values in the
-    global field, never on how it was divided among PEs or in what order the
-    ranks were combined. Two runs at different rank counts that agree bitwise
-    give the same number; two differing in one bit of one element almost
-    certainly do not.
+    Parameters
+    ----------
+    local : numpy.ndarray
+        Rank-local field.
+    comm : mpi4py.MPI.Comm, optional
+        Reduction communicator.
+    mask_val : float, optional
+        Sentinel excluded from the checksum.
 
-    That is the cheap validation the correctness suite otherwise lacks: one
-    integer per field, rather than an elementwise comparison against a
-    gathered reference that needs the whole field on one rank.
+    Returns
+    -------
+    int
+        Global checksum.
 
-    ``mask_val`` excludes a sentinel (a fill value or a land mask) from the
-    sum, as FMS's own ``mask_val`` argument does. NaN is matched as a NaN
-    rather than by equality, since NaN never equals itself.
+    Raises
+    ------
+    TypeError
+        If the element width is unsupported.
     """
     values = np.asarray(local)
     if values.dtype.kind == "b":
@@ -899,19 +949,19 @@ def mpp_chksum(
 
 
 def mpp_partition_offsets(comm: MPI.Comm, local_length: int) -> tuple[int, int, int]:
-    """New ``(global_size, start, stop)`` after an op changed the local length.
+    """Recompute distributed offsets after a local length change.
 
-    Length-changing operations -- ``coarsen``, ``diff``, anything that drops
-    or adds elements along the partition dimension -- have to rebuild the
-    partition metadata from each rank's new length. The obvious way is an
-    ``allgather`` of that one integer, but the result is only ever used as a
-    total and an exclusive prefix sum, both of which are fixed-size
-    collectives: ``Allreduce`` and ``Exscan``. The allgather moves a pickled
-    object per rank and grows with rank count; this does not.
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm
+        Partition communicator.
+    local_length : int
+        This rank's new local length.
 
-    Requires the partition to be contiguous and ordered by rank along the
-    dimension, which is what makes the prefix sum this rank's own offset --
-    the same property FMS relies on throughout ``mpp_domains``.
+    Returns
+    -------
+    tuple[int, int, int]
+        Global size and this rank's half-open ownership bounds.
     """
     length = np.array([int(local_length)], dtype=np.int64)
     total = np.empty_like(length)

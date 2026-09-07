@@ -31,23 +31,13 @@ if TYPE_CHECKING:
 
     from ..mpi.context import MPIContext
 
-    # `.io` imports `append`/`mpp_to_netcdf_parallel`/`to_netcdf_serial` from this
-    # module, so importing `mpi_partition_data` back from `.io` at module
-    # scope would be circular. Call sites that need it at mpi_context import
-    # locally.
 
 
 class NetCDFWriteError(MPIError):
     """Parallel NetCDF write failure."""
 
 
-# A single HDF5 chunk's byte size must stay strictly under 2**32 bytes (4
-# GiB) -- confirmed directly against this build with a binary search: a
-# (16383, 256, 256) float32 chunk (3.9998 GiB) succeeds, (16384, 256, 256)
-# (4.0000 GiB) raises "NetCDF: Bad chunk sizes." from the netCDF-C library.
-# Half that hard limit is used as the working target below, leaving headroom
-# for HDF5/filter (zlib, shuffle) bookkeeping overhead per chunk rather than
-# skimming the exact boundary.
+# Keep chunks below HDF5's 4 GiB hard limit; target half the limit for filter overhead.
 def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
     """Set serializable NetCDF attributes."""
     for key, value in strip_export_attrs(attrs).items():
@@ -55,7 +45,7 @@ def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
             target.setncattr(str(key), value)
 
 
-def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray, str | np.dtype[Any]]:
+def _normalise_variable(source: xr.DataArray) -> tuple[np.ndarray[Any, Any], str | np.dtype[Any]]:
     """Normalize an xarray variable for NetCDF output."""
     variable = encode_time(source) if is_time_like(source) else source
     values = np.asarray(variable.values)
@@ -211,9 +201,7 @@ def open_in_parallel(
                     continue
                 key, separator, value = item.partition("=")
                 if not separator or not key.strip():
-                    raise ValueError(
-                        f"Invalid MPI-IO hint: {item!r}; expected key=value."
-                    )
+                    raise ValueError(f"Invalid MPI-IO hint {item!r}; expected key=value.")
                 info.Set(key.strip(), value.strip())
             return netCDF4.Dataset(
                 path,
@@ -230,15 +218,16 @@ def open_in_parallel(
 def mpp_close_writer(
     mpi_context: MPIContext, nc: netCDF4.Dataset | None, comm: MPI.Comm
 ) -> None:
-    """Close, free, and barrier after a parallel NetCDF write.
+    """Close a parallel NetCDF writer and synchronize ranks.
 
-    Shared cleanup for :func:`mpp_write_distributed`/:func:`mpp_write_partitioned`
-    (previously duplicated identically in both): close the file if one was
-    opened, free the writer sub-communicator, then a full world barrier so
-    no rank downstream (a different communicator, a non-parallel reopen
-    for validation, ...) can run ahead of a writer rank still inside
-    ``nc.close()``. Every rank reaches this, including a COMM_NULL/no-data
-    rank that never opened a file at all.
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    nc : netCDF4.Dataset or None
+        Open writer on participating ranks.
+    comm : mpi4py.MPI.Comm
+        Writer communicator to free.
     """
     if nc is not None:
         nc.close()
@@ -274,8 +263,7 @@ def mpp_write_distributed(
                 continue
             if spec["dtype"] == "str":
                 raise NetCDFWriteError(
-                    f"Partitioned string variable {name!r} is unsupported because "
-                    + "netCDF4 parallel I/O cannot write VLEN data types."
+                    f"Parallel NetCDF cannot write partitioned string variable {name!r}."
                 )
 
             values, _ = _normalise_variable(ds[name])
@@ -305,14 +293,8 @@ def mpp_write_partitioned(
     prewritten = set(schema.get("prewritten", ()))
 
     length = int(schema["sizes"][partition_dim])
-    # Every rank's slab boundary must land on a multiple of the same chunk
-    # length get_chunks() gave this variable's partition axis (see
-    # get_partition_chunk_size), or a rank's write straddles two HDF5
-    # chunks -- see get_chunks()'s docstring for what that corrupts. This is
-    # the same alignment mpp_to_netcdf_parallel's already-distributed path gets
-    # for free from mpi_meta's own start/stop; mpp_write_partitioned computes it
-    # fresh here because rank 0 owns the whole array before this call and no
-    # partition boundaries exist yet.
+    # Align rank boundaries to the NetCDF chunk grid so writes do not straddle
+    # partition-axis chunks.
     chunk_size = int(
         schema.get("partition_chunk_size")
         or max(1, math.ceil(length / mpi_context.comm.size))
@@ -336,8 +318,7 @@ def mpp_write_partitioned(
                 continue
             if spec["dtype"] == "str":
                 raise NetCDFWriteError(
-                    f"Partitioned string variable {name!r} is unsupported because "
-                    + "netCDF4 parallel I/O cannot write VLEN data types."
+                    f"Parallel NetCDF cannot write partitioned string variable {name!r}."
                 )
 
             axis = dims.index(partition_dim)
@@ -358,23 +339,8 @@ def mpp_write_partitioned(
                 )
 
             local = mpi_context.scatterv(send, counts, local_shape, dtype)
-            # `send = None` (not `del send` + `gc.collect()`) is deliberate
-            # and sufficient: CPython reclaims a non-cyclic object the
-            # moment its refcount hits zero, and mpi_context.scatterv's own Scatterv
-            # call is synchronous and keeps no reference to `send` after it
-            # returns, so dropping this one binding is enough. An explicit
-            # gc.collect() here would only add a full generational GC pass
-            # with no correctness or memory benefit, since there is no
-            # reference cycle to break. What this does NOT release is
-            # source_ds's own underlying array for `name`: `.values` is
-            # typically a view into source_ds's own storage, not a copy, so
-            # source_ds -- which the caller keeps alive for this whole
-            # function's duration -- still holds it regardless. What this
-            # loop actually avoids is the *old* design's redundant extra
-            # copy of every variable sitting in root_data simultaneously
-            # (see mpp_to_netcdf_parallel's schema-construction step); it does
-            # not, and cannot, undo the baseline cost of an eager source
-            # already being fully resident before this function is called.
+            # Release each temporary scatter buffer promptly; ``source_ds`` still owns
+            # eager backing arrays.
             send = None
             if nc is None:
                 continue
@@ -409,15 +375,12 @@ def mpp_to_netcdf_parallel(
     """Write an xarray object with MPI collective NetCDF I/O."""
     if mpi_context.comm.size == 1 and not allow_serial:
         raise NetCDFWriteError(
-            "MPI_COMM_WORLD contains one process. Launch with mpirun/mpiexec/srun "
-            + "or pass allow_serial=True."
+            "Parallel NetCDF requires multiple MPI ranks; set allow_serial=True."
         )
     if mpi_context.comm.size > 1 and not getattr(
         netCDF4, "__has_parallel4_support__", False
     ):
-        raise NetCDFWriteError(
-            "netCDF4-python is not linked with parallel NetCDF-4/HDF5 support."
-        )
+        raise NetCDFWriteError("netCDF4 lacks parallel HDF5 support.")
 
     # Rank-local validation is collected rather than raised. Only rank 0 holds
     # real data on the scatter path, so raising here would abort one rank while
@@ -428,10 +391,8 @@ def mpp_to_netcdf_parallel(
         if isinstance(data, xr.DataArray):
             if data.name is None:
                 raise ValueError("DataArray must have a name for NetCDF output.")
-            # to_dataset() moves the array's attributes onto the variable and
-            # leaves Dataset.attrs empty. mpp_get_meta falls back to
-            # variable-level metadata for exactly this reason, so the
-            # distributed path is still selected here.
+            # ``DataArray.to_dataset`` moves attrs to the variable; ``mpp_get_meta``
+            # checks there.
             local_ds = data.to_dataset()
         elif isinstance(data, xr.Dataset):
             local_ds = data
@@ -449,10 +410,7 @@ def mpp_to_netcdf_parallel(
     agreed = mpi_context.comm.allgather(distributed)
     if any(agreed) and not all(agreed):
         disagreeing = [rank for rank, state in enumerate(agreed) if state != agreed[0]]
-        raise NetCDFWriteError(
-            "MPI ranks disagree about whether the object carries mpi_meta; "
-            + f"ranks {disagreeing} differ from rank 0."
-        )
+        raise NetCDFWriteError(f"MPI ranks disagree on mpi_meta state: {disagreeing}.")
 
     root_data: dict[str, dict[str, Any]] | None = None
     schema: dict[str, Any] | None = None
@@ -460,18 +418,8 @@ def mpp_to_netcdf_parallel(
     error = None
 
     if not distributed:
-        # A dask-backed rank-0-source input can be distributed lazily
-        # instead of forced through np.asarray(...values) below, which
-        # would materialize the complete array on rank 0 regardless of
-        # size. An eager (already in-memory) input gains nothing from that
-        # laziness -- the array is already fully resident wherever it
-        # started -- and pays real overhead switching to point-to-point
-        # pickling instead of scatterv's zero-copy buffer transfer, so it
-        # is left on the original path entirely unchanged below. Every
-        # rank must agree on this decision before either branch runs, for
-        # the same collective-mismatch reason as the agreement check above:
-        # only rank 0 can inspect the real object, so its answer is
-        # broadcast rather than each rank guessing from an empty one.
+        # Use lazy distribution only for Dask-backed root data; eager arrays stay on
+        # ``Scatterv``.
         is_dask_backed = False
         try:
             if mpi_context.comm.rank == 0 and local_ds is not None:
@@ -485,6 +433,7 @@ def mpp_to_netcdf_parallel(
         is_dask_backed = mpi_context.comm.bcast(is_dask_backed, root=0)
 
         if is_dask_backed:
+            # Import locally to avoid the ``.io``/``.netcdf`` cycle.
             from .io import mpi_partition_data
 
             local_ds = mpi_partition_data(
@@ -518,52 +467,18 @@ def mpp_to_netcdf_parallel(
             partition_dim = distributed_dims
         mpi_context.raise_if_error(error, "parallel NetCDF partition dimension")
 
-        # Plan save_chunks collectively before any rank-0-only work below,
-        # so the schema-construction branch can align the partition-
-        # dimension chunk to distribution_chunks and cap it to the HDF5
-        # 4 GiB chunk limit -- rank 0's own local slice (used below to read
-        # dtype/dims) does not know the array's true global shape, so a
-        # dask.chunk("auto") call against it alone would size every other
-        # dimension's chunk from 1/mpi_size of the real data volume.
-        # attach_save_chunks fixes that using mpi_meta alone (see its
-        # docstring), and is skipped when the caller already gave explicit
-        # chunks to honor below, since every rank sees the same `chunks`
-        # argument and can decide this identically without communication.
+        # Plan save chunks collectively from global metadata before rank-0 schema
+        # construction.
         if chunks is None:
-            # Deferred import: `.io` imports `mpp_to_netcdf_parallel` from this
-            # module at module scope, so `attach_save_chunks` can only be
-            # reached here without a circular import. It mutates
-            # local_ds.attrs[mpi_meta] in place via _assign_meta and returns
-            # the same object, so its return value is intentionally unused.
+            # Import locally to avoid the ``.io``/``.netcdf`` cycle.
             from .io import mpp_attach_save_chunks
 
             mpp_attach_save_chunks(mpi_context, local_ds)
             local_meta = mpp_get_meta(local_ds)
             if local_meta is None:
-                raise AssertionError(
-                    "attach_save_chunks unexpectedly cleared mpi_meta."
-                )
+                raise AssertionError("attach_save_chunks cleared mpi_meta.")
 
-        # Coordinates that carry a partition dimension (a distributed
-        # "time" axis is the common case) are genuinely different per
-        # rank, unlike lat/lon/plev, so rank 0 cannot just read them off
-        # its own local_ds. Gather every rank's piece, verify the pieces
-        # tile the global interval with no gap or overlap, and
-        # concatenate in start order. This also means such a coordinate
-        # is CF-encoded exactly once (one units/calendar pair for the
-        # whole axis) instead of once per rank, and it can then be
-        # written serially in create_file alongside lat/lon/plev rather
-        # than through the collective phase -- sidestepping netCDF4's
-        # default chunk size for that variable entirely, not just
-        # working around it with an explicit override.
-        #
-        # Under a multi-dimensional partition, each coordinate's gather
-        # is scoped to the sub-communicator for the ONE dimension it
-        # varies along (via dim_comm), not the full communicator: ranks
-        # that differ only along a DIFFERENT partition axis (e.g. a
-        # different lon-group, when gathering "lat") must not be folded
-        # into the same gather, or their independent, equally-valid
-        # lat ranges would collide as spurious duplicates/overlaps.
+        # Reassemble partitioned coordinates per partition axis before schema creation.
         partition_dims_tuple = (
             (partition_dim,) if isinstance(partition_dim, str) else tuple(partition_dim)
         )
@@ -579,9 +494,8 @@ def mpp_to_netcdf_parallel(
                     continue
                 if len(touched) > 1:
                     raise NetCDFWriteError(
-                        f"Coordinate {name!r} varies along more than one "
-                        + f"active partition dimension {tuple(touched)!r}; "
-                        + "parallel NetCDF output does not yet support that."
+                        f"Coordinate {name!r} spans multiple partition dims: "
+                        + f"{tuple(touched)!r}."
                     )
                 coord_names.append((name, touched[0]))
         except BaseException as exc:
@@ -613,23 +527,20 @@ def mpp_to_netcdf_parallel(
                     for piece_start, piece_stop, values in ordered:
                         if piece_start != cursor:
                             raise NetCDFWriteError(
-                                f"Partitioned coordinate {coord_name!r} has a "
-                                + f"gap or overlap: expected start {cursor}, "
-                                + f"got {piece_start}."
+                                f"Coordinate {coord_name!r}: expected start "
+                                + f"{cursor}, got {piece_start}."
                             )
                         expected = piece_stop - piece_start
                         if values.shape[axis] != expected:
                             raise NetCDFWriteError(
-                                f"Partitioned coordinate {coord_name!r} rank piece "
-                                + f"[{piece_start}:{piece_stop}) has length "
-                                + f"{values.shape[axis]} along {coord_dim!r}; "
-                                + f"expected {expected}."
+                                f"Coordinate {coord_name!r} slice length "
+                                + f"{values.shape[axis]} != {expected}."
                             )
                         cursor = piece_stop
                     if cursor != global_size:
                         raise NetCDFWriteError(
-                            f"Partitioned coordinate {coord_name!r} covers "
-                            + f"{cursor} of {global_size} global elements."
+                            f"Coordinate {coord_name!r} covers "
+                            + f"{cursor}/{global_size} elements."
                         )
                     assembled = np.concatenate(
                         [values for _, _, values in ordered],
@@ -655,9 +566,7 @@ def mpp_to_netcdf_parallel(
             try:
                 ds = local_ds
                 if deflate is not None and not 0 <= int(deflate) <= 9:
-                    raise ValueError(
-                        "deflate must be None or an integer from 0 through 9."
-                    )
+                    raise ValueError("deflate must be None or an integer in [0, 9].")
                 if unlimited_dim is None:
                     unlimited = ()
                 elif isinstance(unlimited_dim, str):
@@ -741,12 +650,10 @@ def mpp_to_netcdf_parallel(
                     None,
                 )
             elif partition_dim not in ds.sizes:
-                raise ValueError(
-                    f"partition_dim {partition_dim!r} is not in {list(ds.sizes)}."
-                )
+                raise ValueError(f"Unknown partition dimension {partition_dim!r}.")
 
             if deflate is not None and not 0 <= int(deflate) <= 9:
-                raise ValueError("deflate must be None or an integer from 0 through 9.")
+                raise ValueError("deflate must be None or an integer in [0, 9].")
             if unlimited_dim is None:
                 unlimited = ()
             elif isinstance(unlimited_dim, str):
@@ -761,11 +668,7 @@ def mpp_to_netcdf_parallel(
                 ds, partition_dim, mpi_context.comm.size
             )
             chunk_map = get_chunks(ds, chunks, partition_dim, partition_chunk_size)
-            # Rank 0 already holds the complete global array for every
-            # coordinate here (there is nothing to gather, unlike the
-            # distributed path), so a coordinate carrying partition_dim can
-            # be written directly below rather than through the scatter
-            # loop -- avoiding netCDF4's own default chunking for it.
+            # Root-owned coordinates are already global and can be written directly.
             prewritten_names = frozenset(
                 name for name in ds.coords if partition_dim in ds[name].dims
             )
@@ -776,23 +679,7 @@ def mpp_to_netcdf_parallel(
                 partitioned = partition_dim in dims and name not in prewritten_names
 
                 if partitioned and not is_time_like(source):
-                    # The actual array is deferred to mpp_write_partitioned,
-                    # which extracts, encodes and scatters one variable at a
-                    # time. Materializing every variable's full array here,
-                    # before any writing starts, would hold all of them
-                    # resident on rank 0 simultaneously -- on top of `ds`
-                    # itself -- for no benefit, since create_file never reads
-                    # `data` for a partitioned entry (it only pre-extends the
-                    # unlimited dimension). Only cheap shape/dtype metadata
-                    # is needed here, mirroring _normalise_variable's dtype
-                    # rules without touching `.values`. A time-like
-                    # partitioned variable is deliberately excluded from
-                    # this and falls through to the eager branch below: its
-                    # post-encoding dtype (from encode_time's cftime/
-                    # timedelta branches) is not always knowable without
-                    # actually running the encode, and getting it wrong here
-                    # would create the netCDF variable with a dtype that
-                    # mpp_write_partitioned's later scatter wouldn't match.
+                    # Defer partitioned data; keep time-like values eager for safe encoding.
                     if source.dtype.kind in ("U", "S", "O"):
                         dtype: str | np.dtype[Any] = "str"
                     elif source.dtype.kind == "b":
@@ -914,8 +801,8 @@ def resolve_unlimited_dim(
             names = [item for item in unlimited_dim]
         except TypeError as exc:
             raise TypeError(
-                "unlimited_dim must be a string or an iterable of strings, "
-                + f"got {type(unlimited_dim).__name__}."
+                "unlimited_dim must be str or iterable[str], got "
+                + f"{type(unlimited_dim).__name__}."
             ) from exc
         if not names:
             return None
@@ -1131,7 +1018,8 @@ def nc_append(
         unlimited = [d for d, o in ncf.dimensions.items() if o.isunlimited()]
         if dim not in unlimited:
             raise ValueError(
-                f"Dimension {dim!r} in {file} is not unlimited; unlimited dimension(s): {unlimited or 'none'}"
+                f"{dim!r} is not unlimited in {file}; available: "
+                + f"{unlimited or 'none'}."
             )
 
         offset = ncf.dimensions[dim].size
@@ -1186,10 +1074,7 @@ def nc_append(
             arr = da.transpose(*ncvar.dimensions).values
 
             if arr.dtype.kind in "mMO":
-                raise TypeError(
-                    f"Variable {varname!r} reached the NetCDF layer with "
-                    + f"unencoded dtype {arr.dtype}."
-                )
+                raise TypeError(f"Variable {varname!r} has unencoded dtype {arr.dtype}.")
 
             if ncvar.dtype != arr.dtype:
                 arr = arr.astype(ncvar.dtype)
@@ -1214,9 +1099,7 @@ def createVariable(
     """Execute createVariable."""
     missing = [d for d in da.dims if d not in ncf.dimensions]
     if missing:
-        raise ValueError(
-            f"Cannot create {varname} in {ncf.filepath()}: missing dimensions {missing}"
-        )
+        raise ValueError(f"Cannot create {varname}: missing dimensions {missing}.")
 
     kwargs = {}
     if zlib is not None:

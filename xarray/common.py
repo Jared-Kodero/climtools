@@ -23,10 +23,8 @@ _OP_LIST: tuple[tuple[Any, str], ...] = (
 
 MPI_REDUCIBLE_KINDS = "biufc"
 
-# Verify that every rank entered a reduction with the same per-variable plan
-# before any buffer collective is posted. The check costs one small object
-# allgather per reduction and converts an otherwise silent deadlock into an
-# immediate exception. Set to False only for micro-benchmarking.
+# Check rank agreement before collectives so mismatched plans fail instead of
+# deadlocking.
 CHECK_COLLECTIVE_AGREEMENT = True
 
 
@@ -93,35 +91,18 @@ class PlanEntry(NamedTuple):
     ----------
     name : Hashable
         Variable name.
-    dims : tuple of Hashable
+    dims : tuple[Hashable, ...]
         Reduced dimensions present on the variable.
     distributed : bool
-        Whether this variable's reduction requires any MPI communication
-        at all -- equivalent to ``bool(comm_axes)``.
+        Whether the reduction requires MPI communication.
     dtype : numpy.dtype
         Variable dtype.
-    shape : tuple of tuple of (str, int)
-        Global dimensions and lengths that survive the reduction.
-    comm_axes : frozenset of str
-        Partition dimensions this variable's reduction must communicate
-        over: the partition dimensions actually being reduced away
-        (``dim`` names on this variable that are also active partition
-        dimensions), plus any partition dimension this variable is
-        replicated along (present in the object's partition dimensions
-        but absent from this variable's own dims). Empty when the
-        reduction is entirely rank-local. See
-        :meth:`ReductionPlanningMixin._resolve_comm`.
+    shape : tuple[tuple[str, int], ...]
+        Global dimensions and lengths surviving the reduction.
+    comm_axes : frozenset[str]
+        Partition axes included in the collective.
     replica_count : int
-        Size of the replicated-axis process subgroup this variable is
-        duplicated across (the product of the process-grid extent along
-        every dimension in ``comm_axes`` that is *not* actually being
-        reduced on this variable, i.e. a dimension the variable is merely
-        replicated along). 1 for the common case of no replicated axes
-        (including every one-dimensional partition). A collective SUM
-        over ``comm_axes`` counts each replica ``replica_count`` times,
-        so :meth:`ReductionPlanningMixin._comm_reduce` divides a
-        ``MPI.SUM`` result by it to undo the duplication.
-
+        Number of replicated copies included in a SUM collective.
     """
 
     name: Hashable

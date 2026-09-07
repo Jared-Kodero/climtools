@@ -16,40 +16,14 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 MPI_META = "mpi_meta"
-#: Attrs key for the lightweight boolean partition flag set by
-#: :func:`~.core.mark_partitioned`. Tracked here (not just in ``MPI_META``)
-#: so it can be stripped alongside the full metadata dict by
-#: :func:`strip_mpi_meta` and by every NetCDF attribute writer -- a bare
-#: Python/NumPy bool is not a valid NetCDF attribute type, so leaving it in
-#: ``attrs`` fails schema creation as soon as a freshly partitioned (not
-#: reopened) object is passed to ``to_netcdf(..., parallel=True)``.
+#: Lightweight partition flag stripped before NetCDF export.
 PARTITIONED_ATTR = "mpi_partitioned"
-#: Internal bookkeeping keys that must never reach a NetCDF attribute
-#: writer or a "real" attrs comparison. Centralized so every strip/export
-#: call site (``strip_mpi_meta``, every schema-building block in
-#: ``netcdf.py``) filters the identical set instead of each re-deriving it.
+#: Centralize internal attrs that must be removed before export or user-level
+#: comparisons.
 _INTERNAL_ATTRS = frozenset({MPI_META, PARTITIONED_ATTR})
-# The subset of a partition's metadata that decides whether two partitions
-# describe the same rank-local ownership. chunk_info and save_chunks are
-# deliberately excluded: they record how the split/write was computed for
-# the benefit of a later mpp_repartition(..., chunk_info=...) or a NetCDF
-# write, not the ownership itself, so two partitions with different (or
-# absent) chunk_info/save_chunks but identical dims/global_sizes/starts/stops
-# still own the exact same data and are still equal.
-#
-# ``meta`` always carries both a plural, canonical description of every
-# partition dimension (``dims``/``global_sizes``/``starts``/``stops``) and,
-# mirroring ``dims[0]``, the original singular keys (``dim``/``global_size``/
-# ``start``/``stop``). The singular keys exist purely so every pre-existing
-# single-dimension consumer of ``meta["dim"]`` etc. keeps working unmodified;
-# they are correct in full for the (default, most common) one-dimensional
-# case, and describe only the first partition axis when more than one
-# dimension is partitioned. Any code that must be correct for a
-# multi-dimensional partition reads ``dims``/``starts``/``stops``/
-# ``global_sizes`` instead. A dict carrying only the legacy singular keys
-# (as attached by an older climtools version, e.g. read back from a
-# previously written NetCDF file's attrs) is still recognized: see
-# :func:`_canonicalize_meta`.
+# Partition identity is defined by dimensions, global sizes, and local ownership bounds.
+# Plural keys support multi-D partitions; singular keys mirror the first axis for
+# compatibility.
 
 
 def _canonicalize_meta(meta: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -194,8 +168,7 @@ def _as_dim_map(
         return resolved
     if len(dims) != 1:
         raise ValueError(
-            f"{name} must be a mapping of dim -> value when more than one "
-            + f"partition dimension is given; got dims={dims!r}."
+            f"{name} must map partition dimensions to values for multi-D partitioning."
         )
     return {dims[0]: int(cast("int", value))}
 
@@ -316,10 +289,8 @@ def reattach_meta_after_collapse(
         start={d: int(meta["starts"][d]) for d in remaining_dims},
         stop={d: int(meta["stops"][d]) for d in remaining_dims},
         chunk_info=prune_chunk_info(meta["chunk_info"], result),
-        # `dim` collapsed away and is excluded from `remaining_dims`, so
-        # it can never cover every axis a Cartesian "cart" descriptor
-        # needs; a fresh, smaller topology is built lazily on demand
-        # instead (see `mpp_finish`'s identical handling for a reduction).
+        # Dropping a Cartesian axis invalidates the cached topology; rebuild it lazily
+        # when needed.
         cart=None,
     )
     return result
@@ -343,9 +314,19 @@ def strip_export_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def mpp_should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> bool:
-    """Collectively resolve whether to call :func:`mpp_log_partition_report`.
+    """Resolve partition logging collectively.
 
-    The answer is identical on every rank, since any rank asking is enough.
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    log_partitions : bool
+        Local logging request.
+
+    Returns
+    -------
+    bool
+        True on every rank if any rank requested logging.
     """
     return bool(mpi_context.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
@@ -555,12 +536,7 @@ def resolve_sizes(
         else:
             resolved[dim_name] = length
     if missing:
-        raise ValueError(
-            f"Cannot determine the length of {sorted(str(d) for d in missing)}: "
-            + "not given explicitly and no matching full-length coordinate "
-            + "was passed. Pass its length explicitly, or include a "
-            + "full-length coordinate array for it."
-        )
+        raise ValueError(f"Missing sizes for dimensions: {sorted(str(d) for d in missing)}.")
     return resolved
 
 

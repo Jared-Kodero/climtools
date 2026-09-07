@@ -30,19 +30,11 @@ from .mpp import (
     mpp_start_update_domains,
 )
 
-# Callables mpp_apply() recognizes and transparently redirects to their
-# dedicated implementation, so mpp_apply() is MPI-aware for them the same way
-# mpp_evaluate() is: mpp_apply(operator.matmul, a, b) computes the same correct,
-# MPI-reduced result as mpp_evaluate("a @ b", a=a, b=b) and mpp_matmul(a, b),
-# instead of running the plain rank-local matmul and failing the post-call
-# partition check whenever the distributed dimension gets contracted away.
+# Route matrix multiplication callables to the MPI-aware implementation.
 _MATMUL_CALLABLES: frozenset[Callable[..., Any]] = frozenset(
     {operator.matmul, np.matmul}
 )
-# ast.MatMult ('@') is deliberately absent: whether matrix multiplication is
-# rank-local depends on which dimension gets contracted, so it is routed to
-# the dedicated Arithmetic.matmul() implementation in _eval_ast_node()
-# instead of the generic mpp_apply(operator.matmul, ...) table below.
+# Handle ``@`` separately because contracting a partition dimension requires MPI.
 _AST_BINARY_OPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -97,15 +89,8 @@ def _fill_chunk(
                 filled[name] = xr.full_like(
                     var,
                     fill_value,
-                    # Pass fill_value itself (not np.asarray(fill_value).dtype)
-                    # so NumPy's value-based scalar promotion applies: a
-                    # Python-float nan against float32 stays float32 (nan is
-                    # representable), matching native xr.Dataset.reindex.
-                    # np.asarray(nan).dtype is float64, which would force
-                    # every float32 variable up to float64 regardless of
-                    # whether the fill value actually needs the extra
-                    # precision/range -- exactly the promotion this
-                    # implementation must not introduce.
+                    # Pass the fill value itself so NumPy preserves xarray's
+                    # scalar-promotion rules.
                     dtype=np.result_type(var.dtype, fill_value),
                 )
         return filled
@@ -145,17 +130,7 @@ def _exchange_halo_blocks(
     left_rank: int | None,
     right_rank: int | None,
 ) -> tuple[xr.Dataset | xr.DataArray | None, xr.Dataset | xr.DataArray | None]:
-    """Exchange boundary slabs with adjacent ranks.
-
-    Thin xarray-facing wrapper: extracts every variable that varies
-    along ``partition_dim`` into a plain NumPy array, delegates the
-    actual point-to-point exchange to :func:`~.mpi.mpp.mpp_start_update_domains`
-    (one batched group update covering every such variable at once, not
-    one call per variable), and reconstructs xarray objects -- labels,
-    dims, attrs -- from what comes back. climtools' communication layer
-    lives entirely in ``mpi.mpp``; this function's only job is the
-    xarray-object <-> plain-array translation on either side of it.
-    """
+    """Exchange boundary slabs with adjacent ranks."""
     haloed = _haloed_variable_names(value, partition_dim)
 
     def _local_array(name: Hashable) -> xr.Variable:
@@ -165,27 +140,15 @@ def _exchange_halo_blocks(
             return value.variable
         return value.coords[name].variable
 
-    # mpp_update_domains exchanges every field along the same `axis`, but
-    # different variables can carry `partition_dim` at different
-    # positions (e.g. "pr" is (time, lat, lon) -> axis 1 for "lat", while
-    # "slmsk" is (lat, lon) -> axis 0). Normalize every field to axis 0
-    # with a view (moveaxis, no copy) before the batched call, and move
-    # back after -- cheaper and simpler than threading a per-field axis
-    # through the communication kernel itself.
+    # Move each partition axis to axis 0 so mixed variable layouts share one halo
+    # kernel.
     axes = {name: _local_array(name).dims.index(partition_dim) for name in haloed}
     fields = {
         name: np.moveaxis(np.asarray(_local_array(name).values), axes[name], 0)
         for name in haloed
     }
 
-    # start/complete rather than the blocking mpp_update_domains: only the
-    # neighbours' slabs are wanted here, and the blocking form reaches them
-    # by concatenating [before | local | after] into a fresh array, copying
-    # every haloed variable in full, only for this function to slice the two
-    # ends off and drop the interior. xr.concat below then copies the same
-    # data a second time. Taking the slabs straight from the receive buffers
-    # removes one whole-array copy per haloed variable per halo exchange --
-    # so per rolling, coarsen, diff, differentiate, shift and roll call.
+    # Use start/complete to consume only halo slabs and avoid full-array copies.
     update = mpp_start_update_domains(
         fields,
         domain,
@@ -198,7 +161,7 @@ def _exchange_halo_blocks(
     )
     recv_before, recv_after, left_pad, right_pad = mpp_complete_update_domains(update)
 
-    def _received(name: Hashable, side: str) -> np.ndarray | None:
+    def _received(name: Hashable, side: str) -> np.ndarray[Any, Any] | None:
         """This name's exchanged slab, moved back to its original axis, or None."""
         pad = left_pad if side == "before" else right_pad
         if pad == 0:
@@ -242,10 +205,7 @@ def _gather_full(
     """Reconstruct ``value``'s full, replicated extent on every rank."""
     dim = meta["dim"]
     if len(meta["dims"]) > 1:
-        raise NotImplementedError(
-            "cannot yet gather a multi-dimensionally partitioned object "
-            + f"onto every rank (dims={meta['dims']!r})"
-        )
+        raise NotImplementedError(f"Gathering partition dims {meta['dims']!r} is unsupported.")
     pieces = mpi_context.comm.allgather(value)
     full = (
         xr.concat(pieces, dim=dim, data_vars="minimal")
@@ -273,10 +233,7 @@ def _align_replicated(
         length = int(other.sizes[dim])
         global_size = int(meta["global_sizes"][dim])
         if length != global_size:
-            raise ValueError(
-                f"cannot align: operand has dimension {dim!r} at length "
-                + f"{length}, expected the partner's global size {global_size}"
-            )
+            raise ValueError(f"Cannot align {dim!r}: length {length}, expected {global_size}.")
         indexers[dim] = slice(meta["starts"][dim], meta["stops"][dim])
     sliced = other.isel(indexers)
 
@@ -290,9 +247,7 @@ def _align_replicated(
                 xr.align(partner, sliced, join="exact")
             except (ValueError, KeyError) as exc:
                 raise ValueError(
-                    f"Cannot align: operand's {dim!r} labels don't match "
-                    + "the distributed partner's for this rank's slice, "
-                    + f"despite equal length. xarray.align reports: {exc}"
+                    f"Operand {dim!r} coordinates do not match this rank."
                 ) from exc
 
     return reattach_meta(sliced, meta)
@@ -381,12 +336,7 @@ def mpp_align(
         try:
             xr.align(left, right, join="exact")
         except (ValueError, KeyError) as exc:
-            raise ValueError(
-                f"Cannot align: left and right disagree on {dim!r} "
-                + "coordinate labels, so distributing each "
-                + "independently would silently combine mismatched "
-                + f"slices. xarray.align(..., join='exact') reports: {exc}"
-            ) from exc
+            raise ValueError(f"Cannot align {dim!r}: coordinate labels differ.") from exc
 
     return (
         mpp_repartition(
@@ -402,34 +352,9 @@ def mpp_align(
     )
 
 
-#
-# mpp_reindex() and mpp_sortby() are xarray's own coordinate-label operations
-# (unlike mpp_align() above, which reconciles rank *ownership* rather than
-# labels) -- either can move an element to a different rank whenever the
-# partition dimension itself is reindexed/reordered. Routing follows the
-# same "local unless communication is structurally required" rule as
-# everywhere else in this module: if none of the touched dimensions are
-# currently partitioned, native xarray runs rank-locally and ownership
-# is provably unaffected (see _local_reduction_meta's identical
-# reasoning for reductions).
-#
-# When the partition dimension itself IS touched, this does a genuine
-# personalized shuffle (see _shuffle_by_position below), not a full
-# MPI_Allgather: only the (small) coordinate/key values along `dim` are
-# ever gathered onto every rank -- ~O(global_size(dim)) numbers, the
-# same order of magnitude bookkeeping already costs elsewhere in this
-# package -- never the bulk data. Every rank then redundantly computes
-# the identical global new-position -> old-position mapping from those
-# small gathered arrays (cheap, no further communication needed to
-# agree on it), and the bulk payload moves rank-to-rank with
-# point-to-point, non-blocking sends: exactly one message per (source,
-# destination) pair that actually has data to move, receives posted
-# before sends (the same order FMS's mpp_do_update_ posts them in),
-# and no message at all for a rank's own self-contribution or for
-# newly-filled positions. Peak memory on any one rank is its own old
-# local slice plus its own new local slice -- never the global array --
-# so this scales to a partition dimension far larger than any single
-# rank could hold, unlike a full gather.
+# Reindex and sort stay local unless they touch a partition dimension.
+# Partition-axis changes gather only coordinate metadata, then shuffle bulk data
+# point-to-point.
 
 
 def _shuffle_by_position(
@@ -473,11 +398,8 @@ def _shuffle_by_position(
     self_payload: xr.Dataset | xr.DataArray | None = None
     send_requests: list[MPI.Request] = []
 
-    # What I must receive, computed independently but symmetrically
-    # with every source's own view of the same global mapping above --
-    # see the module note: both sides iterate the same predicate over
-    # the same universe in the same ascending order, so no metadata
-    # about position/order needs to travel alongside the payload.
+    # Source and destination ranks derive the same position map, so payload metadata is
+    # unnecessary.
     my_local_p = np.arange(new_start, new_stop, dtype=np.int64)
     my_local_g = old_pos[new_start:new_stop] if new_length > 0 else my_local_p
     my_is_fill = my_local_g == -1
@@ -500,16 +422,8 @@ def _shuffle_by_position(
         else:
             send_requests.append(comm.isend(payload, dest=dest))
 
-    # Blocking recv, not irecv: mpi4py's pickle irecv needs an accurate
-    # buffer-size guess up front and can silently corrupt memory once
-    # a payload exceeds it (exactly the risk a genuinely large,
-    # OOM-motivated shuffle would hit). recv() self-sizes via an
-    # internal probe first, so it stays correct at any payload size;
-    # the isend side above needs no such guess, since the sender
-    # already knows its own pickled size exactly. This trades away
-    # "receives posted before sends" latency-hiding for that
-    # correctness guarantee -- sends are still posted non-blocking so
-    # this rank's own sends never stall waiting on a slow receiver.
+    # Use ``recv`` for pickled payloads because it probes size; ``irecv`` requires a
+    # buffer-size guess.
     received = {source: comm.recv(source=source) for source in incoming_sources}
     MPI.Request.Waitall(send_requests)
 
@@ -523,10 +437,7 @@ def _shuffle_by_position(
         self_mask = my_owner == rank
         if self_mask.any():
             if self_payload is None:
-                raise AssertionError(
-                    "Shuffle planning mismatch: expected a "
-                    + "self-contribution that was never built."
-                )
+                raise AssertionError("Missing planned self-contribution.")
             pieces.append(self_payload)
             slot_pieces.append(np.nonzero(self_mask)[0])
 
@@ -659,18 +570,12 @@ def mpp_reindex(
         return result
 
     if len(touched) > 1:
-        raise NotImplementedError(
-            "cannot yet redistribute more than one active partition "
-            + f"dimension at once: touched={touched!r}"
-        )
+        raise NotImplementedError(f"Cannot redistribute multiple partition dims: {touched!r}.")
 
     dim = touched[0]
     new_labels = np.asarray(indexers[dim])
     if new_labels.ndim != 1:
-        raise NotImplementedError(
-            f"new {dim!r} labels must be one-dimensional to "
-            + f"redistribute; got shape {new_labels.shape!r}"
-        )
+        raise NotImplementedError(f"New {dim!r} labels must be 1-D; got {new_labels.shape!r}.")
     _agree(
         mpi_context,
         (
@@ -769,11 +674,7 @@ def mpp_sortby(
         return result
 
     if len(touched) > 1:
-        raise NotImplementedError(
-            "cannot yet redistribute when the sort key(s) together vary "
-            + "along more than one active partition dimension "
-            + f"({touched!r})"
-        )
+        raise NotImplementedError(f"Sort keys span multiple partition dims: {touched!r}.")
 
     dim = touched[0]
     local_len = int(value.sizes[dim])
@@ -784,9 +685,7 @@ def mpp_sortby(
         )
         if arr.ndim != 1 or arr.shape[0] != local_len:
             raise NotImplementedError(
-                f"key {key!r} is not one-dimensional along partition "
-                + f"dimension {dim!r}: shape {arr.shape!r} vs. local "
-                + f"length {local_len!r}"
+                f"Sort key {key!r} must be 1-D along {dim!r}; got {arr.shape!r}."
             )
         key_arrays_local.append(arr)
 
@@ -874,13 +773,7 @@ def mpp_check_operands_distribution(
     for other, other_meta in zip(operands, metas, strict=True):
         if other_meta is not None:
             if not _partitions_match(meta, other_meta):
-                raise ValueError(
-                    "cannot combine operands distributed over "
-                    + f"different partitions: dims={meta['dims']!r} "
-                    + f"bounds={ {d: (meta['starts'][d], meta['stops'][d]) for d in meta['dims']} } vs "
-                    + f"dims={other_meta['dims']!r} "
-                    + f"bounds={ {d: (other_meta['starts'][d], other_meta['stops'][d]) for d in other_meta['dims']} }"
-                )
+                raise ValueError("Operands have different partition ownership.")
             continue
 
         for dim in meta["dims"]:
@@ -891,10 +784,7 @@ def mpp_check_operands_distribution(
             owned = meta["stops"][dim] - meta["starts"][dim]
             local = int(other.sizes[dim])
             if local != owned:
-                raise ValueError(
-                    f"operand carries dimension {dim!r} at length "
-                    + f"{local}, expected this rank's owned length {owned}"
-                )
+                raise ValueError(f"Operand {dim!r} length is {local}; expected {owned}.")
             reference_indexed = dim in getattr(reference, "indexes", {})
             other_indexed = dim in getattr(other, "indexes", {})
             if reference_indexed and other_indexed:
@@ -902,19 +792,11 @@ def mpp_check_operands_distribution(
                     xr.align(reference, other, join="exact")
                 except (ValueError, KeyError) as exc:
                     raise ValueError(
-                        f"Operand carries dimension {dim!r} at the right "
-                        + "length but its coordinate labels don't match "
-                        + f"this rank's slice. xarray.align reports: {exc}"
-                    ) from exc
+                    f"Operand {dim!r} coordinates do not match this rank."
+                ) from exc
             elif mpi_context.comm.size > 1:
-                # Equal length is necessary but not sufficient: without a
-                # coordinate on dim to check exactly (the branch above),
-                # there is no way to tell this rank's own correctly
-                # aligned slice apart from, say, a different rank's
-                # slice of the same length -- a silently wrong answer
-                # that would otherwise pass unnoticed. Refuse rather
-                # than trust length alone once more than one rank makes
-                # that ambiguity possible.
+                # Without coordinates, equal local lengths cannot prove cross-rank
+                # alignment; reject the ambiguous case.
                 missing = [
                     name
                     for name, indexed in (
@@ -924,9 +806,8 @@ def mpp_check_operands_distribution(
                     if not indexed
                 ]
                 raise ValueError(
-                    f"cannot verify operand alignment for dimension {dim!r}: "
-                    + f"{' and '.join(missing)} has no coordinate to check "
-                    + "against equal length alone"
+                    f"Cannot verify {dim!r} alignment: missing coordinate on "
+                    + f"{' and '.join(missing)}."
                 )
     return meta, reference
 
@@ -958,17 +839,11 @@ def check_partition_preserved(
         owned = meta["stops"][dim] - meta["starts"][dim]
 
         if dim not in result.dims:
-            raise ValueError(
-                "the callable removed or renamed distributed dimension "
-                + f"{dim!r} (result dims: {tuple(result.dims)!r})"
-            )
+            raise ValueError(f"Callable removed distributed dimension {dim!r}.")
 
         local = int(result.sizes[dim])
         if local != owned:
-            raise ValueError(
-                "the callable changed the local length of distributed "
-                + f"dimension {dim!r} from {owned} to {local} on this rank"
-            )
+            raise ValueError(f"Callable changed local {dim!r} length from {owned} to {local}.")
 
         if (
             isinstance(reference, (xr.Dataset, xr.DataArray))
@@ -978,11 +853,7 @@ def check_partition_preserved(
             try:
                 xr.align(reference, result, join="exact")
             except (ValueError, KeyError) as exc:
-                raise ValueError(
-                    f"the callable changed the {dim!r} coordinate on this "
-                    + f"rank even though the length ({local}) is "
-                    + f"unchanged. xarray.align reports: {exc}"
-                ) from exc
+                raise ValueError(f"Callable changed {dim!r} coordinates.") from exc
 
 
 def mpp_apply(
@@ -1050,15 +921,7 @@ def _apply_generic(
     return reattach_meta(result, meta)
 
 
-#
-# mpp_apply() only accepts callables that leave the partition dimension
-# untouched. The two methods below are the "dedicated implementations"
-# for the classes of operation that genuinely need to reduce or
-# communicate across it: matrix multiplication that contracts the
-# partition dimension (needs an MPI reduction), and windowed/rolling
-# reductions along the partition dimension (need boundary values owned
-# by a neighboring rank). Both compute the mathematically correct
-# distributed result instead of refusing outright.
+# Cross-partition matmul and rolling operations use dedicated MPI-aware paths.
 
 
 def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.DataArray:
@@ -1096,16 +959,10 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
         if d in getattr(left, "dims", ()) and d in getattr(right, "dims", ())
     )
     if not contracted:
-        # None of the partition dimensions are among the dot product's
-        # common dimensions, so none are ever contracted: the operation
-        # only reads this rank's own owned slice and mpp_apply()'s post-call
-        # check confirms it.
+        # No partition dimension is contracted, so matrix multiplication is rank-local.
         return _apply_generic(mpi_context, operator.matmul, (left, right), {})
     if len(contracted) > 1:
-        raise NotImplementedError(
-            "cannot yet contract more than one partition dimension at "
-            + f"once: {contracted!r} are common to both operands"
-        )
+        raise NotImplementedError(f"Cannot contract multiple partition dims: {contracted!r}.")
     dim = contracted[0]
     other_axes = tuple(d for d in meta["dims"] if d != dim)
     replicated = tuple(
@@ -1115,8 +972,7 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
     )
     if replicated:
         raise NotImplementedError(
-            f"cannot yet contract dimension {dim!r} while an operand is "
-            + f"replicated along {replicated!r}"
+            f"Cannot contract {dim!r}; operand is replicated over {replicated!r}."
         )
 
     _agree(mpi_context, ("matmul", str(dim), int(meta["global_sizes"][dim])))
@@ -1188,15 +1044,14 @@ def mpp_halo_exchange(
     if dim is None:
         if len(partition_dims) > 1:
             raise ValueError(
-                "dim is required once more than one dimension is "
-                + "partitioned; pick one of "
-                + f"{tuple(str(d) for d in partition_dims)!r}"
+                "dim is required for partition dimensions "
+                + f"{tuple(str(d) for d in partition_dims)!r}."
             )
         partition_dim = partition_dims[0]
     elif dim not in partition_dims:
         raise ValueError(
-            f"dim={dim!r} is not one of the object's active partition "
-            + f"dimensions {tuple(str(d) for d in partition_dims)!r}"
+            f"dim={dim!r} is not active; choose from "
+            + f"{tuple(str(d) for d in partition_dims)!r}."
         )
     else:
         partition_dim = dim
@@ -1216,17 +1071,7 @@ def mpp_halo_exchange(
     )
 
     if before == 0 and after == 0:
-        # No boundary data requested on either side: every rank's own
-        # local slice is already the complete answer, so this is a
-        # local operation and should communicate nothing at all (the
-        # same "no MPI traffic when no communication is structurally
-        # required" rule the routing model applies everywhere else) --
-        # skip the length allgather and every point-to-point call
-        # below, which would otherwise still post/complete 2-4 messages
-        # per rank carrying zero-length payloads for no benefit. Callers
-        # that pass before=after=0 unconditionally (e.g. mpp_diff()/mpp_shift()
-        # with n=0/periods=0, or an edge_order that needs no interior
-        # halo) get correct output at zero communication cost instead.
+        # A zero-width halo is purely local; skip all communication.
         return value, 0, 0
 
     if not exchange_coords:
@@ -1237,27 +1082,15 @@ def mpp_halo_exchange(
             value = value.drop_vars(along_dim)
 
     comm = mpi_context.comm
-    # Neighbor lookup along `partition_dim` -- single-dim linear rank -+ 1,
-    # or (for a multi-dimensional Cartesian partition) the process grid's
-    # face neighbor along this axis, which does not coincide with rank -+
-    # 1 in general. Delegated to mpi.mpp.mpp_get_neighbor_pe, the same
-    # lookup FMS builds once into domain2D at mpp_define_domains time;
-    # here it is one call against a Domain built from this op's own
-    # .meta, keeping the logic in one place rather than duplicated at
-    # every halo-exchange call site.
+    # Resolve halo neighbors through the Cartesian-aware domain helper.
     domain = Domain.from_meta(meta, comm)
     left_rank, right_rank = mpp_get_neighbor_pe(
         domain, str(partition_dim), periodic=periodic
     )
 
     local_len = int(value.sizes[partition_dim])
-    # Only whether *some* rank is too short matters here, and that is a
-    # fixed-size reduction. The allgather this replaces moved a pickled int
-    # per rank on every halo exchange -- so on every rolling, coarsen, diff,
-    # differentiate, shift, roll and ffill/bfill call -- and grew with rank
-    # count, for a check that almost always passes. The per-rank list is only
-    # needed to write the error message, so it is gathered on the failing
-    # path alone.
+    # Use a fixed-size reduction for the common pass case; gather rank details only on
+    # failure.
     shortest = np.empty(1, dtype=np.int64)
     comm.Allreduce(np.array([local_len], dtype=np.int64), shortest, op=MPI.MIN)
     if int(shortest[0]) < max(before, after):
@@ -1268,26 +1101,8 @@ def mpp_halo_exchange(
             if length < before or length < after
         ]
         raise ValueError(
-            f"rank(s) {deficient} ([rank, local_length]) have a local "
-            + f"partition along {partition_dim!r} shorter than the "
-            + f"requested halo (before={before}, after={after}). Fix by "
-            + "one of: (1) run with fewer ranks so each one's slab along "
-            + f"{partition_dim!r} grows past {max(before, after)}; (2) "
-            + "partition a different, longer dimension instead; or (3) "
-            + "if the object was built with mpi_create_dataarray or "
-            + "mpi_create_dataset (not yet supported by "
-            + "mpi_open_dataset), pass "
-            + f"min_partition_size={max(before, after)} (or higher) for "
-            + f"{partition_dim!r} -- this only clears this error "
-            + "completely if it also keeps every rank active (i.e. "
-            + "global size // rank count >= min_partition_size for "
-            + f"{partition_dim!r}); if it instead leaves some "
-            + "highest-numbered ranks with an empty slice, a halo op "
-            + "spanning the active/empty boundary still raises this same "
-            + "error today (mpp_halo_exchange does not yet route around a "
-            + "zero-length neighbor as if it were a global edge), so "
-            + "option (1) or (2) is the only complete fix in that case. "
-            + "See get_balanced_bounds's min_chunk parameter."
+            f"Halo ({before}, {after}) exceeds local {partition_dim!r} size "
+            + f"on ranks {deficient}."
         )
 
     before_block, after_block = _exchange_halo_blocks(
@@ -1306,15 +1121,7 @@ def mpp_halo_exchange(
     if len(pieces) <= 1:
         padded = value
     elif isinstance(value, xr.Dataset):
-        # data_vars="minimal": only concatenate variables that actually
-        # vary along partition_dim. The default ("all") broadcasts every
-        # *other* variable along it too, silently turning a static
-        # (y, x) variable into a bogus (partition_dim, y, x) one
-        # duplicated across before_block/value/after_block -- those three
-        # pieces already agree exactly on any variable that lacks
-        # partition_dim (each is this rank's or a neighbor's full,
-        # untouched copy), so "minimal" is not just faster but the only
-        # option that leaves such variables unchanged.
+        # Concatenate only variables that vary along the partition dimension.
         padded = xr.concat(pieces, dim=partition_dim, data_vars="minimal")
     else:
         padded = xr.concat(pieces, dim=partition_dim)
@@ -1348,21 +1155,12 @@ def mpp_rolling_reduce(
         rolled = value.rolling({dim: window}, center=center, min_periods=min_periods)
         return getattr(rolled, reduce)()
 
-    # xarray's own centered-window convention (verified against
-    # DataArray.rolling(..., center=True) directly): for an odd window
-    # the split is symmetric either way, but for an *even* window the
-    # extra element goes on the left, i.e. before=window//2, not
-    # (window-1)//2 -- the two only differ (by one, in the wrong
-    # direction) when window is even.
+    # Match xarray centered windows: even windows place the extra cell on the left.
     before = window // 2 if center else window - 1
     after = (window - 1) - before if center else 0
 
-    # A rolling reduction reads data values in the halo but never coordinate
-    # values, and the trim below restores exactly this rank's own compute
-    # domain -- so the coordinate on the result is bit-for-bit the one that
-    # went in. Exchanging and re-joining it would rebuild a pandas Index over
-    # the padded extent for nothing; it is put back verbatim after the trim
-    # instead.
+    # Halo coordinates are unused; restore the original compute-domain coordinate after
+    # trimming.
     dim_coords = {
         name: coord for name, coord in value.coords.items() if dim in coord.dims
     }
@@ -1413,10 +1211,7 @@ def mpp_coarsen_reduce(
         return getattr(coarsened, reduce)()
 
     if side != "left":
-        raise NotImplementedError(
-            "side='right' is not yet supported for a distributed "
-            + "dimension (only the default side='left' is)"
-        )
+        raise NotImplementedError("Distributed searchsorted supports only side='left'.")
 
     _agree(
         mpi_context,
@@ -1430,9 +1225,8 @@ def mpp_coarsen_reduce(
 
     if boundary == "exact" and remainder != 0:
         raise ValueError(
-            f"Could not coarsen a distributed dimension of size {global_size} "
-            + f"with window {window} and boundary='exact'. Try boundary="
-            + "'trim' or 'pad'."
+            f"Size {global_size} is not divisible by window {window} "
+            + "with boundary='exact'."
         )
 
     is_left_edge = start == 0
@@ -1441,19 +1235,8 @@ def mpp_coarsen_reduce(
     before_needed = 0 if is_left_edge else start % window
     after_needed = 0 if is_right_edge else (window - stop % window) % window
 
-    # mpp_halo_exchange() requires every rank to request the *same*
-    # before/after width (enforced by its own internal _agree(), which
-    # exists to catch genuine cross-rank call mismatches elsewhere and
-    # should not be weakened here) -- but each rank's own alignment
-    # offset (before_needed/after_needed above) is a function of its
-    # own start/stop, so it is not, and must not be forced to be, the
-    # same on every rank. Request the single largest width any rank
-    # could ever need (window - 1, an O(window) bound, not an
-    # O(global_size) one) uniformly instead, then trim the excess back
-    # off below once each rank knows what it actually received -- the
-    # same "ask for an upper bound, trim locally" trick, just applied
-    # to a collective-agreement constraint rather than to the maximum
-    # halo width itself.
+    # Request the common upper-bound halo ``window - 1`` on all ranks, then trim
+    # locally.
     request = max(window - 1, 0)
     padded, left_pad, right_pad = mpp_halo_exchange(
         mpi_context, value, dim, before=request, after=request
@@ -1493,10 +1276,8 @@ def mpp_coarsen_reduce(
         # left neighbor computes and reports the identical block itself.
         coarsened = coarsened.isel({dim: slice(1, None)})
 
-    # coarsen changes the dimension's length, so -- exactly like mpp_diff()'s
-    # own length-changing case -- start/stop/global_size are recomputed
-    # from an allgather of each rank's new local length, not carried
-    # over from the (now stale) pre-coarsen meta.
+    # Recompute global bounds after coarsen because the distributed dimension length
+    # changes.
     comm = _dim_comm(mpi_context, meta, dim)
     new_global_size, new_start, new_stop = mpp_partition_offsets(
         comm, int(coarsened.sizes[dim])
@@ -1532,9 +1313,7 @@ def _eval_ast_node(
 
         function = _AST_BINARY_OPS.get(type(node.op))
         if function is None:
-            raise ValueError(
-                f"Unsupported operator {type(node.op).__name__!r} in " + "expression."
-            )
+            raise ValueError(f"Unsupported expression operator: {type(node.op).__name__}.")
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.right, variables)
         return mpp_apply(mpi_context, function, left, right)
@@ -1545,11 +1324,7 @@ def _eval_ast_node(
         for val_node in node.values:
             last_val = _eval_ast_node(mpi_context, val_node, variables)
             if isinstance(last_val, (xr.Dataset, xr.DataArray)):
-                raise TypeError(
-                    "'and'/'or' use Python truth-value checks, undefined "
-                    + "for a multi-element array. Use '&'/'|' instead, "
-                    + 'e.g. "(a > 0) & (b < 1)".'
-                )
+                raise TypeError("Use '&' or '|' for array boolean expressions.")
             if is_and and not last_val:
                 return last_val
             if not is_and and last_val:
@@ -1558,16 +1333,10 @@ def _eval_ast_node(
 
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
-            raise ValueError(
-                "Chained comparisons (e.g. 'a < b < c') are not "
-                + "supported; write them as separate comparisons."
-            )
+            raise ValueError("Chained comparisons are unsupported; combine separate comparisons.")
         function = _AST_COMPARE_OPS.get(type(node.ops[0]))
         if function is None:
-            raise ValueError(
-                f"Unsupported comparison {type(node.ops[0]).__name__!r} "
-                + "in expression."
-            )
+            raise ValueError(f"Unsupported comparison operator: {type(node.ops[0]).__name__}.")
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.comparators[0], variables)
         return mpp_apply(mpi_context, function, left, right)
@@ -1575,10 +1344,7 @@ def _eval_ast_node(
     if isinstance(node, ast.UnaryOp):
         function = _AST_UNARY_OPS.get(type(node.op))
         if function is None:
-            raise ValueError(
-                f"Unsupported unary operator {type(node.op).__name__!r} "
-                + "in expression."
-            )
+            raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}.")
         operand = _eval_ast_node(mpi_context, node.operand, variables)
         return mpp_apply(mpi_context, function, operand)
 
@@ -1586,20 +1352,12 @@ def _eval_ast_node(
         try:
             return variables[node.id]
         except KeyError:
-            raise NameError(
-                f"Name {node.id!r} is not defined; pass it as "
-                + f"mpp_evaluate(..., {node.id}=...)."
-            ) from None
+            raise NameError(f"Undefined expression name {node.id!r}.") from None
 
     if isinstance(node, ast.Constant):
         return node.value
 
-    raise ValueError(
-        f"Unsupported expression element {type(node).__name__!r}; "
-        + "only variable names, numeric literals, parentheses, and "
-        + "the arithmetic/comparison/bitwise/boolean operators are "
-        + "accepted."
-    )
+    raise ValueError(f"Unsupported expression node: {type(node).__name__}.")
 
 
 def mpp_evaluate(mpi_context: MPIContext, expression: str, /, **variables: Any) -> Any:
