@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING
 import cartopy.util
 import numpy as np
 import pandas as pd
-from cf_xarray import *
-
 import xarray as xr
+from cf_xarray import *
+from scipy.interpolate import griddata
 
 from ..core.utils import n_cpus, tmp
 
@@ -45,7 +45,9 @@ def get_spatial_dims(da: xr.DataArray | xr.Dataset) -> tuple[str, str]:
     lat = ds.cf["latitude"]
 
     if lon.name is None or lat.name is None:
-        raise ValueError("Could not infer longitude/latitude coordinates; pass x= and y=.")
+        raise ValueError(
+            "Could not infer longitude/latitude coordinates; pass x= and y=."
+        )
 
     return lon.name, lat.name
 
@@ -186,10 +188,14 @@ def sel_transect(
         elif len(data.data_vars) == 1:
             inference_data = next(iter(data.data_vars.values()))
         else:
-            raise ValueError("Automatic x/y inference requires a single-variable Dataset.")
+            raise ValueError(
+                "Automatic x/y inference requires a single-variable Dataset."
+            )
 
         if inference_data.ndim != 2 or set(inference_data.dims) != {xdim, ydim}:
-            raise ValueError("Automatic x/y inference requires exactly the x and y dimensions.")
+            raise ValueError(
+                "Automatic x/y inference requires exactly the x and y dimensions."
+            )
 
         point_dim = "__transect_point"
         flattened = inference_data.stack({point_dim: (ydim, xdim)})
@@ -487,6 +493,199 @@ def mask(
     remapped_mask = remap(subset_mask, data, method="nearest_s2d", parallel=parallel)
 
     return data.where(remapped_mask == valid_value, other=np.nan)
+
+
+def fill_nan_2d(
+    da: xr.DataArray,
+    method: Literal["linear", "cubic", "nearest"] = "linear",
+    max_cells: int = 5,
+    max_iter: int = 5,
+    nan_mask: xr.DataArray | None = None,
+) -> xr.DataArray:
+    """
+    Fill thin horizontal and vertical NaN gaps in a 2-D DataArray.
+
+    The function identifies contiguous NaN runs along both array
+    dimensions and interpolates only gaps whose length does not exceed
+    ```max_cells``. A cell must be bounded by finite values on both sides in
+    at least one direction. Interpolation is performed iteratively so
+    that intersections between horizontal and vertical gaps can be
+    resolved on subsequent passes.
+
+    An optional ``nan_mask`` can be supplied to define cells that must
+    remain NaN after interpolation, such as ocean or permanently masked
+    regions.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Two-dimensional input array containing finite values and NaNs.
+    method : {"linear", "cubic", "nearest"}, default="linear"
+        Interpolation method passed to :func:`scipy.interpolate.griddata`.
+    max_cells: int, default=10
+        Maximum contiguous NaN run length, in grid cells, eligible for
+        interpolation.
+    max_iter : int, default=10
+        Maximum number of interpolation passes.
+    nan_mask : xarray.DataArray, optional
+        Boolean mask with the same grid as ``da``. Cells where
+        ``nan_mask`` is True are forced to NaN in the returned array.
+        This is useful for preserving permanent masks such as ocean,
+        outside-domain, or invalid regions.
+
+    Returns
+    -------
+    xarray.DataArray
+        A copy of ``da`` with eligible NaN gaps interpolated. Cells
+        selected by ``nan_mask`` are NaN in the returned array.
+
+    Raises
+    ------
+    ValueError
+        If ``da`` is not two-dimensional, if ``method`` is unsupported,
+        if ``max_gap`` is less than 1, or if ``nan_mask`` cannot be
+        aligned exactly with ``da``.
+
+    Notes
+    -----
+    Interpolation is performed in array-index space rather than physical
+    coordinate space.
+
+    Examples
+    --------
+    Preserve ocean cells while filling thin gaps over land:
+
+    >>> fixed = fill_nan_2d(
+    ...     da,
+    ...     method="linear",
+    ...     max_gap=3,
+    ...     nan_mask=ocean_mask,
+    ... )
+    """
+    if da.ndim != 2:
+        raise ValueError("da must be 2-D.")
+
+    if method not in {"linear", "cubic", "nearest"}:
+        raise ValueError("method must be 'linear', 'cubic', or 'nearest'.")
+
+    if max_cells < 1:
+        raise ValueError("max_gap must be >= 1.")
+
+    if nan_mask is not None:
+        da, nan_mask = xr.align(
+            da,
+            nan_mask,
+            join="exact",
+        )
+
+    values = np.asarray(da.values, dtype=float).copy()
+
+    ny, nx = values.shape
+
+    y = np.arange(ny, dtype=float)
+    x = np.arange(nx, dtype=float)
+    x2d, y2d = np.meshgrid(x, y)
+
+    for _ in range(max_iter):
+        missing = ~np.isfinite(values)
+
+        if not np.any(missing):
+            break
+
+        target = np.zeros_like(missing, dtype=bool)
+
+        for i in range(ny):
+            row = missing[i]
+
+            padded = np.pad(
+                row.astype(np.int8),
+                1,
+                constant_values=0,
+            )
+
+            diff = np.diff(padded)
+
+            starts = np.where(diff == 1)[0]
+            stops = np.where(diff == -1)[0]
+
+            for start, stop in zip(starts, stops, strict=True):
+                gap = stop - start
+
+                bounded = (
+                    start > 0
+                    and stop < nx
+                    and np.isfinite(values[i, start - 1])
+                    and np.isfinite(values[i, stop])
+                )
+
+                if gap <= max_cells and bounded:
+                    target[i, start:stop] = True
+
+        for j in range(nx):
+            col = missing[:, j]
+
+            padded = np.pad(
+                col.astype(np.int8),
+                1,
+                constant_values=0,
+            )
+
+            diff = np.diff(padded)
+
+            starts = np.where(diff == 1)[0]
+            stops = np.where(diff == -1)[0]
+
+            for start, stop in zip(starts, stops, strict=True):
+                gap = stop - start
+
+                bounded = (
+                    start > 0
+                    and stop < ny
+                    and np.isfinite(values[start - 1, j])
+                    and np.isfinite(values[stop, j])
+                )
+
+                if gap <= max_cells and bounded:
+                    target[start:stop, j] = True
+
+        if not np.any(target):
+            break
+
+        valid = np.isfinite(values)
+
+        points = np.column_stack(
+            (
+                x2d[valid],
+                y2d[valid],
+            )
+        )
+
+        targets = np.column_stack(
+            (
+                x2d[target],
+                y2d[target],
+            )
+        )
+
+        interpolated = griddata(
+            points=points, values=values[valid], xi=targets, method=method
+        )
+
+        old_count = np.isfinite(values).sum()
+
+        values[target] = interpolated
+
+        new_count = np.isfinite(values).sum()
+
+        if new_count == old_count:
+            break
+
+    result = da.copy(data=values)
+
+    if nan_mask is not None:
+        result = result.where(~nan_mask.astype(bool))
+
+    return result
 
 
 def add_local_solar_time(

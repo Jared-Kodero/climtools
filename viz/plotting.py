@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from typing import Any, Literal, Self
 
-    import xarray as xr
     from matplotlib.colorbar import Colorbar
     from matplotlib.colors import Colormap, Normalize
     from matplotlib.figure import Figure
@@ -1480,7 +1480,7 @@ class Adder:
         assert normalized is not None
         return normalized
 
-    def default(
+    def plot(
         self,
         data: xr.DataArray,
         *,

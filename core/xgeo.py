@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ..xarray.utils import (
         SetupDask,
         add_local_solar_time,
+        fill_nan_2d,
         mask,
         remap,
         sel_transect,
@@ -38,6 +39,7 @@ __all__ = [
     "SetupDask",
     "add_local_solar_time",
     "cmaps",
+    "fill_nan_2d",
     "mask",
     "mpi_create_dataarray",
     "mpi_create_dataset",
@@ -74,6 +76,7 @@ _LAZY_IMPORTS = {
     "remap": ("..xarray.utils", "remap"),
     "sel_transect": ("..xarray.utils", "sel_transect"),
     "to_lon180": ("..xarray.utils", "to_lon180"),
+    "fill_nan_2d": ("..xarray.utils", "fill_nan_2d"),
     "to_netcdf": ("..xarray.io", "to_netcdf"),
     "mpi_open_dataset": ("..xarray.io", "mpi_open_dataset"),
     "mpi_create_dataarray": ("..xarray.io", "mpi_create_dataarray"),

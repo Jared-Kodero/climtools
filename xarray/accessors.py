@@ -822,6 +822,65 @@ class GeoDataArray(GeoBase):
         kwargs = exclude_key("self", dict(locals()))
         return calc.trends(self._obj, **kwargs)
 
+    def fill_nan_2d(
+        self,
+        method: Literal["linear", "cubic", "nearest"] = "linear",
+        max_cells: int = 5,
+        max_iter: int = 5,
+        nan_mask: xr.DataArray | None = None,
+    ) -> xr.DataArray:
+        """
+        Fill thin horizontal and vertical NaN gaps in a 2-D DataArray.
+
+        The function identifies contiguous NaN runs along both array
+        dimensions and interpolates only gaps whose length does not exceed
+        ``max_cells``. A cell must be bounded by finite values on both sides in
+        at least one direction. Interpolation is performed iteratively so
+        that intersections between horizontal and vertical gaps can be
+        resolved on subsequent passes.
+
+        An optional ``nan_mask`` can be supplied to define cells that must
+        remain NaN after interpolation, such as ocean or permanently masked
+        regions.
+
+        Parameters
+        ----------
+        method : {"linear", "cubic", "nearest"}, default="linear"
+            Interpolation method passed to :func:`scipy.interpolate.griddata`.
+        max_cells: int, default=10
+            Maximum contiguous NaN run length, in grid cells, eligible for
+            interpolation.
+        max_iter : int, default=10
+            Maximum number of interpolation passes.
+        nan_mask : xarray.DataArray, optional
+            Boolean mask with the same grid as ``da``. Cells where
+            ``nan_mask`` is True are forced to NaN in the returned array.
+            This is useful for preserving permanent masks such as ocean,
+            outside-domain, or invalid regions.
+
+        Returns
+        -------
+        xarray.DataArray
+            A copy of ``da`` with eligible NaN gaps interpolated. Cells
+            selected by ``nan_mask`` are NaN in the returned array.
+
+        Raises
+        ------
+        ValueError
+            If ``da`` is not two-dimensional, if ``method`` is unsupported,
+            if ``max_gap`` is less than 1, or if ``nan_mask`` cannot be
+            aligned exactly with ``da``.
+
+        Notes
+        -----
+        Interpolation is performed in array-index space rather than physical
+        coordinate space.
+
+        """
+
+        kwargs = exclude_key("self", dict(locals()))
+        return xgeo.fill_nan_2d(self._obj, **kwargs)
+
 
 class PreprocessAccessor:
     """Dataset-specific preprocessing namespace."""
