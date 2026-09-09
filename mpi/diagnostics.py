@@ -455,10 +455,10 @@ class MPIDiagnostics:
         return True
 
 
-def tmp_cleanup(comm: MPI.Intracomm, tmp: Path, *_):
+def tmp_cleanup(comm: MPI.Intracomm, TMP: Path, *_):
     comm.Barrier()
     if comm.Get_rank() == 0:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(TMP, ignore_errors=True)
 
 
 def get_tmpdir(comm: MPI.Intracomm) -> Path:
@@ -482,7 +482,7 @@ def get_tmpdir(comm: MPI.Intracomm) -> Path:
             home,
         )
 
-    tmp = base / "tmp" / "xgeo" / tmp_id
-    tmp.mkdir(parents=True, exist_ok=True)
+    TMP = base / "TMP" / "xgeo" / tmp_id
+    TMP.mkdir(parents=True, exist_ok=True)
 
-    return tmp
+    return TMP

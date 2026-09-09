@@ -28,7 +28,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -37,8 +36,10 @@ from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
 
+import xarray as xr
+
 from ..core.progress import DaskProgressBar, SerialProgressBar
-from ..core.utils import n_cpus, tmp
+from ..core.utils import N_CPUS, TMP
 from .plot_utils import add_colorbar as _add_colorbar
 from .plot_utils import (
     add_contour_labels,
@@ -2498,7 +2499,7 @@ class Animate:
                 )
         if outfile is None:
             self.outfile = (
-                tmp / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
+                TMP / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
             )
 
             self.user_outfile = False
@@ -2576,7 +2577,7 @@ class Animate:
         Parameters
         ----------
         input_pattern : str
-            FFmpeg input pattern, for example ``/tmp/frames/%06d.png``.
+            FFmpeg input pattern, for example ``/TMP/frames/%06d.png``.
         outfile : pathlib.Path
             Output MP4 path.
         fps : int
@@ -2651,7 +2652,7 @@ class Animate:
             for frame_number, index in enumerate(self.indices)
         ]
         if self.parallel and len(tasks) > 1:
-            workers = max(1, min(len(tasks), max(1, n_cpus // 2)))
+            workers = max(1, min(len(tasks), max(1, N_CPUS // 2)))
             delayed = [dask.delayed(plot_animation_frame)(*task) for task in tasks]
 
             Callback.active.clear()

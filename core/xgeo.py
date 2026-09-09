@@ -30,9 +30,10 @@ if TYPE_CHECKING:
     )
     from . import preprocess, stats
     from .progress import DaskProgressBar, SerialProgressBar
-    from .utils import n_cpus
+    from .utils import N_CPUS
 
 __all__ = [
+    "N_CPUS",
     "DaskProgressBar",
     "MPIXarray",
     "SerialProgressBar",
@@ -47,7 +48,6 @@ __all__ = [
     "mpi_empty_dataset",
     "mpi_open_dataset",
     "mpi_partition_data",
-    "n_cpus",
     "nc_append",
     "plot",
     "preprocess",
@@ -70,7 +70,7 @@ _LAZY_IMPORTS = {
     "stats": (".stats", None),
     "cmaps": ("..viz.cmaps", None),
     "mask": ("..xarray.utils", "mask"),
-    "n_cpus": (".utils", "n_cpus"),
+    "N_CPUS": (".utils", "N_CPUS"),
     "plot": ("..viz.plotting", None),
     "preprocess": (".preprocess", None),
     "remap": ("..xarray.utils", "remap"),

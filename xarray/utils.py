@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING
 import cartopy.util
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cf_xarray import *
 from scipy.interpolate import griddata
 
-from ..core.utils import n_cpus, tmp
+import xarray as xr
+
+from ..core.utils import N_CPUS, TMP
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -426,7 +427,7 @@ def remap(
             },
         ).chunk(chunks)
 
-    weight_file = tmp / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
+    weight_file = TMP / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
     reuse = weight_file.exists()
 
     regridder = xe.Regridder(
@@ -739,7 +740,7 @@ class SetupDask:
     def __init__(
         self,
         workers: int = 1,
-        threads_per_worker: int = n_cpus,
+        threads_per_worker: int = N_CPUS,
         processes: bool = False,
         filter_warnings: bool = True,
         memory_limit: str | int = "auto",

@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Literal
 
 import xarray as xr
 
-from ..core.utils import n_cpus
+from ..core.utils import N_CPUS
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
@@ -101,7 +101,7 @@ _EXTRAPOLATING_METHODS: frozenset[str] = frozenset(
     {"remapbil", "remapbic", "remapnn", "remaplaf"}
 )
 
-_N_CPUS: int = n_cpus
+_N_CPUS: int = N_CPUS
 
 
 # ---------------------------------------------------------------------------

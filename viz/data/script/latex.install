@@ -6,7 +6,7 @@ set -e
 
 # Define installation directory
 LATEX_INSTALL_DIR="$HOME/texlive"
-WORK_DIR="/tmp/$(date +%s%N)"
+WORK_DIR="/TMP/$(date +%s%N)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Create working directory

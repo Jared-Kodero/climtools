@@ -1274,10 +1274,10 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             changed.append(path)
 
     # The marker is created only after every source modification succeeds.
-    tmp = marker.with_suffix(marker.suffix + ".tmp")
+    TMP = marker.with_suffix(marker.suffix + ".TMP")
 
-    tmp.write_text(json.dumps(signature(), sort_keys=True), encoding="utf-8")
+    TMP.write_text(json.dumps(signature(), sort_keys=True), encoding="utf-8")
 
-    tmp.replace(marker)
+    TMP.replace(marker)
 
     return tuple(changed)

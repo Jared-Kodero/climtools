@@ -618,9 +618,9 @@ def write_stub(force: bool = False) -> bool:
                 return False
         except OSError:
             pass
-    tmp = pyi.with_suffix(".pyi.tmp")
-    tmp.write_text(marker + build_stub_text())
-    os.replace(tmp, pyi)
+    TMP = pyi.with_suffix(".pyi.TMP")
+    TMP.write_text(marker + build_stub_text())
+    os.replace(TMP, pyi)
     return True
 
 

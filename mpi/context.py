@@ -16,7 +16,7 @@ from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
-from ..core.utils import LockFile, tmp
+from ..core.utils import TMP, LockFile
 from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
 from .mpi_init import MPI, require_mpi, world_size
 
@@ -286,7 +286,7 @@ class MPIContext(MPIDiagnostics):
             atexit.register(partial(tmp_cleanup, self.comm, self._tmp))
             self._install_abort_hook()
         else:
-            self._tmp = tmp
+            self._tmp = TMP
 
         self._mpi_lock = LockFile(self._tmp / ".mpi.lock")
 

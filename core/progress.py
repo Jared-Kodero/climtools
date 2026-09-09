@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from dask.diagnostics import ProgressBar
 
-from .utils import LockFile, RedirectStreams, tmp
+from .utils import TMP, LockFile, RedirectStreams
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -53,7 +53,7 @@ class BaseProgress:
         self.reset_redirect()
 
     def reset_redirect(self) -> None:
-        self._temp_path = tmp / ".progress" / uuid.uuid4().hex
+        self._temp_path = TMP / ".progress" / uuid.uuid4().hex
         self._temp_path.parent.mkdir(exist_ok=True, parents=True)
         self._redirect = RedirectStreams(
             stdout_target=self._temp_path,
