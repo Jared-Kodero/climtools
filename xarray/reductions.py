@@ -8,6 +8,7 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI

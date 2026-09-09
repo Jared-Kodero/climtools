@@ -322,7 +322,10 @@ def mpp_slice_compute_domain(
 
 
 def _mpp_reduce(
-    local: np.ndarray[Any, Any], op: MPI.Op, comm: MPI.Comm | None, domain: Domain | None = None
+    local: np.ndarray[Any, Any],
+    op: MPI.Op,
+    comm: MPI.Comm | None,
+    domain: Domain | None = None,
 ) -> np.ndarray[Any, Any]:
     """Reduce rank-local arrays with an MPI reduction operator."""
     active_comm = (
@@ -334,21 +337,30 @@ def _mpp_reduce(
 
 
 def mpp_sum(
-    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+    local: np.ndarray[Any, Any],
+    domain: Domain | None = None,
+    *,
+    comm: MPI.Comm | None = None,
 ) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_sum``. Pass ``domain`` or ``comm``."""
     return _mpp_reduce(local, MPI.SUM, comm, domain)
 
 
 def mpp_max(
-    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+    local: np.ndarray[Any, Any],
+    domain: Domain | None = None,
+    *,
+    comm: MPI.Comm | None = None,
 ) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_max``."""
     return _mpp_reduce(local, MPI.MAX, comm, domain)
 
 
 def mpp_min(
-    local: np.ndarray[Any, Any], domain: Domain | None = None, *, comm: MPI.Comm | None = None
+    local: np.ndarray[Any, Any],
+    domain: Domain | None = None,
+    *,
+    comm: MPI.Comm | None = None,
 ) -> np.ndarray[Any, Any]:
     """FMS's ``mpp_min``."""
     return _mpp_reduce(local, MPI.MIN, comm, domain)
@@ -774,7 +786,9 @@ PROD_EXPONENT, PROD_NAN, PROD_INF, PROD_ZERO, PROD_NEGATIVE = range(5)
 _PROD_FIELDS = 5
 
 
-def _moved_to_front(values: np.ndarray[Any, Any], axes: Sequence[int]) -> np.ndarray[Any, Any]:
+def _moved_to_front(
+    values: np.ndarray[Any, Any], axes: Sequence[int]
+) -> np.ndarray[Any, Any]:
     """Collapse ``axes`` into a single leading axis, preserving the rest."""
     ordered = tuple(a % values.ndim for a in axes)
     moved = np.moveaxis(values, ordered, range(len(ordered)))
@@ -898,7 +912,9 @@ def mpp_reproducing_prod(
         If the communicator exceeds the supported rank limit.
     """
     if comm.size > MAX_PROD_RANKS:
-        raise ValueError(f"mpp_reproducing_prod supports at most {MAX_PROD_RANKS} ranks.")
+        raise ValueError(
+            f"mpp_reproducing_prod supports at most {MAX_PROD_RANKS} ranks."
+        )
     values = np.asarray(local)
     out_dtype = np.dtype(dtype) if dtype is not None else values.dtype
     mantissa, companions = mpp_prod_decompose(values, axis)

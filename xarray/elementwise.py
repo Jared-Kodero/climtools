@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -743,7 +744,9 @@ def mpp_pad(
     if before == 0 and after == 0:
         return value
     if mode != "constant":
-        raise NotImplementedError(f"Distributed pad supports only mode='constant'; got {mode!r}.")
+        raise NotImplementedError(
+            f"Distributed pad supports only mode='constant'; got {mode!r}."
+        )
 
     _agree(mpi_context, ("pad", str(dim), int(before), int(after), mode))
 

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -205,7 +206,9 @@ def _gather_full(
     """Reconstruct ``value``'s full, replicated extent on every rank."""
     dim = meta["dim"]
     if len(meta["dims"]) > 1:
-        raise NotImplementedError(f"Gathering partition dims {meta['dims']!r} is unsupported.")
+        raise NotImplementedError(
+            f"Gathering partition dims {meta['dims']!r} is unsupported."
+        )
     pieces = mpi_context.comm.allgather(value)
     full = (
         xr.concat(pieces, dim=dim, data_vars="minimal")
@@ -233,7 +236,9 @@ def _align_replicated(
         length = int(other.sizes[dim])
         global_size = int(meta["global_sizes"][dim])
         if length != global_size:
-            raise ValueError(f"Cannot align {dim!r}: length {length}, expected {global_size}.")
+            raise ValueError(
+                f"Cannot align {dim!r}: length {length}, expected {global_size}."
+            )
         indexers[dim] = slice(meta["starts"][dim], meta["stops"][dim])
     sliced = other.isel(indexers)
 
@@ -336,7 +341,9 @@ def mpp_align(
         try:
             xr.align(left, right, join="exact")
         except (ValueError, KeyError) as exc:
-            raise ValueError(f"Cannot align {dim!r}: coordinate labels differ.") from exc
+            raise ValueError(
+                f"Cannot align {dim!r}: coordinate labels differ."
+            ) from exc
 
     return (
         mpp_repartition(
@@ -570,12 +577,16 @@ def mpp_reindex(
         return result
 
     if len(touched) > 1:
-        raise NotImplementedError(f"Cannot redistribute multiple partition dims: {touched!r}.")
+        raise NotImplementedError(
+            f"Cannot redistribute multiple partition dims: {touched!r}."
+        )
 
     dim = touched[0]
     new_labels = np.asarray(indexers[dim])
     if new_labels.ndim != 1:
-        raise NotImplementedError(f"New {dim!r} labels must be 1-D; got {new_labels.shape!r}.")
+        raise NotImplementedError(
+            f"New {dim!r} labels must be 1-D; got {new_labels.shape!r}."
+        )
     _agree(
         mpi_context,
         (
@@ -674,7 +685,9 @@ def mpp_sortby(
         return result
 
     if len(touched) > 1:
-        raise NotImplementedError(f"Sort keys span multiple partition dims: {touched!r}.")
+        raise NotImplementedError(
+            f"Sort keys span multiple partition dims: {touched!r}."
+        )
 
     dim = touched[0]
     local_len = int(value.sizes[dim])
@@ -784,7 +797,9 @@ def mpp_check_operands_distribution(
             owned = meta["stops"][dim] - meta["starts"][dim]
             local = int(other.sizes[dim])
             if local != owned:
-                raise ValueError(f"Operand {dim!r} length is {local}; expected {owned}.")
+                raise ValueError(
+                    f"Operand {dim!r} length is {local}; expected {owned}."
+                )
             reference_indexed = dim in getattr(reference, "indexes", {})
             other_indexed = dim in getattr(other, "indexes", {})
             if reference_indexed and other_indexed:
@@ -792,8 +807,8 @@ def mpp_check_operands_distribution(
                     xr.align(reference, other, join="exact")
                 except (ValueError, KeyError) as exc:
                     raise ValueError(
-                    f"Operand {dim!r} coordinates do not match this rank."
-                ) from exc
+                        f"Operand {dim!r} coordinates do not match this rank."
+                    ) from exc
             elif mpi_context.comm.size > 1:
                 # Without coordinates, equal local lengths cannot prove cross-rank
                 # alignment; reject the ambiguous case.
@@ -843,7 +858,9 @@ def check_partition_preserved(
 
         local = int(result.sizes[dim])
         if local != owned:
-            raise ValueError(f"Callable changed local {dim!r} length from {owned} to {local}.")
+            raise ValueError(
+                f"Callable changed local {dim!r} length from {owned} to {local}."
+            )
 
         if (
             isinstance(reference, (xr.Dataset, xr.DataArray))
@@ -962,7 +979,9 @@ def mpp_matmul(mpi_context: MPIContext, left: xr.DataArray, right: Any) -> xr.Da
         # No partition dimension is contracted, so matrix multiplication is rank-local.
         return _apply_generic(mpi_context, operator.matmul, (left, right), {})
     if len(contracted) > 1:
-        raise NotImplementedError(f"Cannot contract multiple partition dims: {contracted!r}.")
+        raise NotImplementedError(
+            f"Cannot contract multiple partition dims: {contracted!r}."
+        )
     dim = contracted[0]
     other_axes = tuple(d for d in meta["dims"] if d != dim)
     replicated = tuple(
@@ -1325,7 +1344,9 @@ def _eval_ast_node(
 
         function = _AST_BINARY_OPS.get(type(node.op))
         if function is None:
-            raise ValueError(f"Unsupported expression operator: {type(node.op).__name__}.")
+            raise ValueError(
+                f"Unsupported expression operator: {type(node.op).__name__}."
+            )
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.right, variables)
         return mpp_apply(mpi_context, function, left, right)
@@ -1345,10 +1366,14 @@ def _eval_ast_node(
 
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
-            raise ValueError("Chained comparisons are unsupported; combine separate comparisons.")
+            raise ValueError(
+                "Chained comparisons are unsupported; combine separate comparisons."
+            )
         function = _AST_COMPARE_OPS.get(type(node.ops[0]))
         if function is None:
-            raise ValueError(f"Unsupported comparison operator: {type(node.ops[0]).__name__}.")
+            raise ValueError(
+                f"Unsupported comparison operator: {type(node.ops[0]).__name__}."
+            )
         left = _eval_ast_node(mpi_context, node.left, variables)
         right = _eval_ast_node(mpi_context, node.comparators[0], variables)
         return mpp_apply(mpi_context, function, left, right)

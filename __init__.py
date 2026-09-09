@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 import dask.diagnostics
 
 from .core.progress import DaskProgressBar
-from .core.utils import apply_widget_css, n_cpus
+from .core.utils import N_CPUS, apply_widget_css
 from .xarray.accessors import fix_xarray
 
 if TYPE_CHECKING:
@@ -76,6 +76,7 @@ warnings.filterwarnings("always", module=r"climtools\..*")
 #: of the whole step. ``from climtools import MPIContext`` still works, going
 #: through ``__getattr__`` exactly as before.
 __all__ = [
+    "N_CPUS",
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
@@ -85,7 +86,6 @@ __all__ = [
     "cmaps",
     "exclude_key",
     "locked_print",
-    "n_cpus",
     "operator",
     "plotting",
     "stats",

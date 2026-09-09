@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.context import MPIContext
@@ -295,7 +296,9 @@ def mpp_partition(
                     stripped, resolved_dim, comm.size, chunk_info
                 )
         elif value is not None:
-            raise ValueError(f"Only root rank {root} may provide value; got rank {comm.rank}.")
+            raise ValueError(
+                f"Only root rank {root} may provide value; got rank {comm.rank}."
+            )
     except BaseException as exc:
         error = exc
     mpi_context.raise_if_error(error, "partition")
@@ -1251,7 +1254,9 @@ def to_netcdf(
             disagreeing = [
                 rank for rank, state in enumerate(agreed) if state != agreed[0]
             ]
-            raise mpi_context.MPIError(f"MPI ranks disagree on distribution state: {disagreeing}.")
+            raise mpi_context.MPIError(
+                f"MPI ranks disagree on distribution state: {disagreeing}."
+            )
 
         if distributed:
             distributed_dim = str(mpi_meta["dim"])

@@ -20,18 +20,18 @@ from typing import TYPE_CHECKING, Any, Literal, TextIO
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-script_dir = Path(__file__).resolve().parent
-host = socket.gethostname()
-user = getpass.getuser()
-home = Path.home()
+N_CPUS: int = len(os.sched_getaffinity(0))
+HOST = socket.gethostname()
+USER = getpass.getuser()
+HOME = Path.home()
 
-mpi_enabled = False
-n_cpus = len(os.sched_getaffinity(0))
+
+script_dir = Path(__file__).resolve().parent
 ipykernel = "ipykernel" in sys.modules
 isatty = sys.stdout.isatty() or ipykernel
 
 
-tmp = Path(f"/tmp/{user}/xgeo/{uuid.uuid4().hex}")
+tmp = Path(f"/tmp/{USER}/xgeo/{uuid.uuid4().hex}")
 tmp.mkdir(parents=True, exist_ok=True)
 
 

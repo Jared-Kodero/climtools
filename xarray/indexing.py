@@ -6,6 +6,7 @@ from collections.abc import Hashable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -114,7 +115,9 @@ def mpp_isel(
         )
 
     if not isinstance(distributed_indexer, slice):
-        raise NotImplementedError("Distributed isel supports only slices or scalar indices.")
+        raise NotImplementedError(
+            "Distributed isel supports only slices or scalar indices."
+        )
     if distributed_indexer.step not in (None, 1):
         raise NotImplementedError("Distributed isel currently requires slice step 1.")
 
@@ -142,7 +145,9 @@ def mpp_isel(
         dim_comm = _dim_comm(mpi_context, meta, dim)
         counts = dim_comm.allgather(int(output.sizes[dim]))
         if len(meta["dims"]) > 1:
-            raise NotImplementedError(f"Cannot redistribute collapsed partition dimension {dim!r}.")
+            raise NotImplementedError(
+                f"Cannot redistribute collapsed partition dimension {dim!r}."
+            )
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_stop = new_start + (local_stop - local_start)
@@ -181,7 +186,9 @@ def mpp_isel_scalar(
     global_size = int(meta["global_sizes"][dim])
     normalized = index + global_size if index < 0 else index
     if normalized < 0 or normalized >= global_size:
-        raise IndexError(f"Index {index} is out of bounds for {dim!r} (size {global_size}).")
+        raise IndexError(
+            f"Index {index} is out of bounds for {dim!r} (size {global_size})."
+        )
 
     dim_comm = _dim_comm(mpi_context, meta, dim)
     # Find a scalar index owner with a fixed-size reduction instead of gathering rank
@@ -274,7 +281,9 @@ def mpp_sel(
         )
 
     if not isinstance(distributed_indexer, slice):
-        raise NotImplementedError("Distributed sel supports only slices or scalar labels.")
+        raise NotImplementedError(
+            "Distributed sel supports only slices or scalar labels."
+        )
 
     local_indexers = dict(supplied)
     local_indexers[dim] = distributed_indexer
@@ -296,7 +305,9 @@ def mpp_sel(
     if new_global_size == 1 and partition_dim is not None:
         counts = dim_comm.allgather(int(local_length[0]))
         if len(meta["dims"]) > 1:
-            raise NotImplementedError(f"Cannot redistribute collapsed partition dimension {dim!r}.")
+            raise NotImplementedError(
+                f"Cannot redistribute collapsed partition dimension {dim!r}."
+            )
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
     new_stop = new_start + int(local_length[0])
@@ -351,7 +362,9 @@ def mpp_sel_scalar(
         elif method in ("backfill", "bfill"):
             rank_fn = min
         else:
-            raise NotImplementedError(f"Distributed sel does not support method={method!r}.")
+            raise NotImplementedError(
+                f"Distributed sel does not support method={method!r}."
+            )
 
         candidate: tuple[int, Any] | None = None
         if local_coord.size:
@@ -366,7 +379,9 @@ def mpp_sel_scalar(
                 selected = None
             if selected is not None:
                 if selected.ndim != 0:
-                    raise NotImplementedError("Inexact sel requires a unique 1-D index.")
+                    raise NotImplementedError(
+                        "Inexact sel requires a unique 1-D index."
+                    )
                 local_index = int(selected.item())
                 matched_coord = local_coord[local_index]
                 key = (

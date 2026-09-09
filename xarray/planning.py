@@ -9,6 +9,7 @@ from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -76,7 +77,9 @@ def local_reduction_meta(
     if meta is None or any(dim in dims for dim in meta["dims"]):
         return None
     if partition_dim not in (None, "auto"):
-        raise ValueError("New partition_dim requires reducing the active partition dimension.")
+        raise ValueError(
+            "New partition_dim requires reducing the active partition dimension."
+        )
     return meta
 
 
@@ -635,7 +638,9 @@ def mpp_finish(
             sizes, mpi_context.comm.size, rank=mpi_context.comm.rank
         )
     elif partition_dim not in auto_candidates:
-        raise ValueError(f"partition_dim={partition_dim!r} was not reduced collectively.")
+        raise ValueError(
+            f"partition_dim={partition_dim!r} was not reduced collectively."
+        )
 
     chunk_info = (
         prune_chunk_info(old_meta["chunk_info"], result) if old_meta is not None else {}
