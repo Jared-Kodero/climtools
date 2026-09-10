@@ -6,7 +6,6 @@ import functools
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
@@ -16,9 +15,9 @@ from .arithmetic import (
     mpp_halo_exchange,
     reattach_meta,
 )
-from .mpp import mpp_dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
+from .mpp import mpp_dim_comm as _dim_comm
 from .mpp import mpp_partition_offsets
 from .planning import _agree, guarded
 

@@ -22,16 +22,19 @@ bypassed by import order.
 from __future__ import annotations
 
 import os
-import sys
+from typing import TYPE_CHECKING
 
-import mpi4py
+from ..core.utils import ipykernel
 
 #: Launcher variables reporting the world *size*. Rank variables are useless
 #: for this: Slurm exports ``SLURM_PROCID`` into every task of every step and
 #: every child inherits it, so a kernel started inside an allocation carries
 #: one without being an MPI rank.
 
+if TYPE_CHECKING:
+    from mpi4py import MPI
 
+__all__ = ["MPI", "mpi_is_available", "require_mpi"]
 LAUNCH_ENV = (
     "OMPI_COMM_WORLD_SIZE",
     "PMI_SIZE",
@@ -50,34 +53,19 @@ def world_size() -> int:
     return 1
 
 
-def _defer_mpi_init() -> bool:
-    """Whether to hold back ``MPI_Init`` for this process.
-
-    Only for an interactive kernel that is not part of a multi-rank launch.
-    A batch job never has ipykernel loaded, so this cannot suppress MPI for a
-    real run; and a single kernel cannot do useful MPI anyway, since its
-    ``COMM_WORLD`` has one member. ``CLIMTOOLS_FORCE_MPI=1`` overrides, for
-    anyone who wants the old behaviour back.
-    """
-
-    return "ipykernel" in sys.modules and world_size() <= 1
-
-
-DEFERRED = _defer_mpi_init()
-
-if DEFERRED:
-    mpi4py.rc.initialize = False
-    mpi4py.rc.finalize = False
+if ipykernel and world_size() <= 1:
+    MPI = None
+else:
+    from mpi4py import MPI
 
 
 # Must follow the rc assignment above: importing MPI is what runs MPI_Init.
-from mpi4py import MPI
-
-__all__ = ["DEFERRED", "MPI", "mpi_is_available", "require_mpi"]
 
 
 def mpi_is_available() -> bool:
     """Whether MPI calls are safe to make in this process."""
+    if MPI is None:
+        return False
     return bool(MPI.Is_initialized()) and not MPI.Is_finalized()
 
 
