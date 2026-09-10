@@ -26,7 +26,7 @@ USER: str = getpass.getuser()
 HOME: str = Path.home()
 
 
-TMP = Path(f"/TMP/{USER}/xgeo/{uuid.uuid4().hex}")
+TMP = Path(f"/tmp/{USER}/xgeo/{uuid.uuid4().hex}")
 TMP.mkdir(parents=True, exist_ok=True)
 
 
@@ -132,12 +132,6 @@ def exclude_key(name: str | list[str], data: dict) -> dict:
     for k in keys:
         data.pop(k, None)
     return data
-
-
-class AttrDict(dict):
-    __getattr__ = dict.get
-    __setattr__ = dict.__setitem__
-    __delattr__ = dict.__delitem__
 
 
 class LockFile:
