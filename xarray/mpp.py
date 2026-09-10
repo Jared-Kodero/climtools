@@ -52,6 +52,10 @@ __all__ = [
     "mpp_update_domains",
 ]
 
+# Cache topologies on the communicator so cache lifetime follows the MPI communicator
+# lifetime.
+_TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
+
 
 @dataclass(frozen=True)
 class Domain:
@@ -1242,11 +1246,6 @@ def mpp_define_cartesian_domain(
         bounds=bounds,
         neighbors=neighbors,
     )
-
-
-# Cache topologies on the communicator so cache lifetime follows the MPI communicator
-# lifetime.
-_TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
 
 
 def mpp_get_cartesian_domain(
