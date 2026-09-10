@@ -13,14 +13,17 @@ from typing import TYPE_CHECKING, Any
 
 import dask
 import netCDF4
+import cftime
 import numpy as np
 import xarray as xr
 
 from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
+from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
+
 from ..mpi.mpi_init import MPI
+from ..mpp import mpp_global_field
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
-from .encoding import encode_dataset_time, encode_time, is_time_like
 from .meta import mpp_get_meta, strip_export_attrs
 from .planning import mpp_resolve_comm
 
@@ -37,6 +40,108 @@ class NetCDFWriteError(MPIError):
 
 
 # Keep chunks below HDF5's 4 GiB hard limit; target half the limit for filter overhead.
+
+
+def is_cftime(da: xr.DataArray) -> bool:
+    """Report whether an object-dtype variable holds cftime datetimes."""
+    if da.dtype != object:
+        return False
+    values = np.asarray(da.values).reshape(-1)
+    return values.size > 0 and isinstance(values[0], cftime.datetime)
+
+
+def is_time_like(da: xr.DataArray) -> bool:
+    """Report whether a variable carries datetime, cftime or timedelta values.
+
+    Returns
+    -------
+    bool
+        ``True`` when the variable requires CF numeric encoding before it can be written
+        through the ``netCDF4`` interface.
+
+    """
+    return (
+        np.issubdtype(da.dtype, np.datetime64)
+        or np.issubdtype(da.dtype, np.timedelta64)
+        or is_cftime(da)
+    )
+
+
+def encode_time(
+    da: xr.DataArray,
+    units: str | None = None,
+    calendar: str | None = None,
+) -> xr.DataArray:
+    """Encode datetime64, cftime or timedelta64 values to CF numeric values.
+
+    Returns
+    -------
+    xarray.DataArray
+        Numeric variable carrying ``units`` and, where applicable, ``calendar`` in both
+        ``attrs`` and ``encoding``.
+
+    """
+    if np.issubdtype(da.dtype, np.datetime64) and not is_cftime(da):
+        target_units = units or "seconds since 1970-01-01 00:00:00"
+        target_calendar = calendar or "proleptic_gregorian"
+        num, out_units, out_calendar = encode_cf_datetime(
+            da,
+            units=target_units,
+            calendar=target_calendar,
+            dtype=np.dtype("int64"),
+        )
+        encoded = da.copy(data=num)
+        encoded.attrs.update({"units": out_units, "calendar": out_calendar})
+        encoded.encoding.update({"units": out_units, "calendar": out_calendar})
+        return encoded
+
+    if is_cftime(da):
+        num, out_units, out_calendar = encode_cf_datetime(
+            da,
+            units=units or da.encoding.get("units"),
+            calendar=calendar or da.encoding.get("calendar"),
+            dtype=da.encoding.get("dtype"),
+        )
+        encoded = da.copy(data=num)
+        encoded.attrs.update({"units": out_units, "calendar": out_calendar})
+        encoded.encoding.update({"units": out_units, "calendar": out_calendar})
+        return encoded
+
+    if np.issubdtype(da.dtype, np.timedelta64):
+        num, out_units = encode_cf_timedelta(
+            da,
+            units=units or da.encoding.get("units"),
+            dtype=da.encoding.get("dtype"),
+        )
+        encoded = da.copy(data=num)
+        encoded.attrs.update({"units": out_units})
+        encoded.encoding.update({"units": out_units})
+        return encoded
+
+    return da
+
+
+def encode_dataset_time(ds: xr.Dataset) -> xr.Dataset:
+    """Encode every time-like variable of a dataset without touching the input."""
+    out = ds.copy()
+    replacements: dict[Any, xr.DataArray] = {}
+    for name in list(out.variables):
+        variable = out[name]
+        if is_time_like(variable):
+            replacements[name] = encode_time(variable)
+    for name, variable in replacements.items():
+        out[name] = variable
+    return out
+
+
+__all__ = [
+    "encode_dataset_time",
+    "encode_time",
+    "is_cftime",
+    "is_time_like",
+]
+
+
 def set_attrs(target: Any, attrs: Mapping[str, Any]) -> None:
     """Set serializable NetCDF attributes."""
     for key, value in strip_export_attrs(attrs).items():
@@ -417,81 +522,6 @@ def _variable_record(
             "shape": tuple(int(length) for length in shape),
         },
     )
-
-
-def mpp_global_field(
-    mpi_context: MPIContext,
-    coordinate: xr.DataArray,
-    dim: str,
-    comm: MPI.Comm,
-    *,
-    start: int,
-    stop: int,
-    global_size: int,
-) -> xr.DataArray | None:
-    """Gather a coordinate distributed along ``dim`` into its global form.
-
-    Follows FMS ``mpp_global_field``: each rank contributes its compute-domain
-    slice and the root reassembles the whole axis, verifying that the slices
-    tile it exactly with no gap or overlap.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context.
-    coordinate : xarray.DataArray
-        This rank's slice of the coordinate.
-    dim : str
-        Partitioned dimension.
-    comm : mpi4py.MPI.Comm
-        Communicator varying along ``dim``.
-    start, stop : int
-        This rank's half-open bounds along ``dim``.
-    global_size : int
-        Global length of ``dim``.
-
-    Returns
-    -------
-    xarray.DataArray or None
-        The reassembled coordinate on rank 0 of ``comm``, None elsewhere.
-
-    Raises
-    ------
-    NetCDFWriteError
-        If the gathered slices do not tile the axis exactly.
-    """
-    axis = coordinate.get_axis_num(dim)
-    pieces = comm.gather((start, stop, np.asarray(coordinate.values)), root=0)
-    if comm.rank != 0 or pieces is None:
-        return None
-
-    cursor = 0
-    ordered = sorted(pieces, key=lambda item: item[0])
-    for piece_start, piece_stop, values in ordered:
-        if piece_start != cursor:
-            raise NetCDFWriteError(
-                f"Coordinate {coordinate.name!r}: expected start {cursor}, "
-                + f"got {piece_start}."
-            )
-        if values.shape[axis] != piece_stop - piece_start:
-            raise NetCDFWriteError(
-                f"Coordinate {coordinate.name!r} slice length "
-                + f"{values.shape[axis]} != {piece_stop - piece_start}."
-            )
-        cursor = piece_stop
-    if cursor != global_size:
-        raise NetCDFWriteError(
-            f"Coordinate {coordinate.name!r} covers {cursor}/{global_size} elements."
-        )
-
-    rebuilt = xr.DataArray(
-        np.concatenate([values for _, _, values in ordered], axis=axis),
-        dims=coordinate.dims,
-        name=coordinate.name,
-        attrs=dict(coordinate.attrs),
-    )
-    rebuilt.encoding = dict(coordinate.encoding)
-    return rebuilt
 
 
 def mpp_to_netcdf_parallel(

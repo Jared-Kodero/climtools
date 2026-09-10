@@ -343,6 +343,92 @@ def _aligned_rows(header: list[str], rows: list[list[str]]) -> list[str]:
     ]
 
 
+def mpp_set_domain_bounds(
+    result: xr.Dataset | xr.DataArray,
+    meta: Mapping[str, Any],
+    dim: Hashable,
+    *,
+    global_size: int,
+    start: int,
+    stop: int,
+    chunk_info: Mapping[str, int],
+) -> None:
+    """Rewrite one axis's compute domain, leaving the other axes intact.
+
+    Parameters
+    ----------
+    result : xarray.Dataset or xarray.DataArray
+        Object whose metadata is updated in place.
+    meta : mapping
+        Metadata the object carried before the operation.
+    dim : Hashable
+        Axis whose bounds changed.
+    global_size, start, stop : int
+        New global length and this rank's half-open bounds along ``dim``.
+    chunk_info : mapping
+        Chunk sizes for the new object.
+    """
+    bounds = {key: dict(meta[key]) for key in ("global_sizes", "starts", "stops")}
+    bounds["global_sizes"][dim] = global_size
+    bounds["starts"][dim] = start
+    bounds["stops"][dim] = stop
+    mpp_update_meta(
+        result,
+        dim=meta["dims"],
+        global_size=bounds["global_sizes"],
+        start=bounds["starts"],
+        stop=bounds["stops"],
+        chunk_info=chunk_info,
+        cart=meta.get("cart"),
+    )
+
+
+def mpp_redefine_domain(
+    mpi_context: MPIContext,
+    result: xr.Dataset | xr.DataArray,
+    meta: Mapping[str, Any],
+    dim: Hashable,
+) -> xr.Dataset | xr.DataArray:
+    """Re-derive one axis's compute domain from this rank's new local extent.
+
+    An operation that changes how many elements a rank holds along ``dim``
+    invalidates every rank's offsets. As in FMS, the domain is redefined
+    rather than patched: the new global length and each rank's bounds follow
+    from an exclusive scan of the local extents.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    result : xarray.Dataset or xarray.DataArray
+        Object produced by the operation, updated in place.
+    meta : mapping
+        Metadata the input carried.
+    dim : Hashable
+        Axis whose local extent changed.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        ``result``, carrying the redefined domain.
+    """
+    from ..mpp import mpp_dim_comm, mpp_partition_offsets
+    from .chunks import prune_chunk_info
+
+    comm = mpp_dim_comm(mpi_context, meta, dim)
+    global_size, start, stop = mpp_partition_offsets(comm, int(result.sizes[dim]))
+    mpp_set_domain_bounds(
+        result,
+        meta,
+        dim,
+        global_size=global_size,
+        start=start,
+        stop=stop,
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+    )
+    return result
+
+
 def mpp_log_partition_report(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
@@ -588,3 +674,10 @@ def choose_partition_dim(
     dim, length = max(usable, key=lambda item: (item[1], -order[item[0]]))
 
     return dim
+
+
+def mpp_operand_meta(operand: Any) -> dict[str, Any] | None:
+    """Return ``operand``'s MPI distribution metadata, if any."""
+    if isinstance(operand, (xr.Dataset, xr.DataArray)):
+        return mpp_get_meta(operand)
+    return None

@@ -20,10 +20,11 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 from .chunks import get_effective_chunk_size
-from .common import extreme_identity, partial_dtype
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from .mpp import mpp_reduce_scatter
+from ..mpp import mpp_reduce_scatter
 from .planning import (
+    extreme_identity,
+    partial_dtype,
     dataset_result,
     finish_local_reduction,
     local_reduction_meta,

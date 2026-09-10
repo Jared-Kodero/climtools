@@ -14,7 +14,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .mpp import mpp_dim_comm as _dim_comm
+from ..mpp import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
     choose_partition_dim,
@@ -24,7 +24,7 @@ from .meta import (
     reattach_meta_after_collapse,
     strip_mpi_meta,
 )
-from .mpp import mpp_slice_compute_domain
+from ..mpp import mpp_slice_compute_domain
 
 
 def _select_partition_dim(

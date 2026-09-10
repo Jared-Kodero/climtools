@@ -21,10 +21,13 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .common import PlanEntry, extreme_identity, op_name, partial_dtype
 from .meta import mpp_get_meta
-from .mpp import _mpp_reduce, mpp_reduce_scatter
+from ..mpp import _mpp_reduce, mpp_reduce_scatter
 from .planning import (
+    ReduceContext,
+    extreme_identity,
+    op_name,
+    partial_dtype,
     guarded,
     mpp_comm_reduce,
     mpp_count_valid_values,
@@ -110,18 +113,21 @@ def _combine_prod(
     replica_count: int,
     scatter: tuple[Hashable, list[int]] | None,
 ) -> xr.DataArray:
-    """Combine rank-local products with explicit overflow handling."""
-    from .mpp import mpp_prod_decompose, mpp_prod_recombine
+    """Combine rank-local products with explicit overflow handling.
 
-    mantissa_da: xr.DataArray | None = None
-    companion_da: xr.DataArray | None = None
+    All of the decomposed fields are integers reduced with ``SUM``, so one
+    collective replaces the separate mantissa and tally reductions and the
+    result no longer depends on the rank count.
+    """
+    from ..mpp import mpp_prod_decompose, mpp_prod_recombine
+
+    fields_da: xr.DataArray | None = None
     if error is None and partial is not None:
         try:
             axes = tuple(value.dims.index(d) for d in dims)
-            mantissa, companions = mpp_prod_decompose(np.asarray(value.values), axes)
-            mantissa_da = partial.copy(data=mantissa.astype(np.float64))
-            companion_da = xr.DataArray(
-                companions,
+            fields = mpp_prod_decompose(np.asarray(value.values), axes)
+            fields_da = xr.DataArray(
+                fields,
                 dims=(_PROD_FIELD_DIM, *partial.dims),
                 coords={
                     d: partial.coords[d] for d in partial.dims if d in partial.coords
@@ -130,38 +136,26 @@ def _combine_prod(
         except BaseException as exc:
             error = exc
 
-    global_mantissa = mpp_comm_reduce(
+    global_fields = mpp_comm_reduce(
         mpi_context,
-        mantissa_da,
-        MPI.PROD,
-        expect_dtype=np.dtype(np.float64),
-        error=error,
-        phase="MPI xarray prod reduction (mantissa)",
-        comm=comm,
-        scatter=scatter,
-    )
-    global_companions = mpp_comm_reduce(
-        mpi_context,
-        companion_da,
+        fields_da,
         MPI.SUM,
         expect_dtype=np.dtype(np.int64),
         error=error,
-        phase="MPI xarray prod reduction (exponent and tallies)",
+        phase="MPI xarray prod reduction",
         comm=comm,
         scatter=scatter,
     )
 
-    mantissa_values = np.asarray(global_mantissa.values)
-    companion_values = np.asarray(global_companions.values)
+    values = np.asarray(global_fields.values)
     if replica_count != 1:
-        # Undo replicated products in mantissa/exponent space; companion tallies divide
-        # exactly.
-        mantissa_values = mantissa_values ** (1.0 / replica_count)
-        companion_values = companion_values // replica_count
+        # Every field is additive in log/exponent space, so the replica factor
+        # divides exactly.
+        values = values // replica_count
 
     expect = partial_dtype(value.dtype.str, "prod", skipna)
-    combined = mpp_prod_recombine(mantissa_values, companion_values, expect)
-    return global_mantissa.copy(data=combined)
+    combined = mpp_prod_recombine(values, expect)
+    return global_fields.isel({_PROD_FIELD_DIM: 0}, drop=True).copy(data=combined)
 
 
 def _global_valid_count(
@@ -455,32 +449,26 @@ def _sum_prod(
             dim=dims, skipna=skipna, min_count=min_count, keep_attrs=keep_attrs
         )
 
-    def combine(
-        variable: xr.DataArray,
-        dims: tuple[Hashable, ...],
-        entry: PlanEntry,
-        comm: MPI.Comm,
-        scatter: tuple[Hashable, list[int]] | None,
-    ) -> xr.DataArray:
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
         """Reduce one distributed variable across ranks."""
         method = variable.prod if product else variable.sum
         local, error = guarded(
             lambda: method(
-                dim=dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
+                dim=ctx.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
         return _combine_sum_or_prod(
             mpi_context,
             variable,
             local,
-            dims,
+            ctx.dims,
             op,
             skipna=skipna,
             min_count=min_count,
             error=error,
-            comm=comm,
-            replica_count=entry.replica_count,
-            scatter=scatter,
+            comm=ctx.comm,
+            replica_count=ctx.entry.replica_count,
+            scatter=ctx.scatter,
         )
 
     return mpp_global_reduce(
@@ -529,30 +517,24 @@ def mpp_mean_reduce(
         """Reduce without communication."""
         return obj.mean(dim=dims, skipna=skipna, keep_attrs=keep_attrs)
 
-    def combine(
-        variable: xr.DataArray,
-        dims: tuple[Hashable, ...],
-        entry: PlanEntry,
-        comm: MPI.Comm,
-        scatter: tuple[Hashable, list[int]] | None,
-    ) -> xr.DataArray:
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
         """Reduce one distributed variable across ranks."""
         variable = _materialize_local(variable)
         local_sum, error = guarded(
             lambda: variable.sum(
-                dim=dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
+                dim=ctx.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
         return _combine_mean(
             mpi_context,
             variable,
             local_sum,
-            dims,
+            ctx.dims,
             skipna=skipna,
             error=error,
-            comm=comm,
-            replica_count=entry.replica_count,
-            scatter=scatter,
+            comm=ctx.comm,
+            replica_count=ctx.entry.replica_count,
+            scatter=ctx.scatter,
         )
 
     return mpp_global_reduce(
@@ -626,13 +608,7 @@ def _min_max(
         method = obj.min if minimum else obj.max
         return method(dim=dims, skipna=skipna, keep_attrs=keep_attrs)
 
-    def combine(
-        variable: xr.DataArray,
-        dims: tuple[Hashable, ...],
-        entry: PlanEntry,
-        comm: MPI.Comm,
-        scatter: tuple[Hashable, list[int]] | None,
-    ) -> xr.DataArray:
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
         """Reduce one distributed variable across ranks."""
         empty = any(
             d in variable.dims and int(variable.sizes[d]) == 0 for d in partition_dims
@@ -641,7 +617,7 @@ def _min_max(
             lambda: _local_extreme(
                 mpi_context,
                 variable,
-                dims,
+                ctx.dims,
                 empty=empty,
                 minimum=minimum,
                 skipna=skipna,
@@ -652,12 +628,12 @@ def _min_max(
             mpi_context,
             variable,
             local,
-            dims,
+            ctx.dims,
             minimum=minimum,
             skipna=skipna,
             error=error,
-            comm=comm,
-            scatter=scatter,
+            comm=ctx.comm,
+            scatter=ctx.scatter,
         )
 
     return mpp_global_reduce(
@@ -747,16 +723,10 @@ def _logical(
         method = obj.all if all_values else obj.any
         return method(dim=dims, keep_attrs=keep_attrs)
 
-    def combine(
-        variable: xr.DataArray,
-        dims: tuple[Hashable, ...],
-        entry: PlanEntry,
-        comm: MPI.Comm,
-        scatter: tuple[Hashable, list[int]] | None,
-    ) -> xr.DataArray:
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
         """Reduce one distributed variable across ranks."""
         method = variable.all if all_values else variable.any
-        local, error = guarded(lambda: method(dim=dims, keep_attrs=keep_attrs))
+        local, error = guarded(lambda: method(dim=ctx.dims, keep_attrs=keep_attrs))
         return mpp_comm_reduce(
             mpi_context,
             local,
@@ -764,7 +734,7 @@ def _logical(
             expect_dtype=partial_dtype(variable.dtype.str, operation, None),
             error=error,
             phase=f"MPI xarray {operation} reduction",
-            comm=comm,
+            comm=ctx.comm,
         )
 
     return mpp_global_reduce(
@@ -1004,15 +974,9 @@ def _first_or_last(
             keep_attrs=keep_attrs,
         )
 
-    def combine(
-        variable: xr.DataArray,
-        dims: tuple[Hashable, ...],
-        entry: PlanEntry,
-        comm: MPI.Comm,
-        scatter: tuple[Hashable, list[int]] | None,
-    ) -> xr.DataArray:
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
         """Select the edge value across ranks."""
-        return pick(variable, combined=True, comm=comm)
+        return pick(variable, combined=True, comm=ctx.comm)
 
     return mpp_global_reduce(
         mpi_context,
@@ -1023,4 +987,147 @@ def _first_or_last(
         combine=combine,
         partition_dim=partition_dim,
         allow_scatter=False,
+    )
+
+
+def _var_or_std(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: str | Iterable[Hashable] | EllipsisType | None,
+    *,
+    skipna: bool | None,
+    ddof: int,
+    keep_attrs: bool | None,
+    partition_dim: Hashable | Literal["auto"] | None,
+    root: bool,
+) -> xr.Dataset | xr.DataArray:
+    """Shared implementation for :func:`mpp_var` and :func:`mpp_std`."""
+    cached: list[Any] = []
+
+    def global_mean() -> xr.Dataset | xr.DataArray:
+        """Return the global mean, computed once and reused per variable."""
+        if not cached:
+            cached.append(
+                mpp_mean_reduce(
+                    mpi_context,
+                    value,
+                    dim,
+                    skipna=skipna,
+                    keep_attrs=False,
+                    partition_dim=None,
+                )
+            )
+        return cached[0]
+
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        method = obj.std if root else obj.var
+        return method(dim=dims, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs)
+
+    def combine(variable: xr.DataArray, ctx: ReduceContext) -> xr.DataArray:
+        """Combine local squared deviations into a global variance."""
+        mean = global_mean()
+        if not isinstance(mean, xr.DataArray):
+            mean = mean[ctx.entry.name]
+        deviation = variable - mean
+        # Squared deviations carry ``deviation.dtype`` because integer inputs
+        # are promoted before reduction.
+        partial, error = guarded(
+            lambda: (deviation * deviation).sum(
+                dim=ctx.dims, skipna=skipna, min_count=None, keep_attrs=False
+            )
+        )
+        total = mpp_comm_reduce(
+            mpi_context,
+            partial,
+            MPI.SUM,
+            expect_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
+            error=error,
+            phase="MPI xarray variance reduction",
+            comm=ctx.comm,
+            replica_count=ctx.entry.replica_count,
+            scatter=ctx.scatter,
+        )
+        denominator = (
+            mpp_count_valid_values(
+                mpi_context,
+                variable,
+                ctx.dims,
+                comm=ctx.comm,
+                replica_count=ctx.entry.replica_count,
+                scatter=ctx.scatter,
+            )
+            - ddof
+        )
+        target = np.asarray(np.var(np.zeros(1, dtype=variable.dtype))).dtype
+        divisor = (
+            denominator.astype(target, keep_attrs=False)
+            if target.kind in "fc"
+            else denominator
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result = total / divisor
+        result = result.where(denominator > 0)
+        if result.dtype != target:
+            result = result.astype(target, keep_attrs=True)
+        if root:
+            result = np.sqrt(result)
+        if keep_attrs:
+            result.attrs.update(variable.attrs)
+        return result
+
+    return mpp_global_reduce(
+        mpi_context,
+        value,
+        dim,
+        operation="std" if root else "var",
+        serial=serial,
+        combine=combine,
+        partition_dim=partition_dim,
+    )
+
+
+def mpp_var(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: str | Iterable[Hashable] | EllipsisType | None = None,
+    *,
+    skipna: bool | None = None,
+    ddof: int = 0,
+    keep_attrs: bool | None = None,
+    partition_dim: Hashable | Literal["auto"] | None = "auto",
+) -> xr.Dataset | xr.DataArray:
+    """Compute the variance of a distributed xarray object."""
+    return _var_or_std(
+        mpi_context,
+        value,
+        dim,
+        skipna=skipna,
+        ddof=ddof,
+        keep_attrs=keep_attrs,
+        partition_dim=partition_dim,
+        root=False,
+    )
+
+
+def mpp_std(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: str | Iterable[Hashable] | EllipsisType | None = None,
+    *,
+    skipna: bool | None = None,
+    ddof: int = 0,
+    keep_attrs: bool | None = None,
+    partition_dim: Hashable | Literal["auto"] | None = "auto",
+) -> xr.Dataset | xr.DataArray:
+    """Compute the standard deviation of a distributed xarray object."""
+    return _var_or_std(
+        mpi_context,
+        value,
+        dim,
+        skipna=skipna,
+        ddof=ddof,
+        keep_attrs=keep_attrs,
+        partition_dim=partition_dim,
+        root=True,
     )

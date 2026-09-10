@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import numpy as np
 from climtools import xgeo
-from climtools.xarray.arithmetic import HaloWidthError, mpp_halo_exchange
+from climtools.mpp import HaloWidthError, mpp_halo_exchange
 from climtools.xarray.chunks import get_balanced_bounds
-from climtools.xarray.mpp import (
+from climtools.mpp import (
     Domain,
     mpp_chksum,
     mpp_complete_update_domains,
@@ -218,8 +218,7 @@ def run(fx: Fixtures) -> None:
         """decompose + recombine on one rank must equal a plain product."""
         rng = np.random.default_rng(11)
         field = rng.standard_normal((40, 5))
-        mantissa, companions = mpp_prod_decompose(field, 0)
-        rebuilt = mpp_prod_recombine(mantissa, companions)
+        rebuilt = mpp_prod_recombine(mpp_prod_decompose(field, 0))
         plain = field.prod(axis=0)
         if not np.allclose(rebuilt, plain, rtol=1e-12):
             return False, f"{rebuilt} vs {plain}"

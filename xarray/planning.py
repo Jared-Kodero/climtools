@@ -6,9 +6,13 @@ import hashlib
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from types import EllipsisType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+
+from dataclasses import dataclass
+from functools import cache
 
 import numpy as np
+from mpi4py.util import dtlib as _dtlib
 
 import xarray as xr
 
@@ -17,18 +21,112 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .mpp import mpp_get_cartesian_domain
+from ..mpp import mpp_get_cartesian_domain
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
-from .common import (
-    CHECK_COLLECTIVE_AGREEMENT,
-    MPI_REDUCIBLE_KINDS,
-    PlanEntry,
-    mpi_representable,
-    op_name,
-    partial_dtype,
-)
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from .mpp import _mpp_reduce, mpp_reduce_scatter
+from ..mpp import _mpp_reduce, mpp_reduce_scatter
+
+
+_OP_LIST: tuple[tuple[Any, str], ...] = (
+    (MPI.SUM, "SUM"),
+    (MPI.PROD, "PROD"),
+    (MPI.MIN, "MIN"),
+    (MPI.MAX, "MAX"),
+    (MPI.LAND, "LAND"),
+    (MPI.LOR, "LOR"),
+)
+
+MPI_REDUCIBLE_KINDS = "biufc"
+
+# Check rank agreement before collectives so mismatched plans fail instead of
+# deadlocking.
+CHECK_COLLECTIVE_AGREEMENT = True
+
+
+def op_name(op: MPI.Op) -> str:
+    """Return a rank-stable label for an MPI reduction operation."""
+    for candidate, name in _OP_LIST:
+        if op == candidate:
+            return name
+    return "OP"
+
+
+@cache
+def mpi_representable(dtype_string: str) -> bool:
+    """Return whether a NumPy dtype has a usable predefined MPI datatype."""
+    dtype = np.dtype(dtype_string)
+    try:
+        datatype = _dtlib.from_numpy_dtype(dtype)
+    except BaseException:
+        return False
+    try:
+        return int(datatype.Get_size()) > 0
+    except BaseException:
+        return False
+
+
+@cache
+def partial_dtype(
+    dtype_string: str, operation: str, skipna: bool | None
+) -> np.dtype[Any]:
+    """Return the dtype of a rank-local xarray reduction."""
+    probe = xr.DataArray(np.zeros((1,), dtype=np.dtype(dtype_string)), dims=("_probe",))
+    if operation == "count":
+        return cast("np.dtype[Any]", probe.count(dim="_probe").dtype)
+    if operation in ("any", "all"):
+        method = probe.all if operation == "all" else probe.any
+        return cast("np.dtype[Any]", method(dim="_probe").dtype)
+
+    method = getattr(probe, operation)
+    if operation in ("sum", "prod"):
+        result = method(dim="_probe", skipna=skipna, min_count=None)
+    else:
+        result = method(dim="_probe", skipna=skipna)
+    return cast("np.dtype[Any]", result.dtype)
+
+
+def extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
+    """Return the neutral value for a minimum or maximum reduction."""
+    kind = dtype.kind
+    if kind == "b":
+        return bool(minimum)
+    if kind in "iu":
+        limits = np.iinfo(dtype)
+        return limits.max if minimum else limits.min
+    if kind == "f":
+        return np.asarray(np.inf if minimum else -np.inf, dtype=dtype).item()
+    name = "minimum" if minimum else "maximum"
+    raise TypeError(f"MPI {name} is not defined for {dtype} data.")
+
+
+class PlanEntry(NamedTuple):
+    """Describe one variable in a rank-independent reduction plan.
+
+    Attributes
+    ----------
+    name : Hashable
+        Variable name.
+    dims : tuple[Hashable, ...]
+        Reduced dimensions present on the variable.
+    distributed : bool
+        Whether the reduction requires MPI communication.
+    dtype : numpy.dtype
+        Variable dtype.
+    shape : tuple[tuple[str, int], ...]
+        Global dimensions and lengths surviving the reduction.
+    comm_axes : frozenset[str]
+        Partition axes included in the collective.
+    replica_count : int
+        Number of replicated copies included in a SUM collective.
+    """
+
+    name: Hashable
+    dims: tuple[Hashable, ...]
+    distributed: bool
+    dtype: np.dtype[Any]
+    shape: tuple[tuple[str, int], ...]
+    comm_axes: frozenset[str] = frozenset()
+    replica_count: int = 1
 
 
 def normalize_dim(
@@ -561,6 +659,28 @@ def mpp_plan_scatter_target(
     return (*target, comm)
 
 
+@dataclass(frozen=True)
+class ReduceContext:
+    """What a combine step needs beyond the variable being reduced.
+
+    Attributes
+    ----------
+    dims : tuple of Hashable
+        Dimensions this variable reduces over.
+    entry : PlanEntry
+        The variable's entry in the reduction plan.
+    comm : mpi4py.MPI.Comm
+        Communicator the reduction runs on.
+    scatter : tuple[Hashable, list[int]] or None
+        Target dimension and per-rank counts when the result is scattered.
+    """
+
+    dims: tuple[Hashable, ...]
+    entry: PlanEntry
+    comm: MPI.Comm
+    scatter: tuple[Hashable, list[int]] | None
+
+
 def mpp_global_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -595,8 +715,8 @@ def mpp_global_reduce(
         ``serial(obj, dims)`` reducing ``obj`` without communication. Used
         wherever no partitioned dimension is involved.
     combine : callable
-        ``combine(variable, dims, entry, comm, scatter)`` reducing one
-        distributed variable across ``comm``.
+        ``combine(variable, context)`` reducing one distributed variable,
+        where ``context`` is a :class:`ReduceContext`.
     partition_dim : Hashable, {"auto"}, or None
         Where to repartition the result once the active partition dimension
         is reduced away.
@@ -632,7 +752,9 @@ def mpp_global_reduce(
     if isinstance(value, xr.DataArray):
         if not dims:
             return serial(value, local_dim)
-        result = combine(value, dims, plan[0], comm_for(plan[0]), scatter)
+        result = combine(
+            value, ReduceContext(dims, plan[0], comm_for(plan[0]), scatter)
+        )
     else:
         start = stop = None
         if scattered is not None:
@@ -654,7 +776,8 @@ def mpp_global_reduce(
                 variables[entry.name] = serial(variable, entry.dims)
             else:
                 variables[entry.name] = combine(
-                    variable, entry.dims, entry, comm_for(entry), scatter
+                    variable,
+                    ReduceContext(entry.dims, entry, comm_for(entry), scatter),
                 )
         source = (
             value.isel({scattered[0]: slice(start, stop)})

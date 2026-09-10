@@ -50,7 +50,7 @@ from .reductions import (
     mpp_prod_reduce,
     mpp_sum_reduce,
 )
-from .statistics import mpp_std, mpp_var
+from .reductions import mpp_std, mpp_var
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -495,7 +495,9 @@ class MPIXarray:
         from .io import to_netcdf
 
         if not parallel and self.meta is not None:
-            raise ValueError("Distributed data requires parallel=True for NetCDF output.")
+            raise ValueError(
+                "Distributed data requires parallel=True for NetCDF output."
+            )
 
         prepared = self._prepare()
         if parallel:
@@ -1081,7 +1083,9 @@ class MPIXarray:
     # -- Groupby (xarray-styled entry points; mpp_groupby_reduce/mpp_resample_reduce
     #    are internal engine dispatch names, not part of this public surface) -
 
-    def groupby(self, dim: Hashable, labels: xr.DataArray | np.ndarray[Any, Any]) -> MPIGroupBy:
+    def groupby(
+        self, dim: Hashable, labels: xr.DataArray | np.ndarray[Any, Any]
+    ) -> MPIGroupBy:
         """Group by ``labels`` along ``dim``, mirroring ``xarray.Dataset.groupby``.
 
         Parameters

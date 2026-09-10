@@ -12,13 +12,17 @@ from ..mpi.mpi_init import MPI
 from .arithmetic import (
     check_partition_preserved,
     mpp_check_operands_distribution,
-    mpp_halo_exchange,
     reattach_meta,
 )
 from .chunks import prune_chunk_info
-from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from .mpp import mpp_dim_comm as _dim_comm
-from .mpp import mpp_partition_offsets
+from .meta import (
+    mpp_get_meta,
+    mpp_redefine_domain,
+    mpp_update_meta,
+    strip_mpi_meta,
+)
+from ..mpp import mpp_halo_exchange
+from ..mpp import mpp_dim_comm as _dim_comm
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
@@ -374,26 +378,7 @@ def mpp_interp(
     )
     result = full.interp({dim: new_coord}, method=method, **kwargs)
 
-    new_global_size, new_start, new_stop = mpp_partition_offsets(
-        comm, int(result.sizes[dim])
-    )
-    chunk_info = prune_chunk_info(meta["chunk_info"], result)
-    global_sizes = dict(meta["global_sizes"])
-    starts = dict(meta["starts"])
-    stops = dict(meta["stops"])
-    global_sizes[dim] = new_global_size
-    starts[dim] = new_start
-    stops[dim] = new_stop
-    mpp_update_meta(
-        result,
-        dim=meta["dims"],
-        global_size=global_sizes,
-        start=starts,
-        stop=stops,
-        chunk_info=chunk_info,
-        cart=meta.get("cart"),
-    )
-    return result
+    return mpp_redefine_domain(mpi_context, result, meta, dim)
 
 
 def mpp_median(
@@ -605,27 +590,7 @@ def mpp_diff(
     )
     diffed = padded.diff(dim, n=n, label=label)
 
-    comm = _dim_comm(mpi_context, meta, dim)
-    new_global_size, new_start, new_stop = mpp_partition_offsets(
-        comm, int(diffed.sizes[dim])
-    )
-    chunk_info = prune_chunk_info(meta["chunk_info"], diffed)
-    global_sizes = dict(meta["global_sizes"])
-    starts = dict(meta["starts"])
-    stops = dict(meta["stops"])
-    global_sizes[dim] = new_global_size
-    starts[dim] = new_start
-    stops[dim] = new_stop
-    mpp_update_meta(
-        diffed,
-        dim=meta["dims"],
-        global_size=global_sizes,
-        start=starts,
-        stop=stops,
-        chunk_info=chunk_info,
-        cart=meta.get("cart"),
-    )
-    return diffed
+    return mpp_redefine_domain(mpi_context, diffed, meta, dim)
 
 
 def mpp_shift(
