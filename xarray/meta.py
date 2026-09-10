@@ -198,7 +198,8 @@ def mpp_update_meta(
     chunk_info : mapping
         Effective climtools chunk size for every retained dimension.
     cart : mapping, optional
-        Cartesian topology descriptor (``grid_shape``, ``coords``, ``periods``), attached only for a multi-dimensional partition.
+        Cartesian topology descriptor (``grid_shape``, ``coords``, ``periods``),
+        attached only for a multi-dimensional partition.
 
     """
     dims = _as_dims(dim)
@@ -236,14 +237,16 @@ def set_save_chunks(
     Parameters
     ----------
     value : xarray.Dataset or xarray.DataArray
-        Rank-local xarray object that already carries valid MPI distribution metadata (see :func:`mpp_get_meta`).
+        Rank-local xarray object that already carries valid MPI distribution metadata
+        (see :func:`mpp_get_meta`).
     save_chunks : mapping
         Mapping from variable name to save_chunk shape.
 
     Raises
     ------
     ValueError
-        If ``value`` carries no valid MPI distribution metadata to attach ``save_chunks`` to.
+        If ``value`` carries no valid MPI distribution metadata to attach
+        ``save_chunks`` to.
 
     """
     meta = mpp_get_meta(value)
@@ -331,6 +334,15 @@ def mpp_should_log_partitions(mpi_context: MPIContext, log_partitions: bool) -> 
     return bool(mpi_context.comm.allreduce(bool(log_partitions), op=MPI.LOR))
 
 
+def _aligned_rows(header: list[str], rows: list[list[str]]) -> list[str]:
+    """Right-align string cells into fixed-width columns."""
+    widths = [max(len(h), *(len(r[n]) for r in rows)) for n, h in enumerate(header)]
+    return [
+        "   " + "  ".join(f"{c:>{w}}" for c, w in zip(cells, widths, strict=True))
+        for cells in (header, *rows)
+    ]
+
+
 def mpp_log_partition_report(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray,
@@ -345,155 +357,110 @@ def mpp_log_partition_report(
     automatic: bool = False,
     detail: bool = True,
 ) -> None:
-    """Print a structured, compact description of a rank-local partition layout (1D or Cartesian)."""
+    """Print how a global array is divided across ranks.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    data : xarray.Dataset or xarray.DataArray
+        Partitioned object, read for its shape and chunking.
+    dim : Hashable or tuple of Hashable
+        Partitioned dimension, or dimensions for a Cartesian layout.
+    origin : str
+        Label naming what produced this partition.
+    global_size, start, stop : int or mapping
+        Global length and this rank's half-open bounds, per dimension.
+    grid_shape : tuple of int, optional
+        Process-grid shape for a Cartesian layout.
+    coords : tuple of int, optional
+        This rank's position in the process grid.
+    automatic : bool, default False
+        Whether the partition dimension was chosen rather than requested.
+    detail : bool, default True
+        Whether to include the per-rank table.
+    """
     comm = mpi_context.comm
-    is_cartesian = grid_shape is not None or isinstance(dim, tuple | list)
+    dims = tuple(dim) if isinstance(dim, tuple | list) else (dim,)
+    cartesian = grid_shape is not None or len(dims) > 1
 
-    if is_cartesian:
-        dims = dim if isinstance(dim, tuple | list) else (dim,)
-        starts_map = start if isinstance(start, Mapping) else {dims[0]: start}
-        stops_map = stop if isinstance(stop, Mapping) else {dims[0]: stop}
+    def per_dim(value: Any) -> Mapping[Hashable, int]:
+        """Accept either a scalar for one dimension or a full mapping."""
+        return value if isinstance(value, Mapping) else {dims[0]: value}
 
-        local = (
-            int(comm.rank),
-            tuple(int(c) for c in (coords or ())),
-            tuple(int(starts_map[d]) for d in dims),
-            tuple(int(stops_map[d]) for d in dims),
-        )
-    else:
-        local = (
-            int(comm.rank),
-            int(start),
-            int(stop),
-        )
+    starts, stops, sizes = per_dim(start), per_dim(stop), per_dim(global_size)
+    local = (
+        int(comm.rank),
+        tuple(int(c) for c in (coords or ())),
+        tuple(int(starts[d]) for d in dims),
+        tuple(int(stops[d]) for d in dims),
+    )
 
     rows = comm.gather(local, root=0)
     if comm.rank != 0 or rows is None:
         return
 
-    border = "=" * 80
-    separator = "-" * 80
-    lines = [border]
+    border, separator = "=" * 80, "-" * 80
+    dims_str = ", ".join(f"{str(d)!r}{' (auto)' if automatic else ''}" for d in dims)
+    title = "MPI CARTESIAN PARTITION REPORT" if cartesian else "MPI PARTITION REPORT"
+    lines = [border, f" {title}: {origin}", border]
 
-    if is_cartesian:
-        dims = dim if isinstance(dim, tuple | list) else (dim,)
-        global_sizes_map = (
-            global_size if isinstance(global_size, Mapping) else {dims[0]: global_size}
-        )
-        dims_str = ", ".join(
-            f"{str(d)!r}{' (auto)' if automatic else ''}" for d in dims
-        )
-        grid_str = "x".join(str(n) for n in (grid_shape or (comm.size,)))
-
-        lines.extend(
-            [
-                f" MPI CARTESIAN PARTITION REPORT: {origin}",
-                border,
-                f" 🔹 Dimensions   : {dims_str}",
-                f" 🔹 Process grid : {grid_str} ({comm.size} ranks)",
-                " 🔹 Global sizes : "
-                + ", ".join(f"{str(d)!s}={int(global_sizes_map[d])}" for d in dims),
-            ]
-        )
-
-        if detail:
-            lines.append(separator)
-            slice_widths = [
-                max(
-                    len(f"{d} slice"),
-                    *(len(f"{row[2][i]}:{row[3][i]}") for row in rows),
-                )
-                for i, d in enumerate(dims)
-            ]
-            count_widths = [
-                max(len(f"{d} n"), *(len(str(row[3][i] - row[2][i])) for row in rows))
-                for i, d in enumerate(dims)
-            ]
-            coord_width = (
-                max(len("coords"), *(len(str(row[1])) for row in rows))
-                if coords is not None or any(row[1] for row in rows)
-                else 0
-            )
-
-            header_parts = ["   " + f"{'rank':>4}"]
-            if coord_width > 0:
-                header_parts.append(f"{'coords':>{coord_width}}")
-            for i, d in enumerate(dims):
-                header_parts.append(f"{f'{d} slice':>{slice_widths[i]}}")
-                header_parts.append(f"{f'{d} n':>{count_widths[i]}}")
-
-            lines.append("  ".join(header_parts))
-            lines.append(separator)
-
-            for row in rows:
-                rank_id, rank_coords, rank_starts, rank_stops = row
-                row_parts = ["   " + f"{rank_id:>4}"]
-                if coord_width > 0:
-                    row_parts.append(f"{rank_coords!s:>{coord_width}}")
-                for i in range(len(dims)):
-                    slice_str = f"{rank_starts[i]}:{rank_stops[i]}"
-                    count_val = rank_stops[i] - rank_starts[i]
-                    row_parts.append(f"{slice_str:>{slice_widths[i]}}")
-                    row_parts.append(f"{count_val:>{count_widths[i]}}")
-                lines.append("  ".join(row_parts))
+    if cartesian:
+        grid = "x".join(str(n) for n in (grid_shape or (comm.size,)))
+        lines += [
+            f" 🔹 Dimensions   : {dims_str}",
+            f" 🔹 Process grid : {grid} ({comm.size} ranks)",
+            " 🔹 Global sizes : " + ", ".join(f"{d!s}={int(sizes[d])}" for d in dims),
+        ]
     else:
-        counts = [row[2] - row[1] for row in rows]
+        counts = [row[3][0] - row[2][0] for row in rows]
         idle = sum(1 for count in counts if count == 0)
-
-        other = " ".join(
-            f"{name!s}={int(length)}"
-            for name, length in data.sizes.items()
-            if name != dim
-        )
-        chunk_text = "  ".join(
-            f"{name!s}={max(int(size) for size in chunks)}"
-            for name, chunks in (data.chunks or {}).items()
-        )
-
-        dim_str = f"{str(dim)!r}{' (auto)' if automatic else ''}"
-        split_str = (
+        split = (
             f"{min(counts)}/rank"
             if min(counts) == max(counts)
             else f"{min(counts)}-{max(counts)}/rank"
         )
         if idle:
-            split_str += f" (IDLE={idle})"
-
-        lines.extend(
-            [
-                f" MPI PARTITION REPORT: {origin}",
-                border,
-                f" 🔹 Dimension    : {dim_str}",
-                f" 🔹 Global Size  : {global_size} (Ranks: {comm.size})",
-                f" 🔹 Split        : {split_str}",
-                f" 🔹 Shape        : {other or 'scalar'}",
-                f" 🔹 Chunks/Rank  : {chunk_text or 'unchunked'}",
-            ]
+            split += f" (IDLE={idle})"
+        shape = " ".join(
+            f"{name!s}={int(length)}"
+            for name, length in data.sizes.items()
+            if name != dims[0]
         )
+        # Dataset.chunks maps dimension to chunk sizes; DataArray.chunks is a
+        # bare tuple in dimension order.
+        chunking = data.chunks or {}
+        if not isinstance(chunking, Mapping):
+            chunking = dict(zip(data.dims, chunking, strict=True))
+        chunks = "  ".join(
+            f"{name!s}={max(int(size) for size in sizes_)}"
+            for name, sizes_ in chunking.items()
+        )
+        lines += [
+            f" 🔹 Dimension    : {dims_str}",
+            f" 🔹 Global Size  : {sizes[dims[0]]} (Ranks: {comm.size})",
+            f" 🔹 Split        : {split}",
+            f" 🔹 Shape        : {shape or 'scalar'}",
+            f" 🔹 Chunks/Rank  : {chunks or 'unchunked'}",
+        ]
 
-        if detail:
-            slice_width = max(
-                len("slice"), *(len(f"{row[1]}:{row[2]}") for row in rows)
-            )
-            count_width = max(len("n"), *(len(str(row[2] - row[1])) for row in rows))
-
-            lines.extend(
-                [
-                    separator,
-                    f"   {'rank':>4}  {'slice':>{slice_width}}  {'n':>{count_width}}",
-                    separator,
+    if detail:
+        show_coords = any(row[1] for row in rows)
+        header = ["rank"] + (["coords"] if show_coords else [])
+        for d in dims:
+            header += [f"{d} slice", f"{d} n"] if cartesian else ["slice", "n"]
+        table = []
+        for rank_id, rank_coords, rank_starts, rank_stops in rows:
+            cells = [str(rank_id)] + ([str(rank_coords)] if show_coords else [])
+            for n in range(len(dims)):
+                cells += [
+                    f"{rank_starts[n]}:{rank_stops[n]}",
+                    str(rank_stops[n] - rank_starts[n]),
                 ]
-            )
-
-            for row in rows:
-                slice_str = f"{row[1]}:{row[2]}"
-                count_val = row[2] - row[1]
-                lines.append(
-                    f"   {row[0]:>4}  {slice_str:>{slice_width}}  {count_val:>{count_width}}"
-                )
+            table.append(cells)
+        lines += [separator, *_aligned_rows(header, table)]
 
     lines.append(border)
-
     mpi_context.log("")
     mpi_context.log("\n".join(lines), flush=True, prefix=False)
     mpi_context.log("", prefix=False)
@@ -505,7 +472,8 @@ def indexer_is_scalar(indexer: Any) -> bool:
     Returns
     -------
     bool
-        True when ``indexer`` selects exactly one position and therefore drops its dimension, rather than keeping it with length one.
+        True when ``indexer`` selects exactly one position and therefore drops its
+        dimension, rather than keeping it with length one.
 
     """
     return not isinstance(indexer, (slice, list, tuple, np.ndarray, xr.DataArray))
@@ -536,7 +504,9 @@ def resolve_sizes(
         else:
             resolved[dim_name] = length
     if missing:
-        raise ValueError(f"Missing sizes for dimensions: {sorted(str(d) for d in missing)}.")
+        raise ValueError(
+            f"Missing sizes for dimensions: {sorted(str(d) for d in missing)}."
+        )
     return resolved
 
 
@@ -590,7 +560,8 @@ def choose_partition_dim(
     mpi_size : int
         Number of ranks the data will be spread over.
     exclude : iterable of hashable, optional
-        Dimensions that must not be chosen, for example a dimension the caller intends to reduce over.
+        Dimensions that must not be chosen, for example a dimension the caller intends
+        to reduce over.
     rank : int, optional
         Calling rank, used only to gate the short-partition warning below to rank 0.
 

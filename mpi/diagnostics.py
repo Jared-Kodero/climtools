@@ -1,3 +1,9 @@
+"""Collective error agreement, watchdogs, and scratch-space management.
+
+Rank-local failures are turned into failures every rank sees, so a
+collective is never entered by some ranks and skipped by others.
+"""
+
 import builtins
 import datetime
 import faulthandler
@@ -182,6 +188,7 @@ class MPIDiagnostics:
                     return True
 
         def _fire() -> None:
+            """Dump this rank's stacks if the watchdog saw no progress."""
             if not _stalled():
                 return
 
@@ -367,6 +374,7 @@ class MPIDiagnostics:
             exc_value: BaseException,
             tb: Any,
         ) -> None:
+            """Record an uncaught exception, then abort the whole job."""
             name, message, traceback_text = self._format_exception(
                 exc_type,
                 exc_value,
@@ -456,13 +464,37 @@ class MPIDiagnostics:
 
 
 def tmp_cleanup(comm: MPI.Intracomm, TMP: Path, *_):
+    """Remove the shared scratch directory once every rank has finished.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Intracomm
+        Communicator whose ranks share ``TMP``.
+    TMP : pathlib.Path
+        Scratch directory to delete.
+    """
     comm.Barrier()
     if comm.Get_rank() == 0:
         shutil.rmtree(TMP, ignore_errors=True)
 
 
 def get_tmpdir(comm: MPI.Intracomm) -> Path:
+    """Return a scratch directory shared by every rank.
 
+    Rank 0 draws the name and broadcasts it, so all ranks agree. The
+    location prefers a scheduler-provided scratch area and falls back to
+    the user home directory.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Intracomm
+        Communicator to agree the name over.
+
+    Returns
+    -------
+    pathlib.Path
+        Existing scratch directory, identical on every rank.
+    """
     tmp_id = comm.bcast(
         uuid.uuid4().hex if comm.Get_rank() == 0 else None,
         root=0,

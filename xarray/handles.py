@@ -19,6 +19,7 @@ class _RollingReduceMixin:
     """Provide zero-argument rolling reductions."""
 
     def _reduce(self, reduce: str) -> MPIXarray:
+        """Apply the named reduction; supplied by the concrete handle."""
         raise NotImplementedError
 
     def mean(self) -> MPIXarray:
@@ -57,6 +58,7 @@ class _PartitionReduceMixin:
         keep_attrs: bool | None,
         partition_dim: Hashable | Literal["auto"] | None,
     ) -> MPIXarray:
+        """Apply the named reduction; supplied by the concrete handle."""
         raise NotImplementedError
 
     def _reduce_kw(
@@ -270,7 +272,10 @@ class MPIGroupBy(_PartitionReduceMixin):
     """
 
     def __init__(
-        self, parent: MPIXarray, dim: Hashable, labels: xr.DataArray | np.ndarray[Any, Any]
+        self,
+        parent: MPIXarray,
+        dim: Hashable,
+        labels: xr.DataArray | np.ndarray[Any, Any],
     ) -> None:
         """Initialize a groupby-operation handle."""
         self._parent = parent

@@ -28,7 +28,8 @@ def is_time_like(da: xr.DataArray) -> bool:
     Returns
     -------
     bool
-        ``True`` when the variable requires CF numeric encoding before it can be written through the ``netCDF4`` interface.
+        ``True`` when the variable requires CF numeric encoding before it can be written
+        through the ``netCDF4`` interface.
 
     """
     return (
@@ -48,7 +49,8 @@ def encode_time(
     Returns
     -------
     xarray.DataArray
-        Numeric variable carrying ``units`` and, where applicable, ``calendar`` in both ``attrs`` and ``encoding``.
+        Numeric variable carrying ``units`` and, where applicable, ``calendar`` in both
+        ``attrs`` and ``encoding``.
 
     """
     if np.issubdtype(da.dtype, np.datetime64) and not is_cftime(da):

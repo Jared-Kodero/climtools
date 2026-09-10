@@ -17,6 +17,7 @@ import sys
 import tempfile
 import warnings
 from dataclasses import dataclass
+from typing import Literal
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,7 +74,7 @@ from .plot_utils import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
-    from typing import Any, Literal, Self
+    from typing import Any, Self
 
     from matplotlib.colorbar import Colorbar
     from matplotlib.colors import Colormap, Normalize
@@ -94,6 +95,25 @@ __all__ = [
 
 set_preview_quality()
 
+
+#: Plot backends accepted by the map-drawing helpers.
+PlotMethod = Literal[
+    "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
+]
+
+#: Cartopy projections accepted by the map-drawing helpers.
+MapProjection = Literal[
+    "PlateCarree",
+    "Mercator",
+    "Robinson",
+    "Mollweide",
+    "Orthographic",
+    "LambertConformal",
+    "AlbersEqualArea",
+    "Stereographic",
+    "NorthPolarStereo",
+    "SouthPolarStereo",
+]
 
 type AxesType = Axes | cgeo.GeoAxes
 type ScalarPrimitive = (
@@ -445,9 +465,7 @@ def _plot_scalar(
     fig: Figure,
     ax: AxesType,
     *,
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-    ] = "default",
+    method: PlotMethod = "default",
     x: str,
     y: str,
     cmap: str | Colormap | None = None,
@@ -813,9 +831,7 @@ class FacetedPlot:
     def render(
         self,
         *,
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-        ] = "default",
+        method: PlotMethod = "default",
         cmap: str | Colormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -1038,22 +1054,8 @@ class GeoPlot:
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
         interactive: bool = False,
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-        ] = "default",
-        projection: Literal[
-            "PlateCarree",
-            "Mercator",
-            "Robinson",
-            "Mollweide",
-            "Orthographic",
-            "LambertConformal",
-            "AlbersEqualArea",
-            "Stereographic",
-            "NorthPolarStereo",
-            "SouthPolarStereo",
-        ]
-        | None = None,
+        method: PlotMethod = "default",
+        projection: MapProjection | None = None,
         cmap: str | Colormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -2411,22 +2413,8 @@ class Animate:
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-        ] = "default",
-        projection: Literal[
-            "PlateCarree",
-            "Mercator",
-            "Robinson",
-            "Mollweide",
-            "Orthographic",
-            "LambertConformal",
-            "AlbersEqualArea",
-            "Stereographic",
-            "NorthPolarStereo",
-            "SouthPolarStereo",
-        ]
-        | None = None,
+        method: PlotMethod = "default",
+        projection: MapProjection | None = None,
         cmap: str | Colormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -2723,22 +2711,8 @@ def geo(
     col_wrap: int | None = None,
     figsize: tuple[float, float] | None = None,
     interactive: bool = False,
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-    ] = "default",
-    projection: Literal[
-        "PlateCarree",
-        "Mercator",
-        "Robinson",
-        "Mollweide",
-        "Orthographic",
-        "LambertConformal",
-        "AlbersEqualArea",
-        "Stereographic",
-        "NorthPolarStereo",
-        "SouthPolarStereo",
-    ]
-    | None = None,
+    method: PlotMethod = "default",
+    projection: MapProjection | None = None,
     cmap: str | Colormap | None = None,
     norm: Normalize | None = None,
     vmin: float | None = None,
@@ -2864,22 +2838,8 @@ def animate(
     row: str | None = None,
     col_wrap: int | None = None,
     figsize: tuple[float, float] | None = None,
-    method: Literal[
-        "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-    ] = "default",
-    projection: Literal[
-        "PlateCarree",
-        "Mercator",
-        "Robinson",
-        "Mollweide",
-        "Orthographic",
-        "LambertConformal",
-        "AlbersEqualArea",
-        "Stereographic",
-        "NorthPolarStereo",
-        "SouthPolarStereo",
-    ]
-    | None = None,
+    method: PlotMethod = "default",
+    projection: MapProjection | None = None,
     cmap: str | Colormap | None = None,
     norm: Normalize | None = None,
     vmin: float | None = None,

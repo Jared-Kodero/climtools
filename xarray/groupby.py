@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from ..mpi.context import MPIContext
 
+from .chunks import get_effective_chunk_size
 from .common import extreme_identity, partial_dtype
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .mpp import mpp_reduce_scatter
@@ -42,7 +43,81 @@ def _balanced_counts(total: int, size: int) -> list[int]:
     return [base + (1 if r < rem else 0) for r in range(size)]
 
 
-def _group_combine_scatter(
+def _group_reduce_local(
+    mpi_context: MPIContext,
+    variable: xr.DataArray,
+    dim: Hashable,
+    group: xr.DataArray,
+    *,
+    op: str,
+    skipna: bool | None,
+) -> xr.DataArray:
+    """Apply a grouped reduction locally, preserving variables without ``dim``."""
+    if dim not in variable.dims:
+        return variable
+    grouped = variable.groupby(group)
+    if op == "count":
+        return grouped.count(dim=dim, keep_attrs=False)
+    method = getattr(grouped, op)
+    return method(dim=dim, skipna=skipna, keep_attrs=False)
+
+
+def _reduce_groups(
+    mpi_context: MPIContext,
+    local: xr.DataArray,
+    op: MPI.Op,
+    expect_dtype: Any,
+    *,
+    comm: MPI.Comm,
+    counts: list[int] | None,
+    labels: np.ndarray[Any, Any],
+    replica_count: int,
+    phase: str,
+) -> xr.DataArray:
+    """Reduce one per-group partial across ranks.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    local : xarray.DataArray
+        Rank-local partial, already reindexed onto the global label set.
+    op : mpi4py.MPI.Op
+        Reduction operator.
+    expect_dtype : numpy.dtype
+        Dtype the reduction is performed in.
+    comm : mpi4py.MPI.Comm
+        Reduction communicator.
+    counts : list of int or None
+        Groups each rank keeps. None reduces to every rank instead.
+    labels : numpy.ndarray
+        Group labels this rank keeps.
+    replica_count : int
+        Number of duplicate replicas included in a SUM.
+    phase : str
+        Collective diagnostic label.
+
+    Returns
+    -------
+    xarray.DataArray
+        Reduced partial indexed by ``labels``.
+    """
+    if counts is None:
+        return mpp_comm_reduce(
+            mpi_context,
+            local,
+            op,
+            expect_dtype=expect_dtype,
+            phase=phase,
+            comm=comm,
+            replica_count=replica_count,
+        )
+    axis = local.get_axis_num(_GROUP_DIM)
+    raw = mpp_reduce_scatter(np.asarray(local.values), op, comm, counts, axis=axis)
+    return xr.DataArray(raw, dims=local.dims).assign_coords({_GROUP_DIM: labels})
+
+
+def _group_combine(
     mpi_context: MPIContext,
     variable: xr.DataArray,
     dim: Hashable,
@@ -52,65 +127,105 @@ def _group_combine_scatter(
     op: str,
     skipna: bool | None,
     comm: MPI.Comm,
-) -> tuple[xr.DataArray, int, int]:
-    """Combine grouped partials and retain each rank’s target slice."""
-    counts = _balanced_counts(len(global_labels), comm.size)
-    start = sum(counts[: comm.rank])
-    stop = start + counts[comm.rank]
-    my_labels = global_labels[start:stop]
+    replica_count: int = 1,
+    counts: list[int] | None = None,
+) -> xr.DataArray:
+    """Combine rank-local per-group partials into a global result.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    variable : xarray.DataArray
+        Variable being grouped.
+    dim : Hashable
+        Dimension grouped over.
+    group : xarray.DataArray
+        Group label per position along ``dim``.
+    global_labels : numpy.ndarray
+        Sorted union of labels across ranks.
+    op : {"sum", "mean", "count", "min", "max"}
+        Reduction applied within each group.
+    skipna : bool or None
+        Missing-value behavior, following xarray semantics.
+    comm : mpi4py.MPI.Comm
+        Reduction communicator.
+    replica_count : int, default 1
+        Number of duplicate replicas included in a SUM.
+    counts : list of int or None, optional
+        Groups each rank keeps, scattering the result. None keeps all
+        groups on every rank.
+
+    Returns
+    -------
+    xarray.DataArray
+        Result indexed by the groups this rank keeps.
+    """
+    labels = global_labels
+    if counts is not None:
+        start = sum(counts[: comm.rank])
+        labels = global_labels[start : start + counts[comm.rank]]
+
+    def partial(kind: str, fill: Any, na: bool | None) -> xr.DataArray:
+        """Reduce locally and align onto the global label set."""
+        local = _group_reduce_local(
+            mpi_context, variable, dim, group, op=kind, skipna=na
+        )
+        return local.reindex({_GROUP_DIM: global_labels}, fill_value=fill)
+
+    def reduce(
+        local: xr.DataArray, mpi_op: MPI.Op, dtype: Any, kind: str
+    ) -> xr.DataArray:
+        """Send one aligned partial through the collective."""
+        return _reduce_groups(
+            mpi_context,
+            local,
+            mpi_op,
+            dtype,
+            comm=comm,
+            counts=counts,
+            labels=labels,
+            replica_count=replica_count,
+            phase=f"MPI xarray groupby {kind} reduction",
+        )
 
     if op == "mean":
-        local_sum = _group_reduce_local(
-            mpi_context, variable, dim, group, op="sum", skipna=skipna
+        total = reduce(
+            partial("sum", 0, skipna),
+            MPI.SUM,
+            partial_dtype(variable.dtype.str, "sum", skipna),
+            "sum",
         )
-        local_count = _group_reduce_local(
-            mpi_context, variable, dim, group, op="count", skipna=None
-        )
-        local_sum = local_sum.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        local_count = local_count.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        axis = local_sum.get_axis_num(_GROUP_DIM)
-        global_sum = mpp_reduce_scatter(
-            np.asarray(local_sum.values), MPI.SUM, comm, counts, axis=axis
-        )
-        global_count = mpp_reduce_scatter(
-            np.asarray(local_count.values), MPI.SUM, comm, counts, axis=axis
+        n = reduce(
+            partial("count", 0, None),
+            MPI.SUM,
+            partial_dtype(variable.dtype.str, "count", None),
+            "count",
         )
         with np.errstate(divide="ignore", invalid="ignore"):
-            raw = global_sum / global_count
-        dims = local_sum.dims
-        result = xr.DataArray(raw, dims=dims).assign_coords({_GROUP_DIM: my_labels})
+            result = total / n
+        # Match xarray groupby-mean promotion: preserve floating and complex
+        # dtypes, promote everything else.
         if variable.dtype.kind in "fc" and result.dtype != variable.dtype:
             result = result.astype(variable.dtype, keep_attrs=True)
-        return result.where(global_count > 0), start, stop
+        return result.where(n > 0)
 
     if op in ("sum", "count"):
-        local = _group_reduce_local(
-            mpi_context, variable, dim, group, op=op, skipna=skipna
+        return reduce(
+            partial(op, 0, skipna),
+            MPI.SUM,
+            partial_dtype(variable.dtype.str, op, skipna),
+            op,
         )
-        local = local.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        axis = local.get_axis_num(_GROUP_DIM)
-        raw = mpp_reduce_scatter(
-            np.asarray(local.values), MPI.SUM, comm, counts, axis=axis
-        )
-        result = xr.DataArray(raw, dims=local.dims).assign_coords(
-            {_GROUP_DIM: my_labels}
-        )
-        return result, start, stop
 
     minimum = op == "min"
-    local = _group_reduce_local(mpi_context, variable, dim, group, op=op, skipna=skipna)
     identity = extreme_identity(variable.dtype, minimum=minimum)
-    local = local.reindex({_GROUP_DIM: global_labels}, fill_value=identity)
-    axis = local.get_axis_num(_GROUP_DIM)
-    raw = mpp_reduce_scatter(
-        np.asarray(local.values),
+    return reduce(
+        partial(op, identity, skipna),
         MPI.MIN if minimum else MPI.MAX,
-        comm,
-        counts,
-        axis=axis,
+        variable.dtype,
+        op,
     )
-    result = xr.DataArray(raw, dims=local.dims).assign_coords({_GROUP_DIM: my_labels})
-    return result, start, stop
 
 
 def _resample_bin_labels(
@@ -157,102 +272,6 @@ def _resample_bin_labels(
     return pd.DatetimeIndex(label_ns.astype("datetime64[ns]")).as_unit(timestamps.unit)
 
 
-def _group_reduce_local(
-    mpi_context: MPIContext,
-    variable: xr.DataArray,
-    dim: Hashable,
-    group: xr.DataArray,
-    *,
-    op: str,
-    skipna: bool | None,
-) -> xr.DataArray:
-    """Apply a grouped reduction locally, preserving variables without ``dim``."""
-    if dim not in variable.dims:
-        return variable
-    grouped = variable.groupby(group)
-    if op == "count":
-        return grouped.count(dim=dim, keep_attrs=False)
-    method = getattr(grouped, op)
-    return method(dim=dim, skipna=skipna, keep_attrs=False)
-
-
-def _group_combine(
-    mpi_context: MPIContext,
-    variable: xr.DataArray,
-    dim: Hashable,
-    group: xr.DataArray,
-    global_labels: np.ndarray[Any, Any],
-    *,
-    op: str,
-    skipna: bool | None,
-    comm: MPI.Comm | None = None,
-    replica_count: int = 1,
-) -> xr.DataArray:
-    """Combine rank-local per-group partials into a global result."""
-    if op == "mean":
-        local_sum = _group_reduce_local(
-            mpi_context, variable, dim, group, op="sum", skipna=skipna
-        )
-        local_count = _group_reduce_local(
-            mpi_context, variable, dim, group, op="count", skipna=None
-        )
-        local_sum = local_sum.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        local_count = local_count.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        global_sum = mpp_comm_reduce(
-            mpi_context,
-            local_sum,
-            MPI.SUM,
-            expect_dtype=partial_dtype(variable.dtype.str, "sum", skipna),
-            phase="MPI xarray groupby sum reduction",
-            comm=comm,
-            replica_count=replica_count,
-        )
-        global_count = mpp_comm_reduce(
-            mpi_context,
-            local_count,
-            MPI.SUM,
-            expect_dtype=partial_dtype(variable.dtype.str, "count", None),
-            phase="MPI xarray groupby count reduction",
-            comm=comm,
-            replica_count=replica_count,
-        )
-        with np.errstate(divide="ignore", invalid="ignore"):
-            result = global_sum / global_count
-        # Match xarray groupby-mean promotion: preserve floating/complex dtypes and
-        # promote non-floating inputs.
-        if variable.dtype.kind in "fc" and result.dtype != variable.dtype:
-            result = result.astype(variable.dtype, keep_attrs=True)
-        return result.where(global_count > 0)
-
-    if op in ("sum", "count"):
-        local = _group_reduce_local(
-            mpi_context, variable, dim, group, op=op, skipna=skipna
-        )
-        local = local.reindex({_GROUP_DIM: global_labels}, fill_value=0)
-        return mpp_comm_reduce(
-            mpi_context,
-            local,
-            MPI.SUM,
-            expect_dtype=partial_dtype(variable.dtype.str, op, skipna),
-            phase=f"MPI xarray groupby {op} reduction",
-            comm=comm,
-            replica_count=replica_count,
-        )
-
-    minimum = op == "min"
-    local = _group_reduce_local(mpi_context, variable, dim, group, op=op, skipna=skipna)
-    identity = extreme_identity(variable.dtype, minimum=minimum)
-    local = local.reindex({_GROUP_DIM: global_labels}, fill_value=identity)
-    return mpp_comm_reduce(
-        mpi_context,
-        local,
-        MPI.MIN if minimum else MPI.MAX,
-        expect_dtype=variable.dtype,
-        phase=f"MPI xarray groupby {op} reduction",
-        comm=comm,
-    )
-
-
 def mpp_groupby_reduce(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -275,21 +294,23 @@ def mpp_groupby_reduce(
     dim : Hashable
         Dimension being grouped and reduced.
     labels : array-like
-        Group key for every position along this rank's local ``dim`` axis (same length as ``value.sizes[dim]``); need not be sorted or unique.
+        Group key for every position along this rank's local ``dim`` axis.
+        Need not be sorted or unique.
     op : {"sum", "mean", "count", "min", "max"}, optional
         Reduction applied within each group.
     skipna : bool or None, optional
         Missing-value behavior, following xarray semantics.
     keep_attrs : bool or None, optional
         Whether to preserve attributes.
-    partition_dim : Hashable or {"auto"} or None, optional
-        Partition placement after grouping; ``"auto"`` may place the result on the new group dimension.
+    partition_dim : Hashable, {"auto"}, or None, optional
+        Partition placement after grouping. ``"auto"`` may place the result
+        on the new group dimension.
 
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Reduced over ``dim``, with a new dimension of the same name indexed by the sorted, global set of group labels.
-
+        Reduced over ``dim``, carrying a new dimension of the same name
+        indexed by the sorted, global set of group labels.
     """
     if op not in _GROUP_OPS:
         raise ValueError(f"Unsupported groupby op: {op!r}. Supported: {_GROUP_OPS}.")
@@ -298,13 +319,20 @@ def mpp_groupby_reduce(
     old_meta = mpp_get_meta(value)
     local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
 
+    def with_attrs(result: xr.DataArray, source: xr.DataArray) -> xr.DataArray:
+        """Reattach source attributes when the caller asked for them."""
+        if keep_attrs:
+            result.attrs.update(source.attrs)
+        return result
+
     if local_meta is not None:
         if isinstance(value, xr.DataArray):
-            result = _group_reduce_local(
-                mpi_context, value, dim, group, op=op, skipna=skipna
+            result = with_attrs(
+                _group_reduce_local(
+                    mpi_context, value, dim, group, op=op, skipna=skipna
+                ),
+                value,
             )
-            if keep_attrs:
-                result.attrs.update(value.attrs)
         else:
             result = value.map(
                 functools.partial(_group_reduce_local, mpi_context),
@@ -317,68 +345,84 @@ def mpp_groupby_reduce(
         return finish_local_reduction(result, old_meta=local_meta)
 
     plan = mpp_reduction_plan(mpi_context, value, dims, old_meta, operation=op)
-    local_labels = np.unique(group.values)
     labels_comm = mpp_resolve_comm(mpi_context, old_meta, (dim,))
-    global_labels = np.unique(np.concatenate(labels_comm.allgather(local_labels)))
+    global_labels = np.unique(
+        np.concatenate(labels_comm.allgather(np.unique(group.values)))
+    )
 
-    if isinstance(value, xr.DataArray):
-        combine_comm = mpp_resolve_comm(mpi_context, old_meta, plan[0].comm_axes)
-        old_dims_da: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
-        partition_removed_da = old_meta is not None and not any(
-            d != dim for d in old_dims_da
-        )
-        # Scatter combined groups only when the result will be partitioned on the new
-        # group dimension.
-        if (
-            partition_removed_da
-            and partition_dim is not None
-            and len(global_labels) > 1
-            and combine_comm.size > 1
-            and plan[0].replica_count == 1
-        ):
-            result, start, stop = _group_combine_scatter(
+    entries = [entry for entry in plan if entry.dims and entry.distributed]
+    comms = {
+        entry.name: mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+        for entry in entries
+    }
+    # Scatter the combined groups only when the result will be partitioned on
+    # the new group dimension and every variable reduces over one shape.
+    can_scatter = (
+        old_meta is not None
+        and not tuple(d for d in old_meta["dims"] if d != dim)
+        and partition_dim is not None
+        and len(global_labels) > 1
+        and bool(comms)
+        and len({c.size for c in comms.values()}) == 1
+        and all(entry.replica_count == 1 for entry in entries)
+    )
+
+    counts = start = stop = None
+    scatter_comm = None
+    if can_scatter:
+        scatter_comm = next(iter(comms.values()))
+        counts = _balanced_counts(len(global_labels), scatter_comm.size)
+        start = sum(counts[: scatter_comm.rank])
+        stop = start + counts[scatter_comm.rank]
+
+    def combine(variable: xr.DataArray, entry: Any) -> xr.DataArray:
+        """Reduce one distributed variable across its communicator."""
+        return with_attrs(
+            _group_combine(
                 mpi_context,
-                value,
+                variable,
                 dim,
                 group,
                 global_labels,
                 op=op,
                 skipna=skipna,
-                comm=combine_comm,
-            )
-            if keep_attrs:
-                result.attrs.update(value.attrs)
-            from .chunks import get_effective_chunk_size
-
-            chunk_info = {
-                str(other_dim): get_effective_chunk_size(
-                    int(other_length), None, combine_comm.size
-                )
-                for other_dim, other_length in result.sizes.items()
-            }
-            mpp_update_meta(
-                result,
-                dim=_GROUP_DIM,
-                global_size=len(global_labels),
-                start=start,
-                stop=stop,
-                chunk_info=chunk_info,
-            )
-            return result
-
-        result = _group_combine(
-            mpi_context,
-            value,
-            dim,
-            group,
-            global_labels,
-            op=op,
-            skipna=skipna,
-            comm=combine_comm,
-            replica_count=plan[0].replica_count,
+                comm=comms[entry.name],
+                replica_count=entry.replica_count,
+                counts=counts,
+            ),
+            variable,
         )
-        if keep_attrs:
-            result.attrs.update(value.attrs)
+
+    def replicated(variable: xr.DataArray) -> xr.DataArray:
+        """Reduce a variable every rank already holds in full."""
+        full = _group_reduce_local(
+            mpi_context, variable, dim, group, op=op, skipna=skipna
+        )
+        if counts is None:
+            return with_attrs(full, variable)
+        fill = (
+            extreme_identity(variable.dtype, minimum=(op == "min"))
+            if op in ("min", "max")
+            else 0
+        )
+        sliced = full.reindex({_GROUP_DIM: global_labels[start:stop]}, fill_value=fill)
+        return with_attrs(sliced, variable)
+
+    if isinstance(value, xr.DataArray):
+        result = combine(value, plan[0])
+    else:
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = variable
+            elif entry.distributed:
+                variables[entry.name] = combine(variable, entry)
+            else:
+                variables[entry.name] = replicated(variable)
+        result = dataset_result(value, dims, variables)
+
+    if counts is None:
         return mpp_finish(
             mpi_context,
             result,
@@ -387,118 +431,18 @@ def mpp_groupby_reduce(
             auto_candidates=frozenset({_GROUP_DIM}),
         )
 
-    # Dataset scatter requires common group lengths and compatible combine
-    # communicators.
-    old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
-    remaining_dims = tuple(d for d in old_dims if d != dim)
-    partition_removed = old_meta is not None and not remaining_dims
-    combine_comms = {
-        entry.name: mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
-        for entry in plan
-        if entry.dims and entry.distributed
-    }
-    can_scatter = (
-        partition_removed
-        and partition_dim is not None
-        and len(global_labels) > 1
-        and combine_comms
-        and len({c.size for c in combine_comms.values()}) == 1
-        and all(
-            entry.replica_count == 1
-            for entry in plan
-            if entry.dims and entry.distributed
-        )
+    mpp_update_meta(
+        result,
+        dim=_GROUP_DIM,
+        global_size=len(global_labels),
+        start=start,
+        stop=stop,
+        chunk_info={
+            str(other): get_effective_chunk_size(int(length), None, scatter_comm.size)
+            for other, length in result.sizes.items()
+        },
     )
-
-    variables: dict[Hashable, xr.DataArray] = {}
-    if can_scatter:
-        scatter_comm = next(iter(combine_comms.values()))
-        counts = _balanced_counts(len(global_labels), scatter_comm.size)
-        start = sum(counts[: scatter_comm.rank])
-        stop = start + counts[scatter_comm.rank]
-        my_labels = global_labels[start:stop]
-        for entry in plan:
-            variable = value[entry.name]
-            if not entry.dims:
-                variables[entry.name] = variable
-                continue
-            if entry.distributed:
-                result, _s, _e = _group_combine_scatter(
-                    mpi_context,
-                    variable,
-                    dim,
-                    group,
-                    global_labels,
-                    op=op,
-                    skipna=skipna,
-                    comm=combine_comms[entry.name],
-                )
-            else:
-                # Replicated variables already cover all groups locally; reindex them by
-                # label.
-                full = _group_reduce_local(
-                    mpi_context, variable, dim, group, op=op, skipna=skipna
-                )
-                fill = (
-                    extreme_identity(variable.dtype, minimum=(op == "min"))
-                    if op in ("min", "max")
-                    else 0
-                )
-                result = full.reindex({_GROUP_DIM: my_labels}, fill_value=fill)
-            if keep_attrs:
-                result.attrs.update(variable.attrs)
-            variables[entry.name] = result
-        from .chunks import get_effective_chunk_size
-
-        result_ds = dataset_result(value, dims, variables)
-        chunk_info = {
-            str(other_dim): get_effective_chunk_size(
-                int(other_length), None, scatter_comm.size
-            )
-            for other_dim, other_length in result_ds.sizes.items()
-        }
-        mpp_update_meta(
-            result_ds,
-            dim=_GROUP_DIM,
-            global_size=len(global_labels),
-            start=start,
-            stop=stop,
-            chunk_info=chunk_info,
-        )
-        return result_ds
-
-    for entry in plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = variable
-            continue
-        if entry.distributed:
-            result = _group_combine(
-                mpi_context,
-                variable,
-                dim,
-                group,
-                global_labels,
-                op=op,
-                skipna=skipna,
-                comm=combine_comms.get(entry.name)
-                or mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
-                replica_count=entry.replica_count,
-            )
-        else:
-            result = _group_reduce_local(
-                mpi_context, variable, dim, group, op=op, skipna=skipna
-            )
-        if keep_attrs:
-            result.attrs.update(variable.attrs)
-        variables[entry.name] = result
-    return mpp_finish(
-        mpi_context,
-        dataset_result(value, dims, variables),
-        old_meta=old_meta,
-        partition_dim=partition_dim,
-        auto_candidates=frozenset({_GROUP_DIM}),
-    )
+    return result
 
 
 def mpp_resample_reduce(
@@ -526,33 +470,20 @@ def mpp_resample_reduce(
         partition_dim=partition_dim,
     )
 
-    # Rename the internal group dimension back to the resampled source dimension.
+    # Rename the internal group dimension back to the resampled source
+    # dimension, carrying any partition metadata across the rename.
     if _GROUP_DIM not in getattr(result, "dims", ()):
         return result
     meta = mpp_get_meta(result)
     renamed = strip_mpi_meta(result).rename({_GROUP_DIM: dim})
-    if meta is not None and _GROUP_DIM in meta["dims"]:
-        # Rename only the partition metadata entry for the internal group dimension.
-        new_dims = tuple(dim if d == _GROUP_DIM else d for d in meta["dims"])
-        remap = {(dim if d == _GROUP_DIM else d): d for d in meta["dims"]}
+    if meta is not None:
+        rename = {d: (dim if d == _GROUP_DIM else d) for d in meta["dims"]}
         mpp_update_meta(
             renamed,
-            dim=new_dims,
-            global_size={nd: meta["global_sizes"][od] for nd, od in remap.items()},
-            start={nd: meta["starts"][od] for nd, od in remap.items()},
-            stop={nd: meta["stops"][od] for nd, od in remap.items()},
-            chunk_info=meta["chunk_info"],
-            cart=meta.get("cart"),
-        )
-    elif meta is not None:
-        # If another partition dimension remains active, reattach its metadata
-        # unchanged.
-        mpp_update_meta(
-            renamed,
-            dim=meta["dims"],
-            global_size=dict(meta["global_sizes"]),
-            start=dict(meta["starts"]),
-            stop=dict(meta["stops"]),
+            dim=tuple(rename.values()),
+            global_size={new: meta["global_sizes"][old] for old, new in rename.items()},
+            start={new: meta["starts"][old] for old, new in rename.items()},
+            stop={new: meta["stops"][old] for old, new in rename.items()},
             chunk_info=meta["chunk_info"],
             cart=meta.get("cart"),
         )

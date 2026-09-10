@@ -11,6 +11,7 @@ from ..core import stats as calc
 from ..core import xgeo
 from ..core.utils import exclude_key
 from ..viz import plotting
+from ..viz.plotting import MapProjection, PlotMethod
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -335,22 +336,8 @@ class GeoDataArray(GeoBase):
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
         interactive: bool = False,
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-        ] = "default",
-        projection: Literal[
-            "PlateCarree",
-            "Mercator",
-            "Robinson",
-            "Mollweide",
-            "Orthographic",
-            "LambertConformal",
-            "AlbersEqualArea",
-            "Stereographic",
-            "NorthPolarStereo",
-            "SouthPolarStereo",
-        ]
-        | None = None,
+        method: PlotMethod = "default",
+        projection: MapProjection | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -487,22 +474,8 @@ class GeoDataArray(GeoBase):
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
-        method: Literal[
-            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
-        ] = "default",
-        projection: Literal[
-            "PlateCarree",
-            "Mercator",
-            "Robinson",
-            "Mollweide",
-            "Orthographic",
-            "LambertConformal",
-            "AlbersEqualArea",
-            "Stereographic",
-            "NorthPolarStereo",
-            "SouthPolarStereo",
-        ]
-        | None = None,
+        method: PlotMethod = "default",
+        projection: MapProjection | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,

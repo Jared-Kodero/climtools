@@ -22,7 +22,8 @@ def get_native_chunk_sizes(data: xr.Dataset, dim: Hashable) -> int | None:
     Returns
     -------
     int or None
-        Smallest interval whose boundaries align with every available native chunk grid, or None if native chunking is unavailable.
+        Smallest interval whose boundaries align with every available native chunk grid,
+        or None if native chunking is unavailable.
 
     """
     sizes: set[int] = set()
@@ -54,7 +55,8 @@ def get_usable_native_chunk(length: int, native_chunk: int | None) -> bool:
 def get_effective_chunk_size(
     length: int, native_chunk: int | None, mpi_size: int
 ) -> int:
-    """Return the distribution_chunk length climtools should retain for one dimension."""
+    """Return the distribution_chunk length climtools should retain for one
+    dimension."""
     if length <= 0:
         return 1
 
@@ -115,7 +117,8 @@ def get_balanced_bounds(
 
 
 def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
-    """Return whether rank bounds for this ``(length, chunk_size, size)`` fall on chunk edges."""
+    """Return whether rank bounds for this ``(length, chunk_size, size)`` fall on chunk
+    edges."""
     if length <= 0:
         return True
     chunk_count = math.ceil(length / chunk_size)
@@ -125,7 +128,8 @@ def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
 def get_chunk_bounds(
     length: int, chunk_size: int, rank: int, size: int
 ) -> tuple[int, int]:
-    """Partition a dimension into per-rank distribution_chunk bounds on chunk boundaries."""
+    """Partition a dimension into per-rank distribution_chunk bounds on chunk
+    boundaries."""
     if length <= 0:
         return 0, 0
 
@@ -144,7 +148,8 @@ def get_chunk_bounds(
 def prune_chunk_info(
     chunk_info: Mapping[str, int], value: xr.Dataset | xr.DataArray
 ) -> dict[str, int]:
-    """Restrict a distribution_chunk mapping to dimensions actually present on ``value``."""
+    """Restrict a distribution_chunk mapping to dimensions actually present on
+    ``value``."""
     return {
         str(dim): int(chunk_info[str(dim)])
         for dim in value.dims
@@ -165,7 +170,8 @@ def _other_dims_bytes(
 
 
 def _cap_partition_chunk_to_hdf5_limit(preferred: int, other_bytes: int) -> int:
-    """Shrink a partition-dimension save_chunk length to fit the HDF5 4 GiB chunk limit."""
+    """Shrink a partition-dimension save_chunk length to fit the HDF5 4 GiB chunk
+    limit."""
     if other_bytes <= 0 or preferred * other_bytes <= MAX_SAVE_CHUNK_BYTES:
         return preferred
     return max(1, MAX_SAVE_CHUNK_BYTES // other_bytes)
@@ -210,7 +216,9 @@ def _validate_explicit_chunk_bytes(
                 f"{nbytes / 2**30:.2f} GiB (limit {MAX_SAVE_CHUNK_BYTES / 2**30:.0f} GiB)"
             )
     if offenders:
-        raise ValueError("Explicit chunks exceed the HDF5 4 GiB limit: " + "; ".join(offenders))
+        raise ValueError(
+            "Explicit chunks exceed the HDF5 4 GiB limit: " + "; ".join(offenders)
+        )
 
 
 def get_chunks(

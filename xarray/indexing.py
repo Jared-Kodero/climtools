@@ -14,7 +14,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .cartesian import mpp_dim_comm as _dim_comm
+from .mpp import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
     choose_partition_dim,
@@ -88,7 +88,9 @@ def mpp_isel(
     indexers : mapping, optional
         Integer indexers using global coordinates on the partition dimension.
     partition_dim : Hashable or {"auto"} or None, optional
-        Only consulted when a *slice* on the partition dimension leaves a single global element behind (a scalar indexer already collapses the dimension entirely and broadcasts, so this does not apply there).
+        Only consulted when a *slice* on the partition dimension leaves a single global
+        element behind (a scalar indexer already collapses the dimension entirely and
+        broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
 
@@ -211,12 +213,7 @@ def mpp_isel_scalar(
     if dim_comm.rank == owner:
         local_index = normalized - int(meta["starts"][dim])
         result = strip_mpi_meta(value).isel({dim: local_index, **other_indexers})
-        # Materialize scalar selections before broadcast to avoid pickling lazy Dask
-        # graphs.
-        result = result.load()
-    result = dim_comm.bcast(result, root=owner)
-    result = reattach_meta_after_collapse(result, meta, dim)
-    return cast("xr.Dataset | xr.DataArray", result)
+    return _broadcast_from_owner(mpi_context, dim_comm, owner, result, meta, dim)
 
 
 def mpp_sel(
@@ -247,7 +244,9 @@ def mpp_sel(
     drop : bool, optional
         Drop selected coordinate variables.
     partition_dim : Hashable or {"auto"} or None, optional
-        Only consulted when a label *slice* on the partition dimension leaves a single global element behind (a scalar label already collapses the dimension entirely and broadcasts, so this does not apply there).
+        Only consulted when a label *slice* on the partition dimension leaves a single
+        global element behind (a scalar label already collapses the dimension entirely
+        and broadcasts, so this does not apply there).
     **indexers_kwargs : Any
         Additional indexers passed by dimension name.
 
@@ -324,6 +323,37 @@ def mpp_sel(
     return output
 
 
+#: How to break a tie when several ranks offer an inexact match: ``pad``
+#: wants the largest candidate label, the others the smallest.
+_SEL_TIEBREAK = {
+    "nearest": min,
+    "pad": max,
+    "ffill": max,
+    "backfill": min,
+    "bfill": min,
+}
+
+
+def _broadcast_from_owner(
+    mpi_context: MPIContext,
+    comm: MPI.Comm,
+    owner: int,
+    result: Any,
+    meta: Mapping[str, Any] | None,
+    dim: Hashable,
+) -> xr.Dataset | xr.DataArray:
+    """Share the owning rank's selection and restore partition metadata.
+
+    The payload is materialised first because ``bcast`` pickles it, and a
+    lazy array would otherwise be rebuilt on every receiving rank.
+    """
+    payload = result.load() if comm.rank == owner and result is not None else None
+    shared = comm.bcast(payload, root=owner)
+    if meta is not None:
+        shared = reattach_meta_after_collapse(shared, meta, dim)
+    return cast("xr.Dataset | xr.DataArray", shared)
+
+
 def mpp_sel_scalar(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -355,13 +385,8 @@ def mpp_sel_scalar(
 
         # Resolve each rank's best inexact match locally; reduce only the candidate
         # metadata globally.
-        if method in ("nearest",):
-            rank_fn = min
-        elif method in ("pad", "ffill"):
-            rank_fn = max
-        elif method in ("backfill", "bfill"):
-            rank_fn = min
-        else:
+        pick = _SEL_TIEBREAK.get(method)
+        if pick is None:
             raise NotImplementedError(
                 f"Distributed sel does not support method={method!r}."
             )
@@ -393,7 +418,7 @@ def mpp_sel_scalar(
         candidates = [c for c in dim_comm.allgather(candidate) if c is not None]
         if not candidates:
             raise KeyError(f"No match for label {label!r} on {dim!r}.")
-        global_index = rank_fn(candidates, key=lambda pair: pair[1])[0]
+        global_index = pick(candidates, key=lambda pair: pair[1])[0]
 
         bounds = dim_comm.allgather((int(meta["starts"][dim]), int(meta["stops"][dim])))
         owner = next(
@@ -415,15 +440,10 @@ def mpp_sel_scalar(
                         tolerance=tolerance,
                         drop=drop,
                     )
-                # Materialize before it gets pickled by bcast below (same
-                # reasoning as the sibling scalar-selection function above).
-                result = result.load()
             except BaseException as exc:
                 error = exc
         mpi_context.raise_if_error(error, "distributed scalar selection", comm=dim_comm)
-        result = dim_comm.bcast(result, root=owner)
-        result = reattach_meta_after_collapse(result, meta, dim)
-        return cast("xr.Dataset | xr.DataArray", result)
+        return _broadcast_from_owner(mpi_context, dim_comm, owner, result, meta, dim)
 
     result = None
     found = False
@@ -449,16 +469,9 @@ def mpp_sel_scalar(
         raise KeyError(f"No rank contains label {label!r} on {dim!r}.")
     if owner_count > 1:
         raise NotImplementedError("Scalar sel requires a unique owning rank.")
-    owner = int(tally[1])
-    payload = result if dim_comm.rank == owner else None
-    # Materialize before it gets pickled by bcast below (same reasoning as
-    # the sibling scalar-selection functions above).
-    if payload is not None:
-        payload = payload.load()
-    result = dim_comm.bcast(payload, root=owner)
-    if meta is not None:
-        result = reattach_meta_after_collapse(result, meta, dim)
-    return cast("xr.Dataset | xr.DataArray", result)
+    return _broadcast_from_owner(
+        mpi_context, dim_comm, int(tally[1]), result, meta, dim
+    )
 
 
 def _repartition_singleton(

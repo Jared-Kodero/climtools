@@ -7,7 +7,7 @@ import math
 import sys
 import traceback
 import warnings
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -362,6 +362,138 @@ def mpp_write_partitioned(
         mpp_close_writer(mpi_context, nc, comm)
 
 
+def _normalise_unlimited(
+    unlimited_dim: str | Iterable[str] | None, sizes: Mapping[str, int]
+) -> tuple[str, ...]:
+    """Normalise an unlimited-dimension request and check it against ``sizes``."""
+    if unlimited_dim is None:
+        unlimited: tuple[str, ...] = ()
+    elif isinstance(unlimited_dim, str):
+        unlimited = (unlimited_dim,)
+    else:
+        unlimited = tuple(unlimited_dim)
+    missing = set(unlimited) - set(sizes)
+    if missing:
+        raise ValueError(f"Unknown unlimited dimensions: {sorted(missing)}.")
+    return unlimited
+
+
+def _check_deflate(deflate: int | None) -> int | None:
+    """Validate a deflate level."""
+    if deflate is not None and not 0 <= int(deflate) <= 9:
+        raise ValueError("deflate must be None or an integer in [0, 9].")
+    return None if deflate is None else int(deflate)
+
+
+def _variable_record(
+    name: str,
+    dims: tuple[Hashable, ...],
+    dtype: Any,
+    shape: tuple[int, ...],
+    values: Any,
+    attrs: Mapping[str, Any],
+    is_coord: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the rank-0 buffer entry and the broadcast schema entry for a variable.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        ``(root_entry, schema_entry)``. ``values`` is None for data that each
+        rank writes into its own hyperslab later.
+    """
+    return (
+        {
+            "attrs": dict(attrs),
+            "data": values,
+            "dims": dims,
+            "dtype": dtype,
+            "coord": is_coord,
+        },
+        {
+            "coord": is_coord,
+            "dims": dims,
+            "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
+            "shape": tuple(int(length) for length in shape),
+        },
+    )
+
+
+def mpp_global_field(
+    mpi_context: MPIContext,
+    coordinate: xr.DataArray,
+    dim: str,
+    comm: MPI.Comm,
+    *,
+    start: int,
+    stop: int,
+    global_size: int,
+) -> xr.DataArray | None:
+    """Gather a coordinate distributed along ``dim`` into its global form.
+
+    Follows FMS ``mpp_global_field``: each rank contributes its compute-domain
+    slice and the root reassembles the whole axis, verifying that the slices
+    tile it exactly with no gap or overlap.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    coordinate : xarray.DataArray
+        This rank's slice of the coordinate.
+    dim : str
+        Partitioned dimension.
+    comm : mpi4py.MPI.Comm
+        Communicator varying along ``dim``.
+    start, stop : int
+        This rank's half-open bounds along ``dim``.
+    global_size : int
+        Global length of ``dim``.
+
+    Returns
+    -------
+    xarray.DataArray or None
+        The reassembled coordinate on rank 0 of ``comm``, None elsewhere.
+
+    Raises
+    ------
+    NetCDFWriteError
+        If the gathered slices do not tile the axis exactly.
+    """
+    axis = coordinate.get_axis_num(dim)
+    pieces = comm.gather((start, stop, np.asarray(coordinate.values)), root=0)
+    if comm.rank != 0 or pieces is None:
+        return None
+
+    cursor = 0
+    ordered = sorted(pieces, key=lambda item: item[0])
+    for piece_start, piece_stop, values in ordered:
+        if piece_start != cursor:
+            raise NetCDFWriteError(
+                f"Coordinate {coordinate.name!r}: expected start {cursor}, "
+                + f"got {piece_start}."
+            )
+        if values.shape[axis] != piece_stop - piece_start:
+            raise NetCDFWriteError(
+                f"Coordinate {coordinate.name!r} slice length "
+                + f"{values.shape[axis]} != {piece_stop - piece_start}."
+            )
+        cursor = piece_stop
+    if cursor != global_size:
+        raise NetCDFWriteError(
+            f"Coordinate {coordinate.name!r} covers {cursor}/{global_size} elements."
+        )
+
+    rebuilt = xr.DataArray(
+        np.concatenate([values for _, _, values in ordered], axis=axis),
+        dims=coordinate.dims,
+        name=coordinate.name,
+        attrs=dict(coordinate.attrs),
+    )
+    rebuilt.encoding = dict(coordinate.encoding)
+    return rebuilt
+
+
 def mpp_to_netcdf_parallel(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray | None,
@@ -511,54 +643,25 @@ def mpp_to_netcdf_parallel(
         )
 
         for coord_name, coord_dim in coord_names:
-            coordinate = local_ds[coord_name]
-            axis = coordinate.get_axis_num(coord_dim)
-            local_values = np.asarray(coordinate.values)
             dim_comm = (
                 mpi_context.comm
                 if len(partition_dims_tuple) == 1
                 else mpp_resolve_comm(mpi_context, local_meta, (coord_dim,))
             )
-            start = int(starts_map[coord_dim])
-            stop = int(stops_map[coord_dim])
-            global_size = int(global_sizes_map[coord_dim])
-            pieces = dim_comm.gather((start, stop, local_values), root=0)
-            if dim_comm.rank == 0:
-                try:
-                    ordered = sorted(pieces, key=lambda item: item[0])
-                    cursor = 0
-                    for piece_start, piece_stop, values in ordered:
-                        if piece_start != cursor:
-                            raise NetCDFWriteError(
-                                f"Coordinate {coord_name!r}: expected start "
-                                + f"{cursor}, got {piece_start}."
-                            )
-                        expected = piece_stop - piece_start
-                        if values.shape[axis] != expected:
-                            raise NetCDFWriteError(
-                                f"Coordinate {coord_name!r} slice length "
-                                + f"{values.shape[axis]} != {expected}."
-                            )
-                        cursor = piece_stop
-                    if cursor != global_size:
-                        raise NetCDFWriteError(
-                            f"Coordinate {coord_name!r} covers "
-                            + f"{cursor}/{global_size} elements."
-                        )
-                    assembled = np.concatenate(
-                        [values for _, _, values in ordered],
-                        axis=axis,
-                    )
-                    rebuilt = xr.DataArray(
-                        assembled,
-                        dims=coordinate.dims,
-                        name=coordinate.name,
-                        attrs=dict(coordinate.attrs),
-                    )
-                    rebuilt.encoding = dict(coordinate.encoding)
+            try:
+                rebuilt = mpp_global_field(
+                    mpi_context,
+                    local_ds[coord_name],
+                    coord_dim,
+                    dim_comm,
+                    start=int(starts_map[coord_dim]),
+                    stop=int(stops_map[coord_dim]),
+                    global_size=int(global_sizes_map[coord_dim]),
+                )
+                if rebuilt is not None:
                     prewritten_coords[coord_name] = rebuilt
-                except BaseException as exc:
-                    error = exc
+            except BaseException as exc:
+                error = exc
             mpi_context.raise_if_error(
                 error, f"parallel NetCDF coordinate gather ({coord_name})"
             )
@@ -568,23 +671,11 @@ def mpp_to_netcdf_parallel(
         if mpi_context.comm.rank == 0:
             try:
                 ds = local_ds
-                if deflate is not None and not 0 <= int(deflate) <= 9:
-                    raise ValueError("deflate must be None or an integer in [0, 9].")
-                if unlimited_dim is None:
-                    unlimited = ()
-                elif isinstance(unlimited_dim, str):
-                    unlimited = (unlimited_dim,)
-                else:
-                    unlimited = tuple(unlimited_dim)
-
+                _check_deflate(deflate)
                 sizes = dict(ds.sizes)
                 for d in partition_dims_tuple:
                     sizes[d] = int(global_sizes_map[d])
-                missing = set(unlimited) - set(sizes)
-                if missing:
-                    raise ValueError(
-                        f"Unknown unlimited dimensions: {sorted(missing)}."
-                    )
+                unlimited = _normalise_unlimited(unlimited_dim, sizes)
 
                 chunk_map = (
                     get_chunks(
@@ -612,19 +703,15 @@ def mpp_to_netcdf_parallel(
                         if d in dims:
                             shape[dims.index(d)] = sizes[d]
 
-                    root_data[name] = {
-                        "attrs": attrs,
-                        "data": values,
-                        "dims": dims,
-                        "dtype": dtype,
-                        "coord": name in ds.coords,
-                    }
-                    variables[name] = {
-                        "coord": name in ds.coords,
-                        "dims": dims,
-                        "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
-                        "shape": tuple(shape),
-                    }
+                    root_data[name], variables[name] = _variable_record(
+                        name,
+                        dims,
+                        dtype,
+                        tuple(shape),
+                        values,
+                        attrs,
+                        name in ds.coords,
+                    )
 
                 output_path = str(Path(path).expanduser().resolve(strict=False))
                 schema = {
@@ -655,17 +742,8 @@ def mpp_to_netcdf_parallel(
             elif partition_dim not in ds.sizes:
                 raise ValueError(f"Unknown partition dimension {partition_dim!r}.")
 
-            if deflate is not None and not 0 <= int(deflate) <= 9:
-                raise ValueError("deflate must be None or an integer in [0, 9].")
-            if unlimited_dim is None:
-                unlimited = ()
-            elif isinstance(unlimited_dim, str):
-                unlimited = (unlimited_dim,)
-            else:
-                unlimited = tuple(unlimited_dim)
-            missing = set(unlimited) - set(ds.sizes)
-            if missing:
-                raise ValueError(f"Unknown unlimited dimensions: {sorted(missing)}.")
+            _check_deflate(deflate)
+            unlimited = _normalise_unlimited(unlimited_dim, ds.sizes)
 
             partition_chunk_size = get_partition_chunk_size(
                 ds, partition_dim, mpi_context.comm.size
@@ -691,38 +769,28 @@ def mpp_to_netcdf_parallel(
                         dtype = source.dtype.newbyteorder("=")
                     else:
                         dtype = source.dtype
-                    attrs = strip_export_attrs(source.attrs)
-                    root_data[name] = {
-                        "attrs": attrs,
-                        "data": None,
-                        "dims": dims,
-                        "dtype": dtype,
-                        "coord": name in ds.coords,
-                    }
-                    variables[name] = {
-                        "coord": name in ds.coords,
-                        "dims": dims,
-                        "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
-                        "shape": tuple(int(length) for length in source.shape),
-                    }
+                    root_data[name], variables[name] = _variable_record(
+                        name,
+                        dims,
+                        dtype,
+                        tuple(source.shape),
+                        None,
+                        strip_export_attrs(source.attrs),
+                        name in ds.coords,
+                    )
                     continue
 
                 variable = encode_time(source) if is_time_like(source) else source
                 values, dtype = _normalise_variable(source)
-                attrs = strip_export_attrs(variable.attrs)
-                root_data[name] = {
-                    "attrs": attrs,
-                    "data": values,
-                    "dims": tuple(variable.dims),
-                    "dtype": dtype,
-                    "coord": name in ds.coords,
-                }
-                variables[name] = {
-                    "coord": name in ds.coords,
-                    "dims": tuple(variable.dims),
-                    "dtype": "str" if dtype == "str" else np.dtype(dtype).str,
-                    "shape": values.shape,
-                }
+                root_data[name], variables[name] = _variable_record(
+                    name,
+                    tuple(variable.dims),
+                    dtype,
+                    values.shape,
+                    values,
+                    strip_export_attrs(variable.attrs),
+                    name in ds.coords,
+                )
 
             output_path = str(Path(path).expanduser().resolve(strict=False))
             schema = {

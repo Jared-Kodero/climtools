@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -15,7 +16,7 @@ from .arithmetic import (
     mpp_halo_exchange,
     reattach_meta,
 )
-from .cartesian import mpp_dim_comm as _dim_comm
+from .mpp import mpp_dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .mpp import mpp_partition_offsets
@@ -43,7 +44,9 @@ def mpp_where(
     Raises
     ------
     ValueError
-        If ``drop=True`` is requested on a distributed object, or the operands are distributed over incompatible partitions (see :meth:`~.arithmetic.Arithmetic.apply`).
+        If ``drop=True`` is requested on a distributed object, or the operands are
+        distributed over incompatible partitions (see
+        :meth:`~.arithmetic.Arithmetic.apply`).
 
     """
     operands = (value, cond, other)
@@ -65,6 +68,96 @@ def mpp_where(
     return reattach_meta(result, meta)
 
 
+def _prefix_scan(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    meta: Mapping[str, Any],
+    *,
+    product: bool,
+    skipna: bool | None,
+    keep_attrs: bool | None,
+) -> xr.Dataset | xr.DataArray:
+    """Cross-rank prefix-scan core of :func:`mpp_cumsum` and :func:`mpp_cumprod`.
+
+    Each rank scans locally, then an exclusive scan of the rank totals supplies
+    the offset its own prefix is missing.
+    """
+    operation = "cumprod" if product else "cumsum"
+
+    def local() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
+        """Return this rank's local cumulative result and its total."""
+        scan = (value.cumprod if product else value.cumsum)(
+            dim, skipna=skipna, keep_attrs=keep_attrs
+        )
+        total = (value.prod if product else value.sum)(dim, skipna=skipna)
+        return scan, total
+
+    parts, error = guarded(local)
+    mpi_context.raise_if_error(
+        error, f"MPI xarray {operation}", signature=(operation, str(dim))
+    )
+    local_scan, local_total = parts
+    # `.prod(dim)` alone does not force a still-lazy dask-backed `value` to
+    # compute, and `comm.exscan` would pickle the graph as-is.
+    local_total = local_total.load()
+
+    comm = _dim_comm(mpi_context, meta, dim)
+    # EXSCAN gives exclusive prefixes; rank 0 receives None and takes the
+    # operator's identity instead.
+    prefix = comm.exscan(local_total, op=MPI.PROD if product else MPI.SUM)
+    if prefix is None:
+        prefix = (xr.ones_like if product else xr.zeros_like)(local_total)
+
+    return local_scan * prefix if product else local_scan + prefix
+
+
+def _cumulative(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    *,
+    product: bool,
+    skipna: bool | None,
+    keep_attrs: bool | None,
+) -> xr.Dataset | xr.DataArray:
+    """Shared implementation for :func:`mpp_cumsum` and :func:`mpp_cumprod`."""
+    operation = "cumprod" if product else "cumsum"
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        method = value.cumprod if product else value.cumsum
+        return method(dim, skipna=skipna, keep_attrs=keep_attrs)
+
+    _agree(mpi_context, (operation, str(dim), int(meta["global_size"])))
+
+    scan = functools.partial(
+        _prefix_scan,
+        mpi_context,
+        dim=dim,
+        meta=meta,
+        product=product,
+        skipna=skipna,
+        keep_attrs=keep_attrs,
+    )
+
+    if not isinstance(value, xr.Dataset):
+        return reattach_meta(scan(value), meta)
+
+    # Only variables carrying ``dim`` are scanned; replicated ones pass through.
+    touched = [name for name, var in value.data_vars.items() if dim in var.dims]
+    if not touched:
+        return strip_mpi_meta(value.copy(deep=False))
+    untouched = [name for name in value.data_vars if name not in touched]
+    scanned = scan(value[touched])
+    result = (
+        xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
+        if untouched
+        else scanned
+    )
+    result.attrs = dict(value.attrs)
+    return reattach_meta(result, meta)
+
+
 def mpp_cumsum(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -73,92 +166,29 @@ def mpp_cumsum(
     skipna: bool | None = None,
     keep_attrs: bool | None = None,
 ) -> xr.Dataset | xr.DataArray:
-    """Cumulative sum along ``dim``, correct when ``dim`` is distributed.
+    """Compute a cumulative sum along a distributed dimension.
 
     Parameters
     ----------
     mpi_context : MPIContext
         MPI context used for communication.
     value : xarray.Dataset or xarray.DataArray
-        Object to accumulate.
+        Input object.
     dim : Hashable
-        Dimension to accumulate along.
+        Cumulative-sum dimension.
     skipna : bool or None, optional
-        Missing-value behavior, following xarray semantics.
+        Skip missing values according to xarray semantics.
     keep_attrs : bool or None, optional
-        Whether to preserve attributes on the rank-local cumulative sum step; lost by the subsequent addition of the cross-rank prefix.
+        Preserve attributes.
 
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Cumulative sum with the same local length and ``.meta`` as ``value``.
-
+        Cumulative sum with the original partition layout.
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
-        return value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
-
-    _agree(mpi_context, ("cumsum", str(dim), int(meta["global_size"])))
-
-    if isinstance(value, xr.Dataset):
-        # Prefix scans include only variables carrying ``dim``; replicated variables
-        # stay unchanged.
-        touched = [name for name, var in value.data_vars.items() if dim in var.dims]
-        if not touched:
-            return strip_mpi_meta(value.copy(deep=False))
-        untouched = [name for name in value.data_vars if name not in touched]
-        scanned = _cumsum_scan(
-            mpi_context, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
-        )
-        result = (
-            xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
-            if untouched
-            else scanned
-        )
-        result.attrs = dict(value.attrs)
-        return reattach_meta(result, meta)
-
-    return reattach_meta(
-        _cumsum_scan(
-            mpi_context, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs
-        ),
-        meta,
+    return _cumulative(
+        mpi_context, value, dim, product=False, skipna=skipna, keep_attrs=keep_attrs
     )
-
-
-def _cumsum_scan(
-    mpi_context: MPIContext,
-    value: xr.Dataset | xr.DataArray,
-    dim: Hashable,
-    meta: Mapping[str, Any],
-    *,
-    skipna: bool | None,
-    keep_attrs: bool | None,
-) -> xr.Dataset | xr.DataArray:
-    """Cross-rank prefix-sum core of :meth:`cumsum`."""
-
-    def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
-        """Return this rank's local cumulative sum and total."""
-        local_cumsum = value.cumsum(dim, skipna=skipna, keep_attrs=keep_attrs)
-        local_total = value.sum(dim, skipna=skipna)
-        return local_cumsum, local_total
-
-    locals_or_none, error = guarded(_locals)
-    mpi_context.raise_if_error(
-        error, "MPI xarray cumsum", signature=("cumsum", str(dim))
-    )
-    local_cumsum, local_total = locals_or_none
-    # Materialize local values before object collectives so lazy Dask graphs are never
-    # pickled.
-    local_total = local_total.load()
-
-    comm = _dim_comm(mpi_context, meta, dim)
-    # Use ``MPI_EXSCAN`` for exclusive prefixes; rank 0 uses the true additive identity.
-    exclusive_prefix = comm.exscan(local_total, op=MPI.SUM)
-    if exclusive_prefix is None:
-        exclusive_prefix = xr.zeros_like(local_total)
-
-    return local_cumsum + exclusive_prefix
 
 
 def mpp_cumprod(
@@ -189,71 +219,9 @@ def mpp_cumprod(
     xarray.Dataset or xarray.DataArray
         Cumulative product with the original partition layout.
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
-        return value.cumprod(dim, skipna=skipna, keep_attrs=keep_attrs)
-
-    _agree(mpi_context, ("cumprod", str(dim), int(meta["global_size"])))
-
-    if isinstance(value, xr.Dataset):
-        # Prefix products include only variables carrying ``dim``; replicated variables
-        # stay unchanged.
-        touched = [name for name, var in value.data_vars.items() if dim in var.dims]
-        if not touched:
-            return strip_mpi_meta(value.copy(deep=False))
-        untouched = [name for name in value.data_vars if name not in touched]
-        scanned = _cumprod_scan(
-            mpi_context, value[touched], dim, meta, skipna=skipna, keep_attrs=keep_attrs
-        )
-        result = (
-            xr.merge([scanned, value[untouched]], combine_attrs="no_conflicts")
-            if untouched
-            else scanned
-        )
-        result.attrs = dict(value.attrs)
-        return reattach_meta(result, meta)
-
-    return reattach_meta(
-        _cumprod_scan(
-            mpi_context, value, dim, meta, skipna=skipna, keep_attrs=keep_attrs
-        ),
-        meta,
+    return _cumulative(
+        mpi_context, value, dim, product=True, skipna=skipna, keep_attrs=keep_attrs
     )
-
-
-def _cumprod_scan(
-    mpi_context: MPIContext,
-    value: xr.Dataset | xr.DataArray,
-    dim: Hashable,
-    meta: Mapping[str, Any],
-    *,
-    skipna: bool | None,
-    keep_attrs: bool | None,
-) -> xr.Dataset | xr.DataArray:
-    """Cross-rank prefix-product core of :meth:`cumprod`."""
-
-    def _locals() -> tuple[xr.Dataset | xr.DataArray, xr.Dataset | xr.DataArray]:
-        """Return this rank's local cumulative product and total."""
-        local_cumprod = value.cumprod(dim, skipna=skipna, keep_attrs=keep_attrs)
-        local_total = value.prod(dim, skipna=skipna)
-        return local_cumprod, local_total
-
-    locals_or_none, error = guarded(_locals)
-    mpi_context.raise_if_error(
-        error, "MPI xarray cumprod", signature=("cumprod", str(dim))
-    )
-    local_cumprod, local_total = locals_or_none
-    # Materialize before gathering -- see the matching comment in
-    # `_cumsum_scan` for why: `.prod(dim)` alone does not force a still-lazy
-    # dask-backed `value` to compute, and `comm.exscan` pickles it as-is.
-    local_total = local_total.load()
-
-    comm = _dim_comm(mpi_context, meta, dim)
-    exclusive_prefix = comm.exscan(local_total, op=MPI.PROD)
-    if exclusive_prefix is None:
-        exclusive_prefix = xr.ones_like(local_total)
-
-    return local_cumprod * exclusive_prefix
 
 
 def mpp_ffill(
@@ -337,7 +305,8 @@ def _fill_scan(
     local_filled, edge_slice, has_valid = local_or_none
 
     def _last_valid(carry: Any, current: Any) -> Any:
-        """Combine two (has_valid, edge_slice) pairs, keeping the more recent valid one."""
+        """Combine two (has_valid, edge_slice) pairs, keeping the more recent valid
+        one."""
         return current if current[0] else carry
 
     # Use ``EXSCAN`` for forward fill and reverse communicator numbering for backward
@@ -374,7 +343,9 @@ def mpp_interp(
     dim : Hashable
         Dimension to interpolate along.
     new_coord : array-like
-        This rank's own local slice of the new target coordinate along ``dim`` (not the global target grid -- exactly as this rank's own local ``value`` is its slice of the source, not the global source).
+        This rank's own local slice of the new target coordinate along ``dim`` (not the
+        global target grid -- exactly as this rank's own local ``value`` is its slice of
+        the source, not the global source).
     method : str, optional
         As in ``xarray.DataArray.interp``.
     **kwargs : Any
@@ -383,7 +354,10 @@ def mpp_interp(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        Interpolated onto this rank's ``new_coord``, with ``.meta`` recomputed for the new length along ``dim`` (an allgather of each rank's own new local length, the same mechanism :func:`diff`/:func:`~.arithmetic.coarsen_reduce` use for their own length-changing case).
+        Interpolated onto this rank's ``new_coord``, with ``.meta`` recomputed for the
+        new length along ``dim`` (an allgather of each rank's own new local length, the
+        same mechanism :func:`diff`/:func:`~.arithmetic.coarsen_reduce` use for their
+        own length-changing case).
 
     """
     meta = mpp_get_meta(value)
@@ -602,12 +576,18 @@ def mpp_diff(
     Returns
     -------
     xarray.Dataset or xarray.DataArray
-        The differenced object, ``n`` elements shorter along ``dim`` globally -- and, when ``dim`` is the partition dimension, at exactly one rank (0 for "upper", the last rank for "lower") locally; every other rank's local length is unchanged.
+        The differenced object, ``n`` elements shorter along ``dim`` globally -- and,
+        when ``dim`` is the partition dimension, at exactly one rank (0 for "upper", the
+        last rank for "lower") locally; every other rank's local length is unchanged.
 
     Raises
     ------
     ValueError
-        If ``n`` is negative, ``label`` is not "upper"/"lower", or any rank's local length along ``dim`` is shorter than ``n`` (this last case is caught by :meth:`~.arithmetic.mpp_halo_exchange` itself, which checks every rank's local length together via a synchronized ``allgather`` before raising, so the error is consistent and every rank raises together rather than some hanging).
+        If ``n`` is negative, ``label`` is not "upper"/"lower", or any rank's local
+        length along ``dim`` is shorter than ``n`` (this last case is caught by
+        :meth:`~.arithmetic.mpp_halo_exchange` itself, which checks every rank's local
+        length together via a synchronized ``allgather`` before raising, so the error is
+        consistent and every rank raises together rather than some hanging).
 
     """
     meta = mpp_get_meta(value)
@@ -657,7 +637,8 @@ def mpp_shift(
     *,
     fill_value: Any = _UNSET,
 ) -> xr.Dataset | xr.DataArray:
-    """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is distributed.
+    """Shift ``value`` by ``periods`` along ``dim``, correct when ``dim`` is
+    distributed.
 
     Parameters
     ----------
@@ -668,9 +649,11 @@ def mpp_shift(
     dim : Hashable
         Dimension to shift along.
     periods : int, optional
-        Number of positions to shift by; positive shifts values toward higher indices (as in ``xarray.DataArray.shift``).
+        Number of positions to shift by; positive shifts values toward higher indices
+        (as in ``xarray.DataArray.shift``).
     fill_value : Any, optional
-        As in ``xarray.DataArray.shift``; defaults to xarray's own dtype-aware NA fill when omitted.
+        As in ``xarray.DataArray.shift``; defaults to xarray's own dtype-aware NA fill
+        when omitted.
 
     Returns
     -------
@@ -847,7 +830,9 @@ def mpp_differentiate(
     Raises
     ------
     ValueError
-        If any rank's local length along ``coord`` is shorter than 1 (see ``mpp_halo_exchange``'s own synchronized length check) or too short overall for ``edge_order`` (raised by xarray itself).
+        If any rank's local length along ``coord`` is shorter than 1 (see
+        ``mpp_halo_exchange``'s own synchronized length check) or too short overall for
+        ``edge_order`` (raised by xarray itself).
 
     """
     meta = mpp_get_meta(value)

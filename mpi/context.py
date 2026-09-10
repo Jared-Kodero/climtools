@@ -657,6 +657,7 @@ class MPIContext(MPIDiagnostics):
 
         @functools.wraps(function)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R | None:
+            """Run the wrapped callable on the root rank only."""
             if root >= self.comm.size:
                 raise ValueError(f"root {root} is outside [0, {self.comm.size}).")
 
@@ -678,6 +679,13 @@ class MPIContext(MPIDiagnostics):
 
 
 def get_mpi_ctx() -> MPIContext:
+    """Return the process-wide MPI context.
+
+    Returns
+    -------
+    MPIContext
+        Shared context; constructing it repeatedly is cheap.
+    """
     return MPIContext()
 
 

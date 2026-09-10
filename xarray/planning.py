@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -17,7 +17,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .cartesian import get_cartesian_topology
+from .mpp import mpp_get_cartesian_domain
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .common import (
     CHECK_COLLECTIVE_AGREEMENT,
@@ -27,7 +27,7 @@ from .common import (
     op_name,
     partial_dtype,
 )
-from .meta import choose_partition_dim, mpp_update_meta, strip_mpi_meta
+from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from .mpp import _mpp_reduce, mpp_reduce_scatter
 
 
@@ -217,7 +217,7 @@ def mpp_resolve_comm(
     axes = frozenset(comm_axes)
     if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
         return mpi_context.comm
-    topology = get_cartesian_topology(
+    topology = mpp_get_cartesian_domain(
         mpi_context.comm, meta["dims"], meta["global_sizes"]
     )
     return topology.sub_comm(axes)
@@ -559,6 +559,121 @@ def mpp_plan_scatter_target(
     if target is None:
         return None
     return (*target, comm)
+
+
+def mpp_global_reduce(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: str | Iterable[Hashable] | EllipsisType | None,
+    *,
+    operation: str,
+    serial: Callable[[Any, Any], Any],
+    combine: Callable[..., xr.DataArray],
+    partition_dim: Hashable | Literal["auto"] | None,
+    allow_scatter: bool = True,
+) -> xr.Dataset | xr.DataArray:
+    """Drive a distributed reduction from plan to finished result.
+
+    Every global reduction follows the same course: decide whether the
+    reduction touches a partitioned dimension at all, plan it, reduce each
+    variable, then repartition the result. Only the rank-local step and the
+    cross-rank combination differ between sum, product, mean, extremum,
+    logical and positional reductions, so those two arrive as callables and
+    everything around them is shared.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    value : xarray.Dataset or xarray.DataArray
+        Object to reduce.
+    dim : str, iterable of Hashable, ..., or None
+        Dimensions to reduce.
+    operation : str
+        Reduction name, used for planning and diagnostics.
+    serial : callable
+        ``serial(obj, dims)`` reducing ``obj`` without communication. Used
+        wherever no partitioned dimension is involved.
+    combine : callable
+        ``combine(variable, dims, entry, comm, scatter)`` reducing one
+        distributed variable across ``comm``.
+    partition_dim : Hashable, {"auto"}, or None
+        Where to repartition the result once the active partition dimension
+        is reduced away.
+    allow_scatter : bool, default True
+        Whether the result may be produced already split across ranks by a
+        ``Reduce_scatter``. Positional and logical reductions do not.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Reduced object with updated distribution metadata.
+    """
+    local_dim, dims = normalize_dim(value, dim)
+    old_meta = mpp_get_meta(value)
+    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
+    if local_meta is not None:
+        return finish_local_reduction(serial(value, local_dim), old_meta=local_meta)
+
+    plan = mpp_reduction_plan(mpi_context, value, dims, old_meta, operation=operation)
+    scattered = (
+        mpp_plan_scatter_target(mpi_context, old_meta, dims, partition_dim, plan)
+        if allow_scatter
+        else None
+    )
+    scatter = None if scattered is None else scattered[:2]
+
+    def comm_for(entry: PlanEntry) -> MPI.Comm:
+        """Return the communicator this entry reduces over."""
+        if scattered is not None:
+            return scattered[2]
+        return mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
+
+    if isinstance(value, xr.DataArray):
+        if not dims:
+            return serial(value, local_dim)
+        result = combine(value, dims, plan[0], comm_for(plan[0]), scatter)
+    else:
+        start = stop = None
+        if scattered is not None:
+            counts, scatter_comm = scattered[1], scattered[2]
+            start = sum(counts[: scatter_comm.rank])
+            stop = start + counts[scatter_comm.rank]
+        variables: dict[Hashable, xr.DataArray] = {}
+        for entry in plan:
+            variable = value[entry.name]
+            if not entry.dims:
+                variables[entry.name] = (
+                    variable
+                    if scattered is None
+                    else mpp_scatter_replicated_slice(
+                        variable, scattered[0], start, stop
+                    )
+                )
+            elif not entry.distributed:
+                variables[entry.name] = serial(variable, entry.dims)
+            else:
+                variables[entry.name] = combine(
+                    variable, entry.dims, entry, comm_for(entry), scatter
+                )
+        source = (
+            value.isel({scattered[0]: slice(start, stop)})
+            if scattered is not None and scattered[0] in value.dims
+            else value
+        )
+        result = dataset_result(source, dims, variables)
+
+    if scattered is not None:
+        return mpp_finish_scatter(
+            result, target=scattered[0], counts=scattered[1], comm=scattered[2]
+        )
+    return mpp_finish(
+        mpi_context,
+        result,
+        old_meta=old_meta,
+        partition_dim=partition_dim,
+        auto_candidates=repartition_candidates(plan),
+    )
 
 
 def mpp_finish(

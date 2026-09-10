@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
 from ..mpi.mpi_init import MPI
+from .chunks import get_balanced_bounds
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from mpi4py.MPI import Cartcomm, Comm
 
     from ..mpi.context import MPIContext
 
@@ -23,12 +26,16 @@ __all__ = [
     "PROD_NAN",
     "PROD_NEGATIVE",
     "PROD_ZERO",
+    "CartesianDomain",
     "Domain",
     "DomainUpdate",
     "mpp_chksum",
     "mpp_complete_update_domains",
+    "mpp_define_cartesian_domain",
     "mpp_define_domains",
     "mpp_define_layout",
+    "mpp_dim_comm",
+    "mpp_get_cartesian_domain",
     "mpp_get_compute_domains",
     "mpp_get_neighbor_pe",
     "mpp_max",
@@ -208,6 +215,7 @@ def mpp_define_domains(
     dim_tuple = (dims,) if isinstance(dims, str) else tuple(dims)
 
     def _min_chunk(d: str) -> int | None:
+        """Return the minimum partition size requested for one dimension."""
         return (
             min_partition_size
             if not isinstance(min_partition_size, Mapping)
@@ -231,9 +239,7 @@ def mpp_define_domains(
     sizes = {d: int(global_sizes[d]) for d in dim_tuple}
 
     if target_rank == comm.rank:
-        from .cartesian import get_cartesian_topology
-
-        topology = get_cartesian_topology(comm, dim_tuple, sizes)
+        topology = mpp_get_cartesian_domain(comm, dim_tuple, sizes)
         grid_shape = topology.grid_shape
         starts = {d: topology.bounds[d][0] for d in dim_tuple}
         stops = {d: topology.bounds[d][1] for d in dim_tuple}
@@ -389,9 +395,7 @@ def mpp_get_neighbor_pe(
     rank = comm.rank
 
     if len(domain.dims) > 1:
-        from .cartesian import get_cartesian_topology
-
-        topology = get_cartesian_topology(comm, domain.dims, domain.global_sizes)
+        topology = mpp_get_cartesian_domain(comm, domain.dims, domain.global_sizes)
         if periodic:
             axis = domain.dims.index(dim)
             axis_size = topology.grid_shape[axis]
@@ -499,11 +503,13 @@ def mpp_start_update_domains(
         return arr.view(np.int64) if arr.dtype.kind in "mM" else arr
 
     def _slab(arr: np.ndarray[Any, Any], start: int, stop: int) -> np.ndarray[Any, Any]:
+        """Return a contiguous copy of ``arr[start:stop]`` along the halo axis."""
         idx = [slice(None)] * arr.ndim
         idx[axis] = slice(start, stop)
         return np.ascontiguousarray(arr[tuple(idx)])
 
     def _halo_shape(name: str, width: int) -> tuple[int, ...]:
+        """Return the shape of a ``width``-wide halo slab of one field."""
         arr = items[name]
         return (*arr.shape[:axis], width, *arr.shape[axis + 1 :])
 
@@ -516,6 +522,7 @@ def mpp_start_update_domains(
         names.sort()
 
     def _pack(names: list[str], side: str) -> np.ndarray[Any, Any]:
+        """Flatten one edge of every named field into a single send buffer."""
         pieces = []
         for name in names:
             arr = items[name]
@@ -530,6 +537,7 @@ def mpp_start_update_domains(
     def _unpack(
         flat: np.ndarray[Any, Any], names: list[str], width: int
     ) -> dict[str, np.ndarray[Any, Any]]:
+        """Split a received buffer back into per-field halo slabs."""
         out: dict[str, np.ndarray[Any, Any]] = {}
         pos = 0
         for name in names:
@@ -696,6 +704,14 @@ MAX_EFP_RANKS = 2 ** (63 - _NUMBIT) - 1
 # Scale of digit n, n = 0..NUMINT-1 (FMS's `pr` array).
 _SCALES = np.array([_PREC ** (2 - n) for n in range(_NUMINT)], dtype=np.float64)
 
+# FMS's `prec`: the magnitude one digit holds before it must carry.
+_PREC_INT = 1 << _NUMBIT
+
+# Terms accumulated before renormalising. Each term contributes less than
+# _PREC_INT to a digit, so a block this size cannot overflow int64 even on top
+# of a carried accumulator. FMS renormalises per array row for the same reason.
+_EFP_BLOCK = 1 << 16
+
 # The rank-combining product below multiplies one mantissa in [0.5, 1) per
 # rank, so the reduced mantissa is >= 2**-nranks. Keeping it a normal
 # float64 (>= 2**-1022) bounds the usable rank count.
@@ -705,17 +721,39 @@ MAX_PROD_RANKS = 1000
 _PROD_BLOCK = 512
 
 
+def _carry_overflow(digits: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
+    """Renormalise digits so each holds less than one unit of the next scale.
+
+    FMS ``carry_overflow``. Without this the running accumulator overflows
+    int64 silently once enough terms have been added, which corrupts the sum
+    rather than reporting it.
+    """
+    for n in range(_NUMINT - 1, 0, -1):
+        # Truncate toward zero, exactly, without going through float64.
+        carry = np.sign(digits[n]) * (np.abs(digits[n]) >> _NUMBIT)
+        digits[n] -= carry * _PREC_INT
+        digits[n - 1] += carry
+    return digits
+
+
 def _to_digits(array: np.ndarray[Any, Any], axis: int) -> np.ndarray[Any, Any]:
-    """Split values into signed integer digits along a new leading axis."""
-    values = np.asarray(array, dtype=np.float64)
-    sign = np.where(values < 0.0, -1.0, 1.0)
-    residual = np.abs(values)
-    digits = np.empty((_NUMINT, *values.shape), dtype=np.int64)
-    for n, scale in enumerate(_SCALES):
-        digit = np.floor(residual / scale)
-        digits[n] = (sign * digit).astype(np.int64)
-        residual -= digit * scale
-    return digits.sum(axis=axis + 1 if axis >= 0 else axis, dtype=np.int64)
+    """Sum values into signed integer digits along ``axis``.
+
+    Accumulates in blocks of :data:`_EFP_BLOCK` terms, renormalising after
+    each, so an arbitrarily long local axis cannot overflow the accumulator.
+    """
+    values = np.moveaxis(np.asarray(array, dtype=np.float64), axis, 0)
+    digits = np.zeros((_NUMINT, *values.shape[1:]), dtype=np.int64)
+    for start in range(0, values.shape[0], _EFP_BLOCK):
+        block = values[start : start + _EFP_BLOCK]
+        sign = np.where(block < 0.0, -1.0, 1.0)
+        residual = np.abs(block)
+        for n, scale in enumerate(_SCALES):
+            digit = np.floor(residual / scale)
+            digits[n] += (sign * digit).astype(np.int64).sum(axis=0)
+            residual -= digit * scale
+        _carry_overflow(digits)
+    return digits
 
 
 def _from_digits(digits: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
@@ -751,7 +789,8 @@ def mpp_reproducing_sum(
     Raises
     ------
     ValueError
-        If the rank count is unsupported or input contains non-finite values.
+        If the rank count is unsupported, the input contains non-finite
+        values, or the values are too large to sum without overflow.
     """
     if comm.size > MAX_EFP_RANKS:
         # Every rank sees the same communicator size, so this raises on all of
@@ -759,24 +798,48 @@ def mpp_reproducing_sum(
         raise ValueError(f"mpp_reproducing_sum supports at most {MAX_EFP_RANKS} ranks.")
 
     flat = np.asarray(local).reshape(-1) if axis is None else local
-    digits = _to_digits(flat, 0 if axis is None else axis)
+    reduce_axis = 0 if axis is None else axis
 
-    # Whether a rank holds non-finite input is a rank-local fact, so raising
-    # on it directly would let one rank leave while the others waited in the
-    # Allreduce below -- deadlocking the job over a data error. The flag rides
-    # along in the reduction instead, so every rank learns of it at the same
-    # point and they all raise together.
-    payload = np.empty(digits.size + 1, dtype=np.int64)
-    payload[:-1] = digits.reshape(-1)
-    payload[-1] = 0 if np.all(np.isfinite(flat)) else 1
+    # FMS `prec_error`: the top digit must stay small enough that summing it
+    # across every rank still fits in int64. Checking the inputs rather than
+    # the converted digits keeps the conversion itself from overflowing.
+    prec_error = (2**63 - 1) // comm.size
+    finite = bool(np.all(np.isfinite(flat)))
+    representable = finite and bool(
+        np.all(np.abs(flat) < prec_error * _SCALES[0] / _EFP_BLOCK)
+    )
+
+    if representable:
+        digits = _to_digits(flat, reduce_axis)
+    else:
+        # Contribute zeros so the collective keeps its shape and every rank
+        # still reaches the Allreduce that carries the flags.
+        shape = np.moveaxis(np.asarray(flat), reduce_axis, 0).shape[1:]
+        digits = np.zeros((_NUMINT, *shape), dtype=np.int64)
+
+    # Whether a rank holds non-finite or over-large input is a rank-local
+    # fact, so raising on it directly would let one rank leave while the
+    # others waited in the Allreduce below, deadlocking the job over a data
+    # error. Both flags ride along in the reduction instead.
+    payload = np.empty(digits.size + 2, dtype=np.int64)
+    payload[:-2] = digits.reshape(-1)
+    payload[-2] = 0 if finite else 1
+    payload[-1] = (
+        0 if representable and not np.any(np.abs(digits[0]) > prec_error) else 1
+    )
     total = np.empty_like(payload)
     comm.Allreduce(payload, total, op=MPI.SUM)
-    if total[-1]:
+    if total[-2]:
         raise ValueError(
-            f"mpp_reproducing_sum requires finite input; {int(total[-1])} of "
+            f"mpp_reproducing_sum requires finite input; {int(total[-2])} of "
             f"{comm.size} ranks hold NaN or infinity."
         )
-    return _from_digits(total[:-1].reshape(digits.shape))
+    if total[-1]:
+        raise ValueError(
+            f"mpp_reproducing_sum overflowed on {int(total[-1])} of "
+            f"{comm.size} ranks; the values are too large to sum reproducibly."
+        )
+    return _from_digits(total[:-2].reshape(digits.shape))
 
 
 # Order of the integer companions packed alongside the mantissa, so that the
@@ -1003,3 +1066,231 @@ def mpp_partition_offsets(comm: MPI.Comm, local_length: int) -> tuple[int, int, 
         prefix[0] = 0  # Exscan leaves rank 0's receive buffer undefined.
     start = int(prefix[0])
     return int(total[0]), start, start + int(length[0])
+
+
+def _define_layout_nd(extents: Sequence[int], ndivs: int) -> tuple[int, ...]:
+    """Choose a process-grid shape for more than two partition dimensions.
+
+    Assigns the prime factors of ``ndivs``, largest first, to whichever axis
+    currently carries the most work per rank. Two-dimensional layouts use
+    :func:`mpp_define_layout` instead, which follows FMS exactly.
+
+    Parameters
+    ----------
+    extents : sequence of int
+        Global length of each partitioned dimension.
+    ndivs : int
+        Number of ranks to divide among.
+
+    Returns
+    -------
+    tuple of int
+        Number of divisions along each axis.
+
+    Raises
+    ------
+    ValueError
+        If ``extents`` is empty, any extent is not positive, or ``ndivs`` is
+        not positive.
+    """
+    if not extents:
+        raise ValueError("requires at least one extent")
+    if any(extent <= 0 for extent in extents):
+        raise ValueError(f"All extents must be positive; got {tuple(extents)!r}.")
+    if ndivs <= 0:
+        raise ValueError(f"ndivs must be positive; got {ndivs}.")
+    if len(extents) == 2:
+        return mpp_define_layout(extents[0], extents[1], ndivs)
+
+    factors: list[int] = []
+    remaining, factor = ndivs, 2
+    while factor * factor <= remaining:
+        while remaining % factor == 0:
+            factors.append(factor)
+            remaining //= factor
+        factor += 1
+    if remaining > 1:
+        factors.append(remaining)
+
+    shape = [1] * len(extents)
+    for f in sorted(factors, reverse=True):
+        axis = max(range(len(extents)), key=lambda i: extents[i] / shape[i])
+        shape[axis] *= f
+    return tuple(shape)
+
+
+@dataclass(frozen=True)
+class CartesianDomain:
+    """One rank's view of a multi-dimensional Cartesian process grid.
+
+    Attributes
+    ----------
+    dims : tuple of str
+        Partition dimension names, in Cartesian-axis order.
+    grid_shape : tuple of int
+        Number of process-grid divisions along each axis.
+    coords : tuple of int
+        This rank's position in the process grid, one entry per axis.
+    cart_comm : mpi4py.MPI.Cartcomm
+        The underlying Cartesian communicator. Rank order matches
+        ``comm`` (``reorder=False``), so ``cart_comm.rank`` and the
+        originating communicator's rank agree.
+    bounds : dict of str to (int, int)
+        Global half-open ``[start, stop)`` interval owned by this rank,
+        per dimension.
+    neighbors : dict of str to (int or None, int or None)
+        Per-dimension ``(lower_rank, upper_rank)`` face neighbors in the
+        *original* (non-Cartesian) communicator's rank numbering. None at
+        a non-periodic global boundary.
+
+    """
+
+    dims: tuple[str, ...]
+    grid_shape: tuple[int, ...]
+    coords: tuple[int, ...]
+    cart_comm: Cartcomm
+    bounds: dict[str, tuple[int, int]]
+    neighbors: dict[str, tuple[int | None, int | None]]
+    _sub_comm_cache: dict[frozenset[str], Comm] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+
+    def as_meta_cart(self) -> dict[str, Any]:
+        """Return the ``meta["cart"]`` descriptor for this topology.
+
+        Returns
+        -------
+        dict[str, Any]
+            Cartesian topology metadata descriptor.
+
+        """
+        return {
+            "grid_shape": self.grid_shape,
+            "coords": self.coords,
+            "periods": (False,) * len(self.dims),
+        }
+
+    def sub_comm(self, merge_axes: Sequence[str]) -> Comm:
+        """Return the communicator grouping ranks for a partial collective.
+
+        Parameters
+        ----------
+        merge_axes : sequence of str
+            Subset of :attr:`dims` to group ranks across.
+
+        Returns
+        -------
+        mpi4py.MPI.Comm
+            The (possibly cached) sub-communicator.
+
+        """
+        key = frozenset(merge_axes)
+        cached = self._sub_comm_cache.get(key)
+        if cached is not None:
+            return cached
+        remain = [dim in key for dim in self.dims]
+        sub = self.cart_comm.Sub(remain)
+        self._sub_comm_cache[key] = sub
+        return sub
+
+
+def _no_proc_null(rank: int) -> int | None:
+    """Map ``MPI.PROC_NULL`` (no neighbor) to None."""
+    return None if rank == MPI.PROC_NULL else int(rank)
+
+
+def mpp_define_cartesian_domain(
+    comm: MPI.Intracomm,
+    dims: Sequence[str],
+    sizes: Mapping[str, int],
+) -> CartesianDomain:
+    """Build a rank's Cartesian topology for a multi-dimensional partition.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two dimensions are given.
+
+    """
+    if len(dims) < 2:
+        raise ValueError(
+            "requires at least two partition dimensions; got " + f"{tuple(dims)!r}"
+        )
+
+    extents = [int(sizes[dim]) for dim in dims]
+    grid_shape = _define_layout_nd(extents, comm.size)
+
+    cart_comm = comm.Create_cart(
+        dims=list(grid_shape),
+        periods=[False] * len(dims),
+        reorder=False,
+    )
+    coords = tuple(cart_comm.Get_coords(cart_comm.rank))
+
+    bounds: dict[str, tuple[int, int]] = {}
+    neighbors: dict[str, tuple[int | None, int | None]] = {}
+    for axis, dim in enumerate(dims):
+        bounds[dim] = get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
+        lower, upper = cart_comm.Shift(axis, 1)
+        neighbors[dim] = (_no_proc_null(lower), _no_proc_null(upper))
+
+    return CartesianDomain(
+        dims=tuple(dims),
+        grid_shape=grid_shape,
+        coords=coords,
+        cart_comm=cart_comm,
+        bounds=bounds,
+        neighbors=neighbors,
+    )
+
+
+# Cache topologies on the communicator so cache lifetime follows the MPI communicator
+# lifetime.
+_TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
+
+
+def mpp_get_cartesian_domain(
+    comm: MPI.Intracomm,
+    dims: Sequence[str],
+    sizes: Mapping[str, int],
+) -> CartesianDomain:
+    """Return (building and caching once) a rank's Cartesian topology."""
+    dims = tuple(dims)
+    # Include sizes in the cache key so same-named dimensions with different extents
+    # cannot collide.
+    cache_key = (dims, tuple(int(sizes[d]) for d in dims))
+    cache = comm.Get_attr(_TOPOLOGY_KEYVAL)
+    if cache is None:
+        cache = {}
+        comm.Set_attr(_TOPOLOGY_KEYVAL, cache)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    topology = mpp_define_cartesian_domain(comm, dims, sizes)
+    cache[cache_key] = topology
+    return topology
+
+
+def mpp_dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
+    """Return the communicator varying only along one partition dimension.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    meta : mapping
+        Canonical MPI metadata.
+    dim : str
+        Partition dimension.
+
+    Returns
+    -------
+    mpi4py.MPI.Comm
+        Full communicator for 1-D partitions or the corresponding Cartesian
+        subcommunicator.
+    """
+    dims = meta["dims"]
+    if len(dims) <= 1 or "cart" not in meta:
+        return cast("Comm", mpi_context.comm)
+    topology = mpp_get_cartesian_domain(mpi_context.comm, dims, meta["global_sizes"])
+    return topology.sub_comm((dim,))

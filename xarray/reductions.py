@@ -1,4 +1,10 @@
-"""Provide distributed numerical and logical reductions."""
+"""Distributed numerical, logical and positional reductions.
+
+Every reduction here returns a result that is replicated across the ranks
+that took part, or repartitioned onto a surviving dimension, with no
+duplicated contributions. See :func:`~.planning.mpp_finish` for the exact
+guarantee.
+"""
 
 from __future__ import annotations
 
@@ -16,24 +22,14 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .common import extreme_identity, op_name, partial_dtype
+from .common import PlanEntry, extreme_identity, op_name, partial_dtype
 from .meta import mpp_get_meta
 from .mpp import _mpp_reduce, mpp_reduce_scatter
 from .planning import (
-    dataset_result,
-    finish_local_reduction,
     guarded,
-    local_reduction_meta,
     mpp_comm_reduce,
     mpp_count_valid_values,
-    mpp_finish,
-    mpp_finish_scatter,
-    mpp_plan_scatter_target,
-    mpp_reduction_plan,
-    mpp_resolve_comm,
-    mpp_scatter_replicated_slice,
-    normalize_dim,
-    repartition_candidates,
+    mpp_global_reduce,
     skipna_enabled,
 )
 
@@ -401,15 +397,7 @@ def mpp_sum_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Sum a distributed xarray object over one or more dimensions.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Sum a distributed xarray object over one or more dimensions."""
     return _sum_prod(
         mpi_context,
         value,
@@ -433,15 +421,7 @@ def mpp_prod_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Multiply a distributed xarray object over one or more dimensions.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Multiply a distributed xarray object over one or more dimensions."""
     return _sum_prod(
         mpi_context,
         value,
@@ -468,133 +448,50 @@ def _sum_prod(
     partition_dim: Hashable | Literal["auto"] | None,
 ) -> xr.Dataset | xr.DataArray:
     """Implement distributed sum and product reductions."""
-    operation = "prod" if product else "sum"
-    local_dim, dims = normalize_dim(value, dim)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
-    if local_meta is not None:
-        method = value.prod if product else value.sum
-        local_result = method(
-            dim=local_dim, skipna=skipna, min_count=min_count, keep_attrs=keep_attrs
+
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        method = obj.prod if product else obj.sum
+        return method(
+            dim=dims, skipna=skipna, min_count=min_count, keep_attrs=keep_attrs
         )
-        return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation=operation
-    )
-
-    if isinstance(value, xr.DataArray):
-        method = value.prod if product else value.sum
-        local, local_error = guarded(
+    def combine(
+        variable: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
+    ) -> xr.DataArray:
+        """Reduce one distributed variable across ranks."""
+        method = variable.prod if product else variable.sum
+        local, error = guarded(
             lambda: method(
-                dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
+                dim=dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
-        if not dims:
-            if local_error is not None:
-                raise local_error
-            return local
-        scattered = mpp_plan_scatter_target(
-            mpi_context, old_meta, dims, partition_dim, reduce_plan
-        )
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
-        )
-        scatter = None if scattered is None else scattered[:2]
-        result = _combine_sum_or_prod(
+        return _combine_sum_or_prod(
             mpi_context,
-            value,
+            variable,
             local,
             dims,
             op,
             skipna=skipna,
             min_count=min_count,
-            error=local_error,
-            comm=comm,
-            replica_count=reduce_plan[0].replica_count,
-            scatter=scatter,
-        )
-        if scattered is not None:
-            return mpp_finish_scatter(
-                result, target=scattered[0], counts=scattered[1], comm=comm
-            )
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
-        )
-
-    variables: dict[Hashable, xr.DataArray] = {}
-    scattered = mpp_plan_scatter_target(
-        mpi_context, old_meta, dims, partition_dim, reduce_plan
-    )
-    scatter_start = scatter_stop = None
-    if scattered is not None:
-        _, scatter_counts, scatter_comm = scattered
-        scatter_start = sum(scatter_counts[: scatter_comm.rank])
-        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = (
-                mpp_scatter_replicated_slice(
-                    variable, scattered[0], scatter_start, scatter_stop
-                )
-                if scattered is not None
-                else variable
-            )
-            continue
-        method = variable.prod if product else variable.sum
-        local, local_error = guarded(
-            lambda method=method, entry=entry: method(
-                dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
-            )
-        )
-        if not entry.distributed:
-            if local_error is not None:
-                raise local_error
-            variables[entry.name] = local
-            continue
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
-        )
-        scatter = None if scattered is None else scattered[:2]
-        result = _combine_sum_or_prod(
-            mpi_context,
-            variable,
-            local,
-            entry.dims,
-            op,
-            skipna=skipna,
-            min_count=min_count,
-            error=local_error,
+            error=error,
             comm=comm,
             replica_count=entry.replica_count,
             scatter=scatter,
         )
-        variables[entry.name] = result
-    coord_source = (
-        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
-        if scattered is not None and scattered[0] in value.dims
-        else value
-    )
-    dataset = dataset_result(coord_source, dims, variables)
-    if scattered is not None:
-        return mpp_finish_scatter(
-            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
-        )
-    return mpp_finish(
+
+    return mpp_global_reduce(
         mpi_context,
-        dataset,
-        old_meta=old_meta,
+        value,
+        dim,
+        operation="prod" if product else "sum",
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -614,131 +511,59 @@ def mpp_mean_reduce(
 ) -> xr.Dataset | xr.DataArray:
     """Compute the mean of a distributed xarray object.
 
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    value : xarray.Dataset or xarray.DataArray
+        Object to reduce.
+    dim : str, iterable of Hashable, ..., or None, optional
+        Dimensions to reduce.
+    skipna : bool or None, optional
+        Missing-value behavior, following xarray semantics.
+    keep_attrs : bool or None, optional
+        Whether to preserve attributes.
+    partition_dim : Hashable, {"auto"}, or None, optional
+        Where to repartition the result."""
 
-    """
-    local_dim, dims = normalize_dim(value, dim)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
-    if local_meta is not None:
-        local_result = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
-        return finish_local_reduction(local_result, old_meta=local_meta)
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        return obj.mean(dim=dims, skipna=skipna, keep_attrs=keep_attrs)
 
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation="mean"
-    )
-
-    if isinstance(value, xr.DataArray):
-        if not dims:
-            local_mean = value.mean(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
-            return local_mean
-        value = _materialize_local(value)
-        local_sum, local_error = guarded(
-            lambda: value.sum(
-                dim=local_dim, skipna=skipna, min_count=None, keep_attrs=keep_attrs
-            )
-        )
-        scattered = mpp_plan_scatter_target(
-            mpi_context, old_meta, dims, partition_dim, reduce_plan
-        )
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
-        )
-        scatter = None if scattered is None else scattered[:2]
-        result = _combine_mean(
-            mpi_context,
-            value,
-            local_sum,
-            dims,
-            skipna=skipna,
-            error=local_error,
-            comm=comm,
-            replica_count=reduce_plan[0].replica_count,
-            scatter=scatter,
-        )
-        if scattered is not None:
-            return mpp_finish_scatter(
-                result, target=scattered[0], counts=scattered[1], comm=comm
-            )
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
-        )
-
-    variables: dict[Hashable, xr.DataArray] = {}
-    scattered = mpp_plan_scatter_target(
-        mpi_context, old_meta, dims, partition_dim, reduce_plan
-    )
-    scatter_start = scatter_stop = None
-    if scattered is not None:
-        _, scatter_counts, scatter_comm = scattered
-        scatter_start = sum(scatter_counts[: scatter_comm.rank])
-        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = (
-                mpp_scatter_replicated_slice(
-                    variable, scattered[0], scatter_start, scatter_stop
-                )
-                if scattered is not None
-                else variable
-            )
-            continue
-        if not entry.distributed:
-            variables[entry.name] = variable.mean(
-                dim=entry.dims, skipna=skipna, keep_attrs=keep_attrs
-            )
-            continue
+    def combine(
+        variable: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
+    ) -> xr.DataArray:
+        """Reduce one distributed variable across ranks."""
         variable = _materialize_local(variable)
-        local_sum, local_error = guarded(
-            lambda variable=variable, entry=entry: variable.sum(
-                dim=entry.dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
+        local_sum, error = guarded(
+            lambda: variable.sum(
+                dim=dims, skipna=skipna, min_count=None, keep_attrs=keep_attrs
             )
         )
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
-        )
-        scatter = None if scattered is None else scattered[:2]
-        result = _combine_mean(
+        return _combine_mean(
             mpi_context,
             variable,
             local_sum,
-            entry.dims,
+            dims,
             skipna=skipna,
-            error=local_error,
+            error=error,
             comm=comm,
             replica_count=entry.replica_count,
             scatter=scatter,
         )
-        variables[entry.name] = result
-    coord_source = (
-        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
-        if scattered is not None and scattered[0] in value.dims
-        else value
-    )
-    dataset = dataset_result(coord_source, dims, variables)
-    if scattered is not None:
-        return mpp_finish_scatter(
-            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
-        )
-    return mpp_finish(
+
+    return mpp_global_reduce(
         mpi_context,
-        dataset,
-        old_meta=old_meta,
+        value,
+        dim,
+        operation="mean",
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -751,15 +576,7 @@ def mpp_min_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Compute the minimum of a distributed xarray object.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Compute the minimum of a distributed xarray object."""
     return _min_max(
         mpi_context,
         value,
@@ -780,15 +597,7 @@ def mpp_max_reduce(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Compute the maximum of a distributed xarray object.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Compute the maximum of a distributed xarray object."""
     return _min_max(
         mpi_context,
         value,
@@ -811,143 +620,55 @@ def _min_max(
     partition_dim: Hashable | Literal["auto"] | None,
 ) -> xr.Dataset | xr.DataArray:
     """Implement distributed minimum and maximum reductions."""
-    operation = "min" if minimum else "max"
-    local_dim, dims = normalize_dim(value, dim)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
-    if local_meta is not None:
-        method = value.min if minimum else value.max
-        local_result = method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
-        return finish_local_reduction(local_result, old_meta=local_meta)
+    partition_dims = (mpp_get_meta(value) or {}).get("dims", ())
 
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation=operation
-    )
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        method = obj.min if minimum else obj.max
+        return method(dim=dims, skipna=skipna, keep_attrs=keep_attrs)
 
-    def locally_empty(variable: xr.DataArray) -> bool:
-        """Return whether the local variable is empty along any owned partition axis."""
-        if old_meta is None:
-            return False
-        return any(
-            dim in variable.dims and int(variable.sizes[dim]) == 0
-            for dim in old_meta["dims"]
+    def combine(
+        variable: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
+    ) -> xr.DataArray:
+        """Reduce one distributed variable across ranks."""
+        empty = any(
+            d in variable.dims and int(variable.sizes[d]) == 0 for d in partition_dims
         )
-
-    if isinstance(value, xr.DataArray):
-        if not dims:
-            method = value.min if minimum else value.max
-            return method(dim=local_dim, skipna=skipna, keep_attrs=keep_attrs)
-        local, local_error = guarded(
+        local, error = guarded(
             lambda: _local_extreme(
                 mpi_context,
-                value,
+                variable,
                 dims,
-                empty=locally_empty(value),
+                empty=empty,
                 minimum=minimum,
                 skipna=skipna,
                 keep_attrs=keep_attrs,
             )
         )
-        scattered = mpp_plan_scatter_target(
-            mpi_context, old_meta, dims, partition_dim, reduce_plan
-        )
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
-        )
-        result = _combine_extreme(
+        return _combine_extreme(
             mpi_context,
-            value,
+            variable,
             local,
             dims,
             minimum=minimum,
             skipna=skipna,
-            error=local_error,
+            error=error,
             comm=comm,
-            scatter=None if scattered is None else scattered[:2],
-        )
-        if scattered is not None:
-            return mpp_finish_scatter(
-                result, target=scattered[0], counts=scattered[1], comm=comm
-            )
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
+            scatter=scatter,
         )
 
-    variables: dict[Hashable, xr.DataArray] = {}
-    scattered = mpp_plan_scatter_target(
-        mpi_context, old_meta, dims, partition_dim, reduce_plan
-    )
-    scatter_start = scatter_stop = None
-    if scattered is not None:
-        _, scatter_counts, scatter_comm = scattered
-        scatter_start = sum(scatter_counts[: scatter_comm.rank])
-        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = (
-                mpp_scatter_replicated_slice(
-                    variable, scattered[0], scatter_start, scatter_stop
-                )
-                if scattered is not None
-                else variable
-            )
-            continue
-        local, local_error = guarded(
-            lambda variable=variable, entry=entry: _local_extreme(
-                mpi_context,
-                variable,
-                entry.dims,
-                empty=locally_empty(variable) and entry.distributed,
-                minimum=minimum,
-                skipna=skipna,
-                keep_attrs=keep_attrs,
-            )
-        )
-        if not entry.distributed:
-            if local_error is not None:
-                raise local_error
-            variables[entry.name] = local
-            continue
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
-        )
-        result = _combine_extreme(
-            mpi_context,
-            variable,
-            local,
-            entry.dims,
-            minimum=minimum,
-            skipna=skipna,
-            error=local_error,
-            comm=comm,
-            scatter=None if scattered is None else scattered[:2],
-        )
-        variables[entry.name] = result
-    coord_source = (
-        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
-        if scattered is not None and scattered[0] in value.dims
-        else value
-    )
-    dataset = dataset_result(coord_source, dims, variables)
-    if scattered is not None:
-        return mpp_finish_scatter(
-            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
-        )
-    return mpp_finish(
+    return mpp_global_reduce(
         mpi_context,
-        dataset,
-        old_meta=old_meta,
+        value,
+        dim,
+        operation="min" if minimum else "max",
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -1021,77 +742,41 @@ def _logical(
 ) -> xr.Dataset | xr.DataArray:
     """Implement distributed logical reductions."""
     operation = "all" if all_values else "any"
-    local_dim, dims = normalize_dim(value, dim)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
-    if local_meta is not None:
-        method = value.all if all_values else value.any
-        local_result = method(dim=local_dim, keep_attrs=keep_attrs)
-        return finish_local_reduction(local_result, old_meta=local_meta)
 
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation=operation
-    )
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        method = obj.all if all_values else obj.any
+        return method(dim=dims, keep_attrs=keep_attrs)
 
-    if isinstance(value, xr.DataArray):
-        method = value.all if all_values else value.any
-        local, local_error = guarded(
-            lambda: method(dim=local_dim, keep_attrs=keep_attrs)
-        )
-        if not dims:
-            if local_error is not None:
-                raise local_error
-            return local
-        result = mpp_comm_reduce(
-            mpi_context,
-            local,
-            op,
-            expect_dtype=partial_dtype(value.dtype.str, operation, None),
-            error=local_error,
-            phase=f"MPI xarray {operation} reduction",
-            comm=mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes),
-        )
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
-        )
-
-    variables: dict[Hashable, xr.DataArray] = {}
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = variable
-            continue
+    def combine(
+        variable: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
+    ) -> xr.DataArray:
+        """Reduce one distributed variable across ranks."""
         method = variable.all if all_values else variable.any
-        local, local_error = guarded(
-            lambda method=method, entry=entry: method(
-                dim=entry.dims, keep_attrs=keep_attrs
-            )
-        )
-        if not entry.distributed:
-            if local_error is not None:
-                raise local_error
-            variables[entry.name] = local
-            continue
-        result = mpp_comm_reduce(
+        local, error = guarded(lambda: method(dim=dims, keep_attrs=keep_attrs))
+        return mpp_comm_reduce(
             mpi_context,
             local,
             op,
             expect_dtype=partial_dtype(variable.dtype.str, operation, None),
-            error=local_error,
+            error=error,
             phase=f"MPI xarray {operation} reduction",
-            comm=mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes),
+            comm=comm,
         )
-        variables[entry.name] = result
-    return mpp_finish(
+
+    return mpp_global_reduce(
         mpi_context,
-        dataset_result(value, dims, variables),
-        old_meta=old_meta,
-        auto_candidates=repartition_candidates(reduce_plan),
+        value,
+        dim,
+        operation=operation,
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
+        allow_scatter=False,
     )
 
 
@@ -1103,7 +788,8 @@ def _first_last_local(
     skipna: bool | None,
     want_first: bool,
 ) -> tuple[xr.DataArray, xr.DataArray]:
-    """Rank-local first/last valid value along ``dim``, and its any-valid mask (both without ``dim``)."""
+    """Rank-local first/last valid value along ``dim``, and its any-valid mask (both
+    without ``dim``)."""
     size = int(variable.sizes[dim])
     if size == 0:
         template = variable.isel({dim: slice(0, 0)}).sum(
@@ -1295,76 +981,47 @@ def _first_or_last(
     """Shared implementation for :meth:`first` and :meth:`last`."""
     if not isinstance(dim, str):
         raise TypeError("MPI xarray first/last reduce exactly one dimension.")
-    dims = (dim,)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
 
-    if local_meta is not None:
-        if isinstance(value, xr.DataArray):
-            result = _first_last_pick(
-                mpi_context, value, dim, skipna=skipna, want_first=want_first
-            )
-            if keep_attrs:
-                result.attrs.update(value.attrs)
-        else:
-            result = value.map(
-                functools.partial(_first_last_pick, mpi_context),
-                dim=dim,
-                skipna=skipna,
-                want_first=want_first,
-                keep_attrs=keep_attrs,
-            )
-        return finish_local_reduction(result, old_meta=local_meta)
-
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation="first" if want_first else "last"
-    )
-
-    if isinstance(value, xr.DataArray):
-        result = _first_last_combine(
-            mpi_context,
-            value,
-            dim,
-            skipna=skipna,
-            want_first=want_first,
-            comm=mpp_resolve_comm(mpi_context, old_meta, (dim,)),
+    def pick(variable: xr.DataArray, combined: bool, comm: MPI.Comm | None) -> Any:
+        """Select the edge value, locally or across ranks."""
+        chooser = _first_last_combine if combined else _first_last_pick
+        extra = {"comm": comm} if combined else {}
+        result = chooser(
+            mpi_context, variable, dim, skipna=skipna, want_first=want_first, **extra
         )
-        if keep_attrs:
-            result.attrs.update(value.attrs)
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
-        )
-
-    variables: dict[Hashable, xr.DataArray] = {}
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = variable
-            continue
-        if entry.distributed:
-            result = _first_last_combine(
-                mpi_context,
-                variable,
-                dim,
-                skipna=skipna,
-                want_first=want_first,
-                comm=mpp_resolve_comm(mpi_context, old_meta, (dim,)),
-            )
-        else:
-            result = _first_last_pick(
-                mpi_context, variable, dim, skipna=skipna, want_first=want_first
-            )
         if keep_attrs:
             result.attrs.update(variable.attrs)
-        variables[entry.name] = result
-    return mpp_finish(
+        return result
+
+    def serial(obj: Any, dims: Any) -> Any:
+        """Select the edge value without communication."""
+        if isinstance(obj, xr.DataArray):
+            return pick(obj, combined=False, comm=None)
+        return obj.map(
+            functools.partial(_first_last_pick, mpi_context),
+            dim=dim,
+            skipna=skipna,
+            want_first=want_first,
+            keep_attrs=keep_attrs,
+        )
+
+    def combine(
+        variable: xr.DataArray,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
+    ) -> xr.DataArray:
+        """Select the edge value across ranks."""
+        return pick(variable, combined=True, comm=comm)
+
+    return mpp_global_reduce(
         mpi_context,
-        dataset_result(value, dims, variables),
-        old_meta=old_meta,
-        auto_candidates=repartition_candidates(reduce_plan),
+        value,
+        dim,
+        operation="first" if want_first else "last",
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
+        allow_scatter=False,
     )

@@ -423,7 +423,7 @@ def _partition_pieces_nd(
     """Slice ``stripped`` into one piece per rank on a Cartesian grid."""
     for d in dims:
         if d not in stripped.dims:
-            raise ValueError(f"Unknown partition dimension {resolved_dim!r}.")
+            raise ValueError(f"Unknown partition dimension {d!r}.")
     extents = tuple(int(stripped.sizes[d]) for d in dims)
     sizes = dict(zip(dims, extents, strict=True))
 

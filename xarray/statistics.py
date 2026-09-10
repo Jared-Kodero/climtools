@@ -1,10 +1,15 @@
-"""Compute distributed variance and standard deviation."""
+"""Distributed variance and standard deviation.
+
+Both use the two-pass form: the global mean first, then the global sum of
+squared deviations about it. Results follow the same replication guarantee
+as :mod:`~.reductions`.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable
 from types import EllipsisType
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import xarray as xr
@@ -14,23 +19,12 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .common import partial_dtype
-from .meta import mpp_get_meta
+from .common import PlanEntry, partial_dtype
 from .planning import (
-    dataset_result,
-    finish_local_reduction,
     guarded,
-    local_reduction_meta,
     mpp_comm_reduce,
     mpp_count_valid_values,
-    mpp_finish,
-    mpp_finish_scatter,
-    mpp_plan_scatter_target,
-    mpp_reduction_plan,
-    mpp_resolve_comm,
-    mpp_scatter_replicated_slice,
-    normalize_dim,
-    repartition_candidates,
+    mpp_global_reduce,
 )
 from .reductions import mpp_mean_reduce
 
@@ -46,57 +40,66 @@ def _var_or_std(
     partition_dim: Hashable | Literal["auto"] | None,
     root: bool,
 ) -> xr.Dataset | xr.DataArray:
-    """Shared implementation for :meth:`var` and :meth:`std`."""
-    local_dim, dims = normalize_dim(value, dim)
-    old_meta = mpp_get_meta(value)
-    local_meta = local_reduction_meta(old_meta, dims, partition_dim=partition_dim)
-    if local_meta is not None:
-        method = value.std if root else value.var
-        local_result = method(
-            dim=local_dim, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
-        )
-        return finish_local_reduction(local_result, old_meta=local_meta)
+    """Shared implementation for :func:`mpp_var` and :func:`mpp_std`."""
+    cached: list[Any] = []
 
-    reduce_plan = mpp_reduction_plan(
-        mpi_context, value, dims, old_meta, operation="std" if root else "var"
-    )
+    def global_mean() -> xr.Dataset | xr.DataArray:
+        """Return the global mean, computed once and reused per variable."""
+        if not cached:
+            cached.append(
+                mpp_mean_reduce(
+                    mpi_context,
+                    value,
+                    dim,
+                    skipna=skipna,
+                    keep_attrs=False,
+                    partition_dim=None,
+                )
+            )
+        return cached[0]
+
+    def serial(obj: Any, dims: Any) -> Any:
+        """Reduce without communication."""
+        method = obj.std if root else obj.var
+        return method(dim=dims, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs)
 
     def combine(
         variable: xr.DataArray,
-        variable_dims: tuple[Hashable, ...],
-        mean: xr.DataArray,
-        *,
-        comm: MPI.Comm | None = None,
-        replica_count: int = 1,
-        scatter: tuple[Hashable, list[int]] | None = None,
+        dims: tuple[Hashable, ...],
+        entry: PlanEntry,
+        comm: MPI.Comm,
+        scatter: tuple[Hashable, list[int]] | None,
     ) -> xr.DataArray:
-        """Combine local squared deviations into global variance or standard deviation."""
+        """Combine local squared deviations into a global variance."""
+        mean = global_mean()
+        if not isinstance(mean, xr.DataArray):
+            mean = mean[entry.name]
         deviation = variable - mean
-        # Use ``deviation.dtype`` for squared deviations because integer inputs are
-        # promoted before reduction.
-        partial_sq_sum, error = guarded(
+        # Squared deviations carry ``deviation.dtype`` because integer inputs
+        # are promoted before reduction.
+        partial, error = guarded(
             lambda: (deviation * deviation).sum(
-                dim=variable_dims, skipna=skipna, min_count=None, keep_attrs=False
+                dim=dims, skipna=skipna, min_count=None, keep_attrs=False
             )
         )
-        global_sq_sum = mpp_comm_reduce(
+        total = mpp_comm_reduce(
             mpi_context,
-            partial_sq_sum,
+            partial,
             MPI.SUM,
             expect_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray variance reduction",
             comm=comm,
-            replica_count=replica_count,
+            replica_count=entry.replica_count,
             scatter=scatter,
         )
         denominator = (
             mpp_count_valid_values(
                 mpi_context,
                 variable,
-                variable_dims,
+                dims,
                 comm=comm,
-                replica_count=replica_count,
+                replica_count=entry.replica_count,
                 scatter=scatter,
             )
             - ddof
@@ -108,7 +111,7 @@ def _var_or_std(
             else denominator
         )
         with np.errstate(divide="ignore", invalid="ignore"):
-            result = global_sq_sum / divisor
+            result = total / divisor
         result = result.where(denominator > 0)
         if result.dtype != target:
             result = result.astype(target, keep_attrs=True)
@@ -118,111 +121,14 @@ def _var_or_std(
             result.attrs.update(variable.attrs)
         return result
 
-    if isinstance(value, xr.DataArray):
-        if not dims:
-            method = value.std if root else value.var
-            return method(
-                dim=local_dim, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
-            )
-        mean = mpp_mean_reduce(
-            mpi_context,  # type: ignore[attr-defined]
-            value,
-            dim,
-            skipna=skipna,
-            keep_attrs=False,
-            partition_dim=None,
-        )
-        scattered = mpp_plan_scatter_target(
-            mpi_context, old_meta, dims, partition_dim, reduce_plan
-        )
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, reduce_plan[0].comm_axes)
-        )
-        result = combine(
-            value,
-            dims,
-            mean,
-            comm=comm,
-            replica_count=reduce_plan[0].replica_count,
-            scatter=None if scattered is None else scattered[:2],
-        )
-        if scattered is not None:
-            return mpp_finish_scatter(
-                result, target=scattered[0], counts=scattered[1], comm=comm
-            )
-        return mpp_finish(
-            mpi_context,
-            result,
-            old_meta=old_meta,
-            partition_dim=partition_dim,
-            auto_candidates=repartition_candidates(reduce_plan),
-        )
-
-    mean_ds = mpp_mean_reduce(
-        mpi_context,  # type: ignore[attr-defined]
+    return mpp_global_reduce(
+        mpi_context,
         value,
         dim,
-        skipna=skipna,
-        keep_attrs=False,
-        partition_dim=None,
-    )
-    variables: dict[Hashable, xr.DataArray] = {}
-    scattered = mpp_plan_scatter_target(
-        mpi_context, old_meta, dims, partition_dim, reduce_plan
-    )
-    scatter_start = scatter_stop = None
-    if scattered is not None:
-        _, scatter_counts, scatter_comm = scattered
-        scatter_start = sum(scatter_counts[: scatter_comm.rank])
-        scatter_stop = scatter_start + scatter_counts[scatter_comm.rank]
-    for entry in reduce_plan:
-        variable = value[entry.name]
-        if not entry.dims:
-            variables[entry.name] = (
-                mpp_scatter_replicated_slice(
-                    variable, scattered[0], scatter_start, scatter_stop
-                )
-                if scattered is not None
-                else variable
-            )
-            continue
-        if not entry.distributed:
-            method = variable.std if root else variable.var
-            variables[entry.name] = method(
-                dim=entry.dims, skipna=skipna, ddof=ddof, keep_attrs=keep_attrs
-            )
-            continue
-        comm = (
-            scattered[2]
-            if scattered is not None
-            else mpp_resolve_comm(mpi_context, old_meta, entry.comm_axes)
-        )
-        variables[entry.name] = combine(
-            variable,
-            entry.dims,
-            mean_ds[entry.name],
-            comm=comm,
-            replica_count=entry.replica_count,
-            scatter=None if scattered is None else scattered[:2],
-        )
-    coord_source = (
-        value.isel({scattered[0]: slice(scatter_start, scatter_stop)})
-        if scattered is not None and scattered[0] in value.dims
-        else value
-    )
-    dataset = dataset_result(coord_source, dims, variables)
-    if scattered is not None:
-        return mpp_finish_scatter(
-            dataset, target=scattered[0], counts=scattered[1], comm=scattered[2]
-        )
-    return mpp_finish(
-        mpi_context,
-        dataset,
-        old_meta=old_meta,
+        operation="std" if root else "var",
+        serial=serial,
+        combine=combine,
         partition_dim=partition_dim,
-        auto_candidates=repartition_candidates(reduce_plan),
     )
 
 
@@ -236,15 +142,7 @@ def mpp_var(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Compute the variance of a distributed xarray object.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Compute the variance of a distributed xarray object."""
     return _var_or_std(
         mpi_context,
         value,
@@ -267,15 +165,7 @@ def mpp_std(
     keep_attrs: bool | None = None,
     partition_dim: Hashable | Literal["auto"] | None = "auto",
 ) -> xr.Dataset | xr.DataArray:
-    """Compute the standard deviation of a distributed xarray object.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Reduced object -- see :func:`~.planning.finish` for the exact
-        replication/no-duplication guarantee this carries.
-
-    """
+    """Compute the standard deviation of a distributed xarray object."""
     return _var_or_std(
         mpi_context,
         value,
