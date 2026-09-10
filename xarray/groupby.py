@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from .chunks import get_effective_chunk_size
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from ..mpp import mpp_reduce_scatter
+from ..mpp.mpp import mpp_reduce_scatter
 from .planning import (
     extreme_identity,
     partial_dtype,

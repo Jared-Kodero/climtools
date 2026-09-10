@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 from .meta import mpp_get_meta
-from ..mpp import _mpp_reduce, mpp_reduce_scatter
+from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
 from .planning import (
     ReduceContext,
     extreme_identity,
@@ -119,7 +119,7 @@ def _combine_prod(
     collective replaces the separate mantissa and tally reductions and the
     result no longer depends on the rank count.
     """
-    from ..mpp import mpp_prod_decompose, mpp_prod_recombine
+    from ..mpp.mpp_efp import mpp_prod_decompose, mpp_prod_recombine
 
     fields_da: xr.DataArray | None = None
     if error is None and partial is not None:

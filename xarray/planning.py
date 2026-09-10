@@ -21,10 +21,10 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp import mpp_get_cartesian_domain
+from ..mpp.mpp_domains import mpp_get_cartesian_domain
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from ..mpp import _mpp_reduce, mpp_reduce_scatter
+from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
 
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (

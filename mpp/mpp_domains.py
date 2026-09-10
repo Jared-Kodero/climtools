@@ -20,6 +20,7 @@ from ..mpi.mpi_init import MPI
 from ..xarray.chunks import get_balanced_bounds, prune_chunk_info
 from ..xarray.meta import mpp_operand_meta, mpp_update_meta, strip_mpi_meta
 from .mpp import mpp_max, mpp_min, mpp_sum
+from .mpp_parameter import BOTH_UPDATE, CENTER, CORNER, XUPDATE, YUPDATE
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Sequence
@@ -832,6 +833,125 @@ def mpp_update_domains(
         for name, arr in update.items.items()
     }
     return (padded[""] if update.single else padded), left_pad, right_pad
+
+
+def mpp_update_domains_nd(
+    field: np.ndarray[Any, Any],
+    domain: Domain,
+    dims: Sequence[str],
+    halo: Mapping[str, tuple[int, int]],
+    *,
+    flags: int = BOTH_UPDATE,
+    periodic: Mapping[str, bool] | None = None,
+) -> tuple[np.ndarray[Any, Any], dict[str, tuple[int, int]]]:
+    """Fill halos on several axes at once, corners included.
+
+    A single-axis exchange cannot give a rank its diagonal neighbours, which a
+    two-dimensional stencil needs. Updating one axis at a time and letting the
+    second exchange carry the halo the first just received produces those
+    corner points without a separate diagonal message, which is how FMS fills
+    them for ``position=CENTER``.
+
+    Parameters
+    ----------
+    field : numpy.ndarray
+        This rank's compute-domain values.
+    domain : Domain
+        Rank-local domain.
+    dims : sequence of str
+        Dimension name of each axis of ``field``.
+    halo : mapping[str, tuple[int, int]]
+        Halo width before and after, per dimension.
+    flags : int, default BOTH_UPDATE
+        Which edges to update, from :mod:`~climtools.mpp.mpp_parameter`.
+        ``XUPDATE`` and ``YUPDATE`` select the first and second partitioned
+        axis respectively.
+    periodic : mapping[str, bool], optional
+        Whether each dimension wraps at the global edges.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, dict[str, tuple[int, int]]]
+        The widened field and the halo width actually received per dimension,
+        which is narrower than requested at a non-cyclic global edge.
+    """
+    wrap = dict(periodic or {})
+    selected = [XUPDATE, YUPDATE]
+    result = np.asarray(field)
+    received: dict[str, tuple[int, int]] = {}
+
+    for order, dim in enumerate(d for d in dims if d in domain.dims):
+        if order < len(selected) and not flags & selected[order]:
+            received[dim] = (0, 0)
+            continue
+        before, after = halo.get(dim, (0, 0))
+        if not before and not after:
+            received[dim] = (0, 0)
+            continue
+        axis = list(dims).index(dim)
+        result, low, high = mpp_update_domains(
+            result,
+            domain,
+            dim,
+            axis,
+            before=before,
+            after=after,
+            periodic=wrap.get(dim, False),
+        )
+        received[dim] = (low, high)
+
+    return result, received
+
+
+def mpp_get_boundary(
+    field: np.ndarray[Any, Any],
+    domain: Domain,
+    dim: str,
+    axis: int,
+    *,
+    position: str = CENTER,
+) -> tuple[np.ndarray[Any, Any] | None, np.ndarray[Any, Any] | None]:
+    """Return the compute-domain edge values a neighbour needs.
+
+    FMS ``mpp_get_boundary`` hands a staggered grid the single row or column
+    sitting on the shared boundary, rather than a full halo.
+
+    Parameters
+    ----------
+    field : numpy.ndarray
+        This rank's compute-domain values.
+    domain : Domain
+        Rank-local domain.
+    dim : str
+        Partitioned dimension.
+    axis : int
+        Array axis corresponding to ``dim``.
+    position : {"center", "corner"}, default "center"
+        Grid position. ``CORNER`` fields share their boundary row with the
+        neighbour, so the upper edge is omitted to avoid duplicating it.
+
+    Returns
+    -------
+    tuple[numpy.ndarray or None, numpy.ndarray or None]
+        Lower and upper boundary slabs, or None where this rank sits at a
+        global edge.
+    """
+    values = np.asarray(field)
+    at_start = domain.starts[dim] == 0
+    at_stop = domain.stops[dim] == domain.global_sizes[dim]
+    index: list[Any] = [slice(None)] * values.ndim
+
+    lower = None
+    if not at_start:
+        index[axis] = slice(0, 1)
+        lower = values[tuple(index)].copy()
+
+    upper = None
+    if not at_stop and position != CORNER:
+        index[axis] = slice(values.shape[axis] - 1, values.shape[axis])
+        upper = values[tuple(index)].copy()
+
+    return lower, upper
 
 
 def _define_layout_nd(extents: Sequence[int], ndivs: int) -> tuple[int, ...]:

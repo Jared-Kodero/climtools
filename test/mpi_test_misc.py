@@ -10,7 +10,7 @@ import math
 import numpy as np
 from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
-from climtools.mpp import mpp_reproducing_prod
+from climtools.mpp.mpp_efp import mpp_reproducing_prod
 from mpi4py import MPI
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
 

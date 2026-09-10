@@ -13,8 +13,8 @@ import pandas as pd
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
-from ..mpp import mpp_halo_exchange, mpp_redistribute
-from ..mpp import mpp_dim_comm as _dim_comm
+from ..mpp.mpp_domains import mpp_halo_exchange, mpp_redistribute
+from ..mpp.mpp_domains import mpp_dim_comm as _dim_comm
 from .chunks import prune_chunk_info
 from .meta import (
     _partitions_match,

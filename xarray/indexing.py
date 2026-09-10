@@ -14,9 +14,10 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp import mpp_dim_comm as _dim_comm
+from ..mpp.mpp_domains import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
+    mpp_set_domain_bounds,
     choose_partition_dim,
     indexer_is_scalar,
     mpp_get_meta,
@@ -24,7 +25,7 @@ from .meta import (
     reattach_meta_after_collapse,
     strip_mpi_meta,
 )
-from ..mpp import mpp_slice_compute_domain
+from ..mpp.mpp_domains import mpp_slice_compute_domain
 
 
 def _select_partition_dim(
@@ -39,34 +40,6 @@ def _select_partition_dim(
             f"{caller} supports one partition dimension per call; got {hit!r}."
         )
     return hit[0]
-
-
-def _merge_partition_meta(
-    output: xr.Dataset | xr.DataArray,
-    meta: Mapping[str, Any],
-    dim: Hashable,
-    *,
-    global_size: int,
-    start: int,
-    stop: int,
-    chunk_info: Mapping[str, int],
-) -> None:
-    """Update metadata bounds for ``dim`` while preserving other partition axes."""
-    global_sizes = dict(meta["global_sizes"])
-    starts = dict(meta["starts"])
-    stops = dict(meta["stops"])
-    global_sizes[dim] = global_size
-    starts[dim] = start
-    stops[dim] = stop
-    mpp_update_meta(
-        output,
-        dim=meta["dims"],
-        global_size=global_sizes,
-        start=starts,
-        stop=stops,
-        chunk_info=chunk_info,
-        cart=meta.get("cart"),
-    )
 
 
 def mpp_isel(
@@ -154,7 +127,7 @@ def mpp_isel(
 
     new_stop = new_start + (local_stop - local_start)
     chunk_info = prune_chunk_info(meta["chunk_info"], output)
-    _merge_partition_meta(
+    mpp_set_domain_bounds(
         output,
         meta,
         dim,
@@ -311,7 +284,7 @@ def mpp_sel(
 
     new_stop = new_start + int(local_length[0])
     chunk_info = prune_chunk_info(meta["chunk_info"], output)
-    _merge_partition_meta(
+    mpp_set_domain_bounds(
         output,
         meta,
         dim,

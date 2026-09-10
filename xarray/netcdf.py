@@ -22,7 +22,7 @@ from ..mpi.diagnostics import MPIError
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
 from ..mpi.mpi_init import MPI
-from ..mpp import mpp_global_field
+from ..mpp.mpp_domains import mpp_global_field
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .meta import mpp_get_meta, strip_export_attrs
 from .planning import mpp_resolve_comm
@@ -524,6 +524,86 @@ def _variable_record(
     )
 
 
+def _gather_partitioned_coords(
+    mpi_context: MPIContext,
+    local_ds: xr.Dataset,
+    local_meta: Mapping[str, Any],
+    partition_dims: tuple[str, ...],
+) -> dict[str, xr.DataArray]:
+    """Reassemble every coordinate that is split across ranks.
+
+    A coordinate lying along a partition axis exists only in pieces, so the
+    schema cannot be written until the pieces are joined. Each is gathered on
+    the root of the communicator that varies along its own axis.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    local_ds : xarray.Dataset
+        This rank's data.
+    local_meta : mapping
+        Distribution metadata for ``local_ds``.
+    partition_dims : tuple of str
+        Dimensions the dataset is partitioned over.
+
+    Returns
+    -------
+    dict[str, xarray.DataArray]
+        Reassembled coordinates, populated on gathering roots only.
+
+    Raises
+    ------
+    NetCDFWriteError
+        If a coordinate spans more than one partition dimension.
+    """
+    error: BaseException | None = None
+    coord_names: list[tuple[str, str]] = []
+    try:
+        for name, coord in local_ds.coords.items():
+            touched = [d for d in partition_dims if d in coord.dims]
+            if not touched:
+                continue
+            if len(touched) > 1:
+                raise NetCDFWriteError(
+                    f"Coordinate {name!r} spans multiple partition dims: "
+                    + f"{tuple(touched)!r}."
+                )
+            coord_names.append((str(name), touched[0]))
+    except BaseException as exc:
+        coord_names = []
+        error = exc
+    mpi_context.raise_if_error(
+        error, "parallel NetCDF coordinate discovery", signature=tuple(coord_names)
+    )
+
+    gathered: dict[str, xr.DataArray] = {}
+    for coord_name, coord_dim in coord_names:
+        dim_comm = (
+            mpi_context.comm
+            if len(partition_dims) == 1
+            else mpp_resolve_comm(mpi_context, local_meta, (coord_dim,))
+        )
+        try:
+            rebuilt = mpp_global_field(
+                mpi_context,
+                local_ds[coord_name],
+                coord_dim,
+                dim_comm,
+                start=int(local_meta["starts"][coord_dim]),
+                stop=int(local_meta["stops"][coord_dim]),
+                global_size=int(local_meta["global_sizes"][coord_dim]),
+            )
+            if rebuilt is not None:
+                gathered[coord_name] = rebuilt
+        except BaseException as exc:
+            error = exc
+        mpi_context.raise_if_error(
+            error, f"parallel NetCDF coordinate gather ({coord_name})"
+        )
+    return gathered
+
+
 def mpp_to_netcdf_parallel(
     mpi_context: MPIContext,
     data: xr.Dataset | xr.DataArray | None,
@@ -643,58 +723,13 @@ def mpp_to_netcdf_parallel(
             if local_meta is None:
                 raise AssertionError("attach_save_chunks cleared mpi_meta.")
 
-        # Reassemble partitioned coordinates per partition axis before schema creation.
         partition_dims_tuple = (
             (partition_dim,) if isinstance(partition_dim, str) else tuple(partition_dim)
         )
-        starts_map = local_meta["starts"]
-        stops_map = local_meta["stops"]
         global_sizes_map = local_meta["global_sizes"]
-        prewritten_coords: dict[str, xr.DataArray] = {}
-        try:
-            coord_names = []
-            for name, coord in local_ds.coords.items():
-                touched = [d for d in partition_dims_tuple if d in coord.dims]
-                if not touched:
-                    continue
-                if len(touched) > 1:
-                    raise NetCDFWriteError(
-                        f"Coordinate {name!r} spans multiple partition dims: "
-                        + f"{tuple(touched)!r}."
-                    )
-                coord_names.append((name, touched[0]))
-        except BaseException as exc:
-            coord_names = []
-            error = exc
-        mpi_context.raise_if_error(
-            error,
-            "parallel NetCDF coordinate discovery",
-            signature=tuple(coord_names),
+        prewritten_coords = _gather_partitioned_coords(
+            mpi_context, local_ds, local_meta, partition_dims_tuple
         )
-
-        for coord_name, coord_dim in coord_names:
-            dim_comm = (
-                mpi_context.comm
-                if len(partition_dims_tuple) == 1
-                else mpp_resolve_comm(mpi_context, local_meta, (coord_dim,))
-            )
-            try:
-                rebuilt = mpp_global_field(
-                    mpi_context,
-                    local_ds[coord_name],
-                    coord_dim,
-                    dim_comm,
-                    start=int(starts_map[coord_dim]),
-                    stop=int(stops_map[coord_dim]),
-                    global_size=int(global_sizes_map[coord_dim]),
-                )
-                if rebuilt is not None:
-                    prewritten_coords[coord_name] = rebuilt
-            except BaseException as exc:
-                error = exc
-            mpi_context.raise_if_error(
-                error, f"parallel NetCDF coordinate gather ({coord_name})"
-            )
 
         # No data gather/scatter. Rank 0 only constructs the schema from its
         # local metadata and mpi_meta's global partition length.

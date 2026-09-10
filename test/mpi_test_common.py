@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from climtools import MPIContext, xgeo
-from climtools.mpp import HaloWidthError
+from climtools.mpp.mpp_domains import HaloWidthError
 from climtools.xarray.core import MPIXarray
 from mock_dataset import PATH, PATH2D, create_dataset
 

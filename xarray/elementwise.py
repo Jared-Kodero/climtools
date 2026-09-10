@@ -21,8 +21,8 @@ from .meta import (
     mpp_update_meta,
     strip_mpi_meta,
 )
-from ..mpp import mpp_halo_exchange
-from ..mpp import mpp_dim_comm as _dim_comm
+from ..mpp.mpp_domains import mpp_halo_exchange
+from ..mpp.mpp_domains import mpp_dim_comm as _dim_comm
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:

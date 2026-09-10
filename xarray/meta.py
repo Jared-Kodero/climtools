@@ -412,7 +412,8 @@ def mpp_redefine_domain(
     xarray.Dataset or xarray.DataArray
         ``result``, carrying the redefined domain.
     """
-    from ..mpp import mpp_dim_comm, mpp_partition_offsets
+    from ..mpp.mpp import mpp_partition_offsets
+    from ..mpp.mpp_domains import mpp_dim_comm
     from .chunks import prune_chunk_info
 
     comm = mpp_dim_comm(mpi_context, meta, dim)

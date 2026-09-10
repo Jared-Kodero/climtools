@@ -17,21 +17,22 @@ from __future__ import annotations
 
 import numpy as np
 from climtools import xgeo
-from climtools.mpp import HaloWidthError, mpp_halo_exchange
+from climtools.mpp.mpp_domains import HaloWidthError, mpp_halo_exchange
 from climtools.xarray.chunks import get_balanced_bounds
-from climtools.mpp import (
+from climtools.mpp.mpp import mpp_chksum, mpp_partition_offsets
+from climtools.mpp.mpp_domains import (
     Domain,
-    mpp_chksum,
     mpp_complete_update_domains,
     mpp_define_layout,
     mpp_get_compute_domains,
-    mpp_partition_offsets,
+    mpp_slice_compute_domain,
+    mpp_start_update_domains,
+)
+from climtools.mpp.mpp_efp import (
     mpp_prod_decompose,
     mpp_prod_recombine,
     mpp_reproducing_prod,
     mpp_reproducing_sum,
-    mpp_slice_compute_domain,
-    mpp_start_update_domains,
 )
 from mpi4py import MPI
 from mpi_test_common import Fixtures, mpi, record

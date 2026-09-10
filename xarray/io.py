@@ -37,7 +37,7 @@ from .meta import (
     set_save_chunks,
     strip_mpi_meta,
 )
-from ..mpp import mpp_define_domains
+from ..mpp.mpp_domains import mpp_define_domains
 from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
 __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]

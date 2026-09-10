@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 from climtools import MPIContext, xgeo
-from climtools.mpp import mpp_halo_exchange
+from climtools.mpp.mpp_domains import mpp_halo_exchange
 from mpi4py import MPI
 
 import xarray as xr
@@ -57,4 +57,6 @@ if rank == 0:
     print(
         f"ranks={mpi.comm.size}  n_vars={N_VARS} (3 dtypes: float32/float64/int32)  reps={REPS}"
     )
-    print(f"wall time per mpp_halo_exchange() call (slowest rank): {slowest * 1000:.4f} ms")
+    print(
+        f"wall time per mpp_halo_exchange() call (slowest rank): {slowest * 1000:.4f} ms"
+    )

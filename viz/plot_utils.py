@@ -19,11 +19,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.ticker import MaxNLocator
+
+import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -598,11 +599,25 @@ def add_xy_ticks(
         float(lat.min()), float(lat.max())
     )
 
-    ax.set_xticks(xticks, crs=ccrs.PlateCarree())
-    ax.set_yticks(yticks, crs=ccrs.PlateCarree())
+    if isinstance(ax.projection, (ccrs.PlateCarree, ccrs.Mercator)):
+        ax.set_xticks(xticks, crs=ccrs.PlateCarree())
+        ax.set_yticks(yticks, crs=ccrs.PlateCarree())
+        ax.xaxis.set_major_formatter(LongitudeFormatter())
+        ax.yaxis.set_major_formatter(LatitudeFormatter())
+        return
 
-    ax.xaxis.set_major_formatter(LongitudeFormatter())
-    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    gridliner = ax.gridlines(
+        crs=ccrs.PlateCarree(),
+        draw_labels=True,
+        xlocs=xticks,
+        ylocs=yticks,
+    )
+    gridliner.top_labels = False
+    gridliner.right_labels = False
+    gridliner.xlines = False
+    gridliner.ylines = False
+    gridliner.xformatter = LongitudeFormatter()
+    gridliner.yformatter = LatitudeFormatter()
 
 
 def add_map_features(
