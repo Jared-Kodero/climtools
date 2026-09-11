@@ -5,27 +5,24 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import cache
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
-from dataclasses import dataclass
-from functools import cache
-
 import numpy as np
-from mpi4py.util import dtlib as _dtlib
-
 import xarray as xr
+from mpi4py.util import dtlib as _dtlib
 
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
+from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
 from ..mpp.mpp_domains_define import mpp_get_cartesian_domain
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
-
 
 _OP_LIST: tuple[tuple[Any, str], ...] = (
     (MPI.SUM, "SUM"),

@@ -9,7 +9,7 @@ import xarray as xr
 
 from ..core import stats as calc
 from ..core import xgeo
-from ..core.utils import exclude_key
+from ..core.utils import SharedMemoryObject, exclude_key
 from ..viz import plotting
 from ..viz.plotting import MapProjection, PlotMethod
 
@@ -324,6 +324,53 @@ class GeoBase:
 
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.to_netcdf(self._obj, **kwargs)
+
+    def shared_memory(self, *, readonly: bool = True) -> SharedMemoryObject:
+        """Create an interprocess shared-memory representation.
+
+        The numerical buffers backing the xarray object are copied into
+        operating-system shared memory and may subsequently be attached by
+        other processes without serializing or copying the bulk array data.
+
+        When the returned object is transferred through Python
+        multiprocessing, the receiving process reconstructs the original
+        :class:`xarray.DataArray` or :class:`xarray.Dataset`. Its numerical
+        arrays reference the shared-memory buffers directly.
+
+        Parameters
+        ----------
+        readonly : bool, default True
+            If True, reconstructed shared-memory arrays are marked
+            read-only. If False, processes may modify the same underlying
+            memory and synchronization is the responsibility of the caller.
+
+        Returns
+        -------
+        SharedMemoryObject
+            Shared-memory transport object. The creating process owns the
+            allocated shared-memory segments and must keep this object alive
+            while receiving processes are using them.
+
+        Notes
+        -----
+        Pointer-free NumPy dtypes are stored directly in shared memory.
+        Object-dtype arrays cannot be safely shared as raw memory because
+        they contain process-local Python object pointers and therefore fall
+        back to ordinary serialization.
+
+        Lazy arrays, including Dask-backed xarray variables, are materialized
+        when the shared-memory object is created.
+
+        The returned object should normally be used as a context manager so
+        that owned shared-memory segments are released after all worker
+        processes have completed.
+
+        See Also
+        --------
+        multiprocessing.shared_memory.SharedMemory
+            Python interface to operating-system shared memory.
+        """
+        return SharedMemoryObject(self._obj, readonly=readonly)
 
 
 @xr.register_dataarray_accessor("xgeo")

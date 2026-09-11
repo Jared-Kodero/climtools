@@ -11,19 +11,18 @@ from collections.abc import Hashable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import cftime
 import dask
 import netCDF4
-import cftime
 import numpy as np
 import xarray as xr
+from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
 from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
-from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
-
 from ..mpi.mpi_init import MPI
-from .halo import mpp_global_field_xr as mpp_global_field
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
+from .halo import mpp_global_field_xr as mpp_global_field
 from .meta import mpp_get_meta, strip_export_attrs
 from .planning import mpp_resolve_comm
 

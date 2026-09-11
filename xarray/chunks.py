@@ -5,9 +5,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, cast
 
-from dask import array as dask_array
-
 import xarray as xr
+from dask import array as dask_array
 
 from ..mpp.mpp_domains_define import mpp_compute_extent
 
