@@ -9,24 +9,19 @@ from typing import TYPE_CHECKING, Any
 import xarray as xr
 
 from ..mpi.mpi_init import MPI
-from .arithmetic import (
+from .distribute import mpp_repartition
+from .elementwise import (
     mpp_align,
     mpp_apply,
-    mpp_coarsen_reduce,
-    mpp_evaluate,
-    mpp_matmul,
-    mpp_reindex,
-    mpp_rolling_reduce,
-    mpp_sortby,
-)
-from .elementwise import (
     mpp_bfill,
     mpp_cumprod,
     mpp_cumsum,
     mpp_diff,
     mpp_differentiate,
+    mpp_evaluate,
     mpp_ffill,
     mpp_interp,
+    mpp_matmul,
     mpp_median,
     mpp_pad,
     mpp_quantile,
@@ -35,22 +30,25 @@ from .elementwise import (
     mpp_where,
 )
 from .handles import MPIGroupBy, MPIResample, MPIRolling, MPIXarrayWeighted
-from .indexing import mpp_isel, mpp_sel
-from .io import mpp_attach_save_chunks, mpp_repartition
+from .indexing import mpp_isel, mpp_reindex, mpp_sel, mpp_sortby
+from .io import mpp_attach_save_chunks
 from .meta import PARTITIONED_ATTR as _PARTITIONED_ATTR
 from .meta import mpp_get_meta, mpp_set_meta, strip_mpi_meta
 from .reductions import (
     mpp_all_reduce,
     mpp_any_reduce,
+    mpp_coarsen_reduce,
     mpp_first_reduce,
     mpp_last_reduce,
     mpp_max_reduce,
     mpp_mean_reduce,
     mpp_min_reduce,
     mpp_prod_reduce,
+    mpp_rolling_reduce,
+    mpp_std,
     mpp_sum_reduce,
+    mpp_var,
 )
-from .reductions import mpp_std, mpp_var
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping

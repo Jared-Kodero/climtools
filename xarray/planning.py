@@ -21,7 +21,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp.mpp_domains import mpp_get_cartesian_domain
+from ..mpp.mpp_domains_define import mpp_get_cartesian_domain
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
 from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
@@ -883,6 +883,6 @@ def mpp_finish(
     chunk_info = (
         prune_chunk_info(old_meta["chunk_info"], result) if old_meta is not None else {}
     )
-    from .io import mpp_repartition
+    from .distribute import mpp_repartition
 
     return mpp_repartition(mpi_context, result, target, chunk_info=chunk_info)

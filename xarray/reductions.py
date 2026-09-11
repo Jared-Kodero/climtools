@@ -40,6 +40,12 @@ from .planning import (
 _PROD_FIELD_DIM = "_mpp_prod_field"
 
 
+from ..mpp.mpp_do_update import mpp_halo_exchange
+from .elementwise import reattach_meta
+from .meta import mpp_operand_meta, mpp_redefine_domain
+from .planning import _agree
+
+
 def _combine_sum_or_prod(
     mpi_context: MPIContext,
     value: xr.DataArray,
@@ -1131,3 +1137,155 @@ def mpp_std(
         partition_dim=partition_dim,
         root=True,
     )
+
+
+def mpp_rolling_reduce(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    window: int,
+    reduce: str = "mean",
+    *,
+    center: bool = True,
+    min_periods: int | None = None,
+) -> xr.Dataset | xr.DataArray:
+    """Windowed reduction along ``dim``, correct when ``dim`` is distributed.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The rolled-and-reduced result, with the same local length and distribution
+        metadata as the input when ``dim`` is the partition dimension.
+
+    """
+    meta = mpp_operand_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        rolled = value.rolling({dim: window}, center=center, min_periods=min_periods)
+        return getattr(rolled, reduce)()
+
+    # Match xarray centered windows: even windows place the extra cell on the left.
+    before = window // 2 if center else window - 1
+    after = (window - 1) - before if center else 0
+
+    # Halo coordinates are unused; restore the original compute-domain coordinate after
+    # trimming.
+    dim_coords = {
+        name: coord for name, coord in value.coords.items() if dim in coord.dims
+    }
+    padded, left_pad, _right_pad = mpp_halo_exchange(
+        mpi_context, value, dim, before=before, after=after, exchange_coords=False
+    )
+    rolled = padded.rolling({dim: window}, center=center, min_periods=min_periods)
+    reduced = getattr(rolled, reduce)()
+
+    local_len = int(value.sizes[dim])
+    trimmed = reduced.isel({dim: slice(left_pad, left_pad + local_len)})
+    if dim_coords:
+        trimmed = trimmed.assign_coords(dim_coords)
+    return reattach_meta(trimmed, meta)
+
+
+def mpp_coarsen_reduce(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    window: int,
+    reduce: str = "mean",
+    *,
+    boundary: str = "exact",
+    side: str = "left",
+    coord_func: str = "mean",
+) -> xr.Dataset | xr.DataArray:
+    """Block reduction along ``dim``, correct when ``dim`` is distributed.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The coarsened-and-reduced result, correctly distributed along the now
+        block-reduced ``dim``.
+
+    Raises
+    ------
+    ValueError
+        If ``boundary="exact"`` and the global size is not evenly divisible by
+        ``window``.
+    NotImplementedError
+        If ``side="right"`` is requested on a distributed ``dim``.
+
+    """
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        coarsened = value.coarsen(
+            {dim: window}, boundary=boundary, side=side, coord_func=coord_func
+        )
+        return getattr(coarsened, reduce)()
+
+    if side != "left":
+        raise NotImplementedError("Distributed searchsorted supports only side='left'.")
+
+    _agree(
+        mpi_context,
+        ("coarsen_reduce", str(dim), int(window), boundary, side),
+    )
+
+    global_size = int(meta["global_sizes"][dim])
+    start = int(meta["starts"][dim])
+    stop = int(meta["stops"][dim])
+    remainder = global_size % window
+
+    if boundary == "exact" and remainder != 0:
+        raise ValueError(
+            f"Size {global_size} is not divisible by window {window} "
+            + "with boundary='exact'."
+        )
+
+    is_left_edge = start == 0
+    is_right_edge = stop == global_size
+
+    before_needed = 0 if is_left_edge else start % window
+    after_needed = 0 if is_right_edge else (window - stop % window) % window
+
+    # Request the common upper-bound halo ``window - 1`` on all ranks, then trim
+    # locally.
+    request = max(window - 1, 0)
+    padded, left_pad, right_pad = mpp_halo_exchange(
+        mpi_context, value, dim, before=request, after=request
+    )
+    # left_pad/right_pad are what was actually fetched (0 at a true
+    # global edge, `request` everywhere else); keep only the slice
+    # closest to this rank's own data on each side.
+    padded = padded.isel(
+        {
+            dim: slice(
+                left_pad - before_needed,
+                left_pad + int(value.sizes[dim]) + after_needed,
+            )
+        }
+    )
+
+    local_boundary = "exact"
+    if is_right_edge and remainder != 0:
+        if boundary == "trim":
+            trim_len = int(padded.sizes[dim]) - remainder
+            padded = padded.isel({dim: slice(0, trim_len)})
+        else:  # "pad": only the true global edge ever needs a synthetic
+            # (non-neighbor-sourced) pad -- every interior boundary block
+            # already got real data from mpp_halo_exchange above.
+            local_boundary = "pad"
+
+    coarsened = getattr(
+        padded.coarsen(
+            {dim: window}, boundary=local_boundary, side="left", coord_func=coord_func
+        ),
+        reduce,
+    )()
+
+    if before_needed > 0:
+        # This rank's own first block started inside the left neighbor's
+        # unpadded range (see the ownership rule in the docstring); the
+        # left neighbor computes and reports the identical block itself.
+        coarsened = coarsened.isel({dim: slice(1, None)})
+
+    # Recompute global bounds after coarsen because the distributed dimension length
+    # changes.
+    return mpp_redefine_domain(mpi_context, coarsened, meta, dim)

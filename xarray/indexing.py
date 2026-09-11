@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -14,7 +14,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp.mpp_domains import mpp_dim_comm as _dim_comm
+from ..mpp.mpp_domains_define import mpp_dim_comm as _dim_comm
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
     mpp_set_domain_bounds,
@@ -25,7 +25,13 @@ from .meta import (
     reattach_meta_after_collapse,
     strip_mpi_meta,
 )
-from ..mpp.mpp_domains import mpp_slice_compute_domain
+from ..mpp.mpp_domains_util import mpp_slice_compute_domain
+
+
+import pandas as pd
+
+from ..mpp.mpp_global_field import mpp_redistribute
+from .planning import _agree
 
 
 def _select_partition_dim(
@@ -527,3 +533,245 @@ def _repartition_singleton(
         chunk_info=info,
     )
     return cast("xr.Dataset | xr.DataArray", local)
+
+
+def mpp_reindex(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    indexers: Mapping[Hashable, Any] | None = None,
+    *,
+    method: str | None = None,
+    tolerance: float | Iterable[float] | None = None,
+    fill_value: Any = np.nan,
+    chunk_info: Mapping[str, int] | None = None,
+    log_partitions: bool = False,
+    **indexers_kwargs: Any,
+) -> xr.Dataset | xr.DataArray:
+    """Reindex ``value`` onto new coordinate labels, redistributing if needed.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context used for communication.
+    value : xarray.Dataset or xarray.DataArray
+        Object to reindex; distributed or replicated.
+    indexers : mapping, optional
+        New coordinate labels per dimension, exactly as
+        ``xarray.Dataset.reindex``/``DataArray.reindex`` accepts.
+    method : str, optional
+        Forwarded to ``pandas.Index.get_indexer`` when the partition dimension is
+        reindexed (``None``, ``"nearest"``, ``"ffill"``/ ``"pad"``,
+        ``"bfill"``/``"backfill"``); forwarded to xarray's own ``reindex`` otherwise.
+    tolerance : float or iterable of float, optional
+        Forwarded to ``pandas.Index.get_indexer``/xarray's ``reindex``.
+    fill_value : Any, optional
+        Value used for labels with no match in ``value``.
+    chunk_info : mapping, optional
+        Reserved for parity with ``repartition``'s signature; not consulted by the
+        redistributing path, which always balances.
+    log_partitions : bool, optional
+        Currently unused by the redistributing path.
+    **indexers_kwargs : Any
+        Additional indexers given as keywords, merged with ``indexers``.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The reindexed object: rank-local (metadata preserved) if no partitioned
+        dimension was touched; freshly, memory-scalably redistributed (new bounds,
+        possibly a new global length) otherwise -- see ``mpp_redistribute``.
+
+    Raises
+    ------
+    ValueError
+        If no indexers are given.
+    NotImplementedError
+        If more than one active partition dimension is reindexed at once, or a reindexed
+        partition dimension's new coordinate is not one-dimensional.
+
+    """
+    indexers = {**(indexers or {}), **indexers_kwargs}
+    if not indexers:
+        raise ValueError("requires at least one indexer")
+
+    meta = mpp_get_meta(value)
+    if meta is None:
+        return value.reindex(
+            indexers, method=method, tolerance=tolerance, fill_value=fill_value
+        )
+
+    partition_dims = meta["dims"]
+    touched = tuple(str(d) for d in partition_dims if d in indexers)
+
+    if not touched:
+        result = strip_mpi_meta(value).reindex(
+            indexers, method=method, tolerance=tolerance, fill_value=fill_value
+        )
+        mpp_update_meta(
+            result,
+            dim=meta["dims"],
+            global_size=meta["global_sizes"],
+            start=meta["starts"],
+            stop=meta["stops"],
+            chunk_info=prune_chunk_info(meta["chunk_info"], result),
+            cart=meta.get("cart"),
+        )
+        return result
+
+    if len(touched) > 1:
+        raise NotImplementedError(
+            f"Cannot redistribute multiple partition dims: {touched!r}."
+        )
+
+    dim = touched[0]
+    new_labels = np.asarray(indexers[dim])
+    if new_labels.ndim != 1:
+        raise NotImplementedError(
+            f"New {dim!r} labels must be 1-D; got {new_labels.shape!r}."
+        )
+    _agree(
+        mpi_context,
+        (
+            "reindex",
+            dim,
+            int(new_labels.shape[0]),
+            str(method),
+            str(tolerance),
+        ),
+    )
+
+    comm = _dim_comm(mpi_context, meta, dim)
+    old_coord_local = np.asarray(value[dim].values)
+    old_full_coord = np.concatenate(comm.allgather(old_coord_local))
+    old_index = pd.Index(old_full_coord)
+    old_pos = old_index.get_indexer(new_labels, method=method, tolerance=tolerance)
+    old_pos = old_pos.astype(np.int64)
+
+    return mpp_redistribute(
+        mpi_context,
+        value,
+        meta,
+        dim,
+        new_coord=new_labels,
+        old_pos=old_pos,
+        fill_value=fill_value,
+    )
+
+
+def mpp_sortby(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    by: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray],
+    *,
+    ascending: bool = True,
+    chunk_info: Mapping[str, int] | None = None,
+    log_partitions: bool = False,
+) -> xr.Dataset | xr.DataArray:
+    """Sort ``value`` by one or more keys, redistributing if needed.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context used for communication.
+    value : xarray.Dataset or xarray.DataArray
+        Object to sort; distributed or replicated.
+    by : Hashable, DataArray, or sequence of these
+        Sort key(s): variable/coordinate name(s) or explicit DataArray(s), exactly as
+        ``xarray.Dataset.sortby``/ ``DataArray.sortby`` accepts.
+    ascending : bool, optional
+        Sort order.
+    chunk_info : mapping, optional
+        Reserved for parity with ``repartition``'s signature; not consulted by the
+        redistributing path, which always balances.
+    log_partitions : bool, optional
+        Currently unused by the redistributing path.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The sorted object: rank-local (metadata preserved) if no sort key varies along a
+        partitioned dimension; freshly, memory-scalably redistributed otherwise -- see
+        ``mpp_redistribute``.
+
+    Raises
+    ------
+    NotImplementedError
+        If the sort key(s) together vary along more than one active partition dimension
+        under a multi-dimensional (Cartesian) partition, or a key is not one-dimensional
+        along the partition dimension it varies along.
+
+    """
+    meta = mpp_get_meta(value)
+    if meta is None:
+        return value.sortby(by, ascending=ascending)
+
+    keys = list(by) if isinstance(by, (list, tuple)) else [by]
+    touched_dims: set[str] = set()
+    for key in keys:
+        if isinstance(key, xr.DataArray):
+            touched_dims.update(str(d) for d in key.dims)
+            continue
+        try:
+            touched_dims.update(str(d) for d in value[key].dims)
+        except (KeyError, TypeError):
+            continue
+
+    partition_dims = meta["dims"]
+    touched = tuple(str(d) for d in partition_dims if d in touched_dims)
+
+    if not touched:
+        result = strip_mpi_meta(value).sortby(by, ascending=ascending)
+        mpp_update_meta(
+            result,
+            dim=meta["dims"],
+            global_size=meta["global_sizes"],
+            start=meta["starts"],
+            stop=meta["stops"],
+            chunk_info=prune_chunk_info(meta["chunk_info"], result),
+            cart=meta.get("cart"),
+        )
+        return result
+
+    if len(touched) > 1:
+        raise NotImplementedError(
+            f"Sort keys span multiple partition dims: {touched!r}."
+        )
+
+    dim = touched[0]
+    local_len = int(value.sizes[dim])
+    key_arrays_local: list[np.ndarray[Any, Any]] = []
+    for key in keys:
+        arr = np.asarray(
+            key.values if isinstance(key, xr.DataArray) else value[key].values
+        )
+        if arr.ndim != 1 or arr.shape[0] != local_len:
+            raise NotImplementedError(
+                f"Sort key {key!r} must be 1-D along {dim!r}; got {arr.shape!r}."
+            )
+        key_arrays_local.append(arr)
+
+    key_signature = tuple(
+        "<dataarray>" if isinstance(key, xr.DataArray) else str(key) for key in keys
+    )
+    _agree(mpi_context, ("sortby", dim, key_signature, bool(ascending)))
+
+    comm = _dim_comm(mpi_context, meta, dim)
+    full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
+    old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
+    # np.lexsort sorts by the *last* array primarily; reverse so the
+    # first key in `by` is primary, matching xarray.sortby's own order.
+    order = np.lexsort(tuple(reversed(full_keys)))
+    if not ascending:
+        order = order[::-1]
+    old_pos = order.astype(np.int64)
+    new_coord = old_full_coord[order]
+
+    return mpp_redistribute(
+        mpi_context,
+        value,
+        meta,
+        dim,
+        new_coord=new_coord,
+        old_pos=old_pos,
+        fill_value=np.nan,
+    )

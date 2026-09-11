@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
-from numbers import Integral
 from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -23,21 +22,22 @@ from .chunks import (
     get_chunk_bounds,
     get_chunk_info,
     get_effective_chunk_size,
-    prune_chunk_info,
+)
+from .distribute import (
+    _as_partition_dims,
+    mpp_create_dataarray,
+    mpp_create_dataset,
+    mpp_partition,
 )
 from .meta import (
     choose_partition_dim,
-    delayed_local,
-    localize_coord,
     mpp_get_meta,
     mpp_log_partition_report,
     mpp_should_log_partitions,
     mpp_update_meta,
-    resolve_sizes,
     set_save_chunks,
-    strip_mpi_meta,
 )
-from ..mpp.mpp_domains import mpp_define_domains
+from ..mpp.mpp_domains_define import mpp_define_domains
 from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
 __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]
@@ -45,102 +45,24 @@ __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"
 _NO_DATA_ATTR = "_climtools_no_data"
 
 
-def _open_dataset_1d(
-    mpi_context: MPIContext,
-    filename_or_obj: Any,
-    partition_dim: Hashable | Literal["auto"],
-    open_fn: Callable[..., xr.Dataset],
-    chunks: Any,
-    log_partitions: bool,
-    **kwargs: Any,
-) -> xr.Dataset:
-    """Open and partition a Dataset along one dimension."""
-    automatic = partition_dim == "auto"
-
-    # Build the metadata plan on rank 0.
-    plan: dict[str, Any] | None = None
-    error: BaseException | None = None
-    if mpi_context.is_root():
-        try:
-            with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
-                if automatic:
-                    partition_dim = choose_partition_dim(
-                        metadata.sizes,
-                        mpi_context.comm.size,
-                        rank=mpi_context.comm.rank,
-                    )
-                if partition_dim not in metadata.dims:
-                    raise ValueError(f"Unknown partition dimension {partition_dim!r}.")
-                chunk_info = get_chunk_info(metadata, mpi_context.comm.size)
-                global_size = int(metadata.sizes[partition_dim])
-
-                # Pack the plan into a dictionary for broadcasting
-                plan = {
-                    "partition_dim": partition_dim,
-                    "chunk_info": chunk_info,
-                    "global_size": global_size,
-                }
-        except BaseException as exc:
-            error = exc
-
-    # Synchronize rank-0 planning failures before broadcasting the plan.
-    mpi_context.raise_if_error(error, "open_dataset planning")
-
-    # Broadcast the plan.
-    plan = mpi_context.broadcast(plan, root=0)
-
-    partition_dim = plan["partition_dim"]
-    chunk_info = plan["chunk_info"]
-    global_size = plan["global_size"]
-
-    # Compute this rank's bounds.
-    partition_chunk = chunk_info[str(partition_dim)]
-    start, stop = get_chunk_bounds(
-        global_size,
-        partition_chunk,
-        mpi_context.comm.rank,
-        mpi_context.comm.size,
-    )
-
-    # Synchronize before opening the dataset.
-    mpi_context.comm.Barrier()
-
-    # Open this rank's lazy slice.
-    data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
-    data = data.isel({partition_dim: slice(start, stop)})
-
-    mpp_update_meta(
-        data,
-        dim=partition_dim,
-        global_size=global_size,
-        start=start,
-        stop=stop,
-        chunk_info=chunk_info,
-    )
-    if mpp_should_log_partitions(mpi_context, log_partitions):
-        mpp_log_partition_report(
-            mpi_context,
-            data,
-            partition_dim,
-            origin="open_dataset",
-            global_size=global_size,
-            start=start,
-            stop=stop,
-            automatic=automatic,
-        )
-    return data
-
-
-def _open_dataset_cartesian(
+def _open_partitioned(
     mpi_context: MPIContext,
     filename_or_obj: Any,
     dims: tuple[Hashable, ...],
     open_fn: Callable[..., xr.Dataset],
     chunks: Any,
     log_partitions: bool,
-    **kwargs: Any,
+    automatic: bool,
+    kwargs: dict[str, Any],
 ) -> xr.Dataset:
-    """Open a Dataset lazily on an MPI Cartesian process grid."""
+    """Open a Dataset lazily and keep only this rank's slice.
+
+    Rank 0 reads the header alone and broadcasts the global shape, so the
+    other ranks never touch the file until they open their own slice. As in
+    FMS, one axis and several differ only in how the per-axis bounds are
+    chosen: a single axis follows the file's chunk boundaries, a process grid
+    divides each axis evenly.
+    """
     comm = mpi_context.comm
 
     plan: dict[str, Any] | None = None
@@ -148,60 +70,77 @@ def _open_dataset_cartesian(
     if mpi_context.is_root():
         try:
             with open_fn(filename_or_obj, chunks=None, **kwargs) as metadata:
-                for d in dims:
+                resolved = dims
+                if automatic:
+                    resolved = (
+                        choose_partition_dim(metadata.sizes, comm.size, rank=comm.rank),
+                    )
+                for d in resolved:
                     if d not in metadata.dims:
                         raise ValueError(f"Unknown partition dimension {d!r}.")
-                plan = {"extents": tuple(int(metadata.sizes[d]) for d in dims)}
+                plan = {
+                    "dims": resolved,
+                    "global_sizes": {d: int(metadata.sizes[d]) for d in resolved},
+                    "chunk_info": get_chunk_info(metadata, comm.size),
+                }
         except BaseException as exc:
             error = exc
 
-    # Synchronize rank-0 planning failures before broadcasting the plan.
     mpi_context.raise_if_error(error, "open_dataset planning")
-
-    # Broadcast the plan (just the per-dimension global lengths).
     plan = mpi_context.broadcast(plan, root=0)
-    extents = plan["extents"]
+    dims = plan["dims"]
+    global_sizes = plan["global_sizes"]
+    chunk_info = plan["chunk_info"]
 
-    # Every rank derives its own Cartesian coordinates and per-axis
-    # bounds from `extents` and `comm.size` alone -- identical on
-    # every rank, no further communication needed to agree on it.
-    domain = mpp_define_domains(
-        mpi_context, dict(zip(dims, extents, strict=True)), dims
-    )
-    bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
+    cart = None
+    if len(dims) == 1:
+        dim = dims[0]
+        bounds = {
+            dim: get_chunk_bounds(
+                global_sizes[dim], chunk_info[str(dim)], comm.rank, comm.size
+            )
+        }
+    else:
+        domain = mpp_define_domains(mpi_context, global_sizes, dims)
+        bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
+        cart = domain.cart
 
-    # Synchronize before opening the dataset (mirrors the
-    # single-dimension path's own barrier here).
+    # Hold every rank here so none starts reading before the plan is settled.
     comm.Barrier()
 
-    # Open this rank's lazy slice.
     data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
     data = data.isel({d: slice(*bounds[d]) for d in dims})
 
-    chunk_info = {
-        str(other_dim): get_effective_chunk_size(int(other_length), None, comm.size)
-        for other_dim, other_length in data.sizes.items()
-    }
+    if cart is not None:
+        chunk_info = {
+            str(name): get_effective_chunk_size(int(length), None, comm.size)
+            for name, length in data.sizes.items()
+        }
+
+    starts = {d: bounds[d][0] for d in dims}
+    stops = {d: bounds[d][1] for d in dims}
+    single = len(dims) == 1 and cart is None
     mpp_update_meta(
         data,
-        dim=dims,
-        global_size=dict(zip(dims, extents, strict=True)),
-        start={d: bounds[d][0] for d in dims},
-        stop={d: bounds[d][1] for d in dims},
+        dim=dims[0] if single else dims,
+        global_size=global_sizes[dims[0]] if single else global_sizes,
+        start=starts[dims[0]] if single else starts,
+        stop=stops[dims[0]] if single else stops,
         chunk_info=chunk_info,
-        cart=domain.cart,
+        cart=cart,
     )
     if mpp_should_log_partitions(mpi_context, log_partitions):
         mpp_log_partition_report(
             mpi_context,
             data,
-            dims,
+            dims[0] if single else dims,
             origin="open_dataset",
-            global_size=dict(zip(dims, extents, strict=True)),
-            start={d: bounds[d][0] for d in dims},
-            stop={d: bounds[d][1] for d in dims},
-            grid_shape=domain.cart["grid_shape"],
-            coords=domain.cart["coords"],
+            global_size=global_sizes[dims[0]] if single else global_sizes,
+            start=starts[dims[0]] if single else starts,
+            stop=stops[dims[0]] if single else stops,
+            grid_shape=None if cart is None else cart["grid_shape"],
+            coords=None if cart is None else cart["coords"],
+            automatic=automatic,
         )
     return data
 
@@ -209,648 +148,6 @@ def _open_dataset_cartesian(
 # mpi4py point-to-point tag for mpp_partition(); arbitrary but fixed so a
 # stray message from unrelated code can never be mistaken for a piece
 # this call is expecting.
-_DISTRIBUTE_TAG = 0x6469_7374  # b"dist" as an int, easy to spot in a trace
-
-
-def mpp_partition(
-    mpi_context: MPIContext,
-    value: xr.Dataset | xr.DataArray | None,
-    dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
-    *,
-    root: int = 0,
-    chunk_info: Mapping[str, int] | None = None,
-    log_partitions: bool = False,
-) -> xr.Dataset | xr.DataArray:
-    """partition a root-owned xarray object across MPI ranks.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset, xarray.DataArray, or None
-        Complete object on ``root``; non-root ranks must pass None.
-    dim : Hashable, sequence of Hashable, or {"auto"}, optional
-        Partition dimension(s).
-    root : int, optional
-        Rank that owns ``value``.
-    chunk_info : mapping of str to int, optional
-        Effective chunk-size hints.
-    log_partitions : bool, optional
-        Log the resulting rank layout.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Rank-local slice carrying ``mpi_meta``.
-
-    Raises
-    ------
-    ValueError
-        If ownership, metadata, or ``dim`` is invalid.
-
-    """
-    comm = mpi_context.comm
-    is_root = mpi_context.is_root(root)
-    requested_dims = _as_partition_dims(dim)
-    multi_dim = isinstance(requested_dims, tuple) and len(requested_dims) > 1
-
-    # Prepare every slice before communication so a root-side failure is
-    # synchronized before any rank can block in send/receive.
-    error: BaseException | None = None
-    pieces: list[Any] | None = None
-    replicated_value: xr.Dataset | xr.DataArray | None = None
-    try:
-        if is_root:
-            if value is None:
-                raise ValueError(f"Rank {root} (root) must provide a value, not None.")
-            if mpp_get_meta(value) is not None:
-                raise ValueError("Object is already distributed.")
-            stripped = strip_mpi_meta(value)
-
-            if not stripped.dims:
-                # Nothing to partition: send the (necessarily small)
-                # whole object to every rank as replicated data,
-                # mirroring repartition's handling of the same case.
-                replicated_value = stripped
-            elif multi_dim:
-                pieces = _partition_pieces_nd(
-                    mpi_context,
-                    stripped,
-                    cast("tuple[Hashable, ...]", requested_dims),
-                    comm.size,
-                )
-            else:
-                resolved_dim = (
-                    requested_dims[0]
-                    if isinstance(requested_dims, tuple)
-                    else requested_dims
-                )
-                automatic = resolved_dim == "auto"
-                if automatic:
-                    resolved_dim = choose_partition_dim(
-                        stripped.sizes, comm.size, rank=comm.rank
-                    )
-                if resolved_dim not in stripped.dims:
-                    raise ValueError(f"Unknown partition dimension {resolved_dim!r}.")
-                pieces = _partition_pieces_1d(
-                    stripped, resolved_dim, comm.size, chunk_info
-                )
-        elif value is not None:
-            raise ValueError(
-                f"Only root rank {root} may provide value; got rank {comm.rank}."
-            )
-    except BaseException as exc:
-        error = exc
-    mpi_context.raise_if_error(error, "partition")
-
-    # Broadcast which transfer path root prepared.
-    dimensionless = mpi_context.broadcast(
-        replicated_value is not None if is_root else None, root=root
-    )
-
-    # Transfer the validated pieces.
-    if dimensionless:
-        # Nothing to partition: same small object broadcast to every
-        # rank, no per-rank slicing or point-to-point send needed.
-        output = mpi_context.broadcast(replicated_value if is_root else None, root=root)
-        return cast("xr.Dataset | xr.DataArray", output)
-
-    if is_root:
-        assert pieces is not None
-        output = pieces[root]
-        # Post all sends before waiting so scatter latency does not serialize with rank
-        # count.
-        mpi_context.send_all(
-            {rank: piece for rank, piece in enumerate(pieces) if rank != root},
-            tag=_DISTRIBUTE_TAG,
-        )
-    else:
-        output = mpi_context.receive(source=root, tag=_DISTRIBUTE_TAG)
-
-    if mpp_should_log_partitions(mpi_context, log_partitions):
-        meta = mpp_get_meta(output)
-        if meta is not None and "cart" in meta:
-            mpp_log_partition_report(
-                mpi_context,
-                output,
-                meta["dims"],
-                origin="partition",
-                global_size=meta["global_sizes"],
-                start=meta["starts"],
-                stop=meta["stops"],
-                grid_shape=meta["cart"]["grid_shape"],
-                coords=meta["cart"]["coords"],
-            )
-        elif meta is not None:
-            mpp_log_partition_report(
-                mpi_context,
-                output,
-                meta["dim"],
-                origin="partition",
-                global_size=meta["global_size"],
-                start=meta["start"],
-                stop=meta["stop"],
-                automatic=(dim == "auto"),
-            )
-    return output
-
-
-def _as_partition_dims(
-    dim: Hashable | Sequence[Hashable] | Literal["auto"],
-) -> Literal["auto"] | tuple[Hashable, ...]:
-    """Normalize ``mpp_partition()``'s ``dim`` argument."""
-    if dim == "auto":
-        return "auto"
-    if isinstance(dim, (list, tuple)):
-        dims = tuple(dim)
-        if not dims:
-            raise ValueError("partition_dim sequence must not be empty.")
-        return dims
-    return (dim,)
-
-
-def _partition_pieces_1d(
-    stripped: xr.Dataset | xr.DataArray,
-    resolved_dim: Hashable,
-    comm_size: int,
-    chunk_info: Mapping[str, int] | None,
-) -> list[Any]:
-    """Slice ``stripped`` into one piece per rank along one dimension."""
-    length = int(stripped.sizes[resolved_dim])
-    info = dict(chunk_info or {})
-    chunk_size = int(
-        info.get(
-            str(resolved_dim),
-            get_effective_chunk_size(length, None, comm_size),
-        )
-    )
-    chunk_size = get_effective_chunk_size(length, chunk_size, comm_size)
-    info[str(resolved_dim)] = chunk_size
-
-    pieces = []
-    for rank in range(comm_size):
-        start, stop = get_chunk_bounds(length, chunk_size, rank, comm_size)
-        piece = stripped.isel({resolved_dim: slice(start, stop)})
-        # Break shallow-copy attribute sharing before adding rank metadata.
-        piece.attrs = dict(piece.attrs)
-        if isinstance(piece, xr.Dataset):
-            for variable in piece.variables.values():
-                variable.attrs = dict(variable.attrs)
-        piece_info = prune_chunk_info(info, piece)
-        for other_dim, other_length in piece.sizes.items():
-            piece_info.setdefault(
-                str(other_dim),
-                get_effective_chunk_size(int(other_length), None, comm_size),
-            )
-        mpp_update_meta(
-            piece,
-            dim=resolved_dim,
-            global_size=length,
-            start=start,
-            stop=stop,
-            chunk_info=piece_info,
-        )
-        pieces.append(piece)
-    return pieces
-
-
-def _partition_pieces_nd(
-    mpi_context: MPIContext,
-    stripped: xr.Dataset | xr.DataArray,
-    dims: tuple[Hashable, ...],
-    comm_size: int,
-) -> list[Any]:
-    """Slice ``stripped`` into one piece per rank on a Cartesian grid."""
-    for d in dims:
-        if d not in stripped.dims:
-            raise ValueError(f"Unknown partition dimension {d!r}.")
-    extents = tuple(int(stripped.sizes[d]) for d in dims)
-    sizes = dict(zip(dims, extents, strict=True))
-
-    pieces = []
-    for rank in range(comm_size):
-        domain = mpp_define_domains(mpi_context, sizes, dims, rank=rank)
-        bounds = {d: (domain.starts[d], domain.stops[d]) for d in dims}
-        piece = stripped.isel({d: slice(*bounds[d]) for d in dims})
-        piece.attrs = dict(piece.attrs)
-        if isinstance(piece, xr.Dataset):
-            for variable in piece.variables.values():
-                variable.attrs = dict(variable.attrs)
-        piece_info = {
-            str(other_dim): get_effective_chunk_size(int(other_length), None, comm_size)
-            for other_dim, other_length in piece.sizes.items()
-        }
-        mpp_update_meta(
-            piece,
-            dim=dims,
-            global_size=sizes,
-            start={d: bounds[d][0] for d in dims},
-            stop={d: bounds[d][1] for d in dims},
-            chunk_info=piece_info,
-            cart=domain.cart,
-        )
-        pieces.append(piece)
-    return pieces
-
-
-def _normalize_create_dim(
-    dim: Hashable | int | Sequence[Hashable], dims: Sequence[Hashable]
-) -> tuple[Hashable, ...]:
-    """Normalize ``create_dataarray``/``create_dataset``'s ``dim`` to a tuple."""
-    if isinstance(dim, (list, tuple)):
-        if not dim:
-            raise ValueError("dim sequence must not be empty.")
-        for d in dim:
-            if d not in dims:
-                raise ValueError(f"dim {d!r} is not in dims {tuple(dims)!r}.")
-        if len(set(dim)) != len(dim):
-            raise ValueError(f"dim entries must be unique; got {tuple(dim)!r}.")
-        return tuple(dim)
-    axis_or_name = dims.index(dim) if not isinstance(dim, Integral) else int(dim)
-    if not 0 <= axis_or_name < len(dims):
-        raise ValueError(f"dim {dim!r} is not in dims {tuple(dims)!r}.")
-    return (dims[axis_or_name],)
-
-
-def mpp_create_dataarray(
-    mpi_context: MPIContext,
-    fill: Callable[..., Any],
-    dims: Sequence[Hashable],
-    *,
-    shape: Sequence[int] | Mapping[Hashable, int] | None = None,
-    dim: Hashable | int | Sequence[Hashable] = 0,
-    dtype: Any = np.float64,
-    coords: Mapping[Hashable, Any] | None = None,
-    name: Hashable | None = None,
-    attrs: Mapping[str, Any] | None = None,
-    log_partitions: bool = False,
-    min_partition_size: int | Mapping[Hashable, int] | None = None,
-) -> xr.DataArray:
-    """Create a distributed DataArray from a rank-local fill function.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    fill : callable
-        Function producing this rank's local values.
-    dims : sequence of Hashable
-        Dimension names.
-    shape : sequence of int, mapping, or None, optional
-        Global dimension sizes.
-    dim : Hashable, int, or sequence of Hashable
-        Dimension or dimensions to partition.
-    dtype : Any, optional
-        Fill-function output dtype.
-    coords : mapping, optional
-        DataArray coordinates.
-    name : Hashable, optional
-        DataArray name.
-    attrs : mapping, optional
-        DataArray attributes.
-    log_partitions : bool, optional
-        Log the rank layout.
-    min_partition_size : int or mapping, optional
-        Minimum non-empty local extent per partition dimension.
-
-    Returns
-    -------
-    xarray.DataArray
-        Rank-local DataArray carrying MPI metadata.
-
-    Raises
-    ------
-    ValueError
-        If partition dimensions or global sizes are invalid.
-    """
-    partition_dims = _normalize_create_dim(dim, dims)
-    min_chunk_map = (
-        dict(min_partition_size)
-        if isinstance(min_partition_size, Mapping)
-        else dict.fromkeys(partition_dims, min_partition_size)
-        if min_partition_size is not None
-        else {}
-    )
-
-    if shape is None or isinstance(shape, Mapping):
-        explicit_sizes = dict(shape) if shape else None
-    else:
-        if len(shape) != len(dims):
-            raise ValueError(f"shape has {len(shape)} entries; dims has {len(dims)}.")
-        explicit_sizes = dict(zip(dims, shape, strict=True))
-    resolved_sizes = resolve_sizes(dims, explicit_sizes, coords)
-
-    extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
-    sizes = dict(zip(partition_dims, extents, strict=True))
-
-    domain = mpp_define_domains(
-        mpi_context, sizes, partition_dims, min_partition_size=min_chunk_map
-    )
-    bounds = {d: (domain.starts[d], domain.stops[d]) for d in partition_dims}
-    cart = domain.cart
-
-    local_shape = tuple(
-        (bounds[name][1] - bounds[name][0])
-        if name in bounds
-        else int(resolved_sizes[name])
-        for name in dims
-    )
-
-    fill_args = tuple(v for d in partition_dims for v in bounds[d])
-    local_data = delayed_local(fill, fill_args, local_shape, dtype)
-
-    local_coords = dict(coords) if coords else {}
-    for d in partition_dims:
-        if d in local_coords:
-            d_start, d_stop = bounds[d]
-            local_coords[d] = localize_coord(
-                local_coords[d], int(resolved_sizes[d]), d_start, d_stop
-            )
-
-    da = xr.DataArray(
-        local_data, dims=tuple(dims), coords=local_coords, name=name, attrs=attrs
-    )
-    chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
-    mpp_update_meta(
-        da,
-        dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
-        global_size={d: int(resolved_sizes[d]) for d in partition_dims},
-        start={d: bounds[d][0] for d in partition_dims},
-        stop={d: bounds[d][1] for d in partition_dims},
-        chunk_info=chunk_info,
-        cart=cart,
-    )
-    if mpp_should_log_partitions(mpi_context, log_partitions):
-        if len(partition_dims) > 1:
-            mpp_log_partition_report(
-                mpi_context,
-                da,
-                partition_dims,
-                origin="create_dataarray",
-                global_size={d: int(resolved_sizes[d]) for d in partition_dims},
-                start={d: bounds[d][0] for d in partition_dims},
-                stop={d: bounds[d][1] for d in partition_dims},
-                grid_shape=cart["grid_shape"],
-                coords=cart["coords"],
-            )
-        else:
-            d0 = partition_dims[0]
-            mpp_log_partition_report(
-                mpi_context,
-                da,
-                d0,
-                origin="create_dataarray",
-                global_size=int(resolved_sizes[d0]),
-                start=bounds[d0][0],
-                stop=bounds[d0][1],
-            )
-    return da
-
-
-def mpp_create_dataset(
-    mpi_context: MPIContext,
-    data_vars: Mapping[
-        Hashable,
-        xr.DataArray | tuple[Sequence[Hashable], Callable[[int, int], Any]],
-    ],
-    sizes: Mapping[Hashable, int] | None = None,
-    *,
-    dim: Hashable | Sequence[Hashable],
-    dtype: Any = np.float64,
-    coords: Mapping[Hashable, Any] | None = None,
-    attrs: Mapping[str, Any] | None = None,
-    log_partitions: bool = True,
-    min_partition_size: int | Mapping[Hashable, int] | None = None,
-) -> xr.Dataset:
-    """Create a distributed Dataset from rank-local variables.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    data_vars : mapping
-        DataArrays or ``(dims, fill)`` variable specifications.
-    sizes : mapping, optional
-        Global dimension sizes.
-    dim : Hashable or sequence of Hashable
-        Dimension or dimensions to partition.
-    dtype : Any or mapping, optional
-        Default or per-variable fill dtype.
-    coords, attrs : mapping, optional
-        Dataset coordinates and attributes.
-    log_partitions : bool, optional
-        Log the rank layout.
-    min_partition_size : int or mapping, optional
-        Minimum non-empty local extent per partition dimension.
-
-    Returns
-    -------
-    xarray.Dataset
-        Rank-local Dataset carrying MPI metadata.
-    """
-    if isinstance(dim, (list, tuple)):
-        if not dim:
-            raise ValueError("dim sequence must not be empty.")
-        if len(set(dim)) != len(dim):
-            raise ValueError(f"dim entries must be unique; got {tuple(dim)!r}.")
-        partition_dims = tuple(dim)
-    else:
-        partition_dims = (dim,)
-    min_chunk_map = (
-        dict(min_partition_size)
-        if isinstance(min_partition_size, Mapping)
-        else dict.fromkeys(partition_dims, min_partition_size)
-        if min_partition_size is not None
-        else {}
-    )
-
-    required_dims: set[Hashable] = set(partition_dims)
-    for spec in data_vars.values():
-        if not isinstance(spec, xr.DataArray):
-            var_dims, _ = spec
-            required_dims.update(var_dims)
-    resolved_sizes = resolve_sizes(required_dims, sizes, coords)
-
-    extents = tuple(int(resolved_sizes[d]) for d in partition_dims)
-    sizes = dict(zip(partition_dims, extents, strict=True))
-
-    domain = mpp_define_domains(
-        mpi_context, sizes, partition_dims, min_partition_size=min_chunk_map
-    )
-    bounds = {d: (domain.starts[d], domain.stops[d]) for d in partition_dims}
-    cart = domain.cart
-
-    dtype_map = dtype if isinstance(dtype, Mapping) else None
-
-    built_vars: dict[Hashable, Any] = {}
-    for var_name, spec in data_vars.items():
-        if isinstance(spec, xr.DataArray):
-            for d in partition_dims:
-                if d in spec.dims:
-                    d_start, d_stop = bounds[d]
-                    expected_len = d_stop - d_start
-                    if int(spec.sizes[d]) != expected_len:
-                        raise ValueError(
-                            f"data_vars[{var_name!r}] has local {d!r} length "
-                            + f"{spec.sizes[d]}; expected {expected_len}."
-                        )
-            built_vars[var_name] = spec
-            continue
-
-        var_dims, var_fill = spec
-        var_dtype = (
-            dtype_map.get(var_name, np.float64) if dtype_map is not None else dtype
-        )
-        local_dims_here = [d for d in partition_dims if d in var_dims]
-        local_shape = tuple(
-            (bounds[name][1] - bounds[name][0])
-            if name in local_dims_here
-            else int(resolved_sizes[name])
-            for name in var_dims
-        )
-        if local_dims_here:
-            fill_args = tuple(v for d in local_dims_here for v in bounds[d])
-            local_data = delayed_local(var_fill, fill_args, local_shape, var_dtype)
-        elif callable(var_fill):
-            # Not partitioned: identical on every rank, so there is no
-            # (start, stop) to give -- fill() takes no arguments and
-            # closes over whatever sizes it needs itself.
-            local_data = delayed_local(var_fill, (), local_shape, var_dtype)
-        else:
-            local_data = var_fill
-        built_vars[var_name] = (tuple(var_dims), local_data)
-
-    local_coords = dict(coords) if coords else {}
-    for d in partition_dims:
-        if d in local_coords:
-            d_start, d_stop = bounds[d]
-            local_coords[d] = localize_coord(
-                local_coords[d], int(resolved_sizes[d]), d_start, d_stop
-            )
-
-    ds = xr.Dataset(built_vars, coords=local_coords, attrs=attrs)
-    chunk_info = {str(d): bounds[d][1] - bounds[d][0] for d in partition_dims}
-    mpp_update_meta(
-        ds,
-        dim=partition_dims if len(partition_dims) > 1 else partition_dims[0],
-        global_size={d: int(resolved_sizes[d]) for d in partition_dims},
-        start={d: bounds[d][0] for d in partition_dims},
-        stop={d: bounds[d][1] for d in partition_dims},
-        chunk_info=chunk_info,
-        cart=cart,
-    )
-    if mpp_should_log_partitions(mpi_context, log_partitions):
-        if len(partition_dims) > 1:
-            mpp_log_partition_report(
-                mpi_context,
-                ds,
-                partition_dims,
-                origin="create_dataset",
-                global_size={d: int(resolved_sizes[d]) for d in partition_dims},
-                start={d: bounds[d][0] for d in partition_dims},
-                stop={d: bounds[d][1] for d in partition_dims},
-                grid_shape=cart["grid_shape"],
-                coords=cart["coords"],
-            )
-        else:
-            d0 = partition_dims[0]
-            mpp_log_partition_report(
-                mpi_context,
-                ds,
-                d0,
-                origin="create_dataset",
-                global_size=int(resolved_sizes[d0]),
-                start=bounds[d0][0],
-                stop=bounds[d0][1],
-            )
-    return ds
-
-
-def mpp_repartition(
-    mpi_context: MPIContext,
-    value: xr.Dataset | xr.DataArray,
-    dim: Hashable | Literal["auto"] = "auto",
-    *,
-    chunk_info: Mapping[str, int] | None = None,
-    log_partitions: bool = False,
-) -> xr.Dataset | xr.DataArray:
-    """Partition a replicated xarray object across MPI ranks.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context used for communication.
-    value : xarray.Dataset or xarray.DataArray
-        Complete object present on every rank.
-    dim : Hashable or {"auto"}, optional
-        New partition dimension.
-    chunk_info : mapping of str to int, optional
-        Effective chunk-size hints.
-    log_partitions : bool, optional
-        Log the resulting rank layout.
-
-    Returns
-    -------
-    xarray.Dataset or xarray.DataArray
-        Rank-local slice carrying ``mpi_meta``.
-
-    Raises
-    ------
-    ValueError
-        If ``value`` is already distributed or ``dim`` is invalid.
-
-    """
-    if mpp_get_meta(value) is not None:
-        raise ValueError("Object is already distributed.")
-
-    automatic = dim == "auto"
-    if automatic:
-        if not value.dims:
-            return strip_mpi_meta(value)
-        dim = choose_partition_dim(
-            value.sizes, mpi_context.comm.size, rank=mpi_context.comm.rank
-        )
-
-    if dim not in value.dims:
-        raise ValueError(f"Repartition dimension {dim!r} does not exist.")
-
-    info = dict(chunk_info or {})
-    length = int(value.sizes[dim])
-    chunk_size = int(
-        info.get(
-            str(dim),
-            get_effective_chunk_size(length, None, mpi_context.comm.size),
-        )
-    )
-    chunk_size = get_effective_chunk_size(length, chunk_size, mpi_context.comm.size)
-    info[str(dim)] = chunk_size
-
-    start, stop = get_chunk_bounds(
-        length, chunk_size, mpi_context.comm.rank, mpi_context.comm.size
-    )
-    output = strip_mpi_meta(value).isel({dim: slice(start, stop)})
-    info = prune_chunk_info(info, output)
-    for other_dim, other_length in output.sizes.items():
-        info.setdefault(
-            str(other_dim),
-            get_effective_chunk_size(int(other_length), None, mpi_context.comm.size),
-        )
-
-    mpp_update_meta(
-        output, dim=dim, global_size=length, start=start, stop=stop, chunk_info=info
-    )
-    if mpp_should_log_partitions(mpi_context, log_partitions):
-        mpp_log_partition_report(
-            mpi_context,
-            output,
-            dim,
-            origin="repartition",
-            global_size=length,
-            start=start,
-            stop=stop,
-            automatic=automatic,
-        )
-    return output
 
 
 def mpp_attach_save_chunks(
@@ -940,29 +237,25 @@ def mpi_open_dataset(
     )
 
     requested_dims = _as_partition_dims(partition_dim)
-    if isinstance(requested_dims, tuple) and len(requested_dims) > 1:
-        data = _open_dataset_cartesian(
-            mpi_context,
-            filename,
-            requested_dims,
-            open_fn,
-            chunks,
-            log_partitions,
-            **kwargs,
-        )
-    else:
-        resolved_dim = (
-            requested_dims[0] if isinstance(requested_dims, tuple) else requested_dims
-        )
-        data = _open_dataset_1d(
-            mpi_context,
-            filename,
-            resolved_dim,
-            open_fn,
-            chunks,
-            log_partitions,
-            **kwargs,
-        )
+    automatic = requested_dims == "auto"
+    # "auto" leaves the axis for rank 0 to choose from the file header.
+    dims: tuple[Hashable, ...] = (
+        requested_dims
+        if isinstance(requested_dims, tuple)
+        else ()
+        if automatic
+        else (requested_dims,)
+    )
+    data = _open_partitioned(
+        mpi_context,
+        filename,
+        dims,
+        open_fn,
+        chunks,
+        log_partitions,
+        automatic,
+        kwargs,
+    )
 
     from .core import MPIXarray
 
