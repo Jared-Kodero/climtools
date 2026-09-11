@@ -43,8 +43,6 @@ if TYPE_CHECKING:
 
 type ColorMap = ListedColormap | LinearSegmentedColormap
 
-CMAP_N: int = 25
-
 
 _file_dir = Path(__file__).resolve().parent
 _src_dir = _file_dir / "data" / "cmaps"
@@ -63,9 +61,9 @@ def build_cm(name: str) -> ColorMap:
     for candidate in (name, name.lower(), name.capitalize(), name.upper()):
         cmap_file = _src_dir / f"{candidate}.txt"
         if cmap_file.exists():
-            return LinearSegmentedColormap.from_list(
-                candidate, np.loadtxt(cmap_file), N=256
-            )
+            data = np.loadtxt(cmap_file)
+            return LinearSegmentedColormap.from_list(candidate, data, N=data.shape[0])
+
         if candidate in _plt_cmap_list:
             return _plt_registry[candidate]
         if candidate in _cmocean_cmap_list:
@@ -73,9 +71,10 @@ def build_cm(name: str) -> ColorMap:
     raise KeyError(f"Colormap '{name}' is not valid.")
 
 
-def get_colors(cmap: ColorMap, N: int) -> list[str]:
+def get_colors(cmap: ColorMap, N: int | None = None) -> list[str]:
     """Sample ``N`` evenly spaced colors from ``cmap`` and return them as hex strings."""
-    return [to_hex(c) for c in cmap(np.linspace(0, 1, N))]
+    n_colors = cmap.N if N is None else N
+    return [to_hex(c) for c in cmap(np.linspace(0, 1, n_colors))]
 
 
 _EQ_ATOL = 1e-6  # tolerance consistent with the %.6f text colormap format
@@ -89,8 +88,8 @@ def _signature(cmap: ColorMap) -> np.ndarray:
 def add_colors_to_cmap(
     obj: str | list[str],
     cmap: ColorMap,
-    idx: int = 256,
-    N: int = 256,
+    idx: int | None = None,
+    N: int | None = None,
     gamma: float = 1.0,
     cmap_name: str | None = None,
     format: Literal["linear", "listed", "hex"] = "linear",
@@ -104,11 +103,10 @@ def add_colors_to_cmap(
         Hex codes or CSS4 color names to insert.
     cmap : ListedColormap or LinearSegmentedColormap
         Source colormap.
-    idx : int, default 256
-        Insertion position, clamped to ``[0, cmap.N]``.
-    N : int, default 256
-        Retained for signature compatibility. The number of sampled colors is
-        taken from ``cmap.N``.
+    idx : int, optional
+        Insertion position, clamped to ``[0, cmap.N]``. Defaults to the end.
+    N : int, optional
+        Number of sampled colors. Defaults to native colormap length.
     gamma : float, default 1.0
         Gamma applied when rebuilding a linear segmented colormap.
     cmap_name : str, optional
@@ -120,8 +118,8 @@ def add_colors_to_cmap(
     if format not in {"linear", "listed", "hex"}:
         raise ValueError("`format` must be 'linear', 'listed', or 'hex'.")
 
-    N = cmap.N
-    idx = max(0, min(idx, N))
+    n_colors = cmap.N if N is None else N
+    idx = n_colors if idx is None else max(0, min(idx, n_colors))
 
     if isinstance(obj, str):
         objs = [obj]
@@ -145,13 +143,17 @@ def add_colors_to_cmap(
                 f"Invalid color '{color}'. Must be a hex code or a named CSS4 color."
             )
 
-    colors = [to_hex(tuple(c), keep_alpha=True) for c in cmap(np.linspace(0, 1, N))]
+    colors = [
+        to_hex(tuple(c), keep_alpha=True) for c in cmap(np.linspace(0, 1, n_colors))
+    ]
     new_colors = colors[:idx] + colors_to_add + colors[idx:]
 
     if format in {"listed", "hex"}:
         res = ListedColormap(new_colors, N=len(new_colors), name=cmap_name)
     else:
-        res = LinearSegmentedColormap.from_list(cmap_name, new_colors, N=N, gamma=gamma)
+        res = LinearSegmentedColormap.from_list(
+            cmap_name, new_colors, N=n_colors, gamma=gamma
+        )
 
     if format == "hex":
         return get_colors(res, res.N)
@@ -170,27 +172,27 @@ def adjust_cmap(
 ) -> ColorMap | list[str]:
     """
     Modify a colormap by slicing, reversal, color insertion and output format.
-    # ... (docstrings omitted for brevity)
     """
     if not isinstance(split, tuple) or len(split) != 2:
         raise ValueError("`split` must be a tuple of two floats (start, end).")
     if format not in {"linear", "listed", "hex"}:
         raise ValueError("`format` must be 'linear', 'listed', or 'hex'.")
 
-    if N is None:
-        N = cmap.N if format == "hex" else CMAP_N
+    n_colors = cmap.N if N is None else N
 
     cmap_name = cmap.name
     if r:
         cmap = cmap.reversed()
         cmap_name = f"reversed_{cmap_name}"
 
-    colors = [cmap(value) for value in np.linspace(split[0], split[1], N)]
+    colors = [cmap(value) for value in np.linspace(split[0], split[1], n_colors)]
 
     if format in {"listed", "hex"}:
         res = ListedColormap(colors, name=cmap_name)
     else:
-        res = LinearSegmentedColormap.from_list(cmap_name, colors, N=N, gamma=gamma)
+        res = LinearSegmentedColormap.from_list(
+            cmap_name, colors, N=n_colors, gamma=gamma
+        )
 
     if add_colors:
         if not isinstance(add_colors, dict):
@@ -211,7 +213,7 @@ def adjust_cmap(
                 obj=v,
                 idx=k,
                 cmap=res,
-                N=N,
+                N=n_colors,
                 gamma=gamma,
                 cmap_name=cmap_name,
                 format=internal_format,
@@ -236,12 +238,11 @@ def get_colormap(
 ) -> ColorMap | list[str]:
     """Resolve ``name`` to a colormap and apply the requested adjustments."""
     cmap = build_cm(name)
-    if N is None:
-        N = cmap.N if format == "hex" else CMAP_N
+    n_colors = cmap.N if N is None else N
 
     return adjust_cmap(
         cmap=cmap,
-        N=N,
+        N=n_colors,
         split=split,
         add_colors=add_colors,
         r=r,
@@ -252,7 +253,7 @@ def get_colormap(
 
 def create(
     colors: list[str],
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
@@ -273,10 +274,12 @@ def create(
     if name is None:
         name = "custom"
 
+    n_colors = len(colors) if N is None else N
+
     if format in {"listed", "hex"}:
-        cmap: ColorMap = ListedColormap(colors, N=N, name=name)
+        cmap: ColorMap = ListedColormap(colors, name=name)
     else:
-        cmap = LinearSegmentedColormap.from_list(name, colors, N=N, gamma=gamma)
+        cmap = LinearSegmentedColormap.from_list(name, colors, N=n_colors, gamma=gamma)
 
     if save:
         dup = find_duplicate(cmap)
@@ -289,9 +292,9 @@ def create(
             existing = build_cm(match_name)
             cmap = existing.reversed() if is_reversed else existing
         else:
-            rgb = cmap(np.linspace(0.0, 1.0, 256))[:, :3]
+            rgb = cmap(range(cmap.N))[:, :3]
             _src_dir.mkdir(parents=True, exist_ok=True)
-            np.savetxt(_src_dir / f"{name}.txt", rgb, fmt="%.6f")
+            np.savetxt(Path(_src_dir / name).with_suffix(".txt"), rgb, fmt="%.6f")
             _registry.cache_clear()
             list_cmaps.cache_clear()
             cmap_index.cache_clear()
@@ -304,19 +307,21 @@ def create(
 def _concat_cmaps(
     cmap1: ColorMap,
     cmap2: ColorMap,
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
-    """Concatenate two colormaps into a single colormap of ``N`` colors."""
+    """Concatenate two colormaps into a single colormap."""
+    n_colors = (cmap1.N + cmap2.N) if N is None else N
 
-    def _colors(cmap):
-        return [to_hex(cmap(v)) for v in np.linspace(0, 1, N // 2)]
+    def _colors(cmap, count):
+        return [to_hex(cmap(v)) for v in np.linspace(0, 1, count)]
 
+    half = n_colors // 2
     return create(
-        _colors(cmap1) + _colors(cmap2),
-        N=N,
+        _colors(cmap1, half) + _colors(cmap2, n_colors - half),
+        N=n_colors,
         format=format,
         gamma=gamma,
     )
@@ -326,15 +331,16 @@ def add_or_subtract(
     cmap1: ColorMap,
     cmap2: ColorMap,
     operator: str,
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
     """Add or subtract two colormaps channel wise in RGBA space."""
+    n_colors = cmap1.N if N is None else N
 
     def _colors(cmap):
-        return np.asarray([cmap(v) for v in np.linspace(0, 1, N)], dtype=float)
+        return np.asarray([cmap(v) for v in np.linspace(0, 1, n_colors)], dtype=float)
 
     c1, c2 = _colors(cmap1), _colors(cmap2)
     if operator == "+":
@@ -346,7 +352,7 @@ def add_or_subtract(
 
     return create(
         [to_hex(tuple(row)) for row in c],
-        N=N,
+        N=n_colors,
         format=format,
         gamma=gamma,
     )
@@ -425,7 +431,7 @@ def available(show: bool = True) -> list[str] | DisplayHandle:
 # ---------------------------------------------------------------------------
 def new(
     colors: list[str],
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
@@ -446,7 +452,7 @@ def new(
 def concat(
     cmap1: ColorMap,
     cmap2: ColorMap,
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
@@ -458,7 +464,7 @@ def concat(
 def add(
     cmap1: ColorMap,
     cmap2: ColorMap,
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
@@ -470,7 +476,7 @@ def add(
 def subtract(
     cmap1: ColorMap,
     cmap2: ColorMap,
-    N: int = CMAP_N,
+    N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
@@ -575,12 +581,12 @@ from IPython.display import DisplayHandle
 type ColorMap = ListedColormap | LinearSegmentedColormap
 
 
-def new(colors: list[str], N: int | None = None, *, format: Literal["linear", "listed", "hex"] = \"linear\", gamma: float = 1.0, name: str | None = None, save: bool = False) ->  ColorMap | list[str]: ...
-def create(colors: list[str], N: int | None = None , *, format: Literal["linear", "listed", "hex"] = \"linear\", gamma: float = 1.0, name: str | None = None, save: bool = False) ->  ColorMap | list[str]: ...
-def concat(cmap1:  ColorMap, cmap2:  ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = \"linear\", gamma: float = 1.0) ->  ColorMap | list[str]: ...
-def add(cmap1:  ColorMap, cmap2:  ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = \"linear\", gamma: float = 1.0) ->  ColorMap | list[str]: ...
-def subtract(cmap1:  ColorMap, cmap2:  ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = \"linear\", gamma: float = 1.0) ->  ColorMap | list[str]: ...
-def available(show:bool=True) -> list[str] | DisplayHandle: ...
+def new(colors: list[str], N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0, name: str | None = None, save: bool = False) -> ColorMap | list[str]: ...
+def create(colors: list[str], N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0, name: str | None = None, save: bool = False) -> ColorMap | list[str]: ...
+def concat(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
+def add(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
+def subtract(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
+def available(show: bool = True) -> list[str] | DisplayHandle: ...
 def write_stub(force: bool = False) -> bool: ...
 """
 

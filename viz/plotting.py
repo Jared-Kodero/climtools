@@ -16,11 +16,9 @@ import subprocess
 import sys
 import tempfile
 import warnings
-from dataclasses import dataclass
-from typing import Literal
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import cartopy.crs as ccrs
 import cartopy.mpl.geoaxes as cgeo
@@ -29,6 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -36,8 +35,6 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
-
-import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -121,16 +118,6 @@ type ScalarPrimitive = (
 )
 
 
-@dataclass
-class Colors:
-    SteelBlue: str = "#3f6094"
-    MatteGraphite: str = "#444444"
-    RaspberryRed: str = "#d32f60"
-    DeepSeaGreen: str = "#2e8c71"
-    Cinnabar: str = "#c8462f"
-    # add more
-
-
 class Theme:
     """Configure matplotlib and seaborn plotting themes."""
 
@@ -171,10 +158,6 @@ class Theme:
         self.grid = grid
         self.legend_frame = legend_frame
         self.mpl_rc = rc_params or {}
-
-    @property
-    def colors(self):
-        return Colors()
 
     def __enter__(self) -> Self:
         self.apply()
