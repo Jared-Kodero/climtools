@@ -30,7 +30,7 @@ from ..mpp.mpp_domains_util import mpp_slice_compute_domain
 
 import pandas as pd
 
-from ..mpp.mpp_global_field import mpp_redistribute
+from .halo import mpp_redistribute
 from .planning import _agree
 
 

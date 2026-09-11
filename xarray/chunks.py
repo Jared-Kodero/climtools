@@ -9,6 +9,8 @@ from dask import array as dask_array
 
 import xarray as xr
 
+from ..mpp.mpp_domains_define import mpp_compute_extent
+
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping
 
@@ -76,46 +78,6 @@ def get_chunk_info(data: xr.Dataset, mpi_size: int) -> dict[str, int]:
     }
 
 
-def get_balanced_bounds(
-    length: int, rank: int, size: int, min_chunk: int | None = None
-) -> tuple[int, int]:
-    """Split ``length`` into ``size`` contiguous, near-equal ``[start, stop)`` slabs.
-
-    Parameters
-    ----------
-    length : int
-        Total length to split.
-    rank : int
-        Current MPI rank.
-    size : int
-        Total number of MPI ranks.
-    min_chunk : int or None, optional
-        Guaranteed minimum local length for every rank that receives any
-        data. At most ``max(1, length // min_chunk)`` ranks get a
-        non-empty slab; the rest get an empty ``(length, length)`` slab.
-        Set at or above the widest halo/window a distributed dimension
-        will need (e.g. the largest ``rolling_reduce`` window) to avoid
-        ``mpp_halo_exchange``'s "local partition shorter than the
-        requested halo" error on that dimension.
-
-    Returns
-    -------
-    tuple of int
-        Start and stop indices for the given rank.
-
-    """
-    if min_chunk is not None and min_chunk > 0 and size > 1 and length > 0:
-        active = max(1, min(size, length // min_chunk))
-        if active < size:
-            if rank >= active:
-                return length, length
-            return get_balanced_bounds(length, rank, active)
-
-    quotient, remainder = divmod(length, size)
-    start = rank * quotient + min(rank, remainder)
-    return start, start + quotient + int(rank < remainder)
-
-
 def chunk_alignment_holds(length: int, chunk_size: int, size: int) -> bool:
     """Return whether rank bounds for this ``(length, chunk_size, size)`` fall on chunk
     edges."""
@@ -134,7 +96,7 @@ def get_chunk_bounds(
         return 0, 0
 
     if not chunk_alignment_holds(length, chunk_size, size):
-        return get_balanced_bounds(length, rank, size)
+        return mpp_compute_extent(length, rank, size)
 
     chunk_count = math.ceil(length / chunk_size)
     quotient, remainder = divmod(chunk_count, size)
@@ -324,7 +286,7 @@ def compute_save_chunks(
         boundary_gcd = global_size
         if not aligned and divisions > 1:
             boundaries = [
-                get_balanced_bounds(global_size, i, divisions)[1]
+                mpp_compute_extent(global_size, i, divisions)[1]
                 for i in range(divisions - 1)
             ]
             if boundaries:

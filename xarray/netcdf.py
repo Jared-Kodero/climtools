@@ -22,7 +22,7 @@ from ..mpi.diagnostics import MPIError
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
 from ..mpi.mpi_init import MPI
-from ..mpp.mpp_global_field import mpp_global_field
+from .halo import mpp_global_field_xr as mpp_global_field
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .meta import mpp_get_meta, strip_export_attrs
 from .planning import mpp_resolve_comm

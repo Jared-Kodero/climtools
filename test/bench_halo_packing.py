@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 from climtools import MPIContext, xgeo
-from climtools.mpp.mpp_do_update import mpp_halo_exchange
+from climtools.xarray.halo import mpp_halo_exchange
 from mpi4py import MPI
 
 import xarray as xr

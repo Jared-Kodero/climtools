@@ -16,7 +16,7 @@ from .meta import (
     mpp_update_meta,
     strip_mpi_meta,
 )
-from ..mpp.mpp_do_update import mpp_halo_exchange
+from .halo import mpp_halo_exchange
 from ..mpp.mpp_domains_define import mpp_dim_comm as _dim_comm
 from .planning import _agree, guarded
 

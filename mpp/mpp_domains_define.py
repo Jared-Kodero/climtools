@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from ..mpi.mpi_init import MPI
-from ..xarray.chunks import get_balanced_bounds
 from .mpp_domains import CartesianDomain, Domain, _no_proc_null
 
 if TYPE_CHECKING:
@@ -23,6 +22,49 @@ if TYPE_CHECKING:
 
 
 _TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
+
+
+def mpp_compute_extent(
+    length: int, rank: int, size: int, min_chunk: int | None = None
+) -> tuple[int, int]:
+    """Split ``length`` into ``size`` contiguous, near-equal ``[start, stop)`` slabs.
+
+    FMS ``mpp_compute_extent``: the routine every domain definition goes
+    through to decide which indices a rank owns.
+
+    Parameters
+    ----------
+    length : int
+        Total length to split.
+    rank : int
+        Current MPI rank.
+    size : int
+        Total number of MPI ranks.
+    min_chunk : int or None, optional
+        Guaranteed minimum local length for every rank that receives any
+        data. At most ``max(1, length // min_chunk)`` ranks get a
+        non-empty slab; the rest get an empty ``(length, length)`` slab.
+        Set at or above the widest halo/window a distributed dimension
+        will need (e.g. the largest ``rolling_reduce`` window) to avoid
+        ``mpp_halo_exchange``'s "local partition shorter than the
+        requested halo" error on that dimension.
+
+    Returns
+    -------
+    tuple of int
+        Start and stop indices for the given rank.
+
+    """
+    if min_chunk is not None and min_chunk > 0 and size > 1 and length > 0:
+        active = max(1, min(size, length // min_chunk))
+        if active < size:
+            if rank >= active:
+                return length, length
+            return mpp_compute_extent(length, rank, active)
+
+    quotient, remainder = divmod(length, size)
+    start = rank * quotient + min(rank, remainder)
+    return start, start + quotient + int(rank < remainder)
 
 
 def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]:
@@ -157,7 +199,7 @@ def mpp_define_domains(
     if len(dim_tuple) == 1:
         dim = dim_tuple[0]
         length = int(global_sizes[dim])
-        start, stop = get_balanced_bounds(
+        start, stop = mpp_compute_extent(
             length, target_rank, comm.size, _min_chunk(dim)
         )
         return Domain(
@@ -183,7 +225,7 @@ def mpp_define_domains(
         coords = tuple(int(c) for c in np.unravel_index(target_rank, grid_shape))
         starts, stops = {}, {}
         for axis, d in enumerate(dim_tuple):
-            s, e = get_balanced_bounds(
+            s, e = mpp_compute_extent(
                 sizes[d], coords[axis], grid_shape[axis], _min_chunk(d)
             )
             starts[d], stops[d] = s, e
@@ -234,7 +276,7 @@ def mpp_define_cartesian_domain(
     bounds: dict[str, tuple[int, int]] = {}
     neighbors: dict[str, tuple[int | None, int | None]] = {}
     for axis, dim in enumerate(dims):
-        bounds[dim] = get_balanced_bounds(extents[axis], coords[axis], grid_shape[axis])
+        bounds[dim] = mpp_compute_extent(extents[axis], coords[axis], grid_shape[axis])
         lower, upper = cart_comm.Shift(axis, 1)
         neighbors[dim] = (_no_proc_null(lower), _no_proc_null(upper))
 

@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import numpy as np
 from climtools import xgeo
-from climtools.mpp.mpp_do_update import HaloWidthError, mpp_halo_exchange
-from climtools.xarray.chunks import get_balanced_bounds
+from climtools.mpp.mpp_do_update import HaloWidthError
+from climtools.xarray.halo import mpp_halo_exchange
+from climtools.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
 from climtools.mpp.mpp import mpp_chksum, mpp_partition_offsets
 from climtools.mpp.mpp_do_update import (
     mpp_complete_update_domains,

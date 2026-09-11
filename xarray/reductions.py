@@ -40,7 +40,7 @@ from .planning import (
 _PROD_FIELD_DIM = "_mpp_prod_field"
 
 
-from ..mpp.mpp_do_update import mpp_halo_exchange
+from .halo import mpp_halo_exchange
 from .elementwise import reattach_meta
 from .meta import mpp_operand_meta, mpp_redefine_domain
 from .planning import _agree

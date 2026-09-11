@@ -11,10 +11,9 @@ from typing import TYPE_CHECKING
 import cartopy.util
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cf_xarray import *
 from scipy.interpolate import griddata
-
-import xarray as xr
 
 from ..core.utils import N_CPUS, TMP
 
@@ -366,6 +365,7 @@ def remap(
         "nearest_s2d",
         "nearest_d2s",
     ] = "bilinear",
+    unmapped_to_nan: bool = True,
     parallel: bool = False,
 ) -> xr.Dataset | xr.DataArray:
     """Remap source data to the destination grid using xESMF."""
@@ -437,6 +437,7 @@ def remap(
         parallel=parallel,
         filename=str(weight_file),
         reuse_weights=reuse,
+        unmapped_to_nan=unmapped_to_nan,
     )
 
     return regridder(grid_in, output_chunks=output_chunks)

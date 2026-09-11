@@ -54,6 +54,7 @@ class GeoBase:
             "nearest_s2d",
             "nearest_d2s",
         ] = "bilinear",
+        unmapped_to_nan: bool = True,
         parallel: bool = False,
     ) -> xr.Dataset | xr.DataArray:
         """Regrid onto the horizontal grid of ``grid_out``.
@@ -64,6 +65,8 @@ class GeoBase:
             Object whose 'lat' and 'lon' coordinates define the target grid.
         method : {"bilinear", "conservative", "conservative_normed", "patch", "nearest_s2d", "nearest_d2s"}, default "bilinear"
             ESMF regridding method.
+        unmapped_to_nan : bool, default True
+            Whether to set unmapped target points to NaN.
         parallel : bool, default False
             Build the weights in parallel with Dask.
 
@@ -71,7 +74,6 @@ class GeoBase:
         -------
         xarray.Dataset or xarray.DataArray
             The object on the target grid.
-
         """
 
         kwargs = exclude_key("self", dict(locals()))

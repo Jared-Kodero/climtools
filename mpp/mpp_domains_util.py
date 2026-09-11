@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..xarray.chunks import get_balanced_bounds
+from .mpp_domains_define import mpp_compute_extent
 from .mpp import mpp_chksum
 from .mpp_domains import Domain, DomainMismatchError
 from .mpp_domains_define import mpp_get_cartesian_domain
@@ -60,7 +60,7 @@ def mpp_get_compute_domains(
     """
 
     return [
-        get_balanced_bounds(int(global_size), rank, int(dim_size), min_partition_size)
+        mpp_compute_extent(int(global_size), rank, int(dim_size), min_partition_size)
         for rank in range(int(dim_size))
     ]
 
