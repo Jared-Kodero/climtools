@@ -45,7 +45,8 @@ class GeoBase:
     # -- regridding and masking ------------------------------------------
     def remap(
         self,
-        grid_out: xr.Dataset | xr.DataArray,
+        grid_out: xr.Dataset | xr.DataArray | None = None,
+        grid_out_resolution: float | None = None,
         method: Literal[
             "bilinear",
             "conservative",
@@ -57,12 +58,14 @@ class GeoBase:
         unmapped_to_nan: bool = True,
         parallel: bool = False,
     ) -> xr.Dataset | xr.DataArray:
-        """Regrid onto the horizontal grid of ``grid_out``.
+        """Regrid onto the horizontal grid of ``grid_out`` or a target resolution.
 
         Parameters
         ----------
-        grid_out : xarray.Dataset or xarray.DataArray
+        grid_out : xarray.Dataset or xarray.DataArray, optional
             Object whose 'lat' and 'lon' coordinates define the target grid.
+        grid_out_resolution : float, optional
+            Target grid resolution in degrees if ``grid_out`` is not provided.
         method : {"bilinear", "conservative", "conservative_normed", "patch", "nearest_s2d", "nearest_d2s"}, default "bilinear"
             ESMF regridding method.
         unmapped_to_nan : bool, default True

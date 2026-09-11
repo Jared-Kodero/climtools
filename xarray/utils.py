@@ -354,9 +354,15 @@ def grid_id(coords: xr.DataArray | xr.Dataset) -> str:
     return hashlib.blake2b(signature.encode("utf-8"), digest_size=8).hexdigest()
 
 
+from typing import Literal
+
+import xarray as xr
+
+
 def remap(
     grid_in: xr.Dataset | xr.DataArray,
-    grid_out: xr.Dataset | xr.DataArray,
+    grid_out: xr.Dataset | xr.DataArray | None = None,
+    grid_out_resolution: float | None = None,
     method: Literal[
         "bilinear",
         "conservative",
@@ -372,9 +378,37 @@ def remap(
 
     import xesmf as xe
 
+    if grid_out is not None and grid_out_resolution is not None:
+        raise ValueError(
+            "Provide either `grid_out` or `grid_out_resolution`, not both."
+        )
+
+    if grid_out is None and grid_out_resolution is None:
+        raise ValueError("You must provide either `grid_out` or `grid_out_resolution`.")
+
     for coord in ("lat", "lon"):
         if coord not in grid_in.dims:
             raise ValueError(f"Input grid must contain {coord!r} dimension.")
+
+    if grid_out is None:
+        lat_min, lat_max = float(grid_in["lat"].min()), float(grid_in["lat"].max())
+        lon_min, lon_max = float(grid_in["lon"].min()), float(grid_in["lon"].max())
+
+        lat_coords = np.arange(
+            lat_min, lat_max + grid_out_resolution, grid_out_resolution
+        )
+        lon_coords = np.arange(
+            lon_min, lon_max + grid_out_resolution, grid_out_resolution
+        )
+
+        grid_out = xr.Dataset(
+            coords={
+                "lat": lat_coords,
+                "lon": lon_coords,
+            }
+        )
+
+    for coord in ("lat", "lon"):
         if coord not in grid_out.dims:
             raise ValueError(f"Output grid must contain {coord!r} dimension.")
 
