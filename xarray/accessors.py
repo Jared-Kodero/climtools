@@ -43,7 +43,7 @@ class GeoBase:
         return f"<xgeo accessor on {kind} ({dims})>"
 
     # -- regridding and masking ------------------------------------------
-    def remap(
+    def regrid(
         self,
         grid_out: xr.Dataset | xr.DataArray | None = None,
         grid_out_resolution: float | None = None,
@@ -80,7 +80,7 @@ class GeoBase:
         """
 
         kwargs = exclude_key("self", dict(locals()))
-        return xgeo.remap(self._obj, **kwargs)
+        return xgeo.regrid(self._obj, **kwargs)
 
     def mask(
         self,

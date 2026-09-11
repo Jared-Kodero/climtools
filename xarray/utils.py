@@ -359,7 +359,7 @@ from typing import Literal
 import xarray as xr
 
 
-def remap(
+def regrid(
     grid_in: xr.Dataset | xr.DataArray,
     grid_out: xr.Dataset | xr.DataArray | None = None,
     grid_out_resolution: float | None = None,
@@ -374,7 +374,7 @@ def remap(
     unmapped_to_nan: bool = True,
     parallel: bool = False,
 ) -> xr.Dataset | xr.DataArray:
-    """Remap source data to the destination grid using xESMF."""
+    """Regrid source data to the destination grid using xESMF."""
 
     import xesmf as xe
 
@@ -526,7 +526,7 @@ def mask(
     subset_mask = mask.sortby(["lat", "lon"]).sel(
         lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max)
     )
-    remapped_mask = remap(subset_mask, data, method="nearest_s2d", parallel=parallel)
+    remapped_mask = regrid(subset_mask, data, method="nearest_s2d", parallel=parallel)
 
     return data.where(remapped_mask == valid_value, other=np.nan)
 
