@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     )
     from . import preprocess, stats
     from .progress import DaskProgressBar, SerialProgressBar
+    from .shared_mem import SharedMemoryObject
     from .utils import N_CPUS
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "MPIXarray",
     "SerialProgressBar",
     "SetupDask",
+    "SharedMemoryObject",
     "add_local_solar_time",
     "cmaps",
     "fill_nan_2d",
@@ -83,6 +85,7 @@ _LAZY_IMPORTS = {
     "mpi_create_dataset": ("..xarray.io", "mpi_create_dataset"),
     "mpi_partition_data": ("..xarray.io", "mpi_partition_data"),
     "MPIXarray": ("..xarray.core", "MPIXarray"),
+    "SharedMemoryObject": (".shared_mem", "SharedMemoryObject"),
 }
 
 

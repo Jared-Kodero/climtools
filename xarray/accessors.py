@@ -9,9 +9,8 @@ import xarray as xr
 
 from ..core import stats as calc
 from ..core import xgeo
-from ..core.utils import SharedMemoryObject, exclude_key
+from ..core.utils import exclude_key
 from ..viz import plotting
-from ..viz.plotting import MapProjection, PlotMethod
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -370,7 +369,7 @@ class GeoBase:
         multiprocessing.shared_memory.SharedMemory
             Python interface to operating-system shared memory.
         """
-        return SharedMemoryObject(self._obj, readonly=readonly)
+        return xgeo.SharedMemoryObject(self._obj, readonly=readonly)
 
 
 @xr.register_dataarray_accessor("xgeo")
@@ -388,8 +387,22 @@ class GeoDataArray(GeoBase):
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
         interactive: bool = False,
-        method: PlotMethod = "default",
-        projection: MapProjection | None = None,
+        method: Literal[
+            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
+        ] = "default",
+        projection: Literal[
+            "PlateCarree",
+            "Mercator",
+            "Robinson",
+            "Mollweide",
+            "Orthographic",
+            "LambertConformal",
+            "AlbersEqualArea",
+            "Stereographic",
+            "NorthPolarStereo",
+            "SouthPolarStereo",
+        ]
+        | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -526,8 +539,22 @@ class GeoDataArray(GeoBase):
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
-        method: PlotMethod = "default",
-        projection: MapProjection | None = None,
+        method: Literal[
+            "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
+        ] = "default",
+        projection: Literal[
+            "PlateCarree",
+            "Mercator",
+            "Robinson",
+            "Mollweide",
+            "Orthographic",
+            "LambertConformal",
+            "AlbersEqualArea",
+            "Stereographic",
+            "NorthPolarStereo",
+            "SouthPolarStereo",
+        ]
+        | None = None,
         cmap: str | LinearSegmentedColormap | ListedColormap | None = None,
         norm: Normalize | None = None,
         vmin: float | None = None,
@@ -1014,6 +1041,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         raise RuntimeError("Cannot locate the xarray package.")
 
     marker = Path(xarray_spec.origin).resolve().parent / ".xgeo_patch"
+    xarray_init = Path(xarray_spec.origin).resolve()
 
     if not force and marker.exists():
         return ()
@@ -1298,11 +1326,30 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
             path.write_text(patched, encoding="utf-8")
             changed.append(path)
 
+    # Make xarray import register the xgeo accessors at runtime.
+    raw = xarray_init.read_text(encoding="utf-8")
+    pristine = strip(raw)
+
+    runtime_region = region(
+        "runtime registration",
+        "",
+        [f"import {__package__}.accessors as _xgeo_accessors\n"],
+    )
+
+    patched = pristine.rstrip() + "\n\n" + runtime_region
+
+    compile(patched, str(xarray_init), "exec")
+
+    if patched != raw:
+        xarray_init.write_text(patched, encoding="utf-8")
+        changed.append(xarray_init)
+
     # The marker is created only after every source modification succeeds.
     TMP = marker.with_suffix(marker.suffix + ".TMP")
 
     TMP.write_text(json.dumps(signature(), sort_keys=True), encoding="utf-8")
-
     TMP.replace(marker)
 
-    return tuple(changed)
+    if changed:
+        print("Updated xarray source for IDE typing:")
+        print("\n".join(f"  {path}" for path in changed))

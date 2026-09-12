@@ -57,7 +57,6 @@ if TYPE_CHECKING:
         LockedLogger,
         LockFile,
         RedirectStreams,
-        SharedMemoryObject,
         exclude_key,
         locked_print,
     )
@@ -83,7 +82,6 @@ __all__ = [
     "LockedLogger",
     "RedirectStreams",
     "SerialProgressBar",
-    "SharedMemoryObject",
     "cdo",
     "cmaps",
     "exclude_key",
@@ -109,7 +107,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SerialProgressBar": (".core.progress", "SerialProgressBar"),
     "locked_print": (".core.utils", "locked_print"),
     "exclude_key": (".core.utils", "exclude_key"),
-    "SharedMemoryObject": (".core.utils", "SharedMemoryObject"),
 }
 
 

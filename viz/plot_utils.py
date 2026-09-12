@@ -148,6 +148,7 @@ def norm_levels(
     vmax: float | None,
     levels: int | Sequence[float] | np.ndarray | None,
     data: xr.DataArray | None = None,
+    robust: bool = False,
 ) -> tuple[float | None, float | None, np.ndarray | None]:
     """Normalize plotting limits and level boundaries.
 
@@ -171,6 +172,8 @@ def norm_levels(
         Number of levels, explicit level boundaries, or ``None``.
     data
         Data used to infer missing plotting limits.
+    robust
+        Whether to use robust statistics (percentiles) for limit inference.
 
     Returns
     -------
@@ -189,24 +192,28 @@ def norm_levels(
         if data is None:
             return vmin, vmax, None
 
-        qmin, qmax = data.quantile([0.02, 0.98], skipna=True).compute().values
+        if robust:
+            _vmin, _vmax = data.quantile([0.02, 0.98], skipna=True).compute().values
+        else:
+            _vmin = data.min(skipna=True).compute().item()
+            _vmax = data.max(skipna=True).compute().item()
 
-        qmin = float(qmin)
-        qmax = float(qmax)
+        _vmin = float(_vmin)
+        _vmax = float(_vmax)
 
-        if not np.isfinite(qmin) or not np.isfinite(qmax):
+        if not np.isfinite(_vmin) or not np.isfinite(_vmax):
             return vmin, vmax, None
 
         has_negative = bool((data < 0).any().compute())
         has_positive = bool((data > 0).any().compute())
 
         if has_negative and has_positive:
-            bound = max(abs(qmin), abs(qmax))
+            bound = max(abs(_vmin), abs(_vmax))
             data_vmin = -bound
             data_vmax = bound
         else:
-            data_vmin = qmin
-            data_vmax = qmax
+            data_vmin = _vmin
+            data_vmax = _vmax
 
         if vmin is None:
             vmin = data_vmin
