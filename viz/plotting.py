@@ -2112,7 +2112,7 @@ class Adder:
         *,
         x: str | None = None,
         y: str | None = None,
-        level: float = 0.05,
+        level: float | None = 0.05,
         color: str = "grey",
         alpha: float = 0.3,
         marker: str | None = None,
@@ -2129,7 +2129,7 @@ class Adder:
             Pointwise p-values.
         x, y : str, optional
             Horizontal coordinate names.
-        level : float, default 0.05
+        level : float, default 0.05 if None, all points are plotted
             Significance threshold.
         color : str, default "grey"
             Marker face color.

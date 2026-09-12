@@ -1921,7 +1921,7 @@ def plot_significance(
     *,
     x: str = "lon",
     y: str = "lat",
-    level: float = 0.05,
+    level: float | None = 0.05,
     color: str = "grey",
     alpha: float = 0.3,
     marker: str | None = None,
@@ -1942,7 +1942,7 @@ def plot_significance(
         Destination axis.
     x, y : str, default "lon", "lat"
         Horizontal coordinate names.
-    level : float, default 0.05
+    level : float, default 0.05, if None, all points are plotted
         Significance threshold.
     color : str, default "grey"
         Marker face color.
@@ -1975,8 +1975,10 @@ def plot_significance(
             y: slice(None, None, y_stride),
         }
     )
+    data.name = "p_value"
     frame = selected.rename("p_value").to_dataframe().reset_index()
-    frame = frame.loc[frame["p_value"] < level].dropna(subset=["p_value"])
+    if level:
+        frame = frame.loc[frame["p_value"] < level].dropna(subset=["p_value"])
     options = is_geoaxes(
         ax,
         {
