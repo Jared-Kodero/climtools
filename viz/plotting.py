@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -35,6 +34,8 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
+
+import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -52,7 +53,6 @@ from .plot_utils import (
     get_quiver_key_mag,
     interactive_backend,
     norm_input,
-    norm_levels,
     plot_contour,
     plot_contourf,
     plot_default,
@@ -61,6 +61,7 @@ from .plot_utils import (
     plot_quiver,
     plot_scatter,
     plot_significance,
+    resolve_cmap_params,
     select_facet,
     set_preview_quality,
     to_lon180,
@@ -618,8 +619,6 @@ class FacetedPlot:
         Maximum number of longitude tick intervals.
     yticks_bins : float, default 5
         Maximum number of latitude tick intervals.
-    format_xy_ticks : bool, default False
-        Format longitude and latitude ticks with degree symbols and cardinal directions.
     add_grid_bounds:
        If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
@@ -659,7 +658,6 @@ class FacetedPlot:
         xy_ticks: bool = False,
         xticks_bins: float = 5,
         yticks_bins: float = 5,
-        format_xy_ticks: bool = False,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -725,7 +723,6 @@ class FacetedPlot:
                     grid,
                     xticks_bins=xticks_bins,
                     yticks_bins=yticks_bins,
-                    format_xy_ticks=format_xy_ticks,
                 )
             if add_grid_bounds:
                 add_grid_boundary(
@@ -962,8 +959,6 @@ class GeoPlot:
         Maximum number of longitude tick intervals.
     yticks_bins : float, default 5
         Maximum number of latitude tick intervals.
-    format_xy_ticks : bool, default False
-        Format longitude and latitude ticks with degree symbols and cardinal directions.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     coastlines, borders, states : bool, default True
@@ -1066,7 +1061,6 @@ class GeoPlot:
         xy_ticks: bool = False,
         xticks_bins: float = 5,
         yticks_bins: float = 5,
-        format_xy_ticks: bool = False,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -1120,7 +1114,20 @@ class GeoPlot:
         self.grid: xr.Dataset = self.data.coords.to_dataset()[[self.x, self.y]]
         self.add = Adder(self)
 
-        vmin, vmax, levels = norm_levels(vmin, vmax, levels, self.data, robust=robust)
+        cmap_params = resolve_cmap_params(
+            vmin,
+            vmax,
+            levels,
+            cmap,
+            self.data,
+            robust=robust,
+        )
+        self.vmin = cmap_params.vmin
+        self.vmax = cmap_params.vmax
+        self.levels = cmap_params.levels
+        self.cmap = cmap or cmap_params.cmap
+        self.norm = norm
+        self.extend = extend
 
         if self.is_faceted:
             facet = FacetedPlot(
@@ -1137,7 +1144,6 @@ class GeoPlot:
                 xy_ticks=xy_ticks,
                 xticks_bins=xticks_bins,
                 yticks_bins=yticks_bins,
-                format_xy_ticks=format_xy_ticks,
                 add_grid_bounds=add_grid_bounds,
                 coastlines=coastlines,
                 borders=borders,
@@ -1152,12 +1158,12 @@ class GeoPlot:
             self.axes: AxesType | np.ndarray = facet.axes
             self.artist: ScalarPrimitive | list[ScalarPrimitive] = facet.render(
                 method=method,
-                cmap=cmap,
-                norm=norm,
-                vmin=vmin,
-                vmax=vmax,
-                levels=levels,
-                extend=extend,
+                cmap=self.cmap,
+                norm=self.norm,
+                vmin=self.vmin,
+                vmax=self.vmax,
+                levels=self.levels,
+                extend=self.extend,
                 robust=robust,
                 rasterized=rasterized,
                 clabel=clabel or method == "contour",
@@ -1208,7 +1214,6 @@ class GeoPlot:
                     self.grid,
                     xticks_bins=xticks_bins,
                     yticks_bins=yticks_bins,
-                    format_xy_ticks=format_xy_ticks,
                 )
             self.artist = _plot_scalar(
                 self.data,
@@ -1217,12 +1222,12 @@ class GeoPlot:
                 method=method,
                 x=self.x,
                 y=self.y,
-                cmap=cmap,
-                norm=norm,
-                vmin=vmin,
-                vmax=vmax,
-                levels=levels,
-                extend=extend,
+                cmap=self.cmap,
+                norm=self.norm,
+                vmin=self.vmin,
+                vmax=self.vmax,
+                levels=self.levels,
+                extend=self.extend,
                 robust=robust,
                 rasterized=rasterized,
                 **kwargs,
@@ -1300,7 +1305,7 @@ class GeoPlot:
                 adjust=False,
                 pad_bottom=True if self.quiver_key is not None else None,
                 drawedges=drawedges,
-                extend=extend,
+                extend=self.extend,
                 label=cbar_label,
                 ticks=ticks,
                 tick_labels=tick_labels,
@@ -2352,8 +2357,6 @@ class Animate:
         Maximum number of longitude tick intervals.
     yticks_bins : float, default 5
         Maximum number of latitude tick intervals.
-    format_xy_ticks : bool, default False
-        Format longitude and latitude ticks with degree symbols and cardinal directions.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
@@ -2443,7 +2446,6 @@ class Animate:
         xy_ticks: bool = False,
         xticks_bins: float = 5,
         yticks_bins: float = 5,
-        format_xy_ticks: bool = False,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -2536,7 +2538,6 @@ class Animate:
             "xy_ticks": xy_ticks,
             "xticks_bins": xticks_bins,
             "yticks_bins": yticks_bins,
-            "format_xy_ticks": format_xy_ticks,
             "add_grid_bounds": add_grid_bounds,
             "coastlines": coastlines,
             "borders": borders,
@@ -2757,7 +2758,6 @@ def geo(
     xy_ticks: bool = False,
     xticks_bins: float = 5,
     yticks_bins: float = 5,
-    format_xy_ticks: bool = False,
     add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -2821,8 +2821,6 @@ def geo(
         Maximum number of longitude tick intervals.
     yticks_bins : float, default 5
         Maximum number of latitude tick intervals.
-    format_xy_ticks : bool, default False
-        Format longitude and latitude ticks with degree symbols and cardinal directions.
     add_grid_bounds : bool
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_extent : tuple of float, optional
@@ -2901,7 +2899,6 @@ def animate(
     xy_ticks: bool = False,
     xticks_bins: float = 5,
     yticks_bins: float = 5,
-    format_xy_ticks: bool = False,
     add_grid_bounds: bool = False,
     coastlines: bool = True,
     borders: bool = True,
@@ -2960,8 +2957,6 @@ def animate(
         Maximum number of longitude tick intervals.
     yticks_bins : float, default 5
         Maximum number of latitude tick intervals.
-    format_xy_ticks : bool, default False
-        Format longitude and latitude ticks with degree symbols and cardinal directions.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     u_component, v_component, quiver_kwargs : optional

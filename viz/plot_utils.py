@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import sys
 import warnings
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, NamedTuple
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -19,11 +20,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
+from matplotlib.colors import Colormap
 from matplotlib.ticker import MaxNLocator
+
+import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -64,7 +67,6 @@ __all__ = [
     "get_projection",
     "get_quiver_key_mag",
     "norm_input",
-    "norm_levels",
     "normalize_subsample",
     "plot_contour",
     "plot_contourf",
@@ -74,6 +76,7 @@ __all__ = [
     "plot_quiver",
     "plot_scatter",
     "plot_significance",
+    "resolve_cmap_params",
     "select_facet",
     "validate_animation_inputs",
     "validate_data",
@@ -143,13 +146,21 @@ def validate_data(data: xr.DataArray) -> xr.DataArray:
     return data
 
 
-def norm_levels(
+class CmapParams(NamedTuple):
+    vmin: float | None
+    vmax: float | None
+    levels: np.ndarray | None
+    cmap: Colormap
+
+
+def resolve_cmap_params(
     vmin: float | None,
     vmax: float | None,
     levels: int | Sequence[float] | np.ndarray | None,
+    cmap: Colormap | str | None = None,
     data: xr.DataArray | None = None,
     robust: bool = False,
-) -> tuple[float | None, float | None, np.ndarray | None]:
+) -> CmapParams:
     """Normalize plotting limits and level boundaries.
 
     Explicit level boundaries are returned unchanged. If either ``vmin`` or
@@ -170,6 +181,8 @@ def norm_levels(
         Upper plotting limit.
     levels
         Number of levels, explicit level boundaries, or ``None``.
+    cmap
+        Colormap name or instance.
     data
         Data used to infer missing plotting limits.
     robust
@@ -177,20 +190,21 @@ def norm_levels(
 
     Returns
     -------
-    vmin
-        Normalized lower plotting limit.
-    vmax
-        Normalized upper plotting limit.
-    levels
-        Explicit increasing level boundaries, or ``None`` if they cannot be
-        determined.
+    NormLevelsResult
+        A named tuple containing normalized `vmin`, `vmax`, `levels`, and resolved `cmap`.
     """
+    divergent = False
+
     if isinstance(levels, (list, tuple, np.ndarray)):
-        return vmin, vmax, np.asarray(levels)
+        levels_arr = np.asarray(levels)
+        # Regular arrays/lists don't need .compute()
+        divergent = bool((levels_arr < 0).any()) and bool((levels_arr > 0).any())
+        cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
+        return CmapParams(vmin, vmax, levels_arr, cmap)
 
     if vmin is None or vmax is None:
         if data is None:
-            return vmin, vmax, None
+            return CmapParams(vmin, vmax, None, cmap)
 
         if robust:
             _vmin, _vmax = data.quantile([0.02, 0.98], skipna=True).compute().values
@@ -202,12 +216,13 @@ def norm_levels(
         _vmax = float(_vmax)
 
         if not np.isfinite(_vmin) or not np.isfinite(_vmax):
-            return vmin, vmax, None
+            return CmapParams(vmin, vmax, None, cmap)
 
-        has_negative = bool((data < 0).any().compute())
-        has_positive = bool((data > 0).any().compute())
+        divergent = bool((data < 0).any().compute()) and bool(
+            (data > 0).any().compute()
+        )
 
-        if has_negative and has_positive:
+        if divergent:
             bound = max(abs(_vmin), abs(_vmax))
             data_vmin = -bound
             data_vmax = bound
@@ -220,11 +235,15 @@ def norm_levels(
         if vmax is None:
             vmax = data_vmax
 
+    cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
+
     if isinstance(levels, int):
-        return vmin, vmax, np.linspace(vmin, vmax, levels)
+        return CmapParams(vmin, vmax, np.linspace(vmin, vmax, levels), cmap)
 
     if levels is None:
-        return vmin, vmax, MaxNLocator(nbins=10).tick_values(vmin, vmax)
+        return CmapParams(
+            vmin, vmax, MaxNLocator(nbins=10).tick_values(vmin, vmax), cmap
+        )
 
     raise TypeError(f"unsupported levels type: {type(levels).__name__}")
 
@@ -592,7 +611,6 @@ def add_xy_ticks(
     grid: xr.Dataset,
     xticks_bins: float = 5,
     yticks_bins: float = 5,
-    format_xy_ticks: bool = False,
 ) -> None:
     """Add longitude and latitude ticks to a Cartopy axis with ticks pointing outward."""
 
@@ -612,9 +630,8 @@ def add_xy_ticks(
     if isinstance(ax.projection, (ccrs.PlateCarree, ccrs.Mercator)):
         ax.set_xticks(xticks, crs=ccrs.PlateCarree())
         ax.set_yticks(yticks, crs=ccrs.PlateCarree())
-        if format_xy_ticks:
-            ax.xaxis.set_major_formatter(LongitudeFormatter())
-            ax.yaxis.set_major_formatter(LatitudeFormatter())
+        ax.xaxis.set_major_formatter(LongitudeFormatter())
+        ax.yaxis.set_major_formatter(LatitudeFormatter())
         return
 
     gridliner = ax.gridlines(
@@ -627,9 +644,8 @@ def add_xy_ticks(
     gridliner.right_labels = False
     gridliner.xlines = False
     gridliner.ylines = False
-    if format_xy_ticks:
-        gridliner.xformatter = LongitudeFormatter()
-        gridliner.yformatter = LatitudeFormatter()
+    gridliner.xformatter = LongitudeFormatter()
+    gridliner.yformatter = LatitudeFormatter()
 
 
 def add_map_features(

@@ -17,6 +17,7 @@ from ..mpi.mpi_init import MPI
 if TYPE_CHECKING:
     from .core import MPIXarray
 
+from ..mpp.mpp_domains_define import mpp_define_domains
 from .chunks import (
     compute_save_chunks,
     get_chunk_bounds,
@@ -37,7 +38,6 @@ from .meta import (
     mpp_update_meta,
     set_save_chunks,
 )
-from ..mpp.mpp_domains_define import mpp_define_domains
 from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
 __all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]
