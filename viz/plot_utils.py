@@ -605,14 +605,17 @@ def add_contour_labels(
     return list(labels)
 
 
+from matplotlib.figure import Figure
+
+
 def add_xy_ticks(
     fig: Figure,
     ax: cgeo.GeoAxes,
     grid: xr.Dataset,
-    xticks_bins: float = 5,
-    yticks_bins: float = 5,
+    xticks_bins: int= 5,
+    yticks_bins: int= 5,
 ) -> None:
-    """Add longitude and latitude ticks to a Cartopy axis with ticks pointing outward."""
+    """Add longitude and latitude ticks to a Cartopy axis with numeric signs instead of cardinal letters."""
 
     lon = grid["lon"]
     lat = grid["lat"]
@@ -630,8 +633,8 @@ def add_xy_ticks(
     if isinstance(ax.projection, (ccrs.PlateCarree, ccrs.Mercator)):
         ax.set_xticks(xticks, crs=ccrs.PlateCarree())
         ax.set_yticks(yticks, crs=ccrs.PlateCarree())
-        ax.xaxis.set_major_formatter(LongitudeFormatter())
-        ax.yaxis.set_major_formatter(LatitudeFormatter())
+        ax.xaxis.set_major_formatter(LongitudeFormatter(direction_label=False))
+        ax.yaxis.set_major_formatter(LatitudeFormatter(direction_label=False))
         return
 
     gridliner = ax.gridlines(
@@ -644,8 +647,8 @@ def add_xy_ticks(
     gridliner.right_labels = False
     gridliner.xlines = False
     gridliner.ylines = False
-    gridliner.xformatter = LongitudeFormatter()
-    gridliner.yformatter = LatitudeFormatter()
+    gridliner.xformatter = LongitudeFormatter(direction_label=False)
+    gridliner.yformatter = LatitudeFormatter(direction_label=False)
 
 
 def add_map_features(
