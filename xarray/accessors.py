@@ -324,7 +324,7 @@ class GeoBase:
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.to_netcdf(self._obj, **kwargs)
 
-    def shared_memory(self, *, readonly: bool = True) -> SharedMemoryObject:
+    def shared_memory(self, *, readonly: bool = True) -> xgeo.SharedMemoryObject:
         """Create an interprocess shared-memory representation.
 
         The numerical buffers backing the xarray object are copied into
@@ -422,6 +422,7 @@ class GeoDataArray(GeoBase):
         xy_ticks: bool = False,
         xticks_bins: float = 5,
         yticks_bins: float = 5,
+        format_xy_ticks: bool = False,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -491,6 +492,8 @@ class GeoDataArray(GeoBase):
             Maximum number of longitude tick intervals.
         yticks_bins : float, default 5
             Maximum number of latitude tick intervals.
+        format_xy_ticks : bool, default False
+            Format longitude and latitude ticks with degree symbols and cardinal directions.
         set_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
         coastlines, borders, states, ocean, land, lakes, rivers : bool
@@ -574,6 +577,7 @@ class GeoDataArray(GeoBase):
         xy_ticks: bool = False,
         xticks_bins: float = 5,
         yticks_bins: float = 5,
+        format_xy_ticks: bool = False,
         add_grid_bounds: bool = False,
         coastlines: bool = True,
         borders: bool = True,
@@ -647,6 +651,8 @@ class GeoDataArray(GeoBase):
             Maximum number of longitude tick intervals.
         yticks_bins : float, default 5
             Maximum number of latitude tick intervals.
+        format_xy_ticks : bool, default False
+            Format longitude and latitude ticks with degree symbols and cardinal directions.
         set_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
         coastlines, borders, states, ocean, land, lakes, rivers : bool

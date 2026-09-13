@@ -592,8 +592,9 @@ def add_xy_ticks(
     grid: xr.Dataset,
     xticks_bins: float = 5,
     yticks_bins: float = 5,
+    format_xy_ticks: bool = False,
 ) -> None:
-    """Add longitude and latitude ticks to a Cartopy axis."""
+    """Add longitude and latitude ticks to a Cartopy axis with ticks pointing outward."""
 
     lon = grid["lon"]
     lat = grid["lat"]
@@ -605,11 +606,15 @@ def add_xy_ticks(
         float(lat.min()), float(lat.max())
     )
 
+    # Force tick marks to point outward
+    ax.tick_params(axis="both", direction="out", which="both")
+
     if isinstance(ax.projection, (ccrs.PlateCarree, ccrs.Mercator)):
         ax.set_xticks(xticks, crs=ccrs.PlateCarree())
         ax.set_yticks(yticks, crs=ccrs.PlateCarree())
-        ax.xaxis.set_major_formatter(LongitudeFormatter())
-        ax.yaxis.set_major_formatter(LatitudeFormatter())
+        if format_xy_ticks:
+            ax.xaxis.set_major_formatter(LongitudeFormatter())
+            ax.yaxis.set_major_formatter(LatitudeFormatter())
         return
 
     gridliner = ax.gridlines(
@@ -622,8 +627,9 @@ def add_xy_ticks(
     gridliner.right_labels = False
     gridliner.xlines = False
     gridliner.ylines = False
-    gridliner.xformatter = LongitudeFormatter()
-    gridliner.yformatter = LatitudeFormatter()
+    if format_xy_ticks:
+        gridliner.xformatter = LongitudeFormatter()
+        gridliner.yformatter = LatitudeFormatter()
 
 
 def add_map_features(
