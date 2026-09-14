@@ -339,13 +339,14 @@ def theme(
 
 def colorbar(
     mappable: ScalarMappable,
-    ax: AxesType | np.ndarray,
-    fig: Figure | None = None,
+    cax: Axes | None = None,
+    ax: Axes | cgeo.GeoAxes | np.ndarray | None = None,
+    use_gridspec: bool = True,
     *,
+    fig: Figure | None = None,
     orientation: Literal["vertical", "horizontal"] = "vertical",
     subplots: bool = False,
     adjust: bool = True,
-    cax: Axes | None = None,
     pad_bottom: bool | None = None,
     drawedges: bool = False,
     extend: Literal["neither", "both", "min", "max"] | None = None,
@@ -353,28 +354,33 @@ def colorbar(
     ticks: Sequence[float] | np.ndarray | None = None,
     tick_labels: Sequence[str] | None = None,
     powerlimits: tuple[int, int] = (-3, 3),
+    **kwargs,
 ) -> Colorbar:
     """Add a colorbar for a scalar plotting primitive.
 
     Parameters
     ----------
-    fig : matplotlib.figure.Figure
-        Parent figure.
-    ax : matplotlib.axes.Axes or numpy.ndarray
-        Axis or axes associated with ``mappable``.
     mappable : matplotlib.cm.ScalarMappable
         Primitive described by the colorbar.
+    cax : matplotlib.axes.Axes, optional
+        Axes into which the colorbar will be drawn. If ``None``, a new
+        Axes is created and space is stolen from *ax*.
+    ax : matplotlib.axes.Axes or numpy.ndarray, optional
+        Parent Axes from which space for a new colorbar Axes will be stolen.
+    use_gridspec : bool, default True
+        If *cax* is ``None`` and *ax* is positioned with a subplotspec,
+        position *cax* with a subplotspec.
+    fig : matplotlib.figure.Figure, optional
+        Parent figure.
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation.
     subplots : bool, default False
         Position the colorbar relative to a facet grid.
     adjust : bool, default True
         Apply tight layout before creating the colorbar axis.
-    cax : matplotlib.axes.Axes, optional
-        Existing colorbar axis.
     pad_bottom : bool, optional
-        Force additional space below a horizontal colorbar. When omitted, infer
-        the requirement from the target axis labels.
+        Force additional space below a horizontal colorbar. When omitted,
+        infer the requirement from the target axis labels.
     drawedges : bool, default False
         Draw edges between color intervals.
     extend : {"neither", "both", "min", "max"}, optional
@@ -387,14 +393,17 @@ def colorbar(
         Explicit tick labels.
     powerlimits : tuple of int, default (-3, 3)
         Scientific notation limits for automatic tick formatting.
+    **kwargs
+        Additional keyword arguments passed directly to ``Figure.colorbar``.
 
     Returns
     -------
     matplotlib.colorbar.Colorbar
         Created colorbar.
     """
-
-    return _add_colorbar(**dict(locals()))
+    params = locals()
+    kwargs = params.pop("kwargs")
+    return _add_colorbar(**params, **kwargs)
 
 
 def create_figure(
