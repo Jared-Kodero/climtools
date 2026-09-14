@@ -1312,8 +1312,8 @@ class GeoPlot:
 
             self.colorbar = _add_colorbar(
                 self.mappable,
-                self.axes,
-                self.figure,
+                ax=self.axes,
+                fig=self.figure,
                 orientation=resolved_orientation,
                 subplots=self.is_faceted,
                 adjust=False,
@@ -2241,8 +2241,8 @@ class Adder:
         """
         colorbar = _add_colorbar(
             mappable or self._plot.mappable,
-            self._plot.axes,
-            self._plot.figure,
+            ax=self._plot.axes,
+            fig=self._plot.figure,
             orientation=orientation,
             subplots=self._plot.is_faceted,
             pad_bottom=True if self._plot.quiver_key is not None else None,
