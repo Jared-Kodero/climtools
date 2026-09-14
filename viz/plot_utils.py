@@ -23,8 +23,8 @@ import pandas as pd
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
-from matplotlib.colors import Colormap
-from matplotlib.ticker import MaxNLocator
+from matplotlib.colors import BoundaryNorm, Colormap, Normalize
+from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
 import xarray as xr
 
@@ -35,6 +35,7 @@ from ..xarray.utils import (
     set_edges_to_nan,
     to_lon180,
 )
+from .cmaps import classify_cmap, slice_cmap
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -151,98 +152,166 @@ class CmapParams(NamedTuple):
     vmax: float | None
     levels: np.ndarray | None
     cmap: Colormap
+    extend: str | None = None
+    norm: Normalize | None = None
 
 
 def resolve_cmap_params(
-    vmin: float | None,
-    vmax: float | None,
-    levels: int | Sequence[float] | np.ndarray | None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    levels: int | Sequence[float] | np.ndarray | None = None,
     cmap: Colormap | str | None = None,
     data: xr.DataArray | None = None,
     robust: bool = False,
+    extend: str | None = None,
+    norm: Normalize | None = None,
 ) -> CmapParams:
-    """Normalize plotting limits and level boundaries.
+    """Normalize plotting limits and level boundaries."""
 
-    Explicit level boundaries are returned unchanged. If either ``vmin`` or
-    ``vmax`` is missing and ``data`` is provided, the missing limits are
-    inferred from the 2nd and 98th percentiles of the data. When both negative
-    and positive values are present, the inferred range is made symmetric
-    about zero.
+    user_cmap = cmap
+    vmin_was_none = vmin is None
+    vmax_was_none = vmax is None
 
-    Integer ``levels`` values generate evenly spaced boundaries between
-    ``vmin`` and ``vmax``. If ``levels`` is ``None``, suitable boundaries are
-    generated with ``MaxNLocator``.
+    # Harmonize norm with vmin and vmax.
+    if norm is not None:
+        if norm.vmin is None:
+            norm.vmin = vmin
+        else:
+            if not vmin_was_none and vmin != norm.vmin:
+                raise ValueError("Cannot supply vmin and a norm with a different vmin.")
+            vmin = norm.vmin
 
-    Parameters
-    ----------
-    vmin
-        Lower plotting limit.
-    vmax
-        Upper plotting limit.
-    levels
-        Number of levels, explicit level boundaries, or ``None``.
-    cmap
-        Colormap name or instance.
-    data
-        Data used to infer missing plotting limits.
-    robust
-        Whether to use robust statistics (percentiles) for limit inference.
+        if norm.vmax is None:
+            norm.vmax = vmax
+        else:
+            if not vmax_was_none and vmax != norm.vmax:
+                raise ValueError("Cannot supply vmax and a norm with a different vmax.")
+            vmax = norm.vmax
 
-    Returns
-    -------
-    NormLevelsResult
-        A named tuple containing normalized `vmin`, `vmax`, `levels`, and resolved `cmap`.
-    """
-    divergent = False
+    # BoundaryNorm defines the level boundaries.
+    if isinstance(norm, BoundaryNorm):
+        levels = norm.boundaries
 
     if isinstance(levels, (list, tuple, np.ndarray)):
         levels_arr = np.asarray(levels)
-        # Regular arrays/lists don't need .compute()
         divergent = bool((levels_arr < 0).any()) and bool((levels_arr > 0).any())
+
+        if (
+            user_cmap is not None
+            and not divergent
+            and classify_cmap(user_cmap).lower() == "diverging"
+        ):
+            if np.all(levels_arr >= 0.0):
+                cmap = slice_cmap(user_cmap, split=(0.5, 1.0))
+            elif np.all(levels_arr <= 0.0):
+                cmap = slice_cmap(user_cmap, split=(0.0, 0.5))
+
         cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
-        return CmapParams(vmin, vmax, levels_arr, cmap)
+        return CmapParams(vmin, vmax, levels_arr, cmap, extend=extend, norm=norm)
 
-    if vmin is None or vmax is None:
-        if data is None:
-            return CmapParams(vmin, vmax, None, cmap)
+    divergent = False
+    clip_extend = None
+    d_min, d_max = None, None
 
-        if robust:
-            _vmin, _vmax = data.quantile([0.02, 0.98], skipna=True).compute().values
-        else:
-            _vmin = data.min(skipna=True).compute().item()
-            _vmax = data.max(skipna=True).compute().item()
+    if data is not None:
+        # Preserve absolute extrema for determining colorbar extensions.
+        d_min = float(data.min(skipna=True).compute().item())
+        d_max = float(data.max(skipna=True).compute().item())
 
-        _vmin = float(_vmin)
-        _vmax = float(_vmax)
+        # Use percentile-based limits to prevent isolated extrema from
+        # controlling the useful color range.
+        quantiles = [0.02, 0.98] if robust else [0.01, 0.99]
+        q_vals = data.quantile(quantiles, skipna=True).compute().values
+        plot_min = float(q_vals[0])
+        plot_max = float(q_vals[1])
 
-        if not np.isfinite(_vmin) or not np.isfinite(_vmax):
-            return CmapParams(vmin, vmax, None, cmap)
+        if np.isfinite(plot_min) and np.isfinite(plot_max):
+            span = plot_max - plot_min
+            zero_fraction = -plot_min / span if span > 0.0 else 0.0
 
-        divergent = bool((data < 0).any().compute()) and bool(
-            (data > 0).any().compute()
-        )
+            crosses_zero = plot_min < 0.0 < plot_max
+            divergent = crosses_zero and 0.25 <= zero_fraction <= 0.75
 
-        if divergent:
-            bound = max(abs(_vmin), abs(_vmax))
-            data_vmin = -bound
-            data_vmax = bound
-        else:
-            data_vmin = _vmin
-            data_vmax = _vmax
+            if divergent:
+                bound = max(abs(plot_min), abs(plot_max))
+                data_vmin, data_vmax = -bound, bound
 
-        if vmin is None:
-            vmin = data_vmin
-        if vmax is None:
-            vmax = data_vmax
+            elif crosses_zero and zero_fraction < 0.25:
+                # Predominantly positive: clip the weak negative tail.
+                data_vmin, data_vmax = 0.0, plot_max
+                if vmin is None:
+                    clip_extend = "min"
+
+            elif crosses_zero and zero_fraction > 0.75:
+                # Predominantly negative: clip the weak positive tail.
+                data_vmin, data_vmax = plot_min, 0.0
+                if vmax is None:
+                    clip_extend = "max"
+
+            else:
+                data_vmin, data_vmax = plot_min, plot_max
+
+            if vmin is None:
+                vmin = data_vmin
+            if vmax is None:
+                vmax = data_vmax
+
+    if extend is None:
+        if clip_extend is not None:
+            extend = clip_extend
+        elif d_min is not None and d_max is not None:
+            extend_min = vmin is not None and d_min < vmin
+            extend_max = vmax is not None and d_max > vmax
+
+            if extend_min and extend_max:
+                extend = "both"
+            elif extend_min:
+                extend = "min"
+            elif extend_max:
+                extend = "max"
+            else:
+                extend = "neither"
+
+    if (
+        user_cmap is not None
+        and not divergent
+        and classify_cmap(user_cmap).lower() == "diverging"
+    ):
+        if vmin is not None and vmin >= 0.0:
+            cmap = slice_cmap(user_cmap, split=(0.5, 1.0))
+        elif vmax is not None and vmax <= 0.0:
+            cmap = slice_cmap(user_cmap, split=(0.0, 0.5))
 
     cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
 
     if isinstance(levels, int):
-        return CmapParams(vmin, vmax, np.linspace(vmin, vmax, levels), cmap)
+        resolved_levels = (
+            np.linspace(vmin, vmax, levels)
+            if vmin is not None and vmax is not None
+            else None
+        )
+        return CmapParams(
+            vmin,
+            vmax,
+            resolved_levels,
+            cmap,
+            extend=extend,
+            norm=norm,
+        )
 
     if levels is None:
+        resolved_levels = (
+            MaxNLocator(nbins=10).tick_values(vmin, vmax)
+            if vmin is not None and vmax is not None
+            else None
+        )
         return CmapParams(
-            vmin, vmax, MaxNLocator(nbins=10).tick_values(vmin, vmax), cmap
+            vmin,
+            vmax,
+            resolved_levels,
+            cmap,
+            extend=extend,
+            norm=norm,
         )
 
     raise TypeError(f"unsupported levels type: {type(levels).__name__}")
@@ -612,8 +681,8 @@ def add_xy_ticks(
     fig: Figure,
     ax: cgeo.GeoAxes,
     grid: xr.Dataset,
-    xticks_bins: int= 5,
-    yticks_bins: int= 5,
+    xticks_bins: int = 5,
+    yticks_bins: int = 5,
 ) -> None:
     """Add longitude and latitude ticks to a Cartopy axis with numeric signs instead of cardinal letters."""
 
@@ -628,13 +697,17 @@ def add_xy_ticks(
     )
 
     # Force tick marks to point outward
-    ax.tick_params(axis="both", direction="out", which="both")
+
+    ax.tick_params(axis="both", direction="out", which="major")
+    ax.minorticks_off()
+
+    fmt_opts = {"direction_label": False, "degree_symbol": ""}
 
     if isinstance(ax.projection, (ccrs.PlateCarree, ccrs.Mercator)):
         ax.set_xticks(xticks, crs=ccrs.PlateCarree())
         ax.set_yticks(yticks, crs=ccrs.PlateCarree())
-        ax.xaxis.set_major_formatter(LongitudeFormatter(direction_label=False))
-        ax.yaxis.set_major_formatter(LatitudeFormatter(direction_label=False))
+        ax.xaxis.set_major_formatter(LongitudeFormatter(**fmt_opts))
+        ax.yaxis.set_major_formatter(LatitudeFormatter(**fmt_opts))
         return
 
     gridliner = ax.gridlines(
@@ -647,8 +720,8 @@ def add_xy_ticks(
     gridliner.right_labels = False
     gridliner.xlines = False
     gridliner.ylines = False
-    gridliner.xformatter = LongitudeFormatter(direction_label=False)
-    gridliner.yformatter = LatitudeFormatter(direction_label=False)
+    gridliner.xformatter = LongitudeFormatter(**fmt_opts)
+    gridliner.yformatter = LatitudeFormatter(**fmt_opts)
 
 
 def add_map_features(
@@ -1182,6 +1255,7 @@ def add_colorbar(
     label: str | None = None,
     ticks: Sequence[float] | np.ndarray | None = None,
     tick_labels: Sequence[str] | None = None,
+    powerlimits: tuple[int, int] = (-3, 3),
 ) -> Colorbar:
     """Add a colorbar for a scalar plotting primitive.
 
@@ -1191,7 +1265,7 @@ def add_colorbar(
         Primitive described by the colorbar.
     ax : matplotlib.axes.Axes or numpy.ndarray
         Axis or axes associated with ``mappable``.
-    fig : matplotlib.figure.Figure
+    fig : matplotlib.figure.Figure, optional
         Parent figure.
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation.
@@ -1202,8 +1276,8 @@ def add_colorbar(
     cax : matplotlib.axes.Axes, optional
         Existing colorbar axis.
     pad_bottom : bool, optional
-        Force additional space below a horizontal colorbar. When omitted, infer
-        the requirement from the target axis labels.
+        Force additional space below a horizontal colorbar. When omitted,
+        infer the requirement from the target axis labels.
     drawedges : bool, default False
         Draw edges between color intervals.
     extend : {"neither", "both", "min", "max"}, optional
@@ -1214,6 +1288,8 @@ def add_colorbar(
         Explicit tick positions.
     tick_labels : sequence of str, optional
         Explicit tick labels.
+    powerlimits : tuple of int, default (-3, 3)
+        Scientific notation limits for automatic tick formatting.
 
     Returns
     -------
@@ -1231,8 +1307,9 @@ def add_colorbar(
         )
         cax.set_label("<colorbar>")
 
-    if not fig:
+    if fig is None:
         fig = plt.gcf()
+
     colorbar = fig.colorbar(
         mappable,
         cax=cax,
@@ -1241,15 +1318,30 @@ def add_colorbar(
         drawedges=drawedges,
         extend=extend,
     )
+
     if ticks is not None:
         colorbar.set_ticks(ticks)
+
     if tick_labels is not None:
         if orientation == "horizontal":
             colorbar.ax.set_xticklabels(tick_labels)
         else:
             colorbar.ax.set_yticklabels(tick_labels)
+    else:
+        formatter = ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits(powerlimits)
+
+        if orientation == "horizontal":
+            colorbar.ax.xaxis.set_major_formatter(formatter)
+        else:
+            colorbar.ax.yaxis.set_major_formatter(formatter)
+
+        colorbar.update_ticks()
+
     if label is not None:
         colorbar.set_label(label)
+
     return colorbar
 
 

@@ -37,6 +37,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 from IPython.display import display
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
+from skimage.color import rgb2lab
 
 if TYPE_CHECKING:
     from IPython.display import DisplayHandle
@@ -51,6 +52,36 @@ _src_dir = _file_dir / "data" / "cmaps"
 _plt_registry = mpl.colormaps  # public matplotlib ColormapRegistry
 _plt_cmap_list = list(_plt_registry)
 _cmocean_cmap_list = list(cmocean.cm.cmapnames)
+
+__all__ = ["classify_cmap"]
+
+
+def classify_cmap(cmap: str | ColorMap) -> str:
+    """Classify a colormap as Sequential, Diverging, or Other."""
+    if isinstance(cmap, str):
+        cmap = build_cm(cmap)
+
+    rgb = cmap(np.linspace(0, 1, 256))[:, :3]
+    lab = rgb2lab(rgb.reshape(1, -1, 3))[0]
+    lightness = lab[:, 0]
+
+    # Check monotonicity for sequential
+    diffs = np.diff(lightness)
+    is_monotone = np.all(diffs >= -0.5) or np.all(
+        diffs <= 0.5
+    )  # small tolerance for noise
+
+    if is_monotone:
+        return "Sequential"
+
+    # Check for peak/trough (diverging)
+    mid = len(lightness) // 2
+    if (lightness[0] < lightness[mid] and lightness[-1] < lightness[mid]) or (
+        lightness[0] > lightness[mid] and lightness[-1] > lightness[mid]
+    ):
+        return "Diverging"
+
+    return "Other (Cyclic or Qualitative)"
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +191,41 @@ def add_colors_to_cmap(
     return res
 
 
+def slice_cmap(
+    cmap: str | ColorMap,
+    split: tuple[float, float] = (0.0, 1.0),
+    N: int | None = None,
+    *,
+    format: Literal["linear", "listed", "hex"] | None = None,
+    gamma: float = 1.0,
+) -> ColorMap | list[str]:
+    """
+    Extract a subset of colors from a colormap based on a split range and return in the specified format.
+    """
+    if not isinstance(split, tuple) or len(split) != 2:
+        raise ValueError("`split` must be a tuple of two floats (start, end).")
+
+    if isinstance(cmap, str):
+        cmap = build_cm(cmap)
+
+    n_colors = cmap.N if N is None else N
+    cmap_name = cmap.name
+    colors = [cmap(value) for value in np.linspace(split[0], split[1], n_colors)]
+
+    if format is None:
+        format = "listed" if isinstance(cmap, ListedColormap) else "linear"
+
+    if format == "hex":
+        res = ListedColormap(colors, name=cmap_name)
+        return get_colors(res, res.N)
+    elif format == "listed":
+        return ListedColormap(colors, name=cmap_name)
+    else:
+        return LinearSegmentedColormap.from_list(
+            cmap_name, colors, N=n_colors, gamma=gamma
+        )
+
+
 def adjust_cmap(
     cmap: str | ColorMap,
     N: int | None = None,
@@ -173,30 +239,26 @@ def adjust_cmap(
     """
     Modify a colormap by slicing, reversal, color insertion and output format.
     """
-    if not isinstance(split, tuple) or len(split) != 2:
-        raise ValueError("`split` must be a tuple of two floats (start, end).")
     if format not in {"linear", "listed", "hex"}:
         raise ValueError("`format` must be 'linear', 'listed', or 'hex'.")
 
-    n_colors = cmap.N if N is None else N
-
-    cmap_name = cmap.name
+    cmap_name = cmap.name if not isinstance(cmap, str) else cmap
     if r:
+        if isinstance(cmap, str):
+            cmap = build_cm(cmap)
         cmap = cmap.reversed()
         cmap_name = f"reversed_{cmap_name}"
 
-    colors = [cmap(value) for value in np.linspace(split[0], split[1], n_colors)]
-
-    if format in {"listed", "hex"}:
-        res = ListedColormap(colors, name=cmap_name)
-    else:
-        res = LinearSegmentedColormap.from_list(
-            cmap_name, colors, N=n_colors, gamma=gamma
-        )
+    n_colors = cmap.N if N is None else N
+    res = slice_cmap(cmap, split=split, N=n_colors, format=format, gamma=gamma)
 
     if add_colors:
         if not isinstance(add_colors, dict):
             raise TypeError("`add_colors` must be a dict[int, str | list[str]].")
+
+        if isinstance(res, list):
+            res = ListedColormap(res, name=cmap_name)
+
         cmap_name = "added"
         internal_format: Literal["linear", "listed", "hex"] = (
             "listed" if format == "hex" else format
@@ -222,7 +284,7 @@ def adjust_cmap(
                 raise TypeError("Internal colormap conversion returned a color list.")
             res = adjusted
 
-    if format == "hex":
+    if format == "hex" and not isinstance(res, list):
         return get_colors(res, res.N)
     return res
 
@@ -588,6 +650,8 @@ def add(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Liter
 def subtract(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
 def available(show: bool = True) -> list[str] | DisplayHandle: ...
 def write_stub(force: bool = False) -> bool: ...
+def classify_cmap(cmap: str | ColorMap) -> str: ...
+def slice_cmap(cmap: str | ColorMap,split: tuple[float, float] = (0.0, 1.0),N: int | None = None,*,format: Literal["linear", "listed", "hex"] | None = None,gamma: float = 1.0,) -> ColorMap | list[str]:...
 """
 
 

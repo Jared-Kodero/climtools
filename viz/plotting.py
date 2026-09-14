@@ -352,6 +352,7 @@ def colorbar(
     label: str | None = None,
     ticks: Sequence[float] | np.ndarray | None = None,
     tick_labels: Sequence[str] | None = None,
+    powerlimits: tuple[int, int] = (-3, 3),
 ) -> Colorbar:
     """Add a colorbar for a scalar plotting primitive.
 
@@ -384,6 +385,8 @@ def colorbar(
         Explicit tick positions.
     tick_labels : sequence of str, optional
         Explicit tick labels.
+    powerlimits : tuple of int, default (-3, 3)
+        Scientific notation limits for automatic tick formatting.
 
     Returns
     -------
@@ -1121,13 +1124,15 @@ class GeoPlot:
             cmap,
             self.data,
             robust=robust,
+            extend=extend,
+            norm=norm,
         )
         self.vmin = cmap_params.vmin
         self.vmax = cmap_params.vmax
         self.levels = cmap_params.levels
         self.cmap = cmap or cmap_params.cmap
-        self.norm = norm
-        self.extend = extend
+        self.norm = cmap_params.norm
+        self.extend = cmap_params.extend
 
         if self.is_faceted:
             facet = FacetedPlot(
