@@ -1,4 +1,4 @@
-"""Direct checks of the FMS-adapted primitives in ``climtools.xarray.mpp``.
+"""Direct checks of the FMS-adapted primitives in ``climtools.mpp``.
 
 Every other module in this suite exercises these through the xarray layer,
 which is the right way to test behaviour but a poor way to test the property
@@ -16,25 +16,22 @@ that drifts with rank count fails even when it is self-consistent.
 from __future__ import annotations
 
 import numpy as np
+from climtools.mpp.ext_collectives import partition_offsets
+from climtools.mpp.ext_domains import slice_compute_domain
 from climtools import xgeo
 from climtools.mpp.mpp_do_update import HaloWidthError
 from climtools.xarray.halo import mpp_halo_exchange
 from climtools.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
-from climtools.mpp.mpp import mpp_chksum, mpp_partition_offsets
+from climtools.mpp.mpp import mpp_chksum
 from climtools.mpp.mpp_do_update import (
     mpp_complete_update_domains,
     mpp_start_update_domains,
 )
 from climtools.mpp.mpp_domains import Domain
 from climtools.mpp.mpp_domains_define import mpp_define_layout
-from climtools.mpp.mpp_domains_util import (
-    mpp_get_compute_domains,
-    mpp_slice_compute_domain,
-)
+from climtools.mpp.mpp_domains_util import mpp_get_compute_domains
+from climtools.mpp.ext_efp import prod_decompose, prod_recombine, reproducing_prod
 from climtools.mpp.mpp_efp import (
-    mpp_prod_decompose,
-    mpp_prod_recombine,
-    mpp_reproducing_prod,
     mpp_reproducing_sum,
 )
 from mpi4py import MPI
@@ -96,7 +93,7 @@ def run(fx: Fixtures) -> None:
         # and reported after the loop has run to completion on every rank.
         faults = []
         for lo, hi in ((0, global_length), (10, 500), (496, 997), (300, 301)):
-            local_start, local_stop, new_start = mpp_slice_compute_domain(
+            local_start, local_stop, new_start = slice_compute_domain(
                 start, stop, lo, hi
             )
             counts = comm.allgather(local_stop - local_start)
@@ -107,9 +104,9 @@ def run(fx: Fixtures) -> None:
                 faults.append(f"slice({lo},{hi}): kept {sum(counts)} of {hi - lo}")
         return not faults, "; ".join(faults)
 
-    _check("mpp_slice_compute_domain", "offsets match an allgather", slice_domain)
+    _check("slice_compute_domain", "offsets match an allgather", slice_domain)
 
-    def partition_offsets() -> tuple[bool, str]:
+    def check_partition_offsets() -> tuple[bool, str]:
         """Exscan-derived offsets must match the allgather they replaced."""
         # Same rule as above, and it matters more here: the lengths differ per
         # rank, so the comparison itself can succeed on some ranks and fail on
@@ -118,7 +115,7 @@ def run(fx: Fixtures) -> None:
         # affordable.
         faults = []
         for length in (0, 1, 7 + comm.rank, 100):
-            total, start, stop = mpp_partition_offsets(comm, length)
+            total, start, stop = partition_offsets(comm, length)
             counts = comm.allgather(length)
             expected = (
                 sum(counts),
@@ -130,7 +127,9 @@ def run(fx: Fixtures) -> None:
         return not faults, "; ".join(faults)
 
     _check(
-        "mpp_partition_offsets", "matches an allgather, incl. empty", partition_offsets
+        "partition_offsets",
+        "matches an allgather, incl. empty",
+        check_partition_offsets,
     )
 
     def define_layout() -> tuple[bool, str]:
@@ -163,7 +162,7 @@ def run(fx: Fixtures) -> None:
     # whole global array, which is the reference the distributed answer is
     # supposed to reproduce at any rank count.
     # ------------------------------------------------------------------
-    def reproducing_sum() -> tuple[bool, str]:
+    def check_reproducing_sum() -> tuple[bool, str]:
         length = 4096
         rng = np.random.default_rng(20260906)
         field = rng.standard_normal((length, 3)) * 1e7
@@ -180,9 +179,11 @@ def run(fx: Fixtures) -> None:
             return False, f"{distributed} vs plain sum {plain}"
         return True, ""
 
-    _check("mpp_reproducing_sum", "bitwise equal to a serial sum", reproducing_sum)
+    _check(
+        "mpp_reproducing_sum", "bitwise equal to a serial sum", check_reproducing_sum
+    )
 
-    def reproducing_prod() -> tuple[bool, str]:
+    def check_reproducing_prod() -> tuple[bool, str]:
         """The case a plain distributed product gets wrong.
 
         A float32 product long enough to overflow, containing an exact zero:
@@ -204,8 +205,8 @@ def run(fx: Fixtures) -> None:
         start, stop = _local_slice(length)
 
         f32 = np.dtype(np.float32)
-        distributed = mpp_reproducing_prod(field[start:stop], comm, axis=0, dtype=f32)
-        serial = mpp_reproducing_prod(field, MPI.COMM_SELF, axis=0, dtype=f32)
+        distributed = reproducing_prod(field[start:stop], comm, axis=0, dtype=f32)
+        serial = reproducing_prod(field, MPI.COMM_SELF, axis=0, dtype=f32)
         if not np.array_equal(distributed, serial, equal_nan=True):
             return False, f"{distributed} != serial {serial}"
         if distributed[0] != 0.0:
@@ -216,22 +217,22 @@ def run(fx: Fixtures) -> None:
             return False, f"all-ones column gave {distributed[4]!r}"
         return True, ""
 
-    _check("mpp_reproducing_prod", "overflow with a zero, vs serial", reproducing_prod)
+    _check(
+        "reproducing_prod", "overflow with a zero, vs serial", check_reproducing_prod
+    )
 
     def prod_decompose_roundtrip() -> tuple[bool, str]:
         """decompose + recombine on one rank must equal a plain product."""
         rng = np.random.default_rng(11)
         field = rng.standard_normal((40, 5))
-        rebuilt = mpp_prod_recombine(mpp_prod_decompose(field, 0))
+        rebuilt = prod_recombine(prod_decompose(field, 0))
         plain = field.prod(axis=0)
         if not np.allclose(rebuilt, plain, rtol=1e-12):
             return False, f"{rebuilt} vs {plain}"
         signs_ok = np.array_equal(np.signbit(rebuilt), np.signbit(plain))
         return signs_ok, "sign disagreement"
 
-    _check(
-        "mpp_prod_decompose", "round-trips to a plain product", prod_decompose_roundtrip
-    )
+    _check("prod_decompose", "round-trips to a plain product", prod_decompose_roundtrip)
 
     # ------------------------------------------------------------------
     # Checksums: the point is invariance, so the same global field is
@@ -389,7 +390,7 @@ def run(fx: Fixtures) -> None:
         if nranks == 1:
             return None, "one rank owns everything, so no halo can be short"
         length = nranks  # one element per rank; any halo above 1 is too wide
-        distributed = xgeo.mpi_partition_data(
+        distributed = xgeo.distribute_data(
             xr.DataArray(np.arange(length, dtype=np.float64), dims=("t",), name="v")
             if comm.rank == 0
             else None,

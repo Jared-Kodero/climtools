@@ -16,16 +16,20 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import xarray as xr
 
+from ..mpp.ext_collectives import reduce_scatter
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from .meta import mpp_get_meta
-from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
+from .meta import mpp_get_meta, mpp_partition_meta
+from ..mpp.mpp import _mpp_reduce
+from ..mpp.mpp import extreme_identity
 from .planning import (
+    _FLAG_ENCODING,
+    mpp_sum_and_count,
+    residual_shape,
     ReduceContext,
-    extreme_identity,
     op_name,
     partial_dtype,
     guarded,
@@ -41,7 +45,7 @@ _PROD_FIELD_DIM = "_mpp_prod_field"
 
 
 from .halo import mpp_halo_exchange
-from .elementwise import reattach_meta
+from .meta import reattach_meta
 from .meta import mpp_operand_meta, mpp_redefine_domain
 from .planning import _agree
 
@@ -84,6 +88,7 @@ def _combine_sum_or_prod(
             comm=comm,
             replica_count=replica_count,
             scatter=scatter,
+            expect_shape=residual_shape(value, dims),
         )
     global_count = None
     if min_count is not None and skipna_enabled(value.dtype, skipna):
@@ -125,13 +130,13 @@ def _combine_prod(
     collective replaces the separate mantissa and tally reductions and the
     result no longer depends on the rank count.
     """
-    from ..mpp.mpp_efp import mpp_prod_decompose, mpp_prod_recombine
+    from ..mpp.ext_efp import prod_decompose, prod_recombine
 
     fields_da: xr.DataArray | None = None
     if error is None and partial is not None:
         try:
             axes = tuple(value.dims.index(d) for d in dims)
-            fields = mpp_prod_decompose(np.asarray(value.values), axes)
+            fields = prod_decompose(np.asarray(value.values), axes)
             fields_da = xr.DataArray(
                 fields,
                 dims=(_PROD_FIELD_DIM, *partial.dims),
@@ -160,7 +165,7 @@ def _combine_prod(
         values = values // replica_count
 
     expect = partial_dtype(value.dtype.str, "prod", skipna)
-    combined = mpp_prod_recombine(values, expect)
+    combined = prod_recombine(values, expect)
     return global_fields.isel({_PROD_FIELD_DIM: 0}, drop=True).copy(data=combined)
 
 
@@ -207,26 +212,32 @@ def _combine_mean(
     scatter: tuple[Hashable, list[int]] | None = None,
 ) -> xr.DataArray:
     """Combine rank-local sums and counts into a global mean."""
-    global_sum = mpp_comm_reduce(
+    global_sum, fused_count = mpp_sum_and_count(
         mpi_context,
+        value,
         partial_sum,
-        MPI.SUM,
-        expect_dtype=partial_dtype(value.dtype.str, "sum", skipna),
+        dims,
+        skipna=skipna,
+        sum_dtype=partial_dtype(value.dtype.str, "sum", skipna),
         error=error,
         phase="MPI xarray mean reduction",
         comm=comm,
         replica_count=replica_count,
         scatter=scatter,
     )
-    global_count = _global_valid_count(
-        mpi_context,
-        value,
-        global_sum,
-        dims,
-        skipna=skipna,
-        comm=comm,
-        replica_count=replica_count,
-        scatter=scatter,
+    global_count = (
+        fused_count
+        if fused_count is not None
+        else _global_valid_count(
+            mpi_context,
+            value,
+            global_sum,
+            dims,
+            skipna=skipna,
+            comm=comm,
+            replica_count=replica_count,
+            scatter=scatter,
+        )
     )
     # Match xarray mean promotion: full real reductions promote to float64; partial real
     # and complex reductions preserve floating dtype.
@@ -251,7 +262,7 @@ def _combine_mean(
     return result
 
 
-def _local_extreme(
+def _local_extreme_partial(
     mpi_context: MPIContext,
     variable: xr.DataArray,
     variable_dims: tuple[Hashable, ...],
@@ -287,6 +298,7 @@ def _combine_extreme(
     operation = "min" if minimum else "max"
     expect_dtype = value.dtype
     kind = value.dtype.kind
+    reduced_shape = residual_shape(value, dims)
     if kind == "b":
         return mpp_comm_reduce(
             mpi_context,
@@ -297,6 +309,7 @@ def _combine_extreme(
             phase=f"MPI xarray {operation} reduction",
             comm=comm,
             scatter=scatter,
+            expect_shape=reduced_shape,
         )
 
     op = MPI.MIN if minimum else MPI.MAX
@@ -310,6 +323,7 @@ def _combine_extreme(
             phase=f"MPI xarray {operation} reduction",
             comm=comm,
             scatter=scatter,
+            expect_shape=reduced_shape,
         )
 
     # Floating reductions carry validity beside the extreme so empty or all-NaN
@@ -321,10 +335,11 @@ def _combine_extreme(
     # ANY valid rank suffices under skipna; without it every rank must be
     # NaN-free for the result to be defined.
     flip = -1.0 if ((not minimum) != use_skipna) else 1.0
+    identity = extreme_identity(expect_dtype, minimum=minimum)
+    healthy_flag, failed_flag = _FLAG_ENCODING[op_name(op)]
 
     if error is None:
         try:
-            identity = extreme_identity(expect_dtype, minimum=minimum)
             if use_skipna:
                 good = value.count(dim=dims, keep_attrs=False) > 0
             else:
@@ -342,19 +357,46 @@ def _combine_extreme(
                 np.asarray(flip, dtype=expect_dtype),
                 np.zeros((), dtype=expect_dtype),
             )
-            send = np.empty((2, values.size), dtype=expect_dtype)
-            send[0] = np.reshape(values, values.size)
-            send[1] = np.reshape(flags, values.size)
+            # One trailing column carries whether every rank built a buffer,
+            # so the health check rides in this reduction instead of costing
+            # a separate agreement round. Row 1 there takes the operator's
+            # identity, which cannot perturb the flag in row 0.
+            width = values.size + (0 if scatter is not None else 1)
+            send = np.empty((2, width), dtype=expect_dtype)
+            send[0, : values.size] = np.reshape(values, values.size)
+            send[1, : values.size] = np.reshape(flags, values.size)
+            if scatter is None:
+                send[0, values.size] = healthy_flag
+                send[1, values.size] = identity
         except BaseException as exc:
             error = exc
             send = None
             template = None
 
+    if scatter is None and comm is not None and comm.size > 1:
+        local_size = int(np.prod(reduced_shape, dtype=np.int64) or 1)
+        if send is None:
+            # A rank whose local reduction raised still enters the collective
+            # its peers are committed to, flagging itself in the last column.
+            send = np.full((2, local_size + 1), identity, dtype=expect_dtype)
+            send[0, local_size] = failed_flag
+        recv = _mpp_reduce(send, op, comm)
+        if np.real(recv[0, local_size]) != healthy_flag:
+            mpi_context.raise_if_error(
+                error, f"MPI xarray {operation} reduction", None, comm=comm
+            )
+            raise AssertionError("MPI xarray reduction buffer is missing.")
+        if template is None:
+            raise AssertionError("MPI xarray reduction buffer is missing.")
+        return _finish_extreme(
+            recv[:, :local_size], template, expect_dtype, minimum=minimum, flip=flip
+        )
+
     signature = (
         None
         if send is None
         else (
-            op_name(op),
+            operation,
             send.dtype.str,
             tuple(int(length) for length in send.shape),
             None
@@ -372,13 +414,30 @@ def _combine_extreme(
     if scatter is not None:
         target, counts = scatter
         axis = 1 + template.get_axis_num(target)
-        recv = mpp_reduce_scatter(send, op, resolved_comm, counts, axis=axis)
+        recv = reduce_scatter(send, op, resolved_comm, counts, axis=axis)
         start = sum(counts[: resolved_comm.rank])
         stop = start + counts[resolved_comm.rank]
         template = template.isel({target: slice(start, stop)})
     else:
         recv = _mpp_reduce(send, op, resolved_comm)
 
+    return _finish_extreme(recv, template, expect_dtype, minimum=minimum, flip=flip)
+
+
+def _finish_extreme(
+    recv: np.ndarray[Any, Any],
+    template: xr.DataArray,
+    expect_dtype: np.dtype[Any],
+    *,
+    minimum: bool,
+    flip: float,
+) -> xr.DataArray:
+    """Rebuild an extremum from its reduced value and validity rows.
+
+    Positions no rank held a real value for carry the operator's identity,
+    which is indistinguishable from a genuine infinity, so the validity row
+    decides which ones become NaN.
+    """
     shape = tuple(int(length) for length in template.shape)
     combined = np.asarray(recv[0]).reshape(shape)
     valid = (np.asarray(recv[1]).reshape(shape) * flip) > 0
@@ -620,7 +679,7 @@ def _min_max(
             d in variable.dims and int(variable.sizes[d]) == 0 for d in partition_dims
         )
         local, error = guarded(
-            lambda: _local_extreme(
+            lambda: _local_extreme_partial(
                 mpi_context,
                 variable,
                 ctx.dims,
@@ -1043,19 +1102,25 @@ def _var_or_std(
                 dim=ctx.dims, skipna=skipna, min_count=None, keep_attrs=False
             )
         )
-        total = mpp_comm_reduce(
+        # The squared-deviation sum and the count it is divided by are both
+        # SUM reductions of the same shape, so they share one collective.
+        total, fused_count = mpp_sum_and_count(
             mpi_context,
+            variable,
             partial,
-            MPI.SUM,
-            expect_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
+            ctx.dims,
+            skipna=skipna,
+            sum_dtype=partial_dtype(deviation.dtype.str, "sum", skipna),
             error=error,
             phase="MPI xarray variance reduction",
             comm=ctx.comm,
             replica_count=ctx.entry.replica_count,
             scatter=ctx.scatter,
         )
-        denominator = (
-            mpp_count_valid_values(
+        count = (
+            fused_count
+            if fused_count is not None
+            else mpp_count_valid_values(
                 mpi_context,
                 variable,
                 ctx.dims,
@@ -1063,8 +1128,8 @@ def _var_or_std(
                 replica_count=ctx.entry.replica_count,
                 scatter=ctx.scatter,
             )
-            - ddof
         )
+        denominator = count - ddof
         target = np.asarray(np.var(np.zeros(1, dtype=variable.dtype))).dtype
         divisor = (
             denominator.astype(target, keep_attrs=False)
@@ -1213,8 +1278,8 @@ def mpp_coarsen_reduce(
         If ``side="right"`` is requested on a distributed ``dim``.
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         coarsened = value.coarsen(
             {dim: window}, boundary=boundary, side=side, coord_func=coord_func
         )

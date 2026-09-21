@@ -209,7 +209,7 @@ cmap = cmaps.temp_div()
 
 ## MPI-Xarray
 
-For workloads that exceed convenient single-process memory or justify distributed computation, `climtools.xgeo` provides an MPI-parallel Xarray layer. Each rank owns a non-overlapping partition of the global object while retaining an Xarray-like interface.
+For workloads that exceed convenient single-process memory, `climtools.xgeo` provides an MPI-parallel Xarray layer. Each rank owns a non-overlapping partition of the global object while keeping an Xarray-like interface.
 
 ```python
 import numpy as np
@@ -217,50 +217,89 @@ import numpy as np
 from climtools import mpi, xgeo
 
 
-dist = xgeo.mpi_open_dataset(
-    "data.nc",
-    mpi,
-    partition_dim="time",
-)
+dist = xgeo.open_distributed_dataset("data.nc", mpi, partition_dim="time")
 
 logged = np.log(dist["pr"])
 rolled = dist.rolling_reduce("time", window=5, reduce="mean")
 global_mean = dist.mean(dim="time")
-```
 
-Primary constructors are:
-
-| Function                    | Purpose                                               |
-| --------------------------- | ----------------------------------------------------- |
-| `mpi_open_dataset(...)`     | Open a NetCDF file with rank-local partitioned reads. |
-| `mpi_partition_data(...)`   | Partition an already materialized Xarray object.      |
-| `mpi_create_dataarray(...)` | Construct a distributed `DataArray`.                  |
-| `mpi_create_dataset(...)`   | Construct a distributed multi-variable `Dataset`.     |
-
-Supported distributed operations include rank-local NumPy ufuncs, halo-aware rolling and finite-difference operations, collective reductions, grouped reductions, scans, interpolation, redistribution, and collective NetCDF output.
-
-Halo-aware operations exchange only the neighboring data required by the operation. For constructors that support `min_partition_size`, set it at least as large as the widest halo required by downstream operations when partitions may become very small.
-
-Internally, the actual MPI traffic (domain decomposition, global reductions, halo exchange) is centralized in `climtools.xarray.mpp`, a small communication kernel modeled on GFDL's [FMS](https://github.com/NOAA-GFDL/FMS) `mpp`/`mpp_domains` modules (`Domain`, `mpp_define_domains`, `mpp_sum`/`mpp_max`/`mpp_min`, `mpp_update_domains`). It operates on plain NumPy buffers with no Xarray dependency and is not part of the public API; the constructors and methods above are the intended entry points.
-
-Parallel output is available with:
-
-```python
 dist.to_netcdf("output.nc", parallel=True)
 ```
 
-Multi-rank collective NetCDF output requires the parallel-enabled NetCDF/HDF5 stack described in [Installation](#installation).
+### Constructors
+
+| Function                            | Purpose                                                  |
+| ----------------------------------- | -------------------------------------------------------- |
+| `open_distributed_dataset(...)`     | Open a NetCDF file with rank-local partitioned reads.    |
+| `create_distributed_dataarray(...)` | Construct a distributed `DataArray`, filled per rank.    |
+| `create_distributed_dataset(...)`   | Construct a distributed multi-variable `Dataset`.        |
+| `distribute_data(...)`              | Partition an already materialized Xarray object.         |
+| `empty_distributed_dataset()`       | Placeholder for ranks that hold no data.                 |
+| `is_distributed_empty(...)`         | Whether a rank's partition is empty.                     |
+
+### Supported operations
+
+Rank-local NumPy ufuncs, halo-aware rolling and finite-difference operations, collective reductions (`sum`, `mean`, `min`, `max`, `var`, `std`, `prod`, `any`, `all`, `first`, `last`, `median`, `quantile`), grouped and resampled reductions, cumulative scans, interpolation, reindexing and sorting, and collective NetCDF output.
+
+Halo-aware operations exchange only the neighbouring data they need; nothing is gathered globally unless the operation genuinely requires every value at once (order statistics such as `median`). Interpolation fetches only the source points bracketing each rank's targets. For constructors that accept `min_partition_size`, set it at least as wide as the widest halo a downstream operation will request.
+
+Reductions are bitwise reproducible across rank counts when requested: sums use extended fixed-point accumulation, so the same data give the same bits on 4 ranks or 400.
+
+Multi-rank NetCDF output requires the parallel NetCDF/HDF5 stack described in [Installation](#installation).
+
+### Communication layer
+
+All MPI traffic lives in `climtools.mpp`, an adaptation of GFDL's [FMS](https://github.com/NOAA-GFDL/FMS) `mpp`. Modules mirror the FMS source files one-to-one, and anything FMS provides keeps its FMS name:
+
+| Module                   | FMS source                                  | Contents                                             |
+| ------------------------ | ------------------------------------------- | ---------------------------------------------------- |
+| `mpp.mpp`                | `mpp.F90`                                   | `mpp_sum`/`max`/`min`, `mpp_broadcast`, `mpp_gather`, `mpp_chksum` |
+| `mpp.mpp_domains`        | `mpp_domains.F90`                           | `Domain` and the domain types                        |
+| `mpp.mpp_domains_define` | `mpp_domains_define.inc`                    | `mpp_define_domains`, `mpp_define_layout`, `mpp_compute_extent` |
+| `mpp.mpp_domains_util`   | `mpp_domains_util.inc`                      | `mpp_get_compute_domain`, `mpp_get_data_domain`, …   |
+| `mpp.mpp_do_update`      | `mpp_do_update.fh`                          | `mpp_update_domains`, including corners and folds    |
+| `mpp.mpp_group_update`   | `mpp_group_update.fh`                       | `mpp_create_group_update`, `mpp_do_group_update`     |
+| `mpp.mpp_global_field`   | `mpp_global_field.fh`                       | `mpp_global_field`                                   |
+| `mpp.mpp_global_reduce`  | `mpp_global_reduce.fh`, `mpp_global_sum.fh` | `mpp_global_sum`/`max`/`min`                         |
+| `mpp.mpp_efp`            | `mpp_efp.F90`                               | `mpp_reproducing_sum`                                |
+| `mpp.mpp_data`           | `mpp_data.F90`                              | the reusable halo buffer stack                       |
+| `mpp.mpp_parameter`      | `mpp_parameter.F90`                         | update flags, fold edges, grid positions             |
+
+Functionality FMS does not have lives in `ext_*` modules, without the `mpp_` prefix, so the prefix always means "this is FMS":
+
+| Module                | Contents                                                              |
+| --------------------- | --------------------------------------------------------------------- |
+| `mpp.ext_collectives` | `gather_v`, `scatter_v`, `reduce_scatter`, `partition_offsets`        |
+| `mpp.ext_domains`     | Cartesian process grids, `dim_comm`, `slice_compute_domain`           |
+| `mpp.ext_efp`         | `reproducing_prod` (FMS has a reproducible sum but no product)        |
+
+`climtools.mpp` works on NumPy arrays and `Domain` objects only and imports nothing from `climtools.xarray`; the dependency runs one way. It is an internal layer, and the constructors above are the intended entry points.
+
+## Storage
+
+`XNpyStore` saves NumPy arrays and Xarray objects as uncompressed `.npy` payloads with a versioned JSON manifest, so they can be memory-mapped back without loading. No pickle data are written.
+
+```python
+from climtools import xgeo
+
+store = xgeo.XNpyStore("run_001")
+store.save(ds)
+
+store.variables()          # read from the manifest, no payload opened
+pr = store.load("pr")      # opens only pr and its coordinates, memory-mapped
+```
 
 ## Package overview
 
 | Namespace            | Purpose                                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `climtools.xgeo`     | Geospatial operations, plotting entry points, preprocessing, NetCDF utilities, and MPI-Xarray constructors. |
+| `climtools.xgeo`     | Geospatial operations, plotting entry points, preprocessing, NetCDF utilities, storage, and MPI-Xarray constructors. |
 | `climtools.plotting` | Cartopy-based geographic plotting implementation.                                                           |
 | `climtools.stats`    | Trends, correlations, and significance testing.                                                             |
 | `climtools.cmaps`    | Scientific colormap catalog.                                                                                |
 | `climtools.cdo`      | CDO/NCO command-line wrapper.                                                                               |
 | `climtools.mpi`      | Shared MPI context and communicator.                                                                        |
+| `climtools.mpp`      | FMS-derived communication layer (internal).                                                                 |
 
 ## Links
 
@@ -270,6 +309,7 @@ Multi-rank collective NetCDF output requires the parallel-enabled NetCDF/HDF5 st
 * [Plotting source](viz/plotting.py)
 * [Xarray accessors](xarray/accessors.py)
 * [MPI-Xarray tests](test/mpi_test.py)
+* [Communication layer](mpp/)
 * [Benchmarks](test/benchmark.py)
 * [License](LICENSE)
 

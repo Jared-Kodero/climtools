@@ -4,6 +4,10 @@ Mirrors FMS ``mpp/mpp_data.F90``, which holds ``mpp_domains_stack``: one
 allocation reused by every update rather than a fresh one per call. A stencil
 loop performs the same exchange every step, so without reuse each step
 allocates and frees buffers whose size never changes.
+
+FMS holds the stack as module state and exposes only
+``mpp_domains_set_stack_size``, which keeps its FMS name here. The accessors
+below have no FMS counterpart, so they carry no ``mpp_`` prefix.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ _stack: dict[np.dtype[Any], list[np.ndarray[Any, Any]]] = {}
 _high_water: dict[np.dtype[Any], int] = {}
 
 
-def mpp_domains_get_stack(count: int, dtype: np.dtype[Any]) -> np.ndarray[Any, Any]:
+def get_stack(count: int, dtype: np.dtype[Any]) -> np.ndarray[Any, Any]:
     """Return a buffer of at least ``count`` elements, reusing one if possible.
 
     Parameters
@@ -47,13 +51,13 @@ def mpp_domains_get_stack(count: int, dtype: np.dtype[Any]) -> np.ndarray[Any, A
     return np.empty(count, dtype=dtype)
 
 
-def mpp_domains_put_stack(buffer: np.ndarray[Any, Any]) -> None:
+def put_stack(buffer: np.ndarray[Any, Any]) -> None:
     """Return a buffer to the pool once its exchange has completed.
 
     Parameters
     ----------
     buffer : numpy.ndarray
-        Buffer obtained from :func:`mpp_domains_get_stack`. Passing a buffer
+        Buffer obtained from :func:`get_stack`. Passing a buffer
         that is still in flight corrupts the next exchange to reuse it.
     """
     base = buffer.base if buffer.base is not None else buffer
@@ -77,7 +81,7 @@ def mpp_domains_set_stack_size(elements: int) -> None:
         _stack[dtype] = [b for b in pool if b.size <= MPP_STACK_LIMIT]
 
 
-def mpp_domains_stack_size() -> dict[str, int]:
+def stack_size() -> dict[str, int]:
     """Report the high-water mark reached per dtype.
 
     FMS reports the same figure so a run can be told what
@@ -91,6 +95,6 @@ def mpp_domains_stack_size() -> dict[str, int]:
     return {str(dtype): count for dtype, count in _high_water.items()}
 
 
-def mpp_domains_free_stack() -> None:
+def free_stack() -> None:
     """Drop every pooled buffer, releasing the memory."""
     _stack.clear()

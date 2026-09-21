@@ -219,6 +219,10 @@ def bench(
         return
     mpi_time = slowest_rank_median(mpi_times)
     peak_mb = mpi.comm.reduce(mem_after, op=MPI.MAX, root=0)
+    # ru_maxrss only ever rises, so the absolute peak is the running maximum
+    # over every earlier method too. The rise during this method is what it
+    # actually cost; zero means it stayed under an earlier high-water mark.
+    growth_mb = mpi.comm.reduce(mem_after - mem_before, op=MPI.MAX, root=0)
     if mpi.comm.rank == 0:
         PENDING.append(
             {
@@ -230,12 +234,14 @@ def bench(
                 "accuracy": accuracy_ok,
                 "dtype": dtype_ok,
                 "peak_rss_mb": peak_mb,
+                "rss_growth_mb": growth_mb,
                 "no_native_counterpart": no_native_counterpart,
             }
         )
         acc_str = "PASS" if accuracy_ok else ("FAIL" if accuracy_ok is False else "n/a")
         print(
-            f"  {name:<16} mpi={mpi_time:.4f}s  accuracy={acc_str}  peak_rss={peak_mb:.1f}MiB"
+            f"  {name:<16} mpi={mpi_time:.4f}s  accuracy={acc_str}  "
+            f"peak_rss={peak_mb:.1f}MiB  growth={growth_mb:.1f}MiB"
         )
 
 
@@ -341,7 +347,7 @@ def fill(a, b):
 
 
 t_setup0 = time.perf_counter()
-# .load() immediately: mpi_create_dataarray returns a lazy, dask-backed
+# .load() immediately: create_distributed_dataarray returns a lazy, dask-backed
 # object by design (see MPIXarray.load()'s docstring for the full
 # rationale). `dist`/`dist_check` are each reused below across roughly
 # ten independent bench() calls (mean, sum, np.log, rolling_mean, ...);
@@ -356,7 +362,7 @@ t_setup0 = time.perf_counter()
 # built once, below) that never does. Both sides now pay the fill cost
 # exactly once, outside every timed loop, which is the only comparison
 # that actually measures what this benchmark claims to measure.
-dist = xgeo.mpi_create_dataarray(
+dist = xgeo.create_distributed_dataarray(
     mpi,
     fill,
     dims=("x",),
@@ -365,7 +371,7 @@ dist = xgeo.mpi_create_dataarray(
     log_partitions=False,
     name="v",
 ).load()
-dist_check = xgeo.mpi_create_dataarray(
+dist_check = xgeo.create_distributed_dataarray(
     mpi,
     fill,
     dims=("x",),
@@ -392,7 +398,7 @@ if mpi.comm.rank == 0:
 # ---------------------------------------------------------------------------
 # Benchmarks. Every one has a meaningful native-Xarray counterpart, so
 # none are marked no_native_counterpart=True; a genuinely MPI-only
-# operation (e.g. mpi_open_dataset's initial partitioning itself, which
+# operation (e.g. open_distributed_dataset's initial partitioning itself, which
 # native Xarray has no equivalent notion of) is timed separately below
 # instead of forced into this native-comparison table.
 # ---------------------------------------------------------------------------
@@ -471,7 +477,7 @@ bench(
     check_native_fn=lambda: native_full(NC).isel(x=slice(0, NC // 2)),
 )
 
-# mpi_partition_data: redistributing data every rank already holds in
+# distribute_data: redistributing data every rank already holds in
 # full (e.g. after a broadcast, or independently computed identically
 # everywhere) into a genuine, non-overlapping MPI partition. This has no
 # native-Xarray counterpart at all -- plain xarray has no notion of
@@ -481,9 +487,9 @@ bench(
 # comparing against nothing.
 replicated_full = native_full(N) if mpi.comm.rank == 0 else None
 bench(
-    "mpi_partition_data",
+    "distribute_data",
     lambda: local_of(
-        xgeo.mpi_partition_data(replicated_full, mpi, dim="x", log_partitions=False)
+        xgeo.distribute_data(replicated_full, mpi, dim="x", log_partitions=False)
     ),
     lambda: None,
     no_native_counterpart=True,

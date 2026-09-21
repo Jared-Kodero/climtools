@@ -6,22 +6,16 @@ Mirrors FMS ``mpp/include/mpp_domains_define.inc``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..mpi.mpi_init import MPI
-from .mpp_domains import CartesianDomain, Domain, _no_proc_null
+from .mpp_domains import Domain
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mpi4py.MPI import Comm
-
     from ..mpi.context import MPIContext
-
-
-_TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
 
 
 def mpp_compute_extent(
@@ -104,57 +98,6 @@ def mpp_define_layout(extent0: int, extent1: int, ndivs: int) -> tuple[int, int]
     return min(pairs, key=cost)
 
 
-def _define_layout_nd(extents: Sequence[int], ndivs: int) -> tuple[int, ...]:
-    """Choose a process-grid shape for more than two partition dimensions.
-
-    Assigns the prime factors of ``ndivs``, largest first, to whichever axis
-    currently carries the most work per rank. Two-dimensional layouts use
-    :func:`mpp_define_layout` instead, which follows FMS exactly.
-
-    Parameters
-    ----------
-    extents : sequence of int
-        Global length of each partitioned dimension.
-    ndivs : int
-        Number of ranks to divide among.
-
-    Returns
-    -------
-    tuple of int
-        Number of divisions along each axis.
-
-    Raises
-    ------
-    ValueError
-        If ``extents`` is empty, any extent is not positive, or ``ndivs`` is
-        not positive.
-    """
-    if not extents:
-        raise ValueError("requires at least one extent")
-    if any(extent <= 0 for extent in extents):
-        raise ValueError(f"All extents must be positive; got {tuple(extents)!r}.")
-    if ndivs <= 0:
-        raise ValueError(f"ndivs must be positive; got {ndivs}.")
-    if len(extents) == 2:
-        return mpp_define_layout(extents[0], extents[1], ndivs)
-
-    factors: list[int] = []
-    remaining, factor = ndivs, 2
-    while factor * factor <= remaining:
-        while remaining % factor == 0:
-            factors.append(factor)
-            remaining //= factor
-        factor += 1
-    if remaining > 1:
-        factors.append(remaining)
-
-    shape = [1] * len(extents)
-    for f in sorted(factors, reverse=True):
-        axis = max(range(len(extents)), key=lambda i: extents[i] / shape[i])
-        shape[axis] *= f
-    return tuple(shape)
-
-
 def mpp_define_domains(
     mpi_context: MPIContext,
     global_sizes: Mapping[str, int],
@@ -213,7 +156,11 @@ def mpp_define_domains(
     sizes = {d: int(global_sizes[d]) for d in dim_tuple}
 
     if target_rank == comm.rank:
-        topology = mpp_get_cartesian_domain(comm, dim_tuple, sizes)
+        # Imported here: ext_domains builds on this module, so importing it
+        # at module scope would close a cycle.
+        from .ext_domains import get_cartesian_domain
+
+        topology = get_cartesian_domain(comm, dim_tuple, sizes)
         grid_shape = topology.grid_shape
         starts = {d: topology.bounds[d][0] for d in dim_tuple}
         stops = {d: topology.bounds[d][1] for d in dim_tuple}
@@ -243,95 +190,3 @@ def mpp_define_domains(
         comm=comm,
         cart=cart,
     )
-
-
-def mpp_define_cartesian_domain(
-    comm: MPI.Intracomm,
-    dims: Sequence[str],
-    sizes: Mapping[str, int],
-) -> CartesianDomain:
-    """Build a rank's Cartesian topology for a multi-dimensional partition.
-
-    Raises
-    ------
-    ValueError
-        If fewer than two dimensions are given.
-
-    """
-    if len(dims) < 2:
-        raise ValueError(
-            "requires at least two partition dimensions; got " + f"{tuple(dims)!r}"
-        )
-
-    extents = [int(sizes[dim]) for dim in dims]
-    grid_shape = _define_layout_nd(extents, comm.size)
-
-    cart_comm = comm.Create_cart(
-        dims=list(grid_shape),
-        periods=[False] * len(dims),
-        reorder=False,
-    )
-    coords = tuple(cart_comm.Get_coords(cart_comm.rank))
-
-    bounds: dict[str, tuple[int, int]] = {}
-    neighbors: dict[str, tuple[int | None, int | None]] = {}
-    for axis, dim in enumerate(dims):
-        bounds[dim] = mpp_compute_extent(extents[axis], coords[axis], grid_shape[axis])
-        lower, upper = cart_comm.Shift(axis, 1)
-        neighbors[dim] = (_no_proc_null(lower), _no_proc_null(upper))
-
-    return CartesianDomain(
-        dims=tuple(dims),
-        grid_shape=grid_shape,
-        coords=coords,
-        cart_comm=cart_comm,
-        bounds=bounds,
-        neighbors=neighbors,
-    )
-
-
-def mpp_get_cartesian_domain(
-    comm: MPI.Intracomm,
-    dims: Sequence[str],
-    sizes: Mapping[str, int],
-) -> CartesianDomain:
-    """Return (building and caching once) a rank's Cartesian topology."""
-    dims = tuple(dims)
-    # Include sizes in the cache key so same-named dimensions with different extents
-    # cannot collide.
-    cache_key = (dims, tuple(int(sizes[d]) for d in dims))
-    cache = comm.Get_attr(_TOPOLOGY_KEYVAL)
-    if cache is None:
-        cache = {}
-        comm.Set_attr(_TOPOLOGY_KEYVAL, cache)
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    topology = mpp_define_cartesian_domain(comm, dims, sizes)
-    cache[cache_key] = topology
-    return topology
-
-
-def mpp_dim_comm(mpi_context: MPIContext, meta: Mapping[str, Any], dim: str) -> Comm:
-    """Return the communicator varying only along one partition dimension.
-
-    Parameters
-    ----------
-    mpi_context : MPIContext
-        MPI context.
-    meta : mapping
-        Canonical MPI metadata.
-    dim : str
-        Partition dimension.
-
-    Returns
-    -------
-    mpi4py.MPI.Comm
-        Full communicator for 1-D partitions or the corresponding Cartesian
-        subcommunicator.
-    """
-    dims = meta["dims"]
-    if len(dims) <= 1 or "cart" not in meta:
-        return cast("Comm", mpi_context.comm)
-    topology = mpp_get_cartesian_domain(mpi_context.comm, dims, meta["global_sizes"])
-    return topology.sub_comm((dim,))

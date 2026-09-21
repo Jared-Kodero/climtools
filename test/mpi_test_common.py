@@ -167,8 +167,10 @@ def build_fixtures() -> Fixtures:
     )
 
     native = xr.open_dataset(PATH).load()
-    dist = xgeo.mpi_open_dataset(PATH, mpi, partition_dim="time", log_partitions=True)
-    dist2d = xgeo.mpi_open_dataset(
+    dist = xgeo.open_distributed_dataset(
+        PATH, mpi, partition_dim="time", log_partitions=True
+    )
+    dist2d = xgeo.open_distributed_dataset(
         PATH2D, mpi, partition_dim=("lat", "lon"), log_partitions=True
     )
 
@@ -176,7 +178,7 @@ def build_fixtures() -> Fixtures:
         idx = np.arange(a, b, dtype=np.float64)
         return np.sin(idx) * (idx + 1.0)
 
-    dist_uneven = xgeo.mpi_create_dataarray(
+    dist_uneven = xgeo.create_distributed_dataarray(
         mpi,
         fill_uneven,
         dims=("x",),

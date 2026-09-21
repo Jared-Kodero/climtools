@@ -14,17 +14,23 @@ import numpy as np
 
 import xarray as xr
 
+from ..mpp.ext_collectives import gather_v
+from ..mpp.ext_domains import dim_comm
 from ..mpi.mpi_init import MPI
 from ..mpp.mpp_do_update import (
-    HaloWidthError,
     mpp_complete_update_domains,
     mpp_start_update_domains,
 )
 from ..mpp.mpp_domains import Domain, DomainMismatchError
-from ..mpp.mpp_domains_define import mpp_compute_extent, mpp_dim_comm
+from ..mpp.mpp_domains_define import mpp_compute_extent
 from ..mpp.mpp_domains_util import mpp_get_neighbor_pe
 from .chunks import prune_chunk_info
-from .meta import mpp_operand_meta, mpp_update_meta, strip_mpi_meta
+from .meta import (
+    mpp_concat_along,
+    mpp_operand_meta,
+    mpp_update_meta,
+    strip_mpi_meta,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping
@@ -263,23 +269,7 @@ def mpp_halo_exchange(
         domain, str(partition_dim), periodic=periodic
     )
 
-    local_len = int(value.sizes[partition_dim])
-    # Use a fixed-size reduction for the common pass case; gather rank details only on
-    # failure.
-    shortest = np.empty(1, dtype=np.int64)
-    comm.Allreduce(np.array([local_len], dtype=np.int64), shortest, op=MPI.MIN)
-    if int(shortest[0]) < max(before, after):
-        lengths = comm.allgather(local_len)
-        deficient = [
-            (r, length)
-            for r, length in enumerate(lengths)
-            if length < before or length < after
-        ]
-        raise HaloWidthError(
-            f"Halo ({before}, {after}) exceeds local {partition_dim!r} size "
-            + f"on ranks {deficient}."
-        )
-
+    # The halo width is validated collectively inside mpp_start_update_domains.
     before_block, after_block = _exchange_halo_blocks(
         value,
         partition_dim,
@@ -293,13 +283,9 @@ def mpp_halo_exchange(
     pieces = [
         piece for piece in (before_block, value, after_block) if piece is not None
     ]
-    if len(pieces) <= 1:
-        padded = value
-    elif isinstance(value, xr.Dataset):
-        # Concatenate only variables that vary along the partition dimension.
-        padded = xr.concat(pieces, dim=partition_dim, data_vars="minimal")
-    else:
-        padded = xr.concat(pieces, dim=partition_dim)
+    padded = (
+        value if len(pieces) <= 1 else mpp_concat_along(pieces, value, partition_dim)
+    )
     return (
         strip_mpi_meta(padded),
         before if before_block is not None else 0,
@@ -349,7 +335,7 @@ def mpp_global_field_xr(
         If the gathered slices do not tile the axis exactly.
     """
     axis = coordinate.get_axis_num(dim)
-    pieces = comm.gather((start, stop, np.asarray(coordinate.values)), root=0)
+    pieces = gather_v((start, stop, np.asarray(coordinate.values)), comm, root=0)
     if comm.rank != 0 or pieces is None:
         return None
 
@@ -421,12 +407,12 @@ def mpp_redistribute(
     xarray.Dataset or xarray.DataArray
         This rank's slice of the redistributed object.
     """
-    comm = mpp_dim_comm(mpi_context, meta, dim)
+    comm = dim_comm(meta, dim, mpi_context)
     rank, size = comm.rank, comm.size
 
     old_start = int(meta["starts"][dim])
     old_stop = int(meta["stops"][dim])
-    old_starts, _old_stops = zip(*comm.allgather((old_start, old_stop)), strict=True)
+    old_starts, _old_stops = zip(*gather_v((old_start, old_stop), comm), strict=True)
     old_starts_arr = np.asarray(old_starts, dtype=np.int64)
 
     new_length = int(new_coord.shape[0])
@@ -504,11 +490,7 @@ def mpp_redistribute(
             pieces.append(received[source])
             slot_pieces.append(np.nonzero(mask)[0])
 
-        combined = (
-            xr.concat(pieces, dim=dim, data_vars="minimal")
-            if isinstance(value, xr.Dataset)
-            else xr.concat(pieces, dim=dim)
-        )
+        combined = mpp_concat_along(pieces, value, dim)
         slots = np.concatenate(slot_pieces)
         final_order = np.argsort(slots, kind="stable")
         result = combined.isel({dim: final_order})

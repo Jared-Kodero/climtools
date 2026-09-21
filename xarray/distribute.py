@@ -622,10 +622,11 @@ def mpp_repartition(
     if mpp_get_meta(value) is not None:
         raise ValueError("Object is already distributed.")
 
+    stripped_value = strip_mpi_meta(value)
     automatic = dim == "auto"
     if automatic:
         if not value.dims:
-            return strip_mpi_meta(value)
+            return stripped_value
         dim = choose_partition_dim(
             value.sizes, mpi_context.comm.size, rank=mpi_context.comm.rank
         )
@@ -647,7 +648,7 @@ def mpp_repartition(
     start, stop = get_chunk_bounds(
         length, chunk_size, mpi_context.comm.rank, mpi_context.comm.size
     )
-    output = strip_mpi_meta(value).isel({dim: slice(start, stop)})
+    output = stripped_value.isel({dim: slice(start, stop)})
     info = prune_chunk_info(info, output)
     for other_dim, other_length in output.sizes.items():
         info.setdefault(

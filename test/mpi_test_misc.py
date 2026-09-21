@@ -10,7 +10,7 @@ import math
 import numpy as np
 from climtools import MPIContext
 from climtools.xarray.core import MPIXarray
-from climtools.mpp.mpp_efp import mpp_reproducing_prod
+from climtools.mpp.ext_efp import reproducing_prod
 from mpi4py import MPI
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
 
@@ -158,7 +158,7 @@ def run(fx: Fixtures) -> None:
         result = dist.prod(dim="time")
         raw = local_of(result)["pr"]
         expected = xr.DataArray(
-            mpp_reproducing_prod(
+            reproducing_prod(
                 np.asarray(native["pr"].values),
                 MPI.COMM_SELF,
                 axis=native["pr"].dims.index("time"),
@@ -408,7 +408,7 @@ def run(fx: Fixtures) -> None:
     replicated = fill_replicated(GZ)
     try:
         # repartition() is the MPIXarray method for an object every rank
-        # ALREADY holds fully -- unlike mpi_partition_data's root-scatter
+        # ALREADY holds fully -- unlike distribute_data's root-scatter
         # contract, no data movement is actually required here since
         # every rank starts with the same full array; it just
         # relabels/slices locally.

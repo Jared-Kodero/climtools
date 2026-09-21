@@ -9,14 +9,18 @@ import numpy as np
 
 import xarray as xr
 
+from ..mpp.ext_collectives import gather_v, partition_offsets, scatter_v
+from ..mpp.ext_domains import slice_compute_domain
+from ..mpp.ext_domains import dim_comm as _dim_comm
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp.mpp_domains_define import mpp_dim_comm as _dim_comm
+from ..mpp.mpp import mpp_broadcast
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import (
+    reattach_meta,
     mpp_set_domain_bounds,
     choose_partition_dim,
     indexer_is_scalar,
@@ -25,7 +29,6 @@ from .meta import (
     reattach_meta_after_collapse,
     strip_mpi_meta,
 )
-from ..mpp.mpp_domains_util import mpp_slice_compute_domain
 
 
 import pandas as pd
@@ -108,7 +111,7 @@ def mpp_isel(
 
     # Compute slice offsets from local contiguous bounds; no cross-rank metadata
     # exchange is needed.
-    local_start, local_stop, new_start = mpp_slice_compute_domain(
+    local_start, local_stop, new_start = slice_compute_domain(
         int(meta["starts"][dim]),
         int(meta["stops"][dim]),
         requested_start,
@@ -123,8 +126,8 @@ def mpp_isel(
         # Rare enough not to be worth deriving every rank's share locally;
         # the branch itself is taken identically on every rank, so the
         # collective below stays consistent.
-        dim_comm = _dim_comm(mpi_context, meta, dim)
-        counts = dim_comm.allgather(int(output.sizes[dim]))
+        dim_comm = _dim_comm(meta, dim, mpi_context)
+        counts = gather_v(int(output.sizes[dim]), dim_comm)
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
                 f"Cannot redistribute collapsed partition dimension {dim!r}."
@@ -171,7 +174,7 @@ def mpp_isel_scalar(
             f"Index {index} is out of bounds for {dim!r} (size {global_size})."
         )
 
-    dim_comm = _dim_comm(mpi_context, meta, dim)
+    dim_comm = _dim_comm(meta, dim, mpi_context)
     # Find a scalar index owner with a fixed-size reduction instead of gathering rank
     # bounds.
     claim = np.array(
@@ -266,29 +269,18 @@ def mpp_sel(
     local_indexers = dict(supplied)
     local_indexers[dim] = distributed_indexer
     output = value.sel(local_indexers, method=method, tolerance=tolerance, drop=drop)
-    dim_comm = _dim_comm(mpi_context, meta, dim)
+    dim_comm = _dim_comm(meta, dim, mpi_context)
 
-    # Use a global sum and exclusive prefix sum to resolve label-slice sizes and
-    # offsets.
-    local_length = np.array([int(output.sizes[dim])], dtype=np.int64)
-    total = np.empty_like(local_length)
-    dim_comm.Allreduce(local_length, total, op=MPI.SUM)
-    prefix = np.zeros_like(local_length)
-    dim_comm.Exscan(local_length, prefix, op=MPI.SUM)
-    if dim_comm.rank == 0:
-        prefix[0] = 0  # Exscan leaves rank 0's receive buffer undefined.
-
-    new_global_size = int(total[0])
-    new_start = int(prefix[0])
+    local_length = int(output.sizes[dim])
+    new_global_size, new_start, new_stop = partition_offsets(dim_comm, local_length)
     if new_global_size == 1 and partition_dim is not None:
-        counts = dim_comm.allgather(int(local_length[0]))
+        counts = gather_v(local_length, dim_comm)
         if len(meta["dims"]) > 1:
             raise NotImplementedError(
                 f"Cannot redistribute collapsed partition dimension {dim!r}."
             )
         return _repartition_singleton(mpi_context, output, dim, counts, partition_dim)
 
-    new_stop = new_start + int(local_length[0])
     chunk_info = prune_chunk_info(meta["chunk_info"], output)
     mpp_set_domain_bounds(
         output,
@@ -327,7 +319,7 @@ def _broadcast_from_owner(
     lazy array would otherwise be rebuilt on every receiving rank.
     """
     payload = result.load() if comm.rank == owner and result is not None else None
-    shared = comm.bcast(payload, root=owner)
+    shared = mpp_broadcast(payload, comm, root=owner)
     if meta is not None:
         shared = reattach_meta_after_collapse(shared, meta, dim)
     return cast("xr.Dataset | xr.DataArray", shared)
@@ -345,8 +337,10 @@ def mpp_sel_scalar(
     drop: bool,
 ) -> xr.Dataset | xr.DataArray:
     """Select one global label from the partition dimension."""
+    meta = mpp_get_meta(value)
+    dim_comm = mpi_context.comm if meta is None else _dim_comm(meta, dim, mpi_context)
+
     if method is not None:
-        meta = mpp_get_meta(value)
         if meta is None:
             return value.sel(
                 {dim: label, **other_indexers},
@@ -355,7 +349,6 @@ def mpp_sel_scalar(
                 drop=drop,
             )
 
-        dim_comm = _dim_comm(mpi_context, meta, dim)
         if dim in value.coords:
             local_coord = np.asarray(value[dim].values)
         else:
@@ -394,12 +387,12 @@ def mpp_sel_scalar(
                 candidate = (local_start + local_index, key)
 
         # Exchange only one candidate tuple per rank to choose the global match.
-        candidates = [c for c in dim_comm.allgather(candidate) if c is not None]
+        candidates = [c for c in gather_v(candidate, dim_comm) if c is not None]
         if not candidates:
             raise KeyError(f"No match for label {label!r} on {dim!r}.")
         global_index = pick(candidates, key=lambda pair: pair[1])[0]
 
-        bounds = dim_comm.allgather((int(meta["starts"][dim]), int(meta["stops"][dim])))
+        bounds = gather_v((int(meta["starts"][dim]), int(meta["stops"][dim])), dim_comm)
         owner = next(
             rank
             for rank, (start, stop) in enumerate(bounds)
@@ -437,8 +430,6 @@ def mpp_sel_scalar(
     except (KeyError, IndexError):
         pass
 
-    meta = mpp_get_meta(value)
-    dim_comm = mpi_context.comm if meta is None else _dim_comm(mpi_context, meta, dim)
     # Use one fixed-size sum to detect and identify a unique matching rank.
     claim = np.array([int(found), dim_comm.rank if found else 0], dtype=np.int64)
     tally = np.empty_like(claim)
@@ -514,7 +505,7 @@ def _repartition_singleton(
             error = exc
     mpi_context.raise_if_error(error, "isel/sel partition_dim scatter")
 
-    local = mpi_context.scatter(parts if comm.rank == owner else None, root=owner)
+    local = scatter_v(parts if comm.rank == owner else None, comm, root=owner)
 
     start, stop = get_chunk_bounds(target_length, chunk_size, comm.rank, comm.size)
     info = {str(target): chunk_size}
@@ -607,15 +598,7 @@ def mpp_reindex(
         result = strip_mpi_meta(value).reindex(
             indexers, method=method, tolerance=tolerance, fill_value=fill_value
         )
-        mpp_update_meta(
-            result,
-            dim=meta["dims"],
-            global_size=meta["global_sizes"],
-            start=meta["starts"],
-            stop=meta["stops"],
-            chunk_info=prune_chunk_info(meta["chunk_info"], result),
-            cart=meta.get("cart"),
-        )
+        reattach_meta(result, meta)
         return result
 
     if len(touched) > 1:
@@ -640,9 +623,9 @@ def mpp_reindex(
         ),
     )
 
-    comm = _dim_comm(mpi_context, meta, dim)
+    comm = _dim_comm(meta, dim, mpi_context)
     old_coord_local = np.asarray(value[dim].values)
-    old_full_coord = np.concatenate(comm.allgather(old_coord_local))
+    old_full_coord = np.concatenate(gather_v(old_coord_local, comm))
     old_index = pd.Index(old_full_coord)
     old_pos = old_index.get_indexer(new_labels, method=method, tolerance=tolerance)
     old_pos = old_pos.astype(np.int64)
@@ -721,15 +704,7 @@ def mpp_sortby(
 
     if not touched:
         result = strip_mpi_meta(value).sortby(by, ascending=ascending)
-        mpp_update_meta(
-            result,
-            dim=meta["dims"],
-            global_size=meta["global_sizes"],
-            start=meta["starts"],
-            stop=meta["stops"],
-            chunk_info=prune_chunk_info(meta["chunk_info"], result),
-            cart=meta.get("cart"),
-        )
+        reattach_meta(result, meta)
         return result
 
     if len(touched) > 1:
@@ -755,9 +730,9 @@ def mpp_sortby(
     )
     _agree(mpi_context, ("sortby", dim, key_signature, bool(ascending)))
 
-    comm = _dim_comm(mpi_context, meta, dim)
-    full_keys = [np.concatenate(comm.allgather(arr)) for arr in key_arrays_local]
-    old_full_coord = np.concatenate(comm.allgather(np.asarray(value[dim].values)))
+    comm = _dim_comm(meta, dim, mpi_context)
+    full_keys = [np.concatenate(gather_v(arr, comm)) for arr in key_arrays_local]
+    old_full_coord = np.concatenate(gather_v(np.asarray(value[dim].values), comm))
     # np.lexsort sorts by the *last* array primarily; reverse so the
     # first key in `by` is primary, matching xarray.sortby's own order.
     order = np.lexsort(tuple(reversed(full_keys)))

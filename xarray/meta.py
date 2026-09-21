@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import xarray as xr
 
+from ..mpp.ext_collectives import gather_v
 from ..mpi.mpi_init import MPI
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -412,12 +414,12 @@ def mpp_redefine_domain(
     xarray.Dataset or xarray.DataArray
         ``result``, carrying the redefined domain.
     """
-    from ..mpp.mpp import mpp_partition_offsets
-    from ..mpp.mpp_domains_define import mpp_dim_comm
+    from ..mpp.ext_collectives import partition_offsets
+    from ..mpp.ext_domains import dim_comm
     from .chunks import prune_chunk_info
 
-    comm = mpp_dim_comm(mpi_context, meta, dim)
-    global_size, start, stop = mpp_partition_offsets(comm, int(result.sizes[dim]))
+    comm = dim_comm(meta, dim, mpi_context)
+    global_size, start, stop = partition_offsets(comm, int(result.sizes[dim]))
     mpp_set_domain_bounds(
         result,
         meta,
@@ -483,7 +485,7 @@ def mpp_log_partition_report(
         tuple(int(stops[d]) for d in dims),
     )
 
-    rows = comm.gather(local, root=0)
+    rows = gather_v(local, comm, root=0)
     if comm.rank != 0 or rows is None:
         return
 
@@ -682,3 +684,80 @@ def mpp_operand_meta(operand: Any) -> dict[str, Any] | None:
     if isinstance(operand, (xr.Dataset, xr.DataArray)):
         return mpp_get_meta(operand)
     return None
+
+
+def reattach_meta(result: Any, meta: Mapping[str, Any]) -> Any:
+    """Put an unchanged distribution back on an operation's result.
+
+    For an operation that leaves the partition alone, the result carries the
+    same bounds as the input. Chunk info is pruned to the dimensions the
+    result actually has, since an operation may drop one.
+
+    Parameters
+    ----------
+    result : Any
+        Operation result. Non-xarray values are returned untouched.
+    meta : mapping
+        Distribution metadata the input carried.
+
+    Returns
+    -------
+    Any
+        ``result``, tagged when it is a Dataset or DataArray.
+    """
+    from .chunks import prune_chunk_info
+
+    if isinstance(result, xr.Dataset | xr.DataArray):
+        mpp_update_meta(
+            result,
+            dim=meta["dims"],
+            global_size=meta["global_sizes"],
+            start=meta["starts"],
+            stop=meta["stops"],
+            chunk_info=prune_chunk_info(meta["chunk_info"], result),
+            cart=meta.get("cart"),
+        )
+    return result
+
+
+def mpp_concat_along(
+    pieces: list[Any], template: xr.Dataset | xr.DataArray, dim: Hashable
+) -> xr.Dataset | xr.DataArray:
+    """Join gathered slices back into one object along ``dim``.
+
+    A Dataset needs ``data_vars="minimal"`` so variables that do not span
+    ``dim`` are not needlessly broadcast along it; a DataArray has no such
+    distinction.
+    """
+    if isinstance(template, xr.Dataset):
+        return xr.concat(pieces, dim=dim, data_vars="minimal")
+    return xr.concat(pieces, dim=dim)
+
+
+def mpp_partition_meta(
+    value: xr.Dataset | xr.DataArray, dim: Hashable
+) -> dict[str, Any] | None:
+    """Return the distribution metadata only if ``dim`` is partitioned.
+
+    Almost every distributed operation opens by asking the same question: is
+    the dimension I am about to touch actually split across ranks? If it is
+    not, the operation is rank-local and plain xarray handles it. Returning
+    the metadata on the distributed path and None otherwise puts that test in
+    one place.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object to inspect.
+    dim : Hashable
+        Dimension the caller is about to operate on.
+
+    Returns
+    -------
+    dict or None
+        The metadata when ``dim`` is partitioned, otherwise None.
+    """
+    meta = mpp_get_meta(value)
+    if meta is None or dim not in meta["dims"]:
+        return None
+    return meta

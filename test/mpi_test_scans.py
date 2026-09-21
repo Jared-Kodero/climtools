@@ -285,11 +285,11 @@ def run(fx: Fixtures) -> None:
 
     # interp -- Allgather-based; not halo-bounded, checked under the
     # partition dimension it interpolates along.
-    from climtools.mpp.mpp_domains_define import mpp_dim_comm as _dim_comm_check
+    from climtools.mpp.ext_domains import dim_comm as _dim_comm_check
     from climtools.mpp.mpp_domains_define import mpp_compute_extent as _gbb_check
 
     new_lat_fine = np.linspace(native.lat.values.min(), native.lat.values.max(), 37)
-    sub = _dim_comm_check(mpi, dist2d.meta, "lat")
+    sub = _dim_comm_check(dist2d.meta, "lat", mpi)
     s, e = _gbb_check(len(new_lat_fine), sub.rank, sub.size)
     check_multidim(
         "interp",
@@ -306,7 +306,7 @@ def run(fx: Fixtures) -> None:
     def fill_left(a, b):
         return np.arange(a, b, dtype=np.float64)[:, None] * np.ones((1, GYM))
 
-    left_1d = xgeo.mpi_create_dataarray(
+    left_1d = xgeo.create_distributed_dataarray(
         mpi,
         fill_left,
         dims=("x", "y"),

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .mpp import mpp_max, mpp_min, mpp_sum
+from .mpp import extreme_identity, mpp_max, mpp_min, mpp_sum
 from .mpp_domains import Domain
 
 if TYPE_CHECKING:
@@ -29,6 +29,17 @@ def _compute_slice(
         if before or after:
             index[axis] = slice(before, field.shape[axis] - after or None)
     return field[tuple(index)]
+
+
+def _local_extreme(
+    owned: np.ndarray[Any, Any], *, minimum: bool
+) -> np.ndarray[Any, Any]:
+    """Return this rank's extremum, or the identity if it owns nothing."""
+    if owned.size == 0:
+        return np.asarray(
+            extreme_identity(owned.dtype, minimum=minimum), dtype=owned.dtype
+        )
+    return np.asarray(owned.min() if minimum else owned.max())
 
 
 def mpp_global_sum(
@@ -85,9 +96,12 @@ def mpp_global_max(
     -------
     Any
         Global maximum, over compute-domain points only.
+        Ranks owning no points contribute the operator's identity rather
+        than raising, so an empty compute domain cannot deadlock the
+        collective.
     """
     owned = _compute_slice(np.asarray(field), domain, dims)
-    return mpp_max(np.asarray(owned.max()), comm=domain.comm)
+    return mpp_max(_local_extreme(owned, minimum=False), comm=domain.comm)
 
 
 def mpp_global_min(
@@ -108,6 +122,9 @@ def mpp_global_min(
     -------
     Any
         Global minimum, over compute-domain points only.
+        Ranks owning no points contribute the operator's identity rather
+        than raising, so an empty compute domain cannot deadlock the
+        collective.
     """
     owned = _compute_slice(np.asarray(field), domain, dims)
-    return mpp_min(np.asarray(owned.min()), comm=domain.comm)
+    return mpp_min(_local_extreme(owned, minimum=True), comm=domain.comm)

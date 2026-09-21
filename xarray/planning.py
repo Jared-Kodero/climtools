@@ -14,13 +14,15 @@ import numpy as np
 import xarray as xr
 from mpi4py.util import dtlib as _dtlib
 
+from ..mpp.ext_collectives import reduce_scatter
+from ..mpp.ext_domains import get_cartesian_domain
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
-from ..mpp.mpp import _mpp_reduce, mpp_reduce_scatter
-from ..mpp.mpp_domains_define import mpp_get_cartesian_domain
+from ..mpp.mpp import extreme_identity
+from ..mpp.mpp import _mpp_reduce
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
 
@@ -80,20 +82,6 @@ def partial_dtype(
     else:
         result = method(dim="_probe", skipna=skipna)
     return cast("np.dtype[Any]", result.dtype)
-
-
-def extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
-    """Return the neutral value for a minimum or maximum reduction."""
-    kind = dtype.kind
-    if kind == "b":
-        return bool(minimum)
-    if kind in "iu":
-        limits = np.iinfo(dtype)
-        return limits.max if minimum else limits.min
-    if kind == "f":
-        return np.asarray(np.inf if minimum else -np.inf, dtype=dtype).item()
-    name = "minimum" if minimum else "maximum"
-    raise TypeError(f"MPI {name} is not defined for {dtype} data.")
 
 
 class PlanEntry(NamedTuple):
@@ -312,7 +300,7 @@ def mpp_resolve_comm(
     axes = frozenset(comm_axes)
     if meta is None or not axes or "cart" not in meta or len(meta["dims"]) <= 1:
         return mpi_context.comm
-    topology = mpp_get_cartesian_domain(
+    topology = get_cartesian_domain(
         mpi_context.comm, meta["dims"], meta["global_sizes"]
     )
     return topology.sub_comm(axes)
@@ -326,6 +314,39 @@ def guarded(function: Any) -> tuple[Any, BaseException | None]:
         return None, exc
 
 
+#: What the health flag contributes under each operator: a healthy rank sends
+#: the operator's identity, so it cannot perturb the reduced flag, and a
+#: failed rank sends a value the operator preserves.
+_FLAG_ENCODING: dict[str, tuple[float, float]] = {
+    "SUM": (0.0, 1.0),
+    "PROD": (1.0, 0.0),
+    "MIN": (0.0, -1.0),
+    "MAX": (0.0, 1.0),
+    "LAND": (1.0, 0.0),
+    "LOR": (0.0, 1.0),
+}
+
+
+def residual_shape(value: xr.DataArray, dims: tuple[Hashable, ...]) -> tuple[int, ...]:
+    """Return the local shape a reduction of ``value`` over ``dims`` leaves.
+
+    Derived from the input's sizes alone, so a rank whose local reduction
+    raised can still build a correctly shaped neutral buffer and enter the
+    collective its peers are committed to.
+    """
+    reduced = set(dims)
+    return tuple(int(value.sizes[d]) for d in value.dims if d not in reduced)
+
+
+def _reduction_identity(name: str, dtype: np.dtype[Any]) -> Any:
+    """Return the value that leaves a reduction under ``name`` unchanged."""
+    if name in ("SUM", "LOR"):
+        return np.zeros((), dtype=dtype)
+    if name in ("PROD", "LAND"):
+        return np.ones((), dtype=dtype)
+    return extreme_identity(dtype, minimum=(name == "MIN"))
+
+
 def mpp_comm_reduce(
     mpi_context: MPIContext,
     value: xr.DataArray | None,
@@ -337,6 +358,7 @@ def mpp_comm_reduce(
     comm: MPI.Comm | None = None,
     replica_count: int = 1,
     scatter: tuple[Hashable, Sequence[int]] | None = None,
+    expect_shape: tuple[int, ...] | None = None,
 ) -> xr.DataArray:
     """Reduce a validated DataArray buffer across ranks.
 
@@ -384,38 +406,189 @@ def mpp_comm_reduce(
             error = exc
             send = None
 
+    resolved_comm = comm if comm is not None else mpi_context.comm
+    name = op_name(op)
+    fused = (
+        scatter is None
+        and expect_shape is not None
+        and name in _FLAG_ENCODING
+        and resolved_comm.size > 1
+        and (send is None or send.shape == expect_shape)
+    )
+
+    if fused:
+        # One collective carries both the payload and whether every rank
+        # produced one, instead of a separate agreement round beforehand.
+        dtype = np.dtype(expect_dtype) if expect_dtype is not None else send.dtype
+        healthy_flag, failed_flag = _FLAG_ENCODING[name]
+        count = int(np.prod(expect_shape, dtype=np.int64)) if expect_shape else 1
+        buffer = np.empty(count + 1, dtype=dtype)
+        if send is None:
+            buffer[:count] = _reduction_identity(name, dtype)
+            buffer[count] = failed_flag
+        else:
+            buffer[:count] = send.reshape(count)
+            buffer[count] = healthy_flag
+        reduced = _mpp_reduce(buffer, op, resolved_comm)
+        if np.real(reduced[count]) != healthy_flag:
+            # Rare. Every rank read the same flag, so they all reach the
+            # descriptive protocol together.
+            mpi_context.raise_if_error(error, phase, None, comm=comm)
+            raise AssertionError("MPI xarray reduction buffer is missing.")
+        if value is None:
+            raise AssertionError("MPI xarray reduction buffer is missing.")
+        result = value.copy(data=reduced[:count].reshape(expect_shape))
+        return _apply_replica_count(result, op, replica_count)
+
     signature = (
         None
         if send is None
-        else (
-            op_name(op),
-            send.dtype.str,
-            tuple(int(length) for length in send.shape),
-        )
+        else (name, send.dtype.str, tuple(int(length) for length in send.shape))
     )
     mpi_context.raise_if_error(error, phase, signature, comm=comm)
     if send is None or value is None:
         raise AssertionError("MPI xarray reduction buffer is missing.")
 
-    resolved_comm = comm if comm is not None else mpi_context.comm
     if scatter is not None:
         target, counts = scatter
         axis = value.dims.index(target)
-        recv = mpp_reduce_scatter(send, op, resolved_comm, counts, axis=axis)
+        recv = reduce_scatter(send, op, resolved_comm, counts, axis=axis)
         start = sum(counts[: resolved_comm.rank])
         stop = start + counts[resolved_comm.rank]
         result = value.isel({target: slice(start, stop)}).copy(data=recv)
     else:
         recv = _mpp_reduce(send, op, resolved_comm)
         result = value.copy(data=recv)
+    return _apply_replica_count(result, op, replica_count)
+
+
+def _apply_replica_count(
+    result: xr.DataArray, op: MPI.Op, replica_count: int
+) -> xr.DataArray:
+    """Undo the duplication a replicated SUM introduced."""
     if replica_count != 1 and op == MPI.SUM:
-        # Divide replicated SUM results by ``replica_count``; duplicate contributions
-        # make the factor exact.
+        # Duplicate contributions make the factor exact.
         if result.dtype.kind in "iu":
             result = result // replica_count
         else:
             result = result / replica_count
     return result
+
+
+def mpp_can_fuse_count(dtype: np.dtype[Any]) -> bool:
+    """Return whether a valid-value count can share a buffer of ``dtype``.
+
+    ``float32`` carries integers exactly only to ``2**24``, which a single
+    global field routinely exceeds, so 4-byte reductions keep their own
+    collective rather than silently rounding a mean's denominator.
+    """
+    return dtype.itemsize >= 8 and dtype.kind in "fic"
+
+
+def mpp_sum_and_count(
+    mpi_context: MPIContext,
+    value: xr.DataArray,
+    partial_sum: xr.DataArray | None,
+    dims: tuple[Hashable, ...],
+    *,
+    skipna: bool | None,
+    sum_dtype: np.dtype[Any],
+    error: BaseException | None = None,
+    phase: str = "MPI xarray sum reduction",
+    comm: MPI.Comm | None = None,
+    replica_count: int = 1,
+    scatter: tuple[Hashable, Sequence[int]] | None = None,
+) -> tuple[xr.DataArray, xr.DataArray | None]:
+    """Reduce a partial sum and its valid-value count together.
+
+    Both are ``SUM`` reductions of the same shape over the same communicator,
+    so they travel in one buffer and cost one collective instead of two.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    value : xarray.DataArray
+        Reduction input, used for the count and the residual shape.
+    partial_sum : xarray.DataArray or None
+        Rank-local sum, or None if the local reduction raised.
+    dims : tuple of Hashable
+        Dimensions being reduced.
+    skipna : bool or None
+        Missing-value behavior, following xarray semantics.
+    sum_dtype : numpy.dtype
+        Dtype the summed buffer is reduced in.
+    error : BaseException, optional
+        Deferred local error.
+    phase : str
+        Collective diagnostic label.
+    comm : mpi4py.MPI.Comm, optional
+        Reduction communicator.
+    replica_count : int, default 1
+        Duplicate replicas included in the SUM.
+    scatter : tuple, optional
+        Target dimension and per-rank counts for ``Reduce_scatter``.
+
+    Returns
+    -------
+    tuple[xarray.DataArray, xarray.DataArray or None]
+        Global sum, and the count when it was fused into the same
+        collective. A None count means the caller should obtain it its own
+        way, which for ``skipna=False`` needs no communication at all.
+    """
+    resolved_comm = comm if comm is not None else mpi_context.comm
+    shape = residual_shape(value, dims)
+    fusable = (
+        scatter is None
+        and resolved_comm.size > 1
+        and error is None
+        and partial_sum is not None
+        and mpp_can_fuse_count(sum_dtype)
+        and skipna_enabled(value.dtype, skipna)
+    )
+
+    if fusable:
+        local_count, count_error = guarded(
+            lambda: value.count(dim=dims, keep_attrs=False)
+        )
+        if count_error is None and local_count is not None:
+            count = int(np.prod(shape, dtype=np.int64)) if shape else 1
+            # [ sum | count | health flag ], one contiguous SUM reduction.
+            buffer = np.empty(2 * count + 1, dtype=sum_dtype)
+            buffer[:count] = np.asarray(partial_sum.values, dtype=sum_dtype).reshape(
+                count
+            )
+            buffer[count : 2 * count] = np.asarray(
+                local_count.values, dtype=sum_dtype
+            ).reshape(count)
+            buffer[2 * count] = 0.0
+            reduced = _mpp_reduce(buffer, MPI.SUM, resolved_comm)
+            if np.real(reduced[2 * count]) == 0.0:
+                total = partial_sum.copy(data=reduced[:count].reshape(shape))
+                counted = local_count.copy(
+                    data=np.asarray(reduced[count : 2 * count].reshape(shape)).astype(
+                        np.int64
+                    )
+                )
+                return (
+                    _apply_replica_count(total, MPI.SUM, replica_count),
+                    _apply_replica_count(counted, MPI.SUM, replica_count),
+                )
+        error = count_error
+
+    global_sum = mpp_comm_reduce(
+        mpi_context,
+        partial_sum,
+        MPI.SUM,
+        expect_dtype=sum_dtype,
+        error=error,
+        phase=phase,
+        comm=comm,
+        replica_count=replica_count,
+        scatter=scatter,
+        expect_shape=shape,
+    )
+    return global_sum, None
 
 
 def mpp_count_valid_values(
@@ -444,6 +617,7 @@ def mpp_count_valid_values(
         comm=comm,
         replica_count=replica_count,
         scatter=scatter,
+        expect_shape=residual_shape(value, dims),
     )
 
 
@@ -819,6 +993,9 @@ def mpp_finish(
         redundant copy.
 
     """
+    pruned_chunks = (
+        prune_chunk_info(old_meta["chunk_info"], result) if old_meta is not None else {}
+    )
     result = strip_mpi_meta(result)
     old_dims: tuple[Hashable, ...] = () if old_meta is None else old_meta["dims"]
     remaining_dims = tuple(dim for dim in old_dims if dim in result.dims)
@@ -853,7 +1030,7 @@ def mpp_finish(
             },
             start=start,
             stop=stop,
-            chunk_info=prune_chunk_info(old_meta["chunk_info"], result),
+            chunk_info=pruned_chunks,
             cart=cart,
         )
         return result
@@ -877,9 +1054,7 @@ def mpp_finish(
             f"partition_dim={partition_dim!r} was not reduced collectively."
         )
 
-    chunk_info = (
-        prune_chunk_info(old_meta["chunk_info"], result) if old_meta is not None else {}
-    )
+    chunk_info = pruned_chunks
     from .distribute import mpp_repartition
 
     return mpp_repartition(mpi_context, result, target, chunk_info=chunk_info)

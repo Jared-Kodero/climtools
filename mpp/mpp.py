@@ -13,48 +13,11 @@ import numpy as np
 
 from ..mpi.mpi_init import MPI
 
+#: Dtype kinds MPI has a datatype for.
+MPI_REDUCIBLE_KINDS = "biufc"
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from .mpp_domains import Domain
-
-
-def mpp_reduce_scatter(
-    local: np.ndarray[Any, Any],
-    op: MPI.Op,
-    comm: MPI.Comm,
-    recvcounts: Sequence[int],
-    *,
-    axis: int = 0,
-) -> np.ndarray[Any, Any]:
-    """Reduce an array and retain each rank's contiguous slice.
-
-    Parameters
-    ----------
-    local : numpy.ndarray
-        Equal-shaped local reduction buffer on every rank.
-    op : mpi4py.MPI.Op
-        Reduction operator.
-    comm : mpi4py.MPI.Comm
-        Reduction communicator.
-    recvcounts : sequence of int
-        Elements retained by each rank along ``axis``.
-    axis : int, default 0
-        Axis split among ranks.
-
-    Returns
-    -------
-    numpy.ndarray
-        This rank's reduced slice.
-    """
-    moved = np.ascontiguousarray(np.moveaxis(local, axis, 0))
-    per_slice = moved[0].size if moved.ndim > 1 else 1
-    flat_counts = [c * per_slice for c in recvcounts]
-    recvbuf = np.empty(flat_counts[comm.rank], dtype=moved.dtype)
-    comm.Reduce_scatter(moved.reshape(-1), recvbuf, recvcounts=flat_counts, op=op)
-    my_len = recvcounts[comm.rank]
-    shape = (my_len, *moved.shape[1:]) if moved.ndim > 1 else (my_len,)
-    return np.moveaxis(recvbuf.reshape(shape), 0, axis)
 
 
 def _mpp_reduce(
@@ -155,30 +118,39 @@ def mpp_chksum(
     return int(total[0])
 
 
-def mpp_partition_offsets(comm: MPI.Comm, local_length: int) -> tuple[int, int, int]:
-    """Recompute distributed offsets after a local length change.
+def extreme_identity(dtype: np.dtype[Any], *, minimum: bool) -> Any:
+    """Return the neutral value for a minimum or maximum reduction.
+
+    A rank with nothing to contribute sends this instead, so it still enters
+    the collective its peers are committed to rather than skipping it.
 
     Parameters
     ----------
-    comm : mpi4py.MPI.Comm
-        Partition communicator.
-    local_length : int
-        This rank's new local length.
+    dtype : numpy.dtype
+        Type being reduced.
+    minimum : bool
+        Whether the reduction is a minimum.
 
     Returns
     -------
-    tuple[int, int, int]
-        Global size and this rank's half-open ownership bounds.
+    Any
+        Value that leaves the reduction unchanged.
+
+    Raises
+    ------
+    TypeError
+        If the dtype has no defined ordering identity.
     """
-    length = np.array([int(local_length)], dtype=np.int64)
-    total = np.empty_like(length)
-    comm.Allreduce(length, total, op=MPI.SUM)
-    prefix = np.zeros_like(length)
-    comm.Exscan(length, prefix, op=MPI.SUM)
-    if comm.rank == 0:
-        prefix[0] = 0  # Exscan leaves rank 0's receive buffer undefined.
-    start = int(prefix[0])
-    return int(total[0]), start, start + int(length[0])
+    kind = dtype.kind
+    if kind == "b":
+        return bool(minimum)
+    if kind in "iu":
+        limits = np.iinfo(dtype)
+        return limits.max if minimum else limits.min
+    if kind == "f":
+        return np.asarray(np.inf if minimum else -np.inf, dtype=dtype).item()
+    name = "minimum" if minimum else "maximum"
+    raise TypeError(f"MPI {name} is not defined for {dtype} data.")
 
 
 def mpp_sync(comm: MPI.Comm) -> None:
@@ -192,6 +164,16 @@ def mpp_sync(comm: MPI.Comm) -> None:
     comm.Barrier()
 
 
+def _buffered(value: Any) -> bool:
+    """Return whether ``value`` can ride the MPI buffer interface.
+
+    Only arrays of a type MPI has a datatype for qualify. A ``datetime64``
+    array is still a NumPy array but has no MPI datatype, so it has to go the
+    pickled route like any other Python object.
+    """
+    return isinstance(value, np.ndarray) and value.dtype.kind in MPI_REDUCIBLE_KINDS
+
+
 def mpp_broadcast(
     value: np.ndarray[Any, Any], comm: MPI.Comm, *, root: int = 0
 ) -> np.ndarray[Any, Any]:
@@ -199,9 +181,10 @@ def mpp_broadcast(
 
     Parameters
     ----------
-    value : numpy.ndarray
+    value : numpy.ndarray or object
         Array to send on ``root``; a correctly shaped and typed buffer
-        elsewhere.
+        elsewhere. A non-array object is sent in pickled form instead, the
+        way FMS overloads ``mpp_broadcast`` by type.
     comm : mpi4py.MPI.Comm
         Communicator to broadcast over.
     root : int, default 0
@@ -212,6 +195,10 @@ def mpp_broadcast(
     numpy.ndarray
         The broadcast array, on every rank.
     """
+    if not _buffered(value):
+        # Anything MPI has no datatype for goes through the pickled form;
+        # FMS overloads mpp_broadcast by type for the same reason.
+        return comm.bcast(value, root=root)
     buffer = np.ascontiguousarray(value)
     comm.Bcast(buffer, root=root)
     return buffer
@@ -225,7 +212,8 @@ def mpp_gather(
     Parameters
     ----------
     local : numpy.ndarray
-        This rank's contribution; the same shape on every rank.
+        This rank's contribution; must be the same shape on every rank. Use
+        :func:`gather_v` when the contributions differ in size.
     comm : mpi4py.MPI.Comm
         Communicator to gather over.
     root : int, optional

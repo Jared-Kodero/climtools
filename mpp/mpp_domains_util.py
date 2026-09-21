@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from .ext_domains import get_cartesian_domain
 from .mpp_domains_define import mpp_compute_extent
 from .mpp import mpp_chksum
 from .mpp_domains import Domain, DomainMismatchError
-from .mpp_domains_define import mpp_get_cartesian_domain
 
 if TYPE_CHECKING:
     pass
@@ -190,32 +190,6 @@ def mpp_get_domain_components(domain: Domain) -> dict[str, Domain]:
     }
 
 
-def mpp_slice_compute_domain(
-    start: int,
-    stop: int,
-    requested_start: int,
-    requested_stop: int,
-) -> tuple[int, int, int]:
-    """Intersect one compute domain with a global slice.
-
-    Parameters
-    ----------
-    start, stop : int
-        Rank-local global ownership bounds.
-    requested_start, requested_stop : int
-        Requested global half-open slice.
-
-    Returns
-    -------
-    tuple[int, int, int]
-        Local slice bounds and the surviving global start offset.
-    """
-    lower = max(requested_start, start)
-    upper = max(lower, min(requested_stop, stop))
-    below = max(0, min(requested_stop, start) - requested_start)
-    return lower - start, upper - start, below
-
-
 def mpp_get_neighbor_pe(
     domain: Domain, dim: str, *, periodic: bool = False
 ) -> tuple[int | None, int | None]:
@@ -239,7 +213,7 @@ def mpp_get_neighbor_pe(
     rank = comm.rank
 
     if len(domain.dims) > 1:
-        topology = mpp_get_cartesian_domain(comm, domain.dims, domain.global_sizes)
+        topology = get_cartesian_domain(comm, domain.dims, domain.global_sizes)
         if periodic:
             axis = domain.dims.index(dim)
             axis_size = topology.grid_shape[axis]

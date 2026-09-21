@@ -38,7 +38,7 @@ if rank == 0:
 else:
     full = None
 
-ds = xgeo.mpi_partition_data(full, mpi, dim="x", log_partitions=False)
+ds = xgeo.distribute_data(full, mpi, dim="x", log_partitions=False)
 
 mpi.comm.barrier()
 mpp_halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)  # warm up

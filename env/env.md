@@ -40,6 +40,9 @@ venv/bin/pip install --no-binary netCDF4 --no-build-isolation netCDF4
 # Verify: python -c "import netCDF4; print(netCDF4.__has_parallel4_support__)"  ->  must print 1
 
 venv/bin/pip install pandas scipy xarray dask cf_xarray rich bottleneck
+# `import climtools` imports the plotting stack eagerly, so these are
+# required even for MPI-only use:
+venv/bin/pip install matplotlib cartopy seaborn cmocean ipython scikit-image
 ```
 
 Always set `LD_LIBRARY_PATH` to include the openmpi HDF5 path (and `PATH` to include

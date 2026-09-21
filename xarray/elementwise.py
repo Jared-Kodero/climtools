@@ -8,16 +8,21 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import xarray as xr
 
+from ..mpp.ext_domains import dim_comm as _dim_comm
+from ..mpp.ext_collectives import gather_v
 from ..mpi.mpi_init import MPI
 from .chunks import prune_chunk_info
 from .meta import (
+    mpp_partition_meta,
+    mpp_concat_along,
+    reattach_meta,
     mpp_get_meta,
     mpp_redefine_domain,
     mpp_update_meta,
     strip_mpi_meta,
 )
 from .halo import mpp_halo_exchange
-from ..mpp.mpp_domains_define import mpp_dim_comm as _dim_comm
+from ..mpp.mpp import mpp_broadcast
 from .planning import _agree, guarded
 
 if TYPE_CHECKING:
@@ -33,11 +38,7 @@ import ast
 import operator
 from collections.abc import Callable
 
-
-from .meta import (
-    _partitions_match,
-    mpp_operand_meta,
-)
+from .meta import _partitions_match, mpp_operand_meta
 from .planning import mpp_comm_reduce, mpp_resolve_comm
 
 
@@ -158,7 +159,7 @@ def _prefix_scan(
     # compute, and `comm.exscan` would pickle the graph as-is.
     local_total = local_total.load()
 
-    comm = _dim_comm(mpi_context, meta, dim)
+    comm = _dim_comm(meta, dim, mpi_context)
     # EXSCAN gives exclusive prefixes; rank 0 receives None and takes the
     # operator's identity instead.
     prefix = comm.exscan(local_total, op=MPI.PROD if product else MPI.SUM)
@@ -179,8 +180,8 @@ def _cumulative(
 ) -> xr.Dataset | xr.DataArray:
     """Shared implementation for :func:`mpp_cumsum` and :func:`mpp_cumprod`."""
     operation = "cumprod" if product else "cumsum"
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         method = value.cumprod if product else value.cumsum
         return method(dim, skipna=skipna, keep_attrs=keep_attrs)
 
@@ -287,8 +288,8 @@ def mpp_ffill(
     limit: int | None = None,
 ) -> xr.Dataset | xr.DataArray:
     """Forward-fill along ``dim``, correct when ``dim`` is distributed."""
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.ffill(dim, limit=limit)
 
     if limit is not None:
@@ -312,8 +313,8 @@ def mpp_bfill(
     limit: int | None = None,
 ) -> xr.Dataset | xr.DataArray:
     """Backward-fill along ``dim``, correct when ``dim`` is distributed."""
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.bfill(dim, limit=limit)
 
     if limit is not None:
@@ -339,7 +340,7 @@ def _fill_scan(
     forward: bool,
 ) -> xr.Dataset | xr.DataArray:
     """Unbounded ffill/bfill core: an exclusive-scan last-value-seen carry."""
-    comm = _dim_comm(mpi_context, meta, dim)
+    comm = _dim_comm(meta, dim, mpi_context)
     edge_index = -1 if forward else 0
 
     def _local() -> tuple[xr.Dataset | xr.DataArray, Any, bool]:
@@ -380,6 +381,72 @@ def _fill_scan(
     return local_filled.fillna(carry_in)
 
 
+#: Source points each interpolation method needs on either side of a target.
+_INTERP_STENCIL = {"nearest": 1, "linear": 1, "slinear": 2, "quadratic": 3, "cubic": 3}
+
+
+def _interp_halo_width(
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    new_coord: Any,
+    meta: Mapping[str, Any],
+    comm: MPI.Comm,
+    method: str,
+) -> int | None:
+    """Return the halo that covers every rank's interpolation targets.
+
+    Only the source coordinate is gathered, which costs one value per point
+    along ``dim`` rather than one per array element. From it each rank works
+    out how far outside its own compute domain its targets reach; the widest
+    such reach, agreed across ranks, is the halo that serves all of them.
+
+    Parameters
+    ----------
+    value : xarray.Dataset or xarray.DataArray
+        Object being interpolated.
+    dim : Hashable
+        Dimension being interpolated along.
+    new_coord : array-like
+        This rank's target coordinate values.
+    meta : mapping
+        Distribution metadata for ``value``.
+    comm : mpi4py.MPI.Comm
+        Communicator varying along ``dim``.
+    method : str
+        Interpolation method, which sets how many source points a target
+        needs on each side.
+
+    Returns
+    -------
+    int or None
+        Halo width to exchange, or None when no bounded halo suffices and
+        the caller must reassemble the axis instead.
+    """
+    source = np.concatenate(gather_v(np.asarray(value[dim].values), comm))
+    order = np.argsort(source, kind="stable")
+    if not np.array_equal(order, np.arange(source.size)):
+        # An unsorted source axis gives no locality to exploit.
+        return None
+
+    targets = np.asarray(new_coord)
+    if targets.size == 0:
+        reach = 0
+    else:
+        pad = _INTERP_STENCIL.get(method, 3)
+        low = int(np.searchsorted(source, np.nanmin(targets), side="left")) - pad
+        high = int(np.searchsorted(source, np.nanmax(targets), side="right")) + pad
+        start, stop = int(meta["starts"][dim]), int(meta["stops"][dim])
+        reach = max(start - low, high - stop, 0)
+
+    agreed = np.empty(2, dtype=np.int64)
+    comm.Allreduce(
+        np.array([reach, -int(value.sizes[dim])], dtype=np.int64), agreed, op=MPI.MAX
+    )
+    width, shortest = int(agreed[0]), -int(agreed[1])
+    # A halo can never exceed the narrowest compute domain on the axis.
+    return width if width <= shortest else None
+
+
 def mpp_interp(
     mpi_context: MPIContext,
     value: xr.Dataset | xr.DataArray,
@@ -416,22 +483,108 @@ def mpp_interp(
         own length-changing case).
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.interp({dim: new_coord}, method=method, **kwargs)
 
     _agree(mpi_context, ("interp", str(dim), method))
+    comm = _dim_comm(meta, dim, mpi_context)
 
-    comm = _dim_comm(mpi_context, meta, dim)
-    pieces = comm.allgather(value)
-    full = (
-        xr.concat(pieces, dim=dim, data_vars="minimal")
-        if isinstance(value, xr.Dataset)
-        else xr.concat(pieces, dim=dim)
-    )
-    result = full.interp({dim: new_coord}, method=method, **kwargs)
+    # Interpolation is local: a target point only needs the source points
+    # bracketing it. Gathering the whole field would make every rank hold the
+    # global array, so only the source coordinate is gathered -- one value per
+    # point rather than one per element -- and the data it points at arrives
+    # through a halo.
+    width = _interp_halo_width(value, dim, new_coord, meta, comm, method)
+    if width is not None:
+        padded, _before, _after = mpp_halo_exchange(
+            mpi_context, value, dim, before=width, after=width
+        )
+        result = padded.interp({dim: new_coord}, method=method, **kwargs)
+    else:
+        # A rank is asking for targets far outside its own span, so no
+        # bounded halo can serve it; fall back to reassembling the axis.
+        full = mpp_concat_along(gather_v(value, comm), value, dim)
+        result = full.interp({dim: new_coord}, method=method, **kwargs)
 
     return mpp_redefine_domain(mpi_context, result, meta, dim)
+
+
+def _order_statistic(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    dim: Hashable,
+    operation: str,
+    reduce_full: Callable[[xr.Dataset | xr.DataArray], xr.Dataset | xr.DataArray],
+) -> xr.Dataset | xr.DataArray:
+    """Compute an order statistic over a partitioned dimension.
+
+    Unlike a sum or an extremum, an order statistic cannot be combined from
+    per-rank partials: it needs every value along ``dim`` at once. The axis is
+    gathered onto the root of its sub-communicator, reduced there with
+    ordinary xarray, and broadcast back. Where other partition dimensions
+    survive, only the root keeps the real result and the rest are emptied, so
+    the value is owned exactly once.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    value : xarray.Dataset or xarray.DataArray
+        Object to reduce; ``dim`` must be partitioned.
+    dim : Hashable
+        Dimension to reduce over.
+    operation : str
+        Name used for collective agreement and diagnostics.
+    reduce_full : callable
+        Applied on the root to the reassembled object.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Reduced object with distribution metadata for the surviving
+        dimensions.
+    """
+    meta = mpp_get_meta(value)
+    _agree(mpi_context, (operation, str(dim), int(meta["global_size"])))
+    comm = _dim_comm(meta, dim, mpi_context)
+    # Materialize before the object collective so a lazy Dask graph is never
+    # pickled onto the wire.
+    value = value.load()
+    pieces = gather_v(value, comm, root=0)
+
+    def _on_root() -> xr.Dataset | xr.DataArray:
+        """Reassemble the axis and reduce it."""
+        return reduce_full(mpp_concat_along(pieces, value, dim))
+
+    result, error = guarded(_on_root) if comm.rank == 0 else (None, None)
+    mpi_context.raise_if_error(
+        error, f"MPI xarray {operation}", signature=(operation, str(dim)), comm=comm
+    )
+    result = strip_mpi_meta(mpp_broadcast(result, comm, root=0))
+
+    remaining = tuple(d for d in meta["dims"] if d != dim)
+    if not remaining:
+        return result
+
+    start = {d: int(meta["starts"][d]) for d in remaining}
+    stop = {d: int(meta["stops"][d]) for d in remaining}
+    if comm.rank != 0:
+        # Replicas hold the same values; empty them so ownership stays unique.
+        empty_dim = remaining[0]
+        result = result.isel({empty_dim: slice(0, 0)})
+        stop[empty_dim] = start[empty_dim]
+
+    mpp_update_meta(
+        result,
+        dim=remaining,
+        global_size={d: int(meta["global_sizes"][d]) for d in remaining},
+        start=start,
+        stop=stop,
+        chunk_info=prune_chunk_info(meta["chunk_info"], result),
+        cart=None,
+    )
+    return result
 
 
 def mpp_median(
@@ -458,56 +611,16 @@ def mpp_median(
         redundant copy.
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.median(dim, skipna=skipna, keep_attrs=keep_attrs)
-
-    _agree(mpi_context, ("median", str(dim), int(meta["global_size"])))
-    comm = _dim_comm(mpi_context, meta, dim)
-    # Materialize local values before object collectives so lazy Dask graphs are never
-    # pickled.
-    value = value.load()
-    pieces = comm.gather(value, root=0)
-
-    def _reduce_on_root() -> xr.Dataset | xr.DataArray:
-        """Compute the requested median on the root rank."""
-        full = (
-            xr.concat(pieces, dim=dim, data_vars="minimal")
-            if isinstance(value, xr.Dataset)
-            else xr.concat(pieces, dim=dim)
-        )
-        return full.median(dim, skipna=skipna, keep_attrs=keep_attrs)
-
-    result, error = guarded(_reduce_on_root) if comm.rank == 0 else (None, None)
-    mpi_context.raise_if_error(
-        error, "MPI xarray median", signature=("median", str(dim)), comm=comm
+    return _order_statistic(
+        mpi_context,
+        value,
+        dim,
+        "median",
+        lambda full: full.median(dim, skipna=skipna, keep_attrs=keep_attrs),
     )
-    # Keep reduced data on one subgroup rank; mark replicas empty to preserve unique
-    # ownership.
-    result = comm.bcast(result, root=0)
-    result = strip_mpi_meta(result)
-
-    remaining_dims = tuple(d for d in meta["dims"] if d != dim)
-    if not remaining_dims:
-        return result
-
-    start = {d: int(meta["starts"][d]) for d in remaining_dims}
-    stop = {d: int(meta["stops"][d]) for d in remaining_dims}
-    if comm.rank != 0:
-        empty_dim = remaining_dims[0]
-        result = result.isel({empty_dim: slice(0, 0)})
-        stop[empty_dim] = start[empty_dim]
-
-    mpp_update_meta(
-        result,
-        dim=remaining_dims,
-        global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
-        start=start,
-        stop=stop,
-        chunk_info=prune_chunk_info(meta["chunk_info"], result),
-        cart=None,
-    )
-    return result
 
 
 def mpp_quantile(
@@ -544,60 +657,20 @@ def mpp_quantile(
         result, matching :func:`mpp_median`.
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.quantile(
             q, dim, method=method, skipna=skipna, keep_attrs=keep_attrs
         )
-
-    _agree(mpi_context, ("quantile", str(dim), int(meta["global_size"])))
-    comm = _dim_comm(mpi_context, meta, dim)
-    # See mpp_median's matching comment: `.load()` before `comm.gather`
-    # for the same picklability reason.
-    value = value.load()
-    pieces = comm.gather(value, root=0)
-
-    def _reduce_on_root() -> xr.Dataset | xr.DataArray:
-        """Compute the requested quantile(s) on the root rank."""
-        full = (
-            xr.concat(pieces, dim=dim, data_vars="minimal")
-            if isinstance(value, xr.Dataset)
-            else xr.concat(pieces, dim=dim)
-        )
-        return full.quantile(
+    return _order_statistic(
+        mpi_context,
+        value,
+        dim,
+        "quantile",
+        lambda full: full.quantile(
             q, dim, method=method, skipna=skipna, keep_attrs=keep_attrs
-        )
-
-    result, error = guarded(_reduce_on_root) if comm.rank == 0 else (None, None)
-    mpi_context.raise_if_error(
-        error, "MPI xarray quantile", signature=("quantile", str(dim)), comm=comm
+        ),
     )
-    # See mpp_median's matching comment for why only rank 0 of this
-    # sub-communicator keeps the real data.
-    result = comm.bcast(result, root=0)
-    result = strip_mpi_meta(result)
-
-    remaining_dims = tuple(d for d in meta["dims"] if d != dim)
-    if not remaining_dims:
-        return result
-
-    start = {d: int(meta["starts"][d]) for d in remaining_dims}
-    stop = {d: int(meta["stops"][d]) for d in remaining_dims}
-    if comm.rank != 0:
-        empty_dim = remaining_dims[0]
-        result = result.isel({empty_dim: slice(0, 0)})
-        stop[empty_dim] = start[empty_dim]
-
-    mpp_update_meta(
-        result,
-        dim=remaining_dims,
-        global_size={d: int(meta["global_sizes"][d]) for d in remaining_dims},
-        start=start,
-        stop=stop,
-        chunk_info=prune_chunk_info(meta["chunk_info"], result),
-        cart=None,
-    )
-    return result
 
 
 def mpp_diff(
@@ -627,8 +700,8 @@ def mpp_diff(
         consistent and every rank raises together rather than some hanging).
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.diff(dim, n=n, label=label)
     if n < 0:
         raise ValueError(f"n must be >= 0, got {n!r}")
@@ -678,8 +751,8 @@ def mpp_shift(
         The shifted object, same shape and distribution as the input.
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         kwargs = {} if fill_value is _UNSET else {"fill_value": fill_value}
         return value.shift({dim: periods}, **kwargs)
     if periods == 0:
@@ -737,8 +810,8 @@ def mpp_pad(
         If a distributed dimension uses a non-constant padding mode.
     """
     before, after = pad_width
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         kwargs = {} if mode != "constant" else {"constant_values": constant_values}
         return value.pad({dim: pad_width}, mode=mode, keep_attrs=keep_attrs, **kwargs)
     if before == 0 and after == 0:
@@ -801,8 +874,8 @@ def mpp_roll(
     shift: int,
 ) -> xr.Dataset | xr.DataArray:
     """Circularly shift ``value`` by ``shift`` along ``dim``, wrapping at the edge."""
-    meta = mpp_get_meta(value)
-    if meta is None or dim not in meta["dims"]:
+    meta = mpp_partition_meta(value, dim)
+    if meta is None:
         return value.roll({dim: shift}, roll_coords=False)
 
     global_size = int(meta["global_sizes"][dim])
@@ -852,8 +925,8 @@ def mpp_differentiate(
         ``edge_order`` (raised by xarray itself).
 
     """
-    meta = mpp_get_meta(value)
-    if meta is None or coord not in meta["dims"]:
+    meta = mpp_partition_meta(value, coord)
+    if meta is None:
         return value.differentiate(
             coord, edge_order=edge_order, datetime_unit=datetime_unit
         )
@@ -874,6 +947,61 @@ def mpp_differentiate(
     return reattach_meta(trimmed, meta)
 
 
+def _realign_distributed(
+    mpi_context: MPIContext,
+    value: xr.Dataset | xr.DataArray,
+    meta: Mapping[str, Any],
+    target_dim: str,
+) -> xr.Dataset | xr.DataArray:
+    """Move an already-distributed object onto the standard split of ``target_dim``.
+
+    Two operands split differently have to be brought onto a common
+    decomposition before they can be combined. Reassembling each one globally
+    to do that would make every rank hold the whole field; this sends each
+    rank only the elements it will own, which is what
+    :func:`~climtools.xarray.halo.mpp_redistribute` is for.
+
+    Parameters
+    ----------
+    mpi_context : MPIContext
+        MPI context.
+    value : xarray.Dataset or xarray.DataArray
+        Distributed object to move.
+    meta : mapping
+        Its current distribution metadata.
+    target_dim : str
+        Dimension the result is partitioned on.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        The object on the standard decomposition of ``target_dim``.
+    """
+    from .halo import mpp_redistribute
+
+    global_size = int(meta["global_sizes"][target_dim])
+    coord = (
+        np.concatenate(
+            gather_v(
+                np.asarray(value[target_dim].values),
+                _dim_comm(meta, target_dim, mpi_context),
+            )
+        )
+        if target_dim in value.coords
+        else np.arange(global_size)
+    )
+    # Element order is unchanged; only which rank holds each element moves.
+    return mpp_redistribute(
+        mpi_context,
+        value,
+        meta,
+        target_dim,
+        new_coord=coord,
+        old_pos=np.arange(global_size, dtype=np.int64),
+        fill_value=np.nan,
+    )
+
+
 def _gather_full(
     mpi_context: MPIContext, value: xr.Dataset | xr.DataArray, meta: Mapping[str, Any]
 ) -> xr.Dataset | xr.DataArray:
@@ -883,13 +1011,8 @@ def _gather_full(
         raise NotImplementedError(
             f"Gathering partition dims {meta['dims']!r} is unsupported."
         )
-    pieces = mpi_context.comm.allgather(value)
-    full = (
-        xr.concat(pieces, dim=dim, data_vars="minimal")
-        if isinstance(value, xr.Dataset)
-        else xr.concat(pieces, dim=dim)
-    )
-    return strip_mpi_meta(full)
+    pieces = gather_v(value, mpi_context.comm)
+    return strip_mpi_meta(mpp_concat_along(pieces, value, dim))
 
 
 def _align_replicated(
@@ -981,6 +1104,16 @@ def mpp_align(
         if _partitions_match(left_meta, right_meta):
             return left, right
         target_dim = dim if dim is not None else left_meta["dim"]
+        if (
+            len(left_meta["dims"]) == 1
+            and len(right_meta["dims"]) == 1
+            and target_dim in left_meta["dims"]
+            and target_dim in right_meta["dims"]
+        ):
+            return (
+                _realign_distributed(mpi_context, left, left_meta, target_dim),
+                _realign_distributed(mpi_context, right, right_meta, target_dim),
+            )
         full_left = _gather_full(mpi_context, left, left_meta)
         full_right = _gather_full(mpi_context, right, right_meta)
         return (
@@ -1034,29 +1167,6 @@ def mpp_align(
             log_partitions=log_partitions,
         ),
     )
-
-
-def reattach_meta(result: Any, meta: dict[str, Any]) -> Any:
-    """Tag ``result`` with ``meta`` if it is an xarray object.
-
-    Returns
-    -------
-    Any
-        The tagged result object if it is an xarray dataset or dataarray, otherwise
-        returned unmodified.
-
-    """
-    if isinstance(result, (xr.Dataset, xr.DataArray)):
-        mpp_update_meta(
-            result,
-            dim=meta["dims"],
-            global_size=meta["global_sizes"],
-            start=meta["starts"],
-            stop=meta["stops"],
-            chunk_info=meta["chunk_info"],
-            cart=meta.get("cart"),
-        )
-    return result
 
 
 def mpp_check_operands_distribution(

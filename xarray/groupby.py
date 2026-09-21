@@ -12,6 +12,7 @@ import pandas as pd
 
 import xarray as xr
 
+from ..mpp.ext_collectives import gather_v, reduce_scatter
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
@@ -21,9 +22,8 @@ if TYPE_CHECKING:
 
 from .chunks import get_effective_chunk_size
 from .meta import mpp_get_meta, mpp_update_meta, strip_mpi_meta
-from ..mpp.mpp import mpp_reduce_scatter
+from ..mpp.mpp import extreme_identity
 from .planning import (
-    extreme_identity,
     partial_dtype,
     dataset_result,
     finish_local_reduction,
@@ -114,7 +114,7 @@ def _reduce_groups(
             replica_count=replica_count,
         )
     axis = local.get_axis_num(_GROUP_DIM)
-    raw = mpp_reduce_scatter(np.asarray(local.values), op, comm, counts, axis=axis)
+    raw = reduce_scatter(np.asarray(local.values), op, comm, counts, axis=axis)
     return xr.DataArray(raw, dims=local.dims).assign_coords({_GROUP_DIM: labels})
 
 
@@ -348,7 +348,7 @@ def mpp_groupby_reduce(
     plan = mpp_reduction_plan(mpi_context, value, dims, old_meta, operation=op)
     labels_comm = mpp_resolve_comm(mpi_context, old_meta, (dim,))
     global_labels = np.unique(
-        np.concatenate(labels_comm.allgather(np.unique(group.values)))
+        np.concatenate(gather_v(np.unique(group.values), labels_comm))
     )
 
     entries = [entry for entry in plan if entry.dims and entry.distributed]

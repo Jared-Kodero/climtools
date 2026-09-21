@@ -63,6 +63,7 @@ dependencies = [
     "pymannkendall",
     "ipython",
     "rich",
+    "scikit-image",
 ]
 
 [project.urls]

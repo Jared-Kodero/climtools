@@ -20,13 +20,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
 from matplotlib.colors import BoundaryNorm, Colormap, Normalize
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
-
-import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -1346,11 +1345,7 @@ def add_colorbar(
         formatter.set_scientific(True)
         formatter.set_powerlimits(powerlimits)
 
-        if orientation == "horizontal":
-            colorbar.ax.xaxis.set_major_formatter(formatter)
-        else:
-            colorbar.ax.yaxis.set_major_formatter(formatter)
-
+        colorbar.formatter = formatter
         colorbar.update_ticks()
 
     if label is not None:

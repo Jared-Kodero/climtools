@@ -1,5 +1,5 @@
-"""Construction correctness: mpi_open_dataset, mpi_create_dataarray,
-mpi_create_dataset -- single- and multi-dimensional, even and uneven
+"""Construction correctness: open_distributed_dataset, create_distributed_dataarray,
+create_distributed_dataset -- single- and multi-dimensional, even and uneven
 partitions, with explicit reconstruction (exact, non-overlapping global
 coverage) checks.
 """
@@ -23,15 +23,15 @@ mpi = MPIContext()
 def run(fx: Fixtures) -> None:
     native, dist, dist2d = fx.native, fx.dist, fx.dist2d
 
-    # -- mpi_open_dataset, one distributed dimension -----------------------
+    # -- open_distributed_dataset, one distributed dimension -----------------------
     start, stop = dist.meta["start"], dist.meta["stop"]
     try:
         xr.testing.assert_allclose(
             local_of(dist), native.isel(time=slice(start, stop)), rtol=1e-6
         )
-        record("mpi_open_dataset", "1d(time)", True)
+        record("open_distributed_dataset", "1d(time)", True)
     except Exception as e:
-        record("mpi_open_dataset", "1d(time)", False, str(e)[:200])
+        record("open_distributed_dataset", "1d(time)", False, str(e)[:200])
 
     # -- balanced-bounds boundary cases: even, remainder>0, length<ranks,
     #    length 0, length 1 -------------------------------------------------
@@ -40,7 +40,7 @@ def run(fx: Fixtures) -> None:
             idx = np.arange(a, b)
             return (idx[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
 
-        da = xgeo.mpi_create_dataarray(
+        da = xgeo.create_distributed_dataarray(
             mpi,
             fill,
             dims=("x", "y"),
@@ -98,7 +98,7 @@ def run(fx: Fixtures) -> None:
         return (xs[:, None] * 10 + ys[None, :]).astype(np.float64)
 
     DGX, DGY = 1, 1
-    da_deg = xgeo.mpi_create_dataarray(
+    da_deg = xgeo.create_distributed_dataarray(
         mpi,
         fill_degenerate,
         dims=("x", "y"),
@@ -137,7 +137,7 @@ def run(fx: Fixtures) -> None:
         # exercised and this check would be vacuous.
         degenerate_exercised = any_empty or mpi.comm.size == 1
         record(
-            "mpi_create_dataarray",
+            "create_distributed_dataarray",
             "2d(x,y), degenerate (both dims < ranks)",
             all_ok and bool(np.all(grid == 1)) and degenerate_exercised,
         )
@@ -153,7 +153,7 @@ def run(fx: Fixtures) -> None:
         ).astype(np.float64)
 
     GLOBAL = 21  # uneven for any rank count in {2,3,4,5,6} except divisors
-    da_uneven = xgeo.mpi_create_dataarray(
+    da_uneven = xgeo.create_distributed_dataarray(
         mpi,
         fill_uneven,
         dims=("x", "y"),
@@ -203,7 +203,7 @@ def run(fx: Fixtures) -> None:
             grid[b[0] : b[1], b[2] : b[3]] += 1
             all_ok = all_ok and b[4]
         record(
-            "mpi_open_dataset",
+            "open_distributed_dataset",
             "2d(lat,lon), reconstruction",
             all_ok and bool(np.all(grid == 1)),
         )
@@ -216,7 +216,7 @@ def run(fx: Fixtures) -> None:
         ys = np.arange(y_start, y_stop)
         return (xs[:, None] * 1000 + ys[None, :]).astype(np.float64)
 
-    da2d = xgeo.mpi_create_dataarray(
+    da2d = xgeo.create_distributed_dataarray(
         mpi,
         fill2d,
         dims=("x", "y"),
@@ -242,7 +242,7 @@ def run(fx: Fixtures) -> None:
             grid[b[0] : b[1], b[2] : b[3]] += 1
             all_ok = all_ok and b[4]
         record(
-            "mpi_create_dataarray",
+            "create_distributed_dataarray",
             "2d(x,y), reconstruction",
             all_ok and bool(np.all(grid == 1)),
         )
@@ -254,7 +254,7 @@ def run(fx: Fixtures) -> None:
     def fill_const():
         return np.full((3,), 42.0)
 
-    ds2d = xgeo.mpi_create_dataset(
+    ds2d = xgeo.create_distributed_dataset(
         mpi,
         data_vars={
             "full2d": (("x", "y"), fill2d),
@@ -277,7 +277,7 @@ def run(fx: Fixtures) -> None:
     all_ok = mpi.comm.gather(ok, root=0)
     if mpi.comm.rank == 0:
         record(
-            "mpi_create_dataset",
+            "create_distributed_dataset",
             "2d(x,y), mixed both/one/no-partition-dim vars",
             all(all_ok),
         )
@@ -285,7 +285,7 @@ def run(fx: Fixtures) -> None:
 
     correct_da = xr.DataArray(np.zeros((xe - xs, ye - ys)), dims=("x", "y"))
     try:
-        check_ds = xgeo.mpi_create_dataset(
+        check_ds = xgeo.create_distributed_dataset(
             mpi,
             data_vars={"pre_built": correct_da, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -299,7 +299,7 @@ def run(fx: Fixtures) -> None:
 
     wrong_y = xr.DataArray(np.zeros((xe - xs, (ye - ys) + 1)), dims=("x", "y"))
     try:
-        xgeo.mpi_create_dataset(
+        xgeo.create_distributed_dataset(
             mpi,
             data_vars={"wrong_y": wrong_y, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -314,7 +314,7 @@ def run(fx: Fixtures) -> None:
 
     wrong_x = xr.DataArray(np.zeros(((xe - xs) + 1, ye - ys)), dims=("x", "y"))
     try:
-        xgeo.mpi_create_dataset(
+        xgeo.create_distributed_dataset(
             mpi,
             data_vars={"wrong_x": wrong_x, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -330,7 +330,7 @@ def run(fx: Fixtures) -> None:
     all_ok = mpi.comm.gather((ok_a, ok_b, ok_c), root=0)
     if mpi.comm.rank == 0:
         record(
-            "mpi_create_dataset",
+            "create_distributed_dataset",
             "2d(x,y), DataArray shape validation",
             all(all(t) for t in all_ok),
         )

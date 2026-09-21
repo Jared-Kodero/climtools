@@ -7,8 +7,8 @@ Builds the shared fixtures once (mpi_test_common.build_fixtures), then
 imports and runs each mpi_test_*.py module in turn -- each owns one
 coherent area rather than everything living in a single file:
 
-  mpi_test_construction.py  construction: mpi_open_dataset,
-                             mpi_create_dataarray, mpi_create_dataset;
+  mpi_test_construction.py  construction: open_distributed_dataset,
+                             create_distributed_dataarray, create_distributed_dataset;
                              even/uneven/multi-dim partitioning
   mpi_test_reductions.py    mean/sum/min/max/var/std/median; rank-local,
                              reconstruction, and multi-dim dedup+coverage
@@ -19,9 +19,17 @@ coherent area rather than everything living in a single file:
   mpi_test_groupby.py       groupby, resample
   mpi_test_misc.py          prod, any, all, first, last, align,
                              evaluate, roll, repartition, apply
-  mpi_test_mpp.py           the FMS-adapted primitives in xarray/mpp.py
+  mpi_test_mpp.py           the FMS-adapted primitives in mpp/
                              directly: domain bookkeeping, reproducing
                              sum/product, checksums, halo start/complete
+
+Standalone checks, run separately because they need their own rank counts
+or no MPI at all:
+
+  mpi_test_mpp_edges.py      degenerate decompositions: ranks owning no
+                             points, halos wider than a neighbour
+  mpi_test_interp_memory.py  interpolation must not hold the global field
+  test_xnpy_store.py         XNpyStore round trips and refusals (serial)
 
 Every numeric check compares this rank's local slice against the
 matching slice of a plain, non-distributed xarray/numpy computation --

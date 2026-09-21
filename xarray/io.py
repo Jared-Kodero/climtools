@@ -11,12 +11,14 @@ import numpy as np
 
 import xarray as xr
 
+from ..mpp.ext_collectives import gather_v
 from ..mpi.context import MPIContext
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
     from .core import MPIXarray
 
+from ..mpp.mpp import mpp_sync
 from ..mpp.mpp_domains_define import mpp_define_domains
 from .chunks import (
     compute_save_chunks,
@@ -40,7 +42,12 @@ from .meta import (
 )
 from .netcdf import mpp_to_netcdf_parallel, nc_append, to_netcdf_serial
 
-__all__ = ["mpi_dataset_is_empty", "mpi_empty_dataset", "nc_append", "to_netcdf"]
+__all__ = [
+    "is_distributed_empty",
+    "empty_distributed_dataset",
+    "nc_append",
+    "to_netcdf",
+]
 
 _NO_DATA_ATTR = "_climtools_no_data"
 
@@ -106,7 +113,7 @@ def _open_partitioned(
         cart = domain.cart
 
     # Hold every rank here so none starts reading before the plan is settled.
-    comm.Barrier()
+    mpp_sync(comm)
 
     data: xr.Dataset = open_fn(filename_or_obj, chunks=chunks, **kwargs)
     data = data.isel({d: slice(*bounds[d]) for d in dims})
@@ -191,7 +198,7 @@ def mpp_attach_save_chunks(
     return value
 
 
-def mpi_open_dataset(
+def open_distributed_dataset(
     filename: Path | str | PathLike,
     mpi_context: MPIContext | MPI.Intracomm,
     *,
@@ -262,7 +269,7 @@ def mpi_open_dataset(
     return MPIXarray(data, mpi_context)
 
 
-def mpi_create_dataarray(
+def create_distributed_dataarray(
     mpi_context: MPIContext | MPI.Intracomm,
     fill: Callable[..., Any],
     dims: Sequence[Hashable],
@@ -329,7 +336,7 @@ def mpi_create_dataarray(
     return MPIXarray(data, mpi_context)
 
 
-def mpi_create_dataset(
+def create_distributed_dataset(
     mpi_context: MPIContext | MPI.Intracomm,
     data_vars: Mapping[
         Hashable, xr.DataArray | tuple[Sequence[Hashable], Callable[..., Any]]
@@ -388,7 +395,7 @@ def mpi_create_dataset(
     return MPIXarray(data, mpi_context)
 
 
-def mpi_partition_data(
+def distribute_data(
     value: MPIXarray | xr.Dataset | xr.DataArray | None,
     mpi_context: MPIContext | MPI.Intracomm,
     dim: Hashable | Sequence[Hashable] | Literal["auto"] = "auto",
@@ -436,7 +443,7 @@ def mpi_partition_data(
     return MPIXarray(data, mpi_context)
 
 
-def mpi_empty_dataset() -> xr.Dataset:
+def empty_distributed_dataset() -> xr.Dataset:
     """Return a placeholder Dataset for a non-root MPI rank.
 
     Returns
@@ -448,7 +455,7 @@ def mpi_empty_dataset() -> xr.Dataset:
     return xr.Dataset(attrs={_NO_DATA_ATTR: True})
 
 
-def mpi_dataset_is_empty(data: xr.Dataset | xr.DataArray) -> bool:
+def is_distributed_empty(data: xr.Dataset | xr.DataArray) -> bool:
     """Return whether an object is a non-root MPI placeholder.
 
     Parameters
@@ -542,7 +549,7 @@ def to_netcdf(
         # Ranks must agree on the write path. If one rank saw valid mpi_meta
         # and another did not, the two paths post different collectives and
         # the writer would block instead of reporting the inconsistency.
-        agreed = mpi_context.comm.allgather(distributed)
+        agreed = gather_v(distributed, mpi_context.comm)
         if any(agreed) and not all(agreed):
             disagreeing = [
                 rank for rank, state in enumerate(agreed) if state != agreed[0]
@@ -560,7 +567,7 @@ def to_netcdf(
                 )
             partition_dim = distributed_dim
         elif mpi_context.comm.rank != 0:
-            data = mpi_empty_dataset()
+            data = empty_distributed_dataset()
 
         mpp_to_netcdf_parallel(
             mpi_context,

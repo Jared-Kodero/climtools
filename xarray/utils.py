@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import json
+import math
+import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import cartopy.util
 import numpy as np
@@ -860,3 +863,368 @@ class SetupDask:
     ) -> None:
         """Close the local Dask cluster context."""
         self.close()
+
+
+class XNpyStore:
+    """Store NumPy and xarray objects in a memory-mappable directory format.
+
+    Numerical payloads are stored as uncompressed ``.npy`` files. Metadata are
+    stored in a versioned JSON manifest. No pickle data are written.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Store path. The ``.xnpy`` suffix is appended if absent.
+
+    Attributes
+    ----------
+    path : pathlib.Path
+        Path to the store directory.
+    meta_path : pathlib.Path
+        Path to ``metadata.json``.
+
+    Notes
+    -----
+    ``object``-dtype arrays are rejected because they require object
+    serialization and cannot be safely memory-mapped as numerical payloads.
+
+    The ``.npy`` header is authoritative for array dtype, shape, byte order,
+    and memory order. Values duplicated in JSON are used for inspection and
+    validation.
+    """
+
+    SUFFIX = ".xnpy"
+    META_FILE = "metadata.json"
+    COORD_DIR = "_coords"
+    FORMAT = "xnpy"
+    VERSION = 1
+
+    def __init__(self, path: str | Path) -> None:
+        path = Path(path)
+        if path.suffix != self.SUFFIX:
+            path = Path(f"{path}{self.SUFFIX}")
+        self.path = path
+        self.meta_path = self.path / self.META_FILE
+
+    def save(self, obj: Any, *, overwrite: bool = False) -> Path:
+        """Save an array, DataArray, or Dataset.
+
+        Parameters
+        ----------
+        obj : numpy.ndarray or xarray.DataArray or xarray.Dataset
+            Object to store.
+        overwrite : bool, default False
+            Remove an existing store before writing when True.
+
+        Returns
+        -------
+        pathlib.Path
+            Path to the completed store.
+
+        Raises
+        ------
+        FileExistsError
+            If the store exists and ``overwrite`` is False.
+        TypeError
+            If ``obj`` is unsupported or holds an object-dtype payload.
+        """
+        if self.path.exists():
+            if not overwrite:
+                raise FileExistsError(self.path)
+            shutil.rmtree(self.path)
+        self.path.mkdir(parents=True)
+
+        if isinstance(obj, xr.Dataset):
+            metadata = self._save_dataset(obj)
+        elif isinstance(obj, xr.DataArray):
+            metadata = self._save_dataarray(obj)
+        elif isinstance(obj, np.ndarray):
+            metadata = self._save_ndarray(obj)
+        else:
+            raise TypeError(
+                "XNpyStore supports numpy.ndarray, xarray.DataArray, and "
+                "xarray.Dataset only."
+            )
+
+        # Written last: its presence is what marks the store complete.
+        with self.meta_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                {"format": self.FORMAT, "version": self.VERSION, **metadata},
+                file,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        return self.path
+
+    def metadata(self) -> dict[str, Any]:
+        """Read the JSON manifest without opening array payloads.
+
+        Returns
+        -------
+        dict
+            Store metadata.
+
+        Raises
+        ------
+        ValueError
+            If the directory is not an ``xnpy`` store, or its format version
+            is not understood.
+        """
+        with self.meta_path.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        if metadata.get("format") != self.FORMAT:
+            raise ValueError(f"Not an {self.FORMAT!r} store: {self.path}.")
+        if metadata.get("version") != self.VERSION:
+            raise ValueError(
+                f"Unsupported {self.FORMAT} version: {metadata.get('version')!r}."
+            )
+        return metadata
+
+    def variables(self) -> tuple[str, ...]:
+        """Return data-variable names without opening array payloads.
+
+        Returns
+        -------
+        tuple of str
+            Stored data-variable names, empty for a bare array store.
+        """
+        metadata = self.metadata()
+        if metadata["kind"] == "dataset":
+            return tuple(metadata["variables"])
+        if metadata["kind"] == "dataarray":
+            return (metadata["variable_name"],)
+        return ()
+
+    def load(
+        self, variable: str | None = None, *, mmap_mode: str | None = "r"
+    ) -> np.ndarray | xr.DataArray | xr.Dataset:
+        """Load a stored object or one Dataset variable.
+
+        Metadata are read first, so naming ``variable`` opens only that
+        variable's payload and the coordinates associated with it.
+
+        Parameters
+        ----------
+        variable : str, optional
+            Dataset variable to reconstruct. None reconstructs the whole
+            stored object.
+        mmap_mode : {"r", "r+", "w+", "c"} or None, default "r"
+            Memory-map mode passed to :func:`numpy.load`. None reads payloads
+            into ordinary in-memory arrays.
+
+        Returns
+        -------
+        numpy.ndarray or xarray.DataArray or xarray.Dataset
+            Reconstructed object.
+
+        Raises
+        ------
+        KeyError
+            If ``variable`` is not present.
+        ValueError
+            If ``variable`` is invalid for the stored object type, or the
+            store kind is unknown.
+        """
+        metadata = self.metadata()
+        kind = metadata["kind"]
+
+        if kind == "dataset":
+            if variable is None:
+                return self._load_dataset(metadata, mmap_mode)
+            return self._load_dataset_variable(metadata, variable, mmap_mode)
+
+        if kind == "dataarray":
+            if variable is not None and variable != metadata["variable_name"]:
+                raise KeyError(variable)
+            return self._load_dataarray(metadata, mmap_mode)
+
+        if kind == "ndarray":
+            if variable is not None:
+                raise ValueError("variable= is valid only for xarray stores.")
+            return self._load_array(metadata["array"], mmap_mode)
+
+        raise ValueError(f"Unknown store kind: {kind!r}")
+
+    def _save_dataset(self, dataset: xr.Dataset) -> dict[str, Any]:
+        """Save every data variable and coordinate of a Dataset."""
+        variables = {}
+        for name, variable in dataset.data_vars.items():
+            info = self._save_xarray_variable(variable, self._make_dir(self.path, name))
+            # Recorded so one variable can later be reopened with just the
+            # coordinates that belong to it.
+            info["coords"] = list(dataset[name].coords)
+            variables[name] = info
+
+        return {
+            "kind": "dataset",
+            "attrs": self._json_value(dict(dataset.attrs)),
+            "variables": variables,
+            "coords": self._save_coords(dataset),
+        }
+
+    def _save_dataarray(self, array: xr.DataArray) -> dict[str, Any]:
+        """Save a DataArray and its coordinates."""
+        name = str(array.name) if array.name is not None else "data"
+        variable = self._save_xarray_variable(array, self._make_dir(self.path, name))
+        variable["coords"] = list(array.coords)
+        return {
+            "kind": "dataarray",
+            "name": array.name,
+            "variable_name": name,
+            "variable": variable,
+            "coords": self._save_coords(array),
+        }
+
+    def _save_coords(self, obj: xr.Dataset | xr.DataArray) -> dict[str, Any]:
+        """Save every coordinate under the shared coordinate directory."""
+        root = self.path / self.COORD_DIR
+        root.mkdir()
+        return {
+            name: self._save_xarray_variable(coord, self._make_dir(root, name))
+            for name, coord in obj.coords.items()
+        }
+
+    def _save_ndarray(self, array: np.ndarray) -> dict[str, Any]:
+        """Save a bare NumPy array."""
+        directory = self.path / "array"
+        directory.mkdir()
+        return {"kind": "ndarray", "array": self._save_array(directory, array)}
+
+    def _save_xarray_variable(
+        self, variable: xr.Variable | xr.DataArray, directory: Path
+    ) -> dict[str, Any]:
+        """Save one variable's payload with the metadata needed to rebuild it."""
+        return {
+            "dims": list(variable.dims),
+            "attrs": self._json_value(dict(variable.attrs)),
+            "array": self._save_array(directory, np.asarray(variable.data)),
+        }
+
+    def _save_array(self, directory: Path, array: np.ndarray) -> dict[str, Any]:
+        """Write one payload as ``.npy``."""
+        if array.dtype.hasobject:
+            raise TypeError(
+                "object-dtype arrays are not supported because XNpyStore does "
+                "not use pickle."
+            )
+        path = directory / "data.npy"
+        np.save(path, array, allow_pickle=False)
+        return {
+            "file": str(path.relative_to(self.path)),
+            "dtype": array.dtype.str,
+            "shape": list(array.shape),
+        }
+
+    def _load_dataset(
+        self, metadata: dict[str, Any], mmap_mode: str | None
+    ) -> xr.Dataset:
+        """Reconstruct a complete Dataset."""
+        return xr.Dataset(
+            data_vars={
+                name: self._as_variable(info, mmap_mode)
+                for name, info in metadata["variables"].items()
+            },
+            coords=self._load_coords(metadata["coords"], metadata["coords"], mmap_mode),
+            attrs=metadata["attrs"],
+        )
+
+    def _load_dataset_variable(
+        self, metadata: dict[str, Any], name: str, mmap_mode: str | None
+    ) -> xr.DataArray:
+        """Reconstruct one Dataset variable and the coordinates it uses."""
+        variables = metadata["variables"]
+        if name not in variables:
+            raise KeyError(
+                f"{name!r} not found; available variables: {tuple(variables)!r}"
+            )
+        return self._build_dataarray(
+            variables[name], metadata["coords"], name, mmap_mode
+        )
+
+    def _load_dataarray(
+        self, metadata: dict[str, Any], mmap_mode: str | None
+    ) -> xr.DataArray:
+        """Reconstruct a stored DataArray."""
+        return self._build_dataarray(
+            metadata["variable"], metadata["coords"], metadata["name"], mmap_mode
+        )
+
+    def _build_dataarray(
+        self,
+        info: dict[str, Any],
+        coord_metadata: dict[str, Any],
+        name: Any,
+        mmap_mode: str | None,
+    ) -> xr.DataArray:
+        """Assemble a DataArray from its payload and recorded coordinates."""
+        return xr.DataArray(
+            self._load_array(info["array"], mmap_mode),
+            dims=info["dims"],
+            coords=self._load_coords(coord_metadata, info["coords"], mmap_mode),
+            name=name,
+            attrs=info["attrs"],
+        )
+
+    def _load_coords(
+        self, metadata: dict[str, Any], names: Any, mmap_mode: str | None
+    ) -> dict[str, tuple[Any, ...]]:
+        """Load the named coordinates."""
+        return {name: self._as_variable(metadata[name], mmap_mode) for name in names}
+
+    def _as_variable(
+        self, info: dict[str, Any], mmap_mode: str | None
+    ) -> tuple[Any, ...]:
+        """Return the ``(dims, data, attrs)`` triple xarray builds from."""
+        return (info["dims"], self._load_array(info["array"], mmap_mode), info["attrs"])
+
+    def _load_array(self, info: dict[str, Any], mmap_mode: str | None) -> np.ndarray:
+        """Load a payload and check it against its recorded dtype and shape."""
+        path = self.path / info["file"]
+        array = np.load(path, mmap_mode=mmap_mode, allow_pickle=False)
+
+        expected_dtype = np.dtype(info["dtype"])
+        expected_shape = tuple(info["shape"])
+        if array.dtype != expected_dtype:
+            raise TypeError(f"{path}: dtype {array.dtype} != {expected_dtype}")
+        if array.shape != expected_shape:
+            raise ValueError(f"{path}: shape {array.shape} != {expected_shape}")
+        return array
+
+    @classmethod
+    def _json_value(cls, value: Any) -> Any:
+        """Convert metadata to JSON-safe types, rejecting what cannot survive.
+
+        NumPy scalars and arrays are unwrapped to Python equivalents. Anything
+        JSON cannot round-trip faithfully, including non-finite floats, is
+        refused rather than silently written as something else.
+        """
+        if value is None or isinstance(value, str | bool | int):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise TypeError("Non-finite float metadata are not supported.")
+            return value
+        if isinstance(value, np.generic):
+            return cls._json_value(value.item())
+        if isinstance(value, np.ndarray):
+            return cls._json_value(value.tolist())
+        if isinstance(value, list | tuple):
+            return [cls._json_value(item) for item in value]
+        if isinstance(value, dict):
+            if not all(isinstance(key, str) for key in value):
+                raise TypeError("JSON metadata dictionaries require string keys.")
+            return {key: cls._json_value(item) for key, item in value.items()}
+        raise TypeError(f"Unsupported JSON metadata type: {type(value).__name__}.")
+
+    @classmethod
+    def _make_dir(cls, parent: Path, name: Any) -> Path:
+        """Create one payload directory, rejecting reserved or unsafe names."""
+        value = str(name)
+        if not value or value in {cls.COORD_DIR, cls.META_FILE}:
+            raise ValueError(f"Reserved or empty array name: {value!r}.")
+        if "/" in value or "\\" in value:
+            raise ValueError(f"Array names cannot contain path separators: {value!r}.")
+        directory = parent / value
+        directory.mkdir()
+        return directory

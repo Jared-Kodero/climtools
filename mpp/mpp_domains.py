@@ -19,9 +19,7 @@ from typing import TYPE_CHECKING, Any
 from ..mpi.mpi_init import MPI
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from mpi4py.MPI import Cartcomm, Comm
+    pass
 
 
 from ..mpi.diagnostics import MPIError
@@ -102,81 +100,6 @@ class Domain:
             comm=comm,
             cart=dict(meta["cart"]) if meta.get("cart") is not None else None,
         )
-
-
-@dataclass(frozen=True)
-class CartesianDomain:
-    """One rank's view of a multi-dimensional Cartesian process grid.
-
-    Attributes
-    ----------
-    dims : tuple of str
-        Partition dimension names, in Cartesian-axis order.
-    grid_shape : tuple of int
-        Number of process-grid divisions along each axis.
-    coords : tuple of int
-        This rank's position in the process grid, one entry per axis.
-    cart_comm : mpi4py.MPI.Cartcomm
-        The underlying Cartesian communicator. Rank order matches
-        ``comm`` (``reorder=False``), so ``cart_comm.rank`` and the
-        originating communicator's rank agree.
-    bounds : dict of str to (int, int)
-        Global half-open ``[start, stop)`` interval owned by this rank,
-        per dimension.
-    neighbors : dict of str to (int or None, int or None)
-        Per-dimension ``(lower_rank, upper_rank)`` face neighbors in the
-        *original* (non-Cartesian) communicator's rank numbering. None at
-        a non-periodic global boundary.
-
-    """
-
-    dims: tuple[str, ...]
-    grid_shape: tuple[int, ...]
-    coords: tuple[int, ...]
-    cart_comm: Cartcomm
-    bounds: dict[str, tuple[int, int]]
-    neighbors: dict[str, tuple[int | None, int | None]]
-    _sub_comm_cache: dict[frozenset[str], Comm] = field(
-        default_factory=dict, repr=False, compare=False
-    )
-
-    def as_meta_cart(self) -> dict[str, Any]:
-        """Return the ``meta["cart"]`` descriptor for this topology.
-
-        Returns
-        -------
-        dict[str, Any]
-            Cartesian topology metadata descriptor.
-
-        """
-        return {
-            "grid_shape": self.grid_shape,
-            "coords": self.coords,
-            "periods": (False,) * len(self.dims),
-        }
-
-    def sub_comm(self, merge_axes: Sequence[str]) -> Comm:
-        """Return the communicator grouping ranks for a partial collective.
-
-        Parameters
-        ----------
-        merge_axes : sequence of str
-            Subset of :attr:`dims` to group ranks across.
-
-        Returns
-        -------
-        mpi4py.MPI.Comm
-            The (possibly cached) sub-communicator.
-
-        """
-        key = frozenset(merge_axes)
-        cached = self._sub_comm_cache.get(key)
-        if cached is not None:
-            return cached
-        remain = [dim in key for dim in self.dims]
-        sub = self.cart_comm.Sub(remain)
-        self._sub_comm_cache[key] = sub
-        return sub
 
 
 def _no_proc_null(rank: int) -> int | None:

@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 
+from .ext_domains import dim_comm
 from ..mpi.mpi_init import MPI
-from .mpp_data import mpp_domains_get_stack, mpp_domains_put_stack
+from .mpp_data import get_stack, put_stack
 from .mpp_domains import Domain
-from .mpp_domains_define import mpp_get_cartesian_domain
 from .mpp_domains_util import mpp_get_neighbor_pe
 from .mpp_parameter import (
     BOTH_UPDATE,
@@ -79,6 +79,51 @@ class DomainUpdate:
     unpack: Any
 
 
+def _check_halo_width(
+    comm: MPI.Comm, local_length: int, dim: str, before: int, after: int
+) -> None:
+    """Refuse a halo wider than the narrowest compute domain on ``comm``.
+
+    A rank can only send points it owns. Asked for more, it would pack a
+    short slab into a full-width buffer and its neighbour would unpack
+    whatever happened to be in the unwritten tail, so the exchange has to be
+    rejected rather than allowed to return uninitialised memory.
+
+    The check is collective because the offending rank is usually not the one
+    that would notice: every rank compares against the global minimum so they
+    all raise together instead of some raising while the rest block in the
+    exchange.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm
+        Communicator the exchange runs on.
+    local_length : int
+        This rank's extent along the exchanged axis.
+    dim : str
+        Dimension being exchanged, for the message.
+    before, after : int
+        Requested halo widths.
+
+    Raises
+    ------
+    HaloWidthError
+        If any rank is narrower than the widest requested halo.
+    """
+    widest = max(before, after)
+    if widest == 0 or comm.size == 1:
+        return
+    shortest = np.empty(1, dtype=np.int64)
+    comm.Allreduce(np.array([local_length], dtype=np.int64), shortest, op=MPI.MIN)
+    if int(shortest[0]) >= widest:
+        return
+    lengths = comm.allgather(local_length)
+    deficient = [(r, n) for r, n in enumerate(lengths) if n < widest]
+    raise HaloWidthError(
+        f"Halo ({before}, {after}) exceeds local {dim!r} size on ranks {deficient}."
+    )
+
+
 def mpp_start_update_domains(
     fields: np.ndarray[Any, Any] | Mapping[str, np.ndarray[Any, Any]],
     domain: Domain,
@@ -119,6 +164,14 @@ def mpp_start_update_domains(
     items: dict[str, np.ndarray[Any, Any]] = {"": fields} if single else dict(fields)
 
     comm = domain.comm
+    if items:
+        _check_halo_width(
+            comm,
+            min(int(arr.shape[axis]) for arr in items.values()),
+            dim,
+            before,
+            after,
+        )
     if left_rank is None or right_rank is None:
         default_left, default_right = mpp_get_neighbor_pe(
             domain, dim, periodic=periodic
@@ -187,12 +240,12 @@ def mpp_start_update_domains(
     for dtype, names in groups.items():
         if can_recv_before:
             count = sum(int(np.prod(_halo_shape(name, before))) for name in names)
-            buf = mpp_domains_get_stack(count, dtype)
+            buf = get_stack(count, dtype)
             recv_bufs[dtype, "before"] = buf
             recv_reqs.append(comm.Irecv(buf, source=left_rank))
         if can_recv_after:
             count = sum(int(np.prod(_halo_shape(name, after))) for name in names)
-            buf = mpp_domains_get_stack(count, dtype)
+            buf = get_stack(count, dtype)
             recv_bufs[dtype, "after"] = buf
             recv_reqs.append(comm.Irecv(buf, source=right_rank))
 
@@ -250,7 +303,7 @@ def mpp_complete_update_domains(
     # unpack() copies out of the wire buffers, so they can go back to the pool
     # for the next exchange to reuse.
     for buffer in update.recv_bufs.values():
-        mpp_domains_put_stack(buffer)
+        put_stack(buffer)
 
     return (
         recv_before,
@@ -260,7 +313,7 @@ def mpp_complete_update_domains(
     )
 
 
-def mpp_update_domains(
+def _update_one_axis(
     fields: np.ndarray[Any, Any] | Mapping[str, np.ndarray[Any, Any]],
     domain: Domain,
     dim: str,
@@ -323,71 +376,99 @@ def mpp_update_domains(
     return (padded[""] if update.single else padded), left_pad, right_pad
 
 
-def mpp_update_domains_nd(
-    field: np.ndarray[Any, Any],
+def mpp_update_domains(
+    field: np.ndarray[Any, Any] | Mapping[str, np.ndarray[Any, Any]],
     domain: Domain,
-    dims: Sequence[str],
-    halo: Mapping[str, tuple[int, int]],
+    dim: str | Sequence[str],
+    axis: int = 0,
     *,
+    before: int = 0,
+    after: int = 0,
+    halo: Mapping[str, tuple[int, int]] | None = None,
     flags: int = BOTH_UPDATE,
-    periodic: Mapping[str, bool] | None = None,
-) -> tuple[np.ndarray[Any, Any], dict[str, tuple[int, int]]]:
-    """Fill halos on several axes at once, corners included.
+    periodic: bool | Mapping[str, bool] | None = None,
+    left_rank: int | None = None,
+    right_rank: int | None = None,
+) -> Any:
+    """Fill halo points from neighbouring ranks.
 
-    A single-axis exchange cannot give a rank its diagonal neighbours, which a
-    two-dimensional stencil needs. Updating one axis at a time and letting the
-    second exchange carry the halo the first just received produces those
-    corner points without a separate diagonal message, which is how FMS fills
-    them for ``position=CENTER``.
+    FMS exposes one ``mpp_update_domains`` for one axis and for several, and
+    this does the same. Pass ``dim`` as a name to update a single axis, or as
+    a sequence of names with ``halo`` to update several. Several axes are
+    updated in turn, so the second exchange carries the halo the first just
+    received and the corner points arrive without a diagonal message -- the
+    way FMS fills them for ``position=CENTER``.
 
     Parameters
     ----------
-    field : numpy.ndarray
-        This rank's compute-domain values.
+    field : numpy.ndarray or mapping
+        This rank's compute-domain values, or several fields to exchange
+        together.
     domain : Domain
         Rank-local domain.
-    dims : sequence of str
-        Dimension name of each axis of ``field``.
-    halo : mapping[str, tuple[int, int]]
-        Halo width before and after, per dimension.
+    dim : str or sequence of str
+        Axis, or axes, to update.
+    axis : int, default 0
+        Array axis of ``dim`` for the single-axis form. For several axes the
+        position within ``dim`` is used.
+    before, after : int, default 0
+        Halo widths for the single-axis form.
+    halo : mapping, optional
+        Halo widths per dimension for the multi-axis form.
     flags : int, default BOTH_UPDATE
-        Which edges to update, from :mod:`~climtools.mpp.mpp_parameter`.
-        ``XUPDATE`` and ``YUPDATE`` select the first and second partitioned
-        axis respectively.
-    periodic : mapping[str, bool], optional
-        Whether each dimension wraps at the global edges.
+        Which axes to update, from :mod:`~climtools.mpp.mpp_parameter`.
+        ``XUPDATE`` and ``YUPDATE`` select the first and second axis.
+    periodic : bool or mapping, optional
+        Whether each axis wraps at the global edges. Defaults to the
+        domain's own ``cyclic`` flags.
+    left_rank, right_rank : int, optional
+        Override the neighbours for the single-axis form.
 
     Returns
     -------
-    tuple[numpy.ndarray, dict[str, tuple[int, int]]]
-        The widened field and the halo width actually received per dimension,
-        which is narrower than requested at a non-cyclic global edge.
+    tuple
+        Single axis: ``(padded, before_received, after_received)``.
+        Several axes: ``(padded, {dim: (before, after)})``, where the widths
+        are narrower than requested at a non-cyclic global edge.
     """
-    wrap = dict(domain.cyclic)
-    wrap.update(periodic or {})
-    selected = [XUPDATE, YUPDATE]
-    result = np.asarray(field)
-    received: dict[str, tuple[int, int]] = {}
-
-    for order, dim in enumerate(d for d in dims if d in domain.dims):
-        if order < len(selected) and not flags & selected[order]:
-            received[dim] = (0, 0)
-            continue
-        before, after = halo.get(dim, (0, 0))
-        if not before and not after:
-            received[dim] = (0, 0)
-            continue
-        axis = list(dims).index(dim)
-        result, low, high = mpp_update_domains(
-            result,
+    if isinstance(dim, str):
+        return _update_one_axis(
+            field,
             domain,
             dim,
             axis,
             before=before,
             after=after,
-            periodic=wrap.get(dim, False),
+            periodic=bool(periodic) if periodic is not None else False,
+            left_rank=left_rank,
+            right_rank=right_rank,
         )
-        received[dim] = (low, high)
+
+    wrap = dict(domain.cyclic)
+    if isinstance(periodic, Mapping):
+        wrap.update(periodic)
+    widths = dict(halo or {})
+    selected = [XUPDATE, YUPDATE]
+    result = np.asarray(field)
+    received: dict[str, tuple[int, int]] = {}
+
+    for order, name in enumerate(d for d in dim if d in domain.dims):
+        low_width, high_width = widths.get(name, (0, 0))
+        if (order < len(selected) and not flags & selected[order]) or not (
+            low_width or high_width
+        ):
+            received[name] = (0, 0)
+            continue
+        result, low, high = _update_one_axis(
+            result,
+            domain,
+            name,
+            list(dim).index(name),
+            before=low_width,
+            after=high_width,
+            periodic=wrap.get(name, False),
+        )
+        received[name] = (low, high)
 
     return result, received
 
@@ -520,7 +601,7 @@ def mpp_do_update_fold(
 
     # Every rank owning part of the edge contributes its columns, so the
     # mirrored partner can be found wherever it lives.
-    comm = mpp_dim_comm_for(domain, mirror_dim)
+    comm = dim_comm(domain, mirror_dim)
     contributions = comm.allgather(
         None
         if edge_rows is None
@@ -545,26 +626,3 @@ def mpp_do_update_fold(
     local = local[tuple(flip)]
 
     return np.concatenate((values, local) if north else (local, values), axis=fold_axis)
-
-
-def mpp_dim_comm_for(domain: Domain, dim: str) -> MPI.Comm:
-    """Return the communicator varying along ``dim`` for this domain.
-
-    Parameters
-    ----------
-    domain : Domain
-        Domain to take the communicator from.
-    dim : str
-        Dimension the communicator should vary along.
-
-    Returns
-    -------
-    mpi4py.MPI.Comm
-        The whole communicator for a one-axis domain, otherwise the
-        Cartesian subcommunicator for ``dim``.
-    """
-    if domain.cart is None or len(domain.dims) == 1:
-        return domain.comm
-    return mpp_get_cartesian_domain(
-        domain.comm, domain.dims, domain.global_sizes
-    ).sub_comm((dim,))

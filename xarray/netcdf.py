@@ -18,8 +18,11 @@ import numpy as np
 import xarray as xr
 from xarray.coding.times import encode_cf_datetime, encode_cf_timedelta
 
+from ..mpp.ext_collectives import gather_v
 from ..core.progress import SerialProgressBar
 from ..mpi.diagnostics import MPIError
+from ..mpp.mpp import mpp_broadcast, mpp_sync
+
 from ..mpi.mpi_init import MPI
 from .chunks import get_chunk_bounds, get_chunks, get_partition_chunk_size
 from .halo import mpp_global_field_xr as mpp_global_field
@@ -339,7 +342,7 @@ def mpp_close_writer(
     if nc is not None:
         nc.close()
     mpp_free_writer_comm(mpi_context, comm)
-    mpi_context.comm.Barrier()
+    mpp_sync(mpi_context.comm)
 
 
 def mpp_write_distributed(
@@ -651,7 +654,7 @@ def mpp_to_netcdf_parallel(
 
     # The distributed and scatter paths post different collectives, so every
     # rank must take the same one. Disagreement is reported instead of hanging.
-    agreed = mpi_context.comm.allgather(distributed)
+    agreed = gather_v(distributed, mpi_context.comm)
     if any(agreed) and not all(agreed):
         disagreeing = [rank for rank, state in enumerate(agreed) if state != agreed[0]]
         raise NetCDFWriteError(f"MPI ranks disagree on mpi_meta state: {disagreeing}.")
@@ -674,13 +677,13 @@ def mpp_to_netcdf_parallel(
         except BaseException as exc:
             error = exc
         mpi_context.raise_if_error(error, "parallel NetCDF dask-backed detection")
-        is_dask_backed = mpi_context.comm.bcast(is_dask_backed, root=0)
+        is_dask_backed = mpp_broadcast(is_dask_backed, mpi_context.comm, root=0)
 
         if is_dask_backed:
             # Import locally to avoid the ``.io``/``.netcdf`` cycle.
-            from .io import mpi_partition_data
+            from .io import distribute_data
 
-            local_ds = mpi_partition_data(
+            local_ds = distribute_data(
                 local_ds if mpi_context.comm.rank == 0 else None,
                 mpi_context,
                 dim=partition_dim if partition_dim is not None else "auto",
@@ -876,7 +879,7 @@ def mpp_to_netcdf_parallel(
             error = exc
 
     mpi_context.raise_if_error(error, "parallel NetCDF preparation")
-    output_path, schema = mpi_context.comm.bcast((output_path, schema), root=0)
+    output_path, schema = mpp_broadcast((output_path, schema), mpi_context.comm, root=0)
     if output_path is None or schema is None:
         raise AssertionError("Rank 0 did not broadcast the NetCDF schema.")
 
@@ -889,7 +892,7 @@ def mpp_to_netcdf_parallel(
         except BaseException as exc:
             error = exc
     mpi_context.raise_if_error(error, "serial NetCDF schema creation")
-    mpi_context.comm.barrier()
+    mpp_sync(mpi_context.comm)
 
     try:
         if distributed:
@@ -909,7 +912,7 @@ def mpp_to_netcdf_parallel(
             mpi_context.comm.Abort(1)
         raise
 
-    mpi_context.comm.barrier()
+    mpp_sync(mpi_context.comm)
     return output_path
 
 

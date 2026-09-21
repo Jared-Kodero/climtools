@@ -30,6 +30,7 @@ dependencies:
   - pymannkendall
   - ipython
   - rich
+  - scikit-image
   - xesmf>=0.9.2
   - cdo
   - nco
