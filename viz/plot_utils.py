@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -24,8 +24,13 @@ import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
+from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colorbar import Colorbar
 from matplotlib.colors import BoundaryNorm, Colormap, Normalize
+from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
+from xarray.plot.facetgrid import FacetGrid
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -1240,7 +1245,7 @@ def fmt_anim_title(
 
 
 def add_colorbar(
-    mappable: ScalarMappable,
+    mappable: ScalarMappable | FacetGrid,
     cax: Axes | None = None,
     ax: Axes | cgeo.GeoAxes | np.ndarray | None = None,
     use_gridspec: bool = True,
@@ -1258,28 +1263,36 @@ def add_colorbar(
     powerlimits: tuple[int, int] = (-3, 3),
     **kwargs,
 ) -> Colorbar:
-    """Add a colorbar for a scalar plotting primitive.
+    """Add a colorbar for a scalar mappable or xarray facet grid.
+
+    For a ``FacetGrid``, one representative mappable supplies the color
+    mapping while the complete facet axes array determines colorbar layout.
+    All facet panels are therefore expected to share the same normalization,
+    colormap, and contour levels.
 
     Parameters
     ----------
-    mappable : matplotlib.cm.ScalarMappable
-        Primitive described by the colorbar.
+    mappable : matplotlib.cm.ScalarMappable or xarray.plot.FacetGrid
+        Scalar plotting primitive or faceted xarray plot described by the
+        colorbar.
     cax : matplotlib.axes.Axes, optional
         Axes into which the colorbar will be drawn. If ``None``, a new
-        Axes is created and space is stolen from *ax*.
+        Axes is created relative to *ax*.
     ax : matplotlib.axes.Axes or numpy.ndarray, optional
-        Parent Axes from which space for a new colorbar Axes will be stolen.
+        Parent Axes or array of Axes used to position the colorbar. For a
+        ``FacetGrid``, defaults to ``facet.axs``.
     use_gridspec : bool, default True
         If *cax* is ``None`` and *ax* is positioned with a subplotspec,
         position *cax* with a subplotspec.
     fig : matplotlib.figure.Figure, optional
-        Parent figure.
+        Parent figure. For a ``FacetGrid``, defaults to ``facet.fig``.
     orientation : {"vertical", "horizontal"}, default "vertical"
         Colorbar orientation.
     subplots : bool, default False
-        Position the colorbar relative to a facet grid.
+        Position the colorbar relative to a subplot grid. Automatically
+        enabled when *ax* is a NumPy array.
     adjust : bool, default True
-        Apply tight layout before creating the colorbar axis.
+        Apply layout adjustment before creating the colorbar axis.
     pad_bottom : bool, optional
         Force additional space below a horizontal colorbar. When omitted,
         infer the requirement from the target axis labels.
@@ -1303,12 +1316,34 @@ def add_colorbar(
     matplotlib.colorbar.Colorbar
         Created colorbar.
     """
+    if isinstance(mappable, FacetGrid):
+        facet = mappable
+
+        if not facet._mappables:
+            raise ValueError("FacetGrid contains no color-mappable artists.")
+
+        mappable = facet._mappables[-1]
+
+        if ax is None:
+            ax = facet.axs
+
+        if fig is None:
+            fig = facet.fig
+
     if ax is None:
         ax = getattr(mappable, "axes", None)
 
-    target_ax = ax.flat[0] if isinstance(ax, np.ndarray) else ax
+    if isinstance(ax, np.ndarray):
+        subplots = True
+        target_ax = ax.flat[0]
+    else:
+        target_ax = ax
+
     if fig is None:
-        fig = target_ax.figure if target_ax is not None else plt.gcf()
+        if target_ax is not None:
+            fig = target_ax.figure
+        else:
+            fig = plt.gcf()
 
     if cax is None:
         cax = get_cax(

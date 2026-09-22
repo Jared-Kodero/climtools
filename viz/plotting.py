@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.quiver import Quiver, QuiverKey
     from matplotlib.text import Text
+    from xarray.plot.facetgrid import FacetGrid
 
 __all__ = [
     "Adder",
@@ -337,7 +338,7 @@ def theme(
 
 
 def colorbar(
-    mappable: ScalarMappable,
+    mappable: ScalarMappable | FacetGrid,
     cax: Axes | None = None,
     ax: Axes | cgeo.GeoAxes | np.ndarray | None = None,
     use_gridspec: bool = True,
