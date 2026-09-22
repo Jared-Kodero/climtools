@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import logging
-import os
 import json
+import logging
 import math
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -534,90 +534,14 @@ def mask(
     return data.where(remapped_mask == valid_value, other=np.nan)
 
 
-def fill_nan_2d(
-    da: xr.DataArray,
-    method: Literal["linear", "cubic", "nearest"] = "linear",
-    max_cells: int = 5,
-    max_iter: int = 5,
-    nan_mask: xr.DataArray | None = None,
-) -> xr.DataArray:
-    """
-    Fill thin horizontal and vertical NaN gaps in a 2-D DataArray.
-
-    The function identifies contiguous NaN runs along both array
-    dimensions and interpolates only gaps whose length does not exceed
-    ```max_cells``. A cell must be bounded by finite values on both sides in
-    at least one direction. Interpolation is performed iteratively so
-    that intersections between horizontal and vertical gaps can be
-    resolved on subsequent passes.
-
-    An optional ``nan_mask`` can be supplied to define cells that must
-    remain NaN after interpolation, such as ocean or permanently masked
-    regions.
-
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Two-dimensional input array containing finite values and NaNs.
-    method : {"linear", "cubic", "nearest"}, default="linear"
-        Interpolation method passed to :func:`scipy.interpolate.griddata`.
-    max_cells: int, default=10
-        Maximum contiguous NaN run length, in grid cells, eligible for
-        interpolation.
-    max_iter : int, default=10
-        Maximum number of interpolation passes.
-    nan_mask : xarray.DataArray, optional
-        Boolean mask with the same grid as ``da``. Cells where
-        ``nan_mask`` is True are forced to NaN in the returned array.
-        This is useful for preserving permanent masks such as ocean,
-        outside-domain, or invalid regions.
-
-    Returns
-    -------
-    xarray.DataArray
-        A copy of ``da`` with eligible NaN gaps interpolated. Cells
-        selected by ``nan_mask`` are NaN in the returned array.
-
-    Raises
-    ------
-    ValueError
-        If ``da`` is not two-dimensional, if ``method`` is unsupported,
-        if ``max_gap`` is less than 1, or if ``nan_mask`` cannot be
-        aligned exactly with ``da``.
-
-    Notes
-    -----
-    Interpolation is performed in array-index space rather than physical
-    coordinate space.
-
-    Examples
-    --------
-    Preserve ocean cells while filling thin gaps over land:
-
-    >>> fixed = fill_nan_2d(
-    ...     da,
-    ...     method="linear",
-    ...     max_gap=3,
-    ...     nan_mask=ocean_mask,
-    ... )
-    """
-    if da.ndim != 2:
-        raise ValueError("da must be 2-D.")
-
-    if method not in {"linear", "cubic", "nearest"}:
-        raise ValueError("method must be 'linear', 'cubic', or 'nearest'.")
-
-    if max_cells < 1:
-        raise ValueError("max_gap must be >= 1.")
-
-    if nan_mask is not None:
-        da, nan_mask = xr.align(
-            da,
-            nan_mask,
-            join="exact",
-        )
-
-    values = np.asarray(da.values, dtype=float).copy()
+def _fillgaps_2d(
+    values: np.ndarray,
+    *,
+    method: Literal["linear", "cubic", "nearest"],
+    max_cells: int,
+    max_iter: int,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=float).copy()
 
     ny, nx = values.shape
 
@@ -636,11 +560,7 @@ def fill_nan_2d(
         for i in range(ny):
             row = missing[i]
 
-            padded = np.pad(
-                row.astype(np.int8),
-                1,
-                constant_values=0,
-            )
+            padded = np.pad(row.astype(np.int8), 1, constant_values=0)
 
             diff = np.diff(padded)
 
@@ -692,19 +612,8 @@ def fill_nan_2d(
 
         valid = np.isfinite(values)
 
-        points = np.column_stack(
-            (
-                x2d[valid],
-                y2d[valid],
-            )
-        )
-
-        targets = np.column_stack(
-            (
-                x2d[target],
-                y2d[target],
-            )
-        )
+        points = np.column_stack((x2d[valid], y2d[valid]))
+        targets = np.column_stack((x2d[target], y2d[target]))
 
         interpolated = griddata(
             points=points, values=values[valid], xi=targets, method=method
@@ -719,11 +628,103 @@ def fill_nan_2d(
         if new_count == old_count:
             break
 
-    result = da.copy(data=values)
+    return values
+
+
+def fillgaps(
+    da: xr.DataArray,
+    method: Literal["linear", "cubic", "nearest"] = "linear",
+    max_cells: int = 5,
+    max_iter: int = 5,
+    nan_mask: xr.DataArray | None = None,
+    y: str = "lat",
+    x: str = "lon",
+) -> xr.DataArray:
+    """
+    Fill thin NaN gaps along two dimensions.
+
+    The operation is applied independently to every ``(y, x)`` slice.
+    All other dimensions are vectorized with :func:`xarray.apply_ufunc`.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input array containing finite values and NaNs.
+    method : {"linear", "cubic", "nearest"}, default="linear"
+        Interpolation method passed to :func:`scipy.interpolate.griddata`.
+    max_cells : int, default=5
+        Maximum contiguous NaN run length, in grid cells, eligible for
+        interpolation.
+    max_iter : int, default=5
+        Maximum number of interpolation passes.
+    nan_mask : xarray.DataArray, optional
+        Boolean mask defining cells that must be NaN in the returned
+        array. The mask is applied only after interpolation.
+    y : str, default="lat"
+        Name of the first interpolation dimension.
+    x : str, default="lon"
+        Name of the second interpolation dimension.
+
+    Returns
+    -------
+    xarray.DataArray
+        DataArray with eligible NaN gaps interpolated.
+
+    Notes
+    -----
+    Interpolation is performed in array-index space rather than physical
+    coordinate space.
+    """
+    if y not in da.dims:
+        raise ValueError(f"y dimension {y!r} is not present in da.")
+
+    if x not in da.dims:
+        raise ValueError(f"x dimension {x!r} is not present in da.")
+
+    if y == x:
+        raise ValueError("x and y must refer to different dimensions.")
+
+    if method not in {"linear", "cubic", "nearest"}:
+        raise ValueError("method must be 'linear', 'cubic', or 'nearest'.")
+
+    if max_cells < 1:
+        raise ValueError("max_cells must be >= 1.")
+
+    if max_iter < 1:
+        raise ValueError("max_iter must be >= 1.")
+
+    core_dims = [y, x]
+
+    if nan_mask is not None:
+        result, da = xr.align(
+            da,
+            nan_mask,
+            join="exact",
+        )
+
+    result = xr.apply_ufunc(
+        _fillgaps_2d,
+        da,
+        input_core_dims=[core_dims],
+        output_core_dims=[core_dims],
+        kwargs={
+            "method": method,
+            "max_cells": max_cells,
+            "max_iter": max_iter,
+        },
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[da.dtype],
+        dask_gufunc_kwargs={
+            "allow_rechunk": True,
+        },
+        keep_attrs=True,
+    )
+
+    result = result.transpose(*da.dims)
 
     if nan_mask is not None:
         result = result.where(~nan_mask.astype(bool))
-
     return result
 
 

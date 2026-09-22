@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -34,8 +35,6 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
-
-import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -413,6 +412,8 @@ def create_figure(
     nrows: int = 1,
     ncols: int = 1,
     squeeze: bool = False,
+    sharex: bool = True,
+    sharey: bool = True,
     w_pad: float = 6 / 72,
     h_pad: float = 8 / 72,
     layout: str | None = None,
@@ -424,6 +425,8 @@ def create_figure(
         ncols=ncols,
         figsize=figsize,
         squeeze=squeeze,
+        sharex=sharex,
+        sharey=sharey,
         subplot_kw={"projection": projection},
         layout=layout,
     )
@@ -621,6 +624,8 @@ class FacetedPlot:
         Projection assigned to every panel.
     figsize : tuple of float, optional
         Figure size in inches. A domain-aware size is inferred when omitted.
+    sharex, sharey : bool, default True
+        Share horizontal and vertical axis limits across facet panels.
     global_extent : bool, default False
         Use a global map extent.
     set_extent : tuple of float, optional
@@ -665,6 +670,8 @@ class FacetedPlot:
         col_wrap: int | None,
         projection: ccrs.Projection,
         figsize: tuple[float, float] | None,
+        sharex: bool = True,
+        sharey: bool = True,
         global_extent: bool = False,
         set_extent: tuple[float, float, float, float] | None = None,
         xy_ticks: bool = False,
@@ -699,6 +706,8 @@ class FacetedPlot:
             figsize=figsize,
             nrows=self.nrows,
             ncols=self.ncols,
+            sharex=sharex,
+            sharey=sharey,
             layout="compressed",
             squeeze=False,
         )
@@ -928,6 +937,9 @@ class GeoPlot:
         Maximum number of facet columns when only ``col`` is used.
     figsize : tuple of float, optional
         Figure size in inches.
+    sharex, sharey : bool, default True
+        Share horizontal and vertical axis limits across facet panels. Ignored
+        for non-faceted plots.
     method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
         Base scalar plotting method.
     projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal", "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo"}, optional
@@ -1037,6 +1049,8 @@ class GeoPlot:
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        sharex: bool = True,
+        sharey: bool = True,
         interactive: bool = False,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
@@ -1143,6 +1157,11 @@ class GeoPlot:
         self.norm = cmap_params.norm
         self.extend = cmap_params.extend
 
+        # Makes everything better
+
+        if method == "contourf":
+            drawedges = True
+
         if self.is_faceted:
             facet = FacetedPlot(
                 self.data,
@@ -1153,6 +1172,8 @@ class GeoPlot:
                 col_wrap=col_wrap,
                 projection=self.projection_object,
                 figsize=figsize,
+                sharex=sharex,
+                sharey=sharey,
                 global_extent=global_extent,
                 set_extent=set_extent,
                 xy_ticks=xy_ticks,
@@ -2345,6 +2366,9 @@ class Animate:
         Maximum number of facet columns.
     figsize : tuple of float, optional
         Figure size for each frame.
+    sharex, sharey : bool, default True
+        Share horizontal and vertical axis limits across facet panels in each
+        frame. Ignored for non-faceted plots.
     method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
         Base scalar plot method.
     projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal", "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo"}, optional
@@ -2425,6 +2449,8 @@ class Animate:
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        sharex: bool = True,
+        sharey: bool = True,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -2532,6 +2558,8 @@ class Animate:
             "row": row,
             "col_wrap": col_wrap,
             "figsize": figsize,
+            "sharex": sharex,
+            "sharey": sharey,
             "method": method,
             "projection": projection,
             "cmap": cmap,
@@ -2736,6 +2764,8 @@ def geo(
     row: str | None = None,
     col_wrap: int | None = None,
     figsize: tuple[float, float] | None = None,
+    sharex: bool = True,
+    sharey: bool = True,
     interactive: bool = False,
     method: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
@@ -2809,6 +2839,9 @@ def geo(
         Maximum number of facet columns.
     figsize : tuple of float, optional
         Figure size in inches.
+    sharex, sharey : bool, default True
+        Share horizontal and vertical axis limits across facet panels. Ignored
+        for non-faceted plots.
     interactive : bool, optional
         If True, configures matplotlib for interactive use in Jupyter notebooks.
     method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
@@ -2878,6 +2911,8 @@ def animate(
     row: str | None = None,
     col_wrap: int | None = None,
     figsize: tuple[float, float] | None = None,
+    sharex: bool = True,
+    sharey: bool = True,
     method: Literal[
         "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
     ] = "default",
@@ -2951,6 +2986,9 @@ def animate(
         Animation dimension.
     x, y, col, row, col_wrap, figsize : optional
         Per-frame layout configuration.
+    sharex, sharey : bool, default True
+        Share horizontal and vertical axis limits across facet panels in each
+        frame. Ignored for non-faceted plots.
     method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
         Per-frame scalar plot type.
     projection : {"PlateCarree", "Mercator", "Robinson", "Mollweide", "Orthographic", "LambertConformal", "AlbersEqualArea", "Stereographic", "NorthPolarStereo", "SouthPolarStereo"}, optional

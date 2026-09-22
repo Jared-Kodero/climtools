@@ -386,6 +386,8 @@ class GeoDataArray(GeoBase):
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        sharex: bool = True,
+        sharey: bool = True,
         interactive: bool = False,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
@@ -455,6 +457,9 @@ class GeoDataArray(GeoBase):
             Number of columns for wrapped facets.
         figsize : tuple[float, float], optional
             Figure size in inches.
+        sharex, sharey : bool, default True
+            Share horizontal and vertical axis limits across facet panels. Ignored
+            for non-faceted plots.
         interactive : bool, default False
             Configure Matplotlib for interactive notebook use.
         method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
@@ -539,6 +544,8 @@ class GeoDataArray(GeoBase):
         row: str | None = None,
         col_wrap: int | None = None,
         figsize: tuple[float, float] | None = None,
+        sharex: bool = True,
+        sharey: bool = True,
         method: Literal[
             "default", "pcolormesh", "contourf", "contour", "imshow", "scatter"
         ] = "default",
@@ -613,6 +620,9 @@ class GeoDataArray(GeoBase):
             Number of columns for wrapped facets.
         figsize : tuple[float, float], optional
             Figure size in inches.
+        sharex, sharey : bool, default True
+            Share horizontal and vertical axis limits across facet panels in each
+            frame. Ignored for non-faceted plots.
         method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
             Xarray plotting method.
         projection : str, optional
@@ -874,64 +884,53 @@ class GeoDataArray(GeoBase):
         kwargs = exclude_key("self", dict(locals()))
         return calc.trends(self._obj, **kwargs)
 
-    def fill_nan_2d(
+    def fillgaps(
         self,
+        y: str = "lat",
+        x: str = "lon",
         method: Literal["linear", "cubic", "nearest"] = "linear",
+        *,
         max_cells: int = 5,
         max_iter: int = 5,
         nan_mask: xr.DataArray | None = None,
     ) -> xr.DataArray:
         """
-        Fill thin horizontal and vertical NaN gaps in a 2-D DataArray.
+        Fill short, bounded NaN gaps along two dimensions.
 
-        The function identifies contiguous NaN runs along both array
-        dimensions and interpolates only gaps whose length does not exceed
-        ``max_cells``. A cell must be bounded by finite values on both sides in
-        at least one direction. Interpolation is performed iteratively so
-        that intersections between horizontal and vertical gaps can be
-        resolved on subsequent passes.
-
-        An optional ``nan_mask`` can be supplied to define cells that must
-        remain NaN after interpolation, such as ocean or permanently masked
-        regions.
+        A NaN cell is eligible for interpolation when it belongs to a
+        contiguous NaN run no longer than ``max_cells`` and that run is
+        bounded by finite values on both sides along either ``x`` or ``y``.
+        Multiple passes allow intersections between horizontal and vertical
+        gaps to be resolved after neighboring cells have been filled.
 
         Parameters
         ----------
+        y : str, default="lat"
+            Name of the first interpolation dimension.
+        x : str, default="lon"
+            Name of the second interpolation dimension.
         method : {"linear", "cubic", "nearest"}, default="linear"
             Interpolation method passed to :func:`scipy.interpolate.griddata`.
-        max_cells: int, default=10
+        max_cells : int, default=5
             Maximum contiguous NaN run length, in grid cells, eligible for
             interpolation.
-        max_iter : int, default=10
+        max_iter : int, default=5
             Maximum number of interpolation passes.
         nan_mask : xarray.DataArray, optional
-            Boolean mask with the same grid as ``da``. Cells where
-            ``nan_mask`` is True are forced to NaN in the returned array.
-            This is useful for preserving permanent masks such as ocean,
-            outside-domain, or invalid regions.
+            Boolean mask identifying cells that must remain NaN. The mask may
+            contain only ``(y, x)`` dimensions or additional dimensions
+            broadcastable against ``da``.
+
 
         Returns
         -------
         xarray.DataArray
-            A copy of ``da`` with eligible NaN gaps interpolated. Cells
-            selected by ``nan_mask`` are NaN in the returned array.
-
-        Raises
-        ------
-        ValueError
-            If ``da`` is not two-dimensional, if ``method`` is unsupported,
-            if ``max_gap`` is less than 1, or if ``nan_mask`` cannot be
-            aligned exactly with ``da``.
-
-        Notes
-        -----
-        Interpolation is performed in array-index space rather than physical
-        coordinate space.
+            DataArray with eligible NaN gaps interpolated. Dimensions,
+            coordinates, name, and attributes are preserved.
 
         """
-
         kwargs = exclude_key("self", dict(locals()))
-        return xgeo.fill_nan_2d(self._obj, **kwargs)
+        return xgeo.fillgaps(self._obj, **kwargs)
 
 
 class PreprocessAccessor:

@@ -219,7 +219,7 @@ def resolve_cmap_params(
 
         # Use percentile-based limits to prevent isolated extrema from
         # controlling the useful color range.
-        quantiles = [0.02, 0.98] if robust else [0.01, 0.99]
+        quantiles = [0.02, 0.98] if robust else [0.001, 0.999]
         q_vals = data.quantile(quantiles, skipna=True).compute().values
         plot_min = float(q_vals[0])
         plot_max = float(q_vals[1])
@@ -1347,6 +1347,15 @@ def add_colorbar(
 
         colorbar.formatter = formatter
         colorbar.update_ticks()
+
+        if orientation == "vertical":
+            offset_text = colorbar.ax.yaxis.get_offset_text()
+            offset_text.set_x(0.5)
+            offset_text.set_horizontalalignment("center")
+        else:
+            offset_text = colorbar.ax.xaxis.get_offset_text()
+            offset_text.set_x(1.0)
+            offset_text.set_horizontalalignment("right")
 
     if label is not None:
         colorbar.set_label(label)

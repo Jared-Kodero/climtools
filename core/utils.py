@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+    from logging import Handler, Logger
 
 N_CPUS: int = len(os.sched_getaffinity(0))
 HOST: str = socket.gethostname()
@@ -158,7 +159,7 @@ class LockFile:
         timeout: float | None = None,
         delay: float = 0.1,
     ):
-        self.filepath = filepath or Path(".lock")
+        self.filepath = Path(filepath or ".lock")
         self.timeout = timeout
         self.delay = delay
         self.fd: int | None = None
@@ -205,20 +206,44 @@ class LockFile:
 
 
 class LockedLogger:
-    """
-    A wrapper around `logging.Logger` to synchronize logging output across processes.
+    def __init__(
+        self,
+        lock_file: LockFile,
+        logger: Logger | None = None,
+        *,
+        name: str | None = None,
+        format: str = "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt: str | None = "%Y-%m-%d %H:%M",
+        style: str = "%",
+        level: int | str = logging.INFO,
+        handlers: Iterable[Handler] | None = None,
+        force: bool = False,
+    ) -> None:
+        if logger is None:
+            if name is None:
+                name = sys._getframe(1).f_globals["__name__"]
 
-    Parameters
-    ----------
-    logger : logging.Logger
-        The standard library logger instance to wrap.
-    lock_file : LockFile
-        An instance of the LockFile context manager to use for synchronization.
-    """
+            self.basicConfig(
+                format=format,
+                datefmt=datefmt,
+                style=style,
+                level=level,
+                handlers=handlers,
+                force=force,
+            )
 
-    def __init__(self, logger: logging.Logger, lock_file: LockFile) -> None:
+            logger = logging.getLogger(name)
+
         self._logger = logger
         self._lock_file = lock_file
+
+    @property
+    def name(self) -> str:
+        return self._logger.name
+
+    @wraps(logging.basicConfig)
+    def basicConfig(self, *args, **kwargs) -> None:
+        logging.basicConfig(*args, **kwargs)
 
     @wraps(logging.Logger.info)
     def info(self, *args, **kwargs) -> None:
