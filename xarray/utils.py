@@ -696,29 +696,25 @@ def fillgaps(
     core_dims = [y, x]
 
     if nan_mask is not None:
-        result, da = xr.align(
-            da,
-            nan_mask,
-            join="exact",
-        )
+        da, nan_mask = xr.align(da, nan_mask, join="exact")
 
     result = xr.apply_ufunc(
         _fillgaps_2d,
         da,
         input_core_dims=[core_dims],
         output_core_dims=[core_dims],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[da.dtype],
+        keep_attrs=True,
+        dask_gufunc_kwargs={
+            "allow_rechunk": True,
+        },
         kwargs={
             "method": method,
             "max_cells": max_cells,
             "max_iter": max_iter,
         },
-        vectorize=True,
-        dask="parallelized",
-        output_dtypes=[da.dtype],
-        dask_gufunc_kwargs={
-            "allow_rechunk": True,
-        },
-        keep_attrs=True,
     )
 
     result = result.transpose(*da.dims)
