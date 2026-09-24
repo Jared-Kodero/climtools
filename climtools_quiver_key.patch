@@ -1,0 +1,408 @@
+diff --git a/viz/plot_utils.py b/viz/plot_utils.py
+index f654126..249d0f6 100755
+--- a/viz/plot_utils.py
++++ b/viz/plot_utils.py
+@@ -29,7 +29,9 @@ from matplotlib.cm import ScalarMappable
+ from matplotlib.colorbar import Colorbar
+ from matplotlib.colors import BoundaryNorm, Colormap, Normalize
+ from matplotlib.figure import Figure
++from matplotlib.quiver import QuiverKey
+ from matplotlib.ticker import MaxNLocator, ScalarFormatter
++from matplotlib.transforms import Bbox
+ from xarray.plot.facetgrid import FacetGrid
+ 
+ from ..core.utils import get_fsig
+@@ -54,7 +56,7 @@ if TYPE_CHECKING:
+     from matplotlib.contour import QuadContourSet
+     from matplotlib.figure import Figure
+     from matplotlib.image import AxesImage
+-    from matplotlib.quiver import Quiver, QuiverKey
++    from matplotlib.quiver import Quiver
+     from matplotlib.text import Text
+ 
+ 
+@@ -600,11 +602,90 @@ def validate_animation_inputs(
+     return data, u, v
+ 
+ 
+-def get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> int | float:
+-    """Return a reference quiver-key magnitude from the 75th percentile speed."""
+-    mag = (u**2 + v**2) ** 0.5
+-    key_magnitude = float(mag.quantile(0.75, skipna=True).values)
+-    return key_magnitude
++def get_quiver_key_mag(u: xr.DataArray, v: xr.DataArray) -> float:
++    """Return a round reference magnitude near the 75th percentile speed.
++
++    The percentile is rounded, in log space, to the nearest of 1, 2, 2.5 or 5
++    times a power of ten so the key reads, for example, ``200`` rather than
++    ``228.20``.
++    """
++    speed = float(((u**2 + v**2) ** 0.5).quantile(0.75, skipna=True).values)
++    if not np.isfinite(speed) or speed <= 0.0:
++        return 1.0
++    exponent = np.floor(np.log10(speed))
++    steps = np.array([1.0, 2.0, 2.5, 5.0, 10.0])
++    step = steps[np.argmin(np.abs(np.log(steps * 10.0**exponent / speed)))]
++    return float(step * 10.0**exponent)
++
++
++class AutoQuiverKey(QuiverKey):
++    """Quiver key that positions itself below the decorations of its axes.
++
++    The position is recomputed at every draw, so the key cannot be left
++    overlapping tick labels, Cartopy gridliner labels or an axis label that were
++    added, or a layout that changed, after the key was created. The arrow tail is
++    aligned with the left edge of the axes frame and the label sits to the right
++    of the arrow. The key is placed ``gap_points`` below the lowest of
++
++    * the tight bounding box of the parent axes, excluding the key itself, and
++    * any other axes of the figure lying directly beneath the parent axes and
++      overlapping it horizontally (for example a horizontal colorbar).
++
++    ``get_window_extent`` returns the arrow and label extent, so
++    ``bbox_inches="tight"`` and layout engines include the key.
++    """
++
++    gap_points = 4.0
++
++    def _place(self, renderer: Any) -> None:
++        """Set ``X`` and ``Y`` (axes coordinates) from the current layout."""
++        ax = self.Q.axes
++        in_layout = self.get_in_layout()
++        self.set_in_layout(False)
++        try:
++            decorations = ax.get_tightbbox(renderer)
++            bottom = ax.bbox.y0 if decorations is None else decorations.y0
++            for other in ax.get_figure(root=True).axes:
++                if other is ax or not (other.get_visible() and other.get_in_layout()):
++                    continue
++                box = other.get_tightbbox(renderer)
++                if (
++                    box is not None
++                    and box.y1 <= ax.bbox.y0 + 1.0
++                    and box.x1 > ax.bbox.x0
++                    and box.x0 < ax.bbox.x1
++                ):
++                    bottom = min(bottom, box.y0)
++        finally:
++            self.set_in_layout(in_layout)
++        arrow = self._arrow_extent(renderer)
++        text = self.text.get_window_extent(renderer)
++        half_height = 0.5 * max(arrow.height, text.height)
++        gap = renderer.points_to_pixels(self.gap_points)
++        # labelpos "E" pivots the arrow on its tip, so the tip sits at X and the
++        # tail one arrow length to the left, on the axes edge.
++        self.X, self.Y = ax.transAxes.inverted().transform(
++            (ax.bbox.x0 + arrow.width, bottom - gap - half_height)
++        )
++
++    def _arrow_extent(self, renderer: Any) -> Bbox:
++        """Display-space extent of the key arrow, relative to its anchor."""
++        self._init()
++        vertices = self.Q.get_transform().transform(np.asarray(self.verts[0]))
++        return Bbox.from_extents(*vertices.min(axis=0), *vertices.max(axis=0))
++
++    def draw(self, renderer: Any) -> None:
++        self._place(renderer)
++        super().draw(renderer)
++
++    def get_window_extent(self, renderer: Any = None) -> Bbox:
++        if renderer is None:
++            renderer = self.get_figure(root=True)._get_renderer()
++        self._place(renderer)
++        position = self.get_transform().transform((self.X, self.Y))
++        arrow = self._arrow_extent(renderer).translated(*position)
++        self.text.set_position(position + self._text_shift())
++        return Bbox.union([arrow, self.text.get_window_extent(renderer)])
+ 
+ 
+ def is_geoaxes(ax: Axes | cgeo.GeoAxes, kwargs: Mapping[str, Any]) -> dict:
+@@ -1919,8 +2000,6 @@ def plot_quiver(
+     add_key: bool = True,
+     key_magnitude: float | None = None,
+     key_units: str | None = None,
+-    key_x: float = 0.05,
+-    key_y: float | None = None,
+     powerlimits: tuple[int, int] = (-3, 3),
+     scale: float | None = None,
+     color: str | None = None,
+@@ -1930,10 +2009,11 @@ def plot_quiver(
+ ) -> tuple[Quiver, QuiverKey | None]:
+     """Draw vector arrows and optionally add a quiver key.
+ 
+-    A temporary horizontal auxiliary axis provides the reserved-region
+-    geometry, and a transparent persistent axis keeps that region in the
+-    figure layout. When ``key_y`` is omitted, the key is anchored below the
+-    lowest decoration of ``ax`` (tick labels, gridliner labels, x label).
++    The key is an :class:`AutoQuiverKey`: it is placed automatically below the
++    tick labels, gridliner labels and axis label of ``ax`` (and below a
++    horizontal colorbar beneath ``ax``), aligned with the left edge of the axes,
++    and repositions itself whenever the figure is drawn. Its position cannot be
++    set by the caller.
+ 
+     Parameters
+     ----------
+@@ -1948,23 +2028,16 @@ def plot_quiver(
+     subsample : int or tuple of int, default (1, 1)
+         Spatial stride used to thin vectors.
+     add_key : bool, default True
+-        Add a reference vector key. The key is omitted only when explicitly
+-        set to ``False``.
++        Add a reference vector key.
+     key_magnitude : int or float, optional
+-        Reference magnitude. The unrounded 75th percentile of the vector
+-        magnitude is used when omitted.
++        Reference magnitude. Defaults to the 75th percentile speed of the drawn
++        vectors rounded to 1, 2, 2.5 or 5 times a power of ten.
+     key_units : str, optional
+         Units appended to the key label. Matching component ``units``
+         attributes are used when omitted.
+-    key_x : float, default 0.05
+-        Quiver-key x anchor in axis coordinates. GeoAxes add a further
+-        offset of 0.05 axis widths.
+-    key_y : float, optional
+-        Quiver-key y anchor in axis coordinates. When omitted, the anchor is
+-        placed below the axis decorations.
+     powerlimits : tuple of int, default (-3, 3)
+-        Order-of-magnitude limits outside which the key label switches to
+-        scientific notation (see :meth:`ScalarFormatter.set_powerlimits`).
++        Decimal exponents outside which the key magnitude is written in
++        scientific notation.
+     scale : float, optional
+         Matplotlib quiver scale.
+     color : str, optional
+@@ -1980,9 +2053,15 @@ def plot_quiver(
+     -------
+     quiver : matplotlib.quiver.Quiver
+         Vector primitive.
+-    quiver_key : matplotlib.quiver.QuiverKey or None
++    quiver_key : AutoQuiverKey or None
+         Reference key when requested.
+     """
++    placement = sorted({"key_x", "key_y"}.intersection(kwargs))
++    if placement:
++        raise TypeError(
++            f"{', '.join(placement)} is not supported: the quiver key is placed "
++            + "automatically below the axis decorations"
++        )
+     u, v = validate_vector_components(u, v)
+     assert u is not None and v is not None
+ 
+@@ -2036,104 +2115,26 @@ def plot_quiver(
+                 raise ValueError("u and v units must match when adding a quiver key")
+             key_units = u_units
+ 
+-        # Format the unrounded magnitude using ScalarFormatter
+-        formatter = ScalarFormatter(useMathText=True, useOffset=False)
+-        formatter.set_powerlimits(powerlimits)
+-        formatter.create_dummy_axis()
+-        formatter.axis.set_view_interval(key_magnitude, key_magnitude)
+-        formatter.set_locs([key_magnitude])
+-
+-        raw_val = formatter(key_magnitude)
+-        offset = formatter.get_offset()
+-
+-        # Clean the string returned by ScalarFormatter to parse the scaled mantissa
+-        import re
+-
+-        clean_str = re.sub(r"[^\d.-]", "", str(raw_val))
+-        try:
+-            mantissa = float(clean_str)
+-
+-            # Optional: Check if multiplying by 1000 is an int or apply your logic,
+-            # then format/round strictly to 2 decimal places
+-            formatted_val = f"{mantissa:.2f}"
+-        except ValueError:
+-            formatted_val = raw_val
+-
+-        # Combine the 2-decimal mantissa with the scientific notation offset
+-        magnitude_label = f"{formatted_val}{offset}"
+-        label = f"{magnitude_label} {key_units or ''}".strip()
+-
+-        # The temporary cax supplies the target size; the persistent
+-        # transparent cax reserves that region after the temporary one is
+-        # removed. get_cax also draws the canvas, which resolves the final
+-        # Cartopy geometry and tick-label extents used below.
+-        temporary_cax = get_cax(
+-            fig=fig,
+-            axes=ax,
+-            orientation="horizontal",
+-            subplots=False,
+-            adjust=False,
+-            pad_bottom=True,
+-        )
+-        bbox = temporary_cax.get_position()
+-        temporary_cax.remove()
+-
+-        key_fontsize = 10.0
+-        key_x_ax = float(key_x)
+-        if key_y is None:
+-            # Offset of 1.2 font sizes: a 0.5 em gap plus half the height of
+-            # a label that may carry a mathtext exponent.
+-            renderer = fig.canvas.get_renderer()
+-            decor_y0 = ax.get_tightbbox(renderer).y0
+-            offset_px = renderer.points_to_pixels(1.2 * key_fontsize)
+-            key_y_ax = float(
+-                ax.transAxes.inverted().transform((0.0, decor_y0 - offset_px))[1]
+-            )
++        exponent = int(np.floor(np.log10(abs(key_magnitude)))) if key_magnitude else 0
++        if powerlimits[0] < exponent < powerlimits[1]:
++            magnitude_label = f"{key_magnitude:g}"
+         else:
+-            key_y_ax = float(key_y)
+-
+-        key_x_fig, key_y_fig = fig.transFigure.inverted().transform(
+-            ax.transAxes.transform((key_x_ax, key_y_ax))
+-        )
+-
+-        # Match the previous Cartopy offset, but keep figure and axes
+-        # coordinate systems separate.
+-        padx_fig = 0.0
+-        pady_fig = 0.0
+-        if isinstance(ax, cgeo.GeoAxes):
+-            padx_fig = 0.05 * bbox.width
+-            pady_fig = 0.05 * bbox.height
+-
+-        axis_bbox = ax.get_position()
+-        padx_ax = padx_fig / max(axis_bbox.width, np.finfo(float).eps)
+-        pady_ax = pady_fig / max(axis_bbox.height, np.finfo(float).eps)
+-
+-        cax_left = key_x_fig + padx_fig
+-        cax_bottom = key_y_fig - 0.5 * bbox.height + pady_fig
+-        cax_right = bbox.x1
+-        cax_width = max(cax_right - cax_left, np.finfo(float).eps)
+-
+-        key_cax = fig.add_axes(
+-            [cax_left, cax_bottom, cax_width, bbox.height],
+-            label=f"<quiver-key-{id(quiver)}>",
+-            zorder=1,
+-        )
+-        key_cax.set_frame_on(False)
+-        key_cax.set_xticks([])
+-        key_cax.set_yticks([])
+-        key_cax.set_in_layout(True)
++            mantissa = key_magnitude / 10.0**exponent
++            magnitude_label = rf"${mantissa:g}\times10^{{{exponent}}}$"
++        label = f"{magnitude_label} {key_units or ''}".strip()
+ 
+-        quiver_key = ax.quiverkey(
++        quiver_key = AutoQuiverKey(
+             quiver,
+-            X=key_x_ax + padx_ax,
+-            Y=key_y_ax + pady_ax,
++            X=0.0,
++            Y=0.0,
+             U=key_magnitude,
+             label=label,
+             labelpos="E",
+             coordinates="axes",
+             zorder=zorder,
+-            fontproperties={"size": key_fontsize},
++            fontproperties={"size": 10.0},
+         )
++        ax.add_artist(quiver_key)
+         quiver_key.set_clip_on(False)
+         quiver_key.text.set_clip_on(False)
+         quiver_key.set_in_layout(True)
+diff --git a/viz/plotting.py b/viz/plotting.py
+index fd9ae28..55e1d48 100755
+--- a/viz/plotting.py
++++ b/viz/plotting.py
+@@ -2078,8 +2078,6 @@ class Adder:
+         add_key: bool = True,
+         key_magnitude: float | None = None,
+         key_units: str | None = None,
+-        key_x: float = 0.1,
+-        key_y: float = -0.045,
+         powerlimits: tuple[int, int] = (-3, 3),
+         scale: float | None = None,
+         color: str | None = None,
+@@ -2102,9 +2100,8 @@ class Adder:
+         key_magnitude : int or float, optional
+             Reference magnitude.
+         key_units : str, optional
+-            Units appended to the key label.
+-        key_x, key_y : float, default 0.1, -0.045
+-            Key location in axis coordinates.
++            Units appended to the key label. The key itself is placed
++            automatically below the decorations of the bottom-left axis.
+         powerlimits : tuple of int, default (-3, 3)
+             Order-of-magnitude limits outside which the key label switches to
+             scientific notation (see :meth:`ScalarFormatter.set_powerlimits`).
+@@ -2150,8 +2147,6 @@ class Adder:
+                 add_key=add_key and axis is key_axis,
+                 key_magnitude=key_magnitude,
+                 key_units=key_units,
+-                key_x=key_x,
+-                key_y=key_y,
+                 powerlimits=powerlimits,
+                 scale=scale,
+                 color=color,
+diff --git a/xarray/accessors.py b/xarray/accessors.py
+index 8f18c23..5db38e3 100644
+--- a/xarray/accessors.py
++++ b/xarray/accessors.py
+@@ -716,13 +716,15 @@ class GeoDataArray(GeoBase):
+         ax: Any = None,
+         subsample: int | tuple[int, int] = (1, 1),
+         add_key: bool = True,
+-        subplots: bool = False,
+         key_magnitude: float | None = None,
+         key_units: str | None = None,
+         **kwargs: Any,
+     ) -> tuple[Any, Any, Any]:
+         """Draw quiver arrows, using the bound array as the zonal component.
+ 
++        The reference key is placed automatically below the axis decorations
++        (see :class:`climtools.viz.plot_utils.AutoQuiverKey`).
++
+         Parameters
+         ----------
+         v : xarray.DataArray
+@@ -730,13 +732,11 @@ class GeoDataArray(GeoBase):
+         x, y : str, default "lon", "lat"
+             Horizontal coordinate names.
+         ax : matplotlib.axes.Axes, optional
+-            Axis to draw on.
++            Axis to draw on; the current axis when omitted.
+         subsample : int or tuple of int, default (1, 1)
+             Grid stride used to thin the arrows.
+         add_key : bool, default True
+             Draw a reference quiver key.
+-        subplots : bool, default False
+-            Treat the axis as part of a grid when positioning the key.
+         key_magnitude : int or float, optional
+             Reference arrow magnitude.
+         key_units : str, optional
+@@ -750,12 +750,25 @@ class GeoDataArray(GeoBase):
+             ``(ax, quiver, quiver_key)``.
+ 
+         """
+-        from ..viz import plotting
+-
+-        opts = exclude_key("self", dict(locals()))
+-        kwargs = opts.pop("kwargs")
+-
+-        return plotting.quiver(self._obj, **opts, **kwargs)
++        import matplotlib.pyplot as plt
++
++        from ..viz.plot_utils import plot_quiver
++
++        axis = plt.gca() if ax is None else ax
++        quiver, quiver_key = plot_quiver(
++            self._obj,
++            v,
++            axis.get_figure(),
++            axis,
++            x=x,
++            y=y,
++            subsample=subsample,
++            add_key=add_key,
++            key_magnitude=key_magnitude,
++            key_units=key_units,
++            **kwargs,
++        )
++        return axis, quiver, quiver_key
+ 
+     def significance(
+         self,

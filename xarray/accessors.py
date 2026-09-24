@@ -413,6 +413,7 @@ class GeoDataArray(GeoBase):
         levels: int | list[float] | tuple[float, ...] | None = None,
         extend: str | None = None,
         robust: bool = False,
+        symmetrical: bool = False,
         rasterized: bool = False,
         title: str | dict[str, Any] | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
@@ -480,6 +481,8 @@ class GeoDataArray(GeoBase):
             Colorbar extension mode.
         robust, rasterized : bool, default False
             Enable percentile scaling or rasterized artists.
+        symmetrical : bool, default False
+            Use symmetrical color limits around zero where supported.
         title : str or dict, optional
             Plot title specification.
         orientation : {"vertical", "horizontal"}, optional
@@ -570,6 +573,7 @@ class GeoDataArray(GeoBase):
         levels: int | list[float] | tuple[float, ...] | None = None,
         extend: str | None = None,
         robust: bool = False,
+        symmetrical: bool = False,
         rasterized: bool = False,
         title: str | None = None,
         orientation: Literal["vertical", "horizontal"] = "vertical",
@@ -641,6 +645,8 @@ class GeoDataArray(GeoBase):
             Colorbar extension mode.
         robust, rasterized : bool, default False
             Enable percentile scaling or rasterized artists.
+        symmetrical : bool, default False
+            Use symmetrical color limits around zero where supported.
         title : str, optional
             Base frame title.
         orientation : {"vertical", "horizontal"}, default "vertical"
@@ -653,9 +659,9 @@ class GeoDataArray(GeoBase):
             Control geographic extent and grid-boundary annotations.
         xy_ticks : bool, default False
             Draw longitude and latitude ticks.
-        xticks_bins : float, default 5
+        xticks_bins : int, default 5
             Maximum number of longitude tick intervals.
-        yticks_bins : float, default 5
+        yticks_bins : int, default 5
             Maximum number of latitude tick intervals.
         set_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
@@ -710,12 +716,14 @@ class GeoDataArray(GeoBase):
         ax: Any = None,
         subsample: int | tuple[int, int] = (1, 1),
         add_key: bool = True,
-        subplots: bool = False,
         key_magnitude: float | None = None,
         key_units: str | None = None,
         **kwargs: Any,
     ) -> tuple[Any, Any, Any]:
         """Draw quiver arrows, using the bound array as the zonal component.
+
+        The reference key is placed automatically below the axis decorations
+        (see :class:`climtools.viz.plot_utils.AutoQuiverKey`).
 
         Parameters
         ----------
@@ -724,13 +732,11 @@ class GeoDataArray(GeoBase):
         x, y : str, default "lon", "lat"
             Horizontal coordinate names.
         ax : matplotlib.axes.Axes, optional
-            Axis to draw on.
+            Axis to draw on; the current axis when omitted.
         subsample : int or tuple of int, default (1, 1)
             Grid stride used to thin the arrows.
         add_key : bool, default True
             Draw a reference quiver key.
-        subplots : bool, default False
-            Treat the axis as part of a grid when positioning the key.
         key_magnitude : int or float, optional
             Reference arrow magnitude.
         key_units : str, optional
@@ -744,12 +750,25 @@ class GeoDataArray(GeoBase):
             ``(ax, quiver, quiver_key)``.
 
         """
-        from ..viz import plotting
+        import matplotlib.pyplot as plt
 
-        opts = exclude_key("self", dict(locals()))
-        kwargs = opts.pop("kwargs")
+        from ..viz.plot_utils import plot_quiver
 
-        return plotting.quiver(self._obj, **opts, **kwargs)
+        axis = plt.gca() if ax is None else ax
+        quiver, quiver_key = plot_quiver(
+            self._obj,
+            v,
+            axis.get_figure(),
+            axis,
+            x=x,
+            y=y,
+            subsample=subsample,
+            add_key=add_key,
+            key_magnitude=key_magnitude,
+            key_units=key_units,
+            **kwargs,
+        )
+        return axis, quiver, quiver_key
 
     def significance(
         self,

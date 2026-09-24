@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -35,6 +34,8 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
+
+import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -960,6 +961,8 @@ class GeoPlot:
         Colorbar and contour extension behavior.
     robust : bool, default False
         Use percentile-based limits where supported.
+    symmetrical : bool, default False
+        Use symmetrical color limits around zero where supported.
     rasterized : bool, default False
         Rasterize dense scalar primitives.
     title : str | Dict, default None
@@ -1077,6 +1080,7 @@ class GeoPlot:
         levels: int | Sequence[float] | np.ndarray | None = None,
         extend: Literal["neither", "both", "min", "max"] | None = None,
         robust: bool = False,
+        symmetrical: bool = False,
         rasterized: bool = False,
         title: str | dict | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
@@ -1150,6 +1154,7 @@ class GeoPlot:
             robust=robust,
             extend=extend,
             norm=norm,
+            symmetrical=symmetrical,
         )
         self.vmin = cmap_params.vmin
         self.vmax = cmap_params.vmax
@@ -2073,8 +2078,7 @@ class Adder:
         add_key: bool = True,
         key_magnitude: float | None = None,
         key_units: str | None = None,
-        key_x: float = 0.1,
-        key_y: float = -0.045,
+        powerlimits: tuple[int, int] = (-3, 3),
         scale: float | None = None,
         color: str | None = None,
         width: float | None = None,
@@ -2096,9 +2100,11 @@ class Adder:
         key_magnitude : int or float, optional
             Reference magnitude.
         key_units : str, optional
-            Units appended to the key label.
-        key_x, key_y : float, default 0.1, -0.045
-            Key location in axis coordinates.
+            Units appended to the key label. The key itself is placed
+            automatically below the decorations of the bottom-left axis.
+        powerlimits : tuple of int, default (-3, 3)
+            Order-of-magnitude limits outside which the key label switches to
+            scientific notation (see :meth:`ScalarFormatter.set_powerlimits`).
         scale : float, optional
             Matplotlib quiver scale.
         color : str, optional
@@ -2141,8 +2147,7 @@ class Adder:
                 add_key=add_key and axis is key_axis,
                 key_magnitude=key_magnitude,
                 key_units=key_units,
-                key_x=key_x,
-                key_y=key_y,
+                powerlimits=powerlimits,
                 scale=scale,
                 color=color,
                 width=width,
@@ -2378,6 +2383,8 @@ class Animate:
         Base scalar styling.
     robust, rasterized : bool, default False
         Base scalar rendering options.
+    symmetrical : bool, default False
+        Use symmetrical color limits around zero where supported.
     title : str, optional
         Frame-title prefix.
     orientation : {"vertical", "horizontal"}, optional
@@ -2476,6 +2483,7 @@ class Animate:
         levels: int | Sequence[float] | np.ndarray | None = None,
         extend: Literal["neither", "both", "min", "max"] | None = None,
         robust: bool = False,
+        symmetrical: bool = False,
         rasterized: bool = False,
         title: str | None = None,
         orientation: Literal["vertical", "horizontal"] | None = None,
@@ -2571,6 +2579,7 @@ class Animate:
             "levels": levels,
             "extend": extend,
             "robust": robust,
+            "symmetrical": symmetrical,
             "rasterized": rasterized,
             "orientation": orientation,
             "add_colorbar": add_colorbar,
