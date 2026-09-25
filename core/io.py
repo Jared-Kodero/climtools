@@ -20,7 +20,7 @@ def to_xnpy(
     path: str | Path,
     *,
     overwrite: bool = False,
-) -> Path:
+):
     """Write a NumPy or xarray object to a memory-mappable XNpy store.
 
     Parameters
@@ -51,7 +51,7 @@ def open_xnpy(
     Parameters
     ----------
     path : str or pathlib.Path
-        Store path. The ``.xnpy`` suffix is appended if absent.
+        Store path.
     variable : str, optional
         Dataset variable to reconstruct. None reconstructs the complete stored
         object. For a DataArray, the stored variable name may also be supplied.
