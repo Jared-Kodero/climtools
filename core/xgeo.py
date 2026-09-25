@@ -82,19 +82,19 @@ _LAZY_IMPORTS = {
     "N_CPUS": (".utils", "N_CPUS"),
     "nc_append": ("..xarray.io", "nc_append"),
     "open_distributed_dataset": ("..xarray.io", "open_distributed_dataset"),
-    "open_xnpy": (".shared_mem", "open_xnpy"),
+    "open_xnpy": ("..xarray.io", "open_xnpy"),
     "plot": ("..viz.plotting", None),
     "preprocess": (".preprocess", None),
     "regrid": ("..xarray.utils", "regrid"),
     "sel_transect": ("..xarray.utils", "sel_transect"),
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": ("..xarray.utils", "SetupDask"),
-    "SharedMemoryObject": (".shared_mem", "SharedMemoryObject"),
+    "SharedMemoryObject": ("..xarray.io", "SharedMemoryObject"),
     "stats": (".stats", None),
     "to_lon180": ("..xarray.utils", "to_lon180"),
     "to_netcdf": ("..xarray.io", "to_netcdf"),
-    "to_xnpy": (".shared_mem", "to_xnpy"),
-    "XNpyStore": (".shared_mem", "XNpyStore"),
+    "to_xnpy": ("..xarray.io", "to_xnpy"),
+    "XNpyStore": ("..xarray.io", "XNpyStore"),
 }
 
 
