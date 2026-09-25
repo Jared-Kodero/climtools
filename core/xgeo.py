@@ -10,8 +10,6 @@ if TYPE_CHECKING:
     from ..viz import plotting as plot
     from ..xarray.core import MPIXarray
     from ..xarray.io import (
-        SharedMemoryObject,
-        XNpyStore,
         create_distributed_dataarray,
         create_distributed_dataset,
         distribute_data,
@@ -19,9 +17,7 @@ if TYPE_CHECKING:
         is_distributed_empty,
         nc_append,
         open_distributed_dataset,
-        open_xnpy,
         to_netcdf,
-        to_xnpy,
     )
     from ..xarray.utils import (
         SetupDask,
@@ -33,6 +29,7 @@ if TYPE_CHECKING:
         to_lon180,
     )
     from . import preprocess, stats
+    from .io import SharedMemoryObject, XNpyStore, open_xnpy, to_xnpy
     from .progress import DaskProgressBar, SerialProgressBar
     from .utils import N_CPUS
 
@@ -82,19 +79,18 @@ _LAZY_IMPORTS = {
     "N_CPUS": (".utils", "N_CPUS"),
     "nc_append": ("..xarray.io", "nc_append"),
     "open_distributed_dataset": ("..xarray.io", "open_distributed_dataset"),
-    "open_xnpy": ("..xarray.io", "open_xnpy"),
+    "open_xnpy": (".io", "open_xnpy"),
     "plot": ("..viz.plotting", None),
     "preprocess": (".preprocess", None),
     "regrid": ("..xarray.utils", "regrid"),
     "sel_transect": ("..xarray.utils", "sel_transect"),
     "SerialProgressBar": (".progress", "SerialProgressBar"),
     "SetupDask": ("..xarray.utils", "SetupDask"),
-    "SharedMemoryObject": ("..xarray.io", "SharedMemoryObject"),
+    "SharedMemoryObject": (".io", "SharedMemoryObject"),
     "stats": (".stats", None),
     "to_lon180": ("..xarray.utils", "to_lon180"),
     "to_netcdf": ("..xarray.io", "to_netcdf"),
-    "to_xnpy": ("..xarray.io", "to_xnpy"),
-    "XNpyStore": ("..xarray.io", "XNpyStore"),
+    "to_xnpy": (".io", "to_xnpy"),
 }
 
 
