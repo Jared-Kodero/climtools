@@ -46,6 +46,7 @@ from .plot_utils import (
     add_grid_boundary,
     add_map_features,
     add_xy_ticks,
+    discrete_cmap_norm,
     enable_interactive_features,
     fmt_anim_title,
     get_facet_figsize,
@@ -349,7 +350,7 @@ def colorbar(
     subplots: bool = False,
     adjust: bool = True,
     pad_bottom: bool | None = None,
-    drawedges: bool = False,
+    drawedges: bool = True,
     extend: Literal["neither", "both", "min", "max"] | None = None,
     label: str | None = None,
     ticks: Sequence[float] | np.ndarray | None = None,
@@ -628,23 +629,23 @@ class FacetedPlot:
         Figure size in inches. A domain-aware size is inferred when omitted.
     sharex, sharey : bool, default True
         Share horizontal and vertical axis limits across facet panels.
-    global_extent : bool, default False
+    map_global_extent : bool, default False
         Use a global map extent.
-    set_extent : tuple of float, optional
+    set_map_extent : tuple of float, optional
         Explicit geographic extent.
-    xy_ticks : bool, default False
+    map_ticks : bool, default False
         Draw longitude and latitude ticks.
-    xticks_bins : float, default 5
+    map_xtick_bins : float, default 5
         Maximum number of longitude tick intervals.
-    yticks_bins : float, default 5
+    map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
     add_grid_bounds:
        If True, draw an outline along the outer perimeter of the plotted grid domain.
-    coastlines, borders, states : bool, default True
+    add_coastlines, add_borders, add_states : bool, default True
         Add boundary features.
-    ocean, land : bool, default True
+    add_ocean, add_land : bool, default True
         Control background fills.
-    lakes, rivers : bool, default False
+    add_lakes, add_rivers : bool, default False
         Add inland-water features.
 
     Attributes
@@ -674,19 +675,19 @@ class FacetedPlot:
         figsize: tuple[float, float] | None,
         sharex: bool = True,
         sharey: bool = True,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] | None = None,
-        xy_ticks: bool = False,
-        xticks_bins: int = 5,
-        yticks_bins: int = 5,
+        map_global_extent: bool = False,
+        set_map_extent: tuple[float, float, float, float] | None = None,
+        map_ticks: bool = False,
+        map_xtick_bins: int = 5,
+        map_ytick_bins: int = 5,
         add_grid_bounds: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
+        add_coastlines: bool = True,
+        add_borders: bool = True,
+        add_states: bool = True,
+        add_ocean: bool = True,
+        add_land: bool = True,
+        add_lakes: bool = False,
+        add_rivers: bool = False,
     ) -> None:
         self.data = data
         self.x = x
@@ -728,24 +729,24 @@ class FacetedPlot:
                 add_map_features(
                     self.figure,
                     axis,
-                    global_extent=global_extent,
-                    set_extent=set_extent,
-                    coastlines=coastlines,
-                    states=states,
-                    borders=borders,
-                    lakes=lakes,
-                    rivers=rivers,
-                    ocean=ocean,
-                    land=land,
+                    global_extent=map_global_extent,
+                    set_extent=set_map_extent,
+                    coastlines=add_coastlines,
+                    states=add_states,
+                    borders=add_borders,
+                    lakes=add_lakes,
+                    rivers=add_rivers,
+                    ocean=add_ocean,
+                    land=add_land,
                 )
             )
-            if xy_ticks:
+            if map_ticks:
                 add_xy_ticks(
                     self.figure,
                     axis,
                     grid,
-                    xticks_bins=xticks_bins,
-                    yticks_bins=yticks_bins,
+                    xticks_bins=map_xtick_bins,
+                    yticks_bins=map_ytick_bins,
                 )
             if add_grid_bounds:
                 add_grid_boundary(
@@ -967,33 +968,33 @@ class GeoPlot:
         Rasterize dense scalar primitives.
     title : str | Dict, default None
         Plot title. if dict provide options accepted by plt.title or figure.suptitle
-    orientation : {"vertical", "horizontal"}, optional
+    cbar_orientation : {"vertical", "horizontal"}, optional
         Base colorbar orientation. Defaults to vertical for a single axis and
         horizontal for facets.
     add_colorbar : bool, default True
         Add a base colorbar for scalar plots other than line contours.
         Line contours use inline contour labels instead.
-    drawedges : bool, default False
+    cbar_drawedges : bool, default True
         Draw colorbar interval edges.
     cbar_label : str, optional
         Explicit base colorbar label.
-    global_extent : bool, default False
+    map_global_extent : bool, default False
         Use a global map extent.
-    set_extent : tuple of float, optional
+    set_map_extent : tuple of float, optional
         Explicit extent ``(lon_min, lon_max, lat_min, lat_max)``.
-    xy_ticks : bool, default False
+    map_ticks : bool, default False
         Draw longitude and latitude ticks.
-    xticks_bins : float, default 5
+    map_xtick_bins : float, default 5
         Maximum number of longitude tick intervals.
-    yticks_bins : float, default 5
+    map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
-    coastlines, borders, states : bool, default True
+    add_coastlines, add_borders, add_states : bool, default True
         Add common boundary features.
-    ocean, land : bool, default True
+    add_ocean, add_land : bool, default True
         Control background fills.
-    lakes, rivers : bool, default False
+    add_lakes, add_rivers : bool, default False
         Add inland-water features.
     p_value : xarray.DataArray, optional
         Pointwise p-values added as significance markers.
@@ -1003,7 +1004,7 @@ class GeoPlot:
         Vector components added as a quiver layer.
     quiver_kwargs : mapping, optional
         Arguments forwarded to :meth:`Adder.quiver`.
-    colorbar_kwargs : mapping, optional
+    cbar_kwargs : mapping, optional
         Additional base colorbar options.
     clabel : bool, default False
         Label a line-contour base. Line contours are labeled automatically.
@@ -1083,29 +1084,29 @@ class GeoPlot:
         symmetrical: bool = False,
         rasterized: bool = False,
         title: str | dict | None = None,
-        orientation: Literal["vertical", "horizontal"] | None = None,
+        cbar_orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
-        drawedges: bool = False,
+        cbar_drawedges: bool = True,
         cbar_label: str | None = None,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] | None = None,
-        xy_ticks: bool = False,
-        xticks_bins: int = 5,
-        yticks_bins: int = 5,
+        map_global_extent: bool = False,
+        set_map_extent: tuple[float, float, float, float] | None = None,
+        map_ticks: bool = False,
+        map_xtick_bins: int = 5,
+        map_ytick_bins: int = 5,
         add_grid_bounds: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
+        add_coastlines: bool = True,
+        add_borders: bool = True,
+        add_states: bool = True,
+        add_ocean: bool = True,
+        add_land: bool = True,
+        add_lakes: bool = False,
+        add_rivers: bool = False,
         p_value: xr.DataArray | None = None,
         pvalue_kwargs: Mapping[str, Any] | None = None,
         u_component: xr.DataArray | None = None,
         v_component: xr.DataArray | None = None,
         quiver_kwargs: Mapping[str, Any] | None = None,
-        colorbar_kwargs: Mapping[str, Any] | None = None,
+        cbar_kwargs: Mapping[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str | Mapping[float, str] = "%1.0f",
         clabel_fontsize: float = 8.0,
@@ -1159,14 +1160,22 @@ class GeoPlot:
         self.vmin = cmap_params.vmin
         self.vmax = cmap_params.vmax
         self.levels = cmap_params.levels
-        self.cmap = cmap or cmap_params.cmap
+        self.cmap = cmap_params.cmap
         self.norm = cmap_params.norm
         self.extend = cmap_params.extend
 
         # Makes everything better
 
         if method == "contourf":
-            drawedges = True
+            cbar_drawedges = True
+
+        elif cbar_drawedges and self.levels is not None and method != "contourf":
+            if self.norm is None:
+                self.cmap, self.norm = discrete_cmap_norm(self.cmap, self.levels)
+
+        if self.norm is not None:
+            self.vmin = self.norm.vmin
+            self.vmax = self.norm.vmax
 
         if self.is_faceted:
             facet = FacetedPlot(
@@ -1180,19 +1189,19 @@ class GeoPlot:
                 figsize=figsize,
                 sharex=sharex,
                 sharey=sharey,
-                global_extent=global_extent,
-                set_extent=set_extent,
-                xy_ticks=xy_ticks,
-                xticks_bins=xticks_bins,
-                yticks_bins=yticks_bins,
+                map_global_extent=map_global_extent,
+                set_map_extent=set_map_extent,
+                map_ticks=map_ticks,
+                map_xtick_bins=map_xtick_bins,
+                map_ytick_bins=map_ytick_bins,
                 add_grid_bounds=add_grid_bounds,
-                coastlines=coastlines,
-                borders=borders,
-                states=states,
-                ocean=ocean,
-                land=land,
-                lakes=lakes,
-                rivers=rivers,
+                add_coastlines=add_coastlines,
+                add_borders=add_borders,
+                add_states=add_states,
+                add_ocean=add_ocean,
+                add_land=add_land,
+                add_lakes=add_lakes,
+                add_rivers=add_rivers,
             )
             self.faceted_plot = facet
             self.figure = facet.figure
@@ -1238,23 +1247,23 @@ class GeoPlot:
             self.map_features = add_map_features(
                 self.figure,
                 axis,
-                global_extent=global_extent,
-                set_extent=set_extent,
-                coastlines=coastlines,
-                states=states,
-                borders=borders,
-                lakes=lakes,
-                rivers=rivers,
-                ocean=ocean,
-                land=land,
+                global_extent=map_global_extent,
+                set_extent=set_map_extent,
+                coastlines=add_coastlines,
+                states=add_states,
+                borders=add_borders,
+                lakes=add_lakes,
+                rivers=add_rivers,
+                ocean=add_ocean,
+                land=add_land,
             )
-            if xy_ticks:
+            if map_ticks:
                 add_xy_ticks(
                     self.figure,
                     axis,
                     self.grid,
-                    xticks_bins=xticks_bins,
-                    yticks_bins=yticks_bins,
+                    xticks_bins=map_xtick_bins,
+                    yticks_bins=map_ytick_bins,
                 )
             self.artist = _plot_scalar(
                 self.data,
@@ -1321,18 +1330,18 @@ class GeoPlot:
                 **dict(quiver_kwargs or {}),
             )
         if add_colorbar and method != "contour":
-            colorbar_options = dict(colorbar_kwargs or {})
+            colorbar_options = dict(cbar_kwargs or {})
             ticks = colorbar_options.pop("ticks", None)
             tick_labels = colorbar_options.pop("tick_labels", None)
             if colorbar_options:
                 unexpected = ", ".join(sorted(colorbar_options))
-                raise TypeError(f"unsupported colorbar_kwargs: {unexpected}")
+                raise TypeError(f"unsupported cbar_kwargs: {unexpected}")
 
             if cbar_label is None:
                 long_name = str(self.data.attrs.get("long_name", "")).title()
                 inferred_units = units or self.data.attrs.get("units", self.data.name)
                 cbar_label = f"{long_name}\n[{inferred_units}]".strip()
-            resolved_orientation = orientation or "vertical"
+            resolved_orientation = cbar_orientation or "vertical"
             # (
             #     "horizontal" if self.is_faceted else "vertical"
             # )
@@ -1345,7 +1354,7 @@ class GeoPlot:
                 subplots=self.is_faceted,
                 adjust=False,
                 pad_bottom=True if self.quiver_key is not None else None,
-                drawedges=drawedges,
+                drawedges=cbar_drawedges,
                 extend=self.extend,
                 label=cbar_label,
                 ticks=ticks,
@@ -2235,7 +2244,7 @@ class Adder:
         mappable: ScalarMappable | None = None,
         *,
         orientation: Literal["vertical", "horizontal"] = "vertical",
-        drawedges: bool = False,
+        drawedges: bool = True,
         extend: Literal["neither", "both", "min", "max"] | None = None,
         label: str | None = None,
         ticks: Sequence[float] | np.ndarray | None = None,
@@ -2387,31 +2396,31 @@ class Animate:
         Use symmetrical color limits around zero where supported.
     title : str, optional
         Frame-title prefix.
-    orientation : {"vertical", "horizontal"}, optional
+    cbar_orientation : {"vertical", "horizontal"}, optional
         Base colorbar orientation.
     add_colorbar : bool, default True
         Add a base colorbar to each frame.
-    drawedges : bool, default False
+    cbar_drawedges : bool, default True
         Draw colorbar interval edges.
     cbar_label : str, optional
         Base colorbar label.
-    global_extent : bool, default False
+    map_global_extent : bool, default False
         Use a global map extent.
-    xy_ticks : bool, default False
+    map_ticks : bool, default False
         Draw longitude and latitude ticks.
-    xticks_bins : float, default 5
+    map_xtick_bins : float, default 5
         Maximum number of longitude tick intervals.
-    yticks_bins : float, default 5
+    map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.
-    set_extent : tuple of float, optional
+    set_map_extent : tuple of float, optional
         Explicit map extent.
-    coastlines, borders, states, ocean, land, lakes, rivers : bool
+    add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers : bool
         Map-feature switches.
     u_component, v_component : xarray.DataArray, optional
         Vector components animated with ``data``.
-    colorbar_kwargs, quiver_kwargs : mapping, optional
+    cbar_kwargs, quiver_kwargs : mapping, optional
         Base colorbar and vector options.
     clabel : bool, default False
         Label line contours.
@@ -2486,26 +2495,26 @@ class Animate:
         symmetrical: bool = False,
         rasterized: bool = False,
         title: str | None = None,
-        orientation: Literal["vertical", "horizontal"] | None = None,
+        cbar_orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
-        drawedges: bool = False,
+        cbar_drawedges: bool = True,
         cbar_label: str | None = None,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] | None = None,
-        xy_ticks: bool = False,
-        xticks_bins: int = 5,
-        yticks_bins: int = 5,
+        map_global_extent: bool = False,
+        set_map_extent: tuple[float, float, float, float] | None = None,
+        map_ticks: bool = False,
+        map_xtick_bins: int = 5,
+        map_ytick_bins: int = 5,
         add_grid_bounds: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
+        add_coastlines: bool = True,
+        add_borders: bool = True,
+        add_states: bool = True,
+        add_ocean: bool = True,
+        add_land: bool = True,
+        add_lakes: bool = False,
+        add_rivers: bool = False,
         u_component: xr.DataArray | None = None,
         v_component: xr.DataArray | None = None,
-        colorbar_kwargs: Mapping[str, Any] | None = None,
+        cbar_kwargs: Mapping[str, Any] | None = None,
         quiver_kwargs: Mapping[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str | Mapping[float, str] = "%1.0f",
@@ -2581,24 +2590,24 @@ class Animate:
             "robust": robust,
             "symmetrical": symmetrical,
             "rasterized": rasterized,
-            "orientation": orientation,
+            "cbar_orientation": cbar_orientation,
             "add_colorbar": add_colorbar,
-            "drawedges": drawedges,
+            "cbar_drawedges": cbar_drawedges,
             "cbar_label": cbar_label,
-            "global_extent": global_extent,
-            "set_extent": set_extent,
-            "xy_ticks": xy_ticks,
-            "xticks_bins": xticks_bins,
-            "yticks_bins": yticks_bins,
+            "map_global_extent": map_global_extent,
+            "set_map_extent": set_map_extent,
+            "map_ticks": map_ticks,
+            "map_xtick_bins": map_xtick_bins,
+            "map_ytick_bins": map_ytick_bins,
             "add_grid_bounds": add_grid_bounds,
-            "coastlines": coastlines,
-            "borders": borders,
-            "states": states,
-            "ocean": ocean,
-            "land": land,
-            "lakes": lakes,
-            "rivers": rivers,
-            "colorbar_kwargs": colorbar_kwargs,
+            "add_coastlines": add_coastlines,
+            "add_borders": add_borders,
+            "add_states": add_states,
+            "add_ocean": add_ocean,
+            "add_land": add_land,
+            "add_lakes": add_lakes,
+            "add_rivers": add_rivers,
+            "cbar_kwargs": cbar_kwargs,
             "quiver_kwargs": quiver_kwargs,
             "clabel": clabel,
             "clabel_fmt": clabel_fmt,
@@ -2803,29 +2812,29 @@ def geo(
     robust: bool = False,
     rasterized: bool = False,
     title: str | dict | None = None,
-    orientation: Literal["vertical", "horizontal"] | None = None,
+    cbar_orientation: Literal["vertical", "horizontal"] | None = None,
     add_colorbar: bool = True,
-    drawedges: bool = False,
+    cbar_drawedges: bool = True,
     cbar_label: str | None = None,
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] | None = None,
-    xy_ticks: bool = False,
-    xticks_bins: int = 5,
-    yticks_bins: int = 5,
+    map_global_extent: bool = False,
+    set_map_extent: tuple[float, float, float, float] | None = None,
+    map_ticks: bool = False,
+    map_xtick_bins: int = 5,
+    map_ytick_bins: int = 5,
     add_grid_bounds: bool = False,
-    coastlines: bool = True,
-    borders: bool = True,
-    states: bool = True,
-    ocean: bool = True,
-    land: bool = True,
-    lakes: bool = False,
-    rivers: bool = False,
+    add_coastlines: bool = True,
+    add_borders: bool = True,
+    add_states: bool = True,
+    add_ocean: bool = True,
+    add_land: bool = True,
+    add_lakes: bool = False,
+    add_rivers: bool = False,
     p_value: xr.DataArray | None = None,
     pvalue_kwargs: Mapping[str, Any] | None = None,
     u_component: xr.DataArray | None = None,
     v_component: xr.DataArray | None = None,
     quiver_kwargs: Mapping[str, Any] | None = None,
-    colorbar_kwargs: Mapping[str, Any] | None = None,
+    cbar_kwargs: Mapping[str, Any] | None = None,
     clabel: bool = False,
     clabel_fmt: str | Mapping[float, str] = "%1.0f",
     clabel_fontsize: float = 8.0,
@@ -2864,25 +2873,25 @@ def geo(
         Base scalar rendering options.
     title : str | Dict, default None
         Plot title. if dict provide options accepted by plt.title or figure.suptitle
-    orientation : {"vertical", "horizontal"}, optional
+    cbar_orientation : {"vertical", "horizontal"}, optional
         Base colorbar orientation.
-    add_colorbar, drawedges : bool
+    add_colorbar, cbar_drawedges : bool
         Base colorbar controls.
     cbar_label : str, optional
         Explicit base colorbar label.
-    global_extent : bool, default False
+    map_global_extent : bool, default False
         Use a global map extent.
-    xy_ticks : bool, default False
+    map_ticks : bool, default False
         Draw longitude and latitude ticks.
-    xticks_bins : float, default 5
+    map_xtick_bins : float, default 5
         Maximum number of longitude tick intervals.
-    yticks_bins : float, default 5
+    map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
     add_grid_bounds : bool
         If True, draw an outline along the outer perimeter of the plotted grid domain.
-    set_extent : tuple of float, optional
+    set_map_extent : tuple of float, optional
         Explicit geographic extent.
-    coastlines, borders, states, ocean, land, lakes, rivers : bool
+    add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers : bool
         Map-feature switches.
     p_value : xarray.DataArray, optional
         Pointwise significance field.
@@ -2892,7 +2901,7 @@ def geo(
         Vector components.
     quiver_kwargs : mapping, optional
         Vector-layer options.
-    colorbar_kwargs : mapping, optional
+    cbar_kwargs : mapping, optional
         Base colorbar tick options.
     clabel, clabel_fmt, clabel_fontsize, clabel_inline, clabel_colors, clabel_kwargs
         Line-contour label controls.
@@ -2949,26 +2958,26 @@ def animate(
     robust: bool = False,
     rasterized: bool = False,
     title: str | None = None,
-    orientation: Literal["vertical", "horizontal"] | None = None,
+    cbar_orientation: Literal["vertical", "horizontal"] | None = None,
     add_colorbar: bool = True,
-    drawedges: bool = False,
+    cbar_drawedges: bool = True,
     cbar_label: str | None = None,
-    global_extent: bool = False,
-    set_extent: tuple[float, float, float, float] | None = None,
-    xy_ticks: bool = False,
-    xticks_bins: int = 5,
-    yticks_bins: int = 5,
+    map_global_extent: bool = False,
+    set_map_extent: tuple[float, float, float, float] | None = None,
+    map_ticks: bool = False,
+    map_xtick_bins: int = 5,
+    map_ytick_bins: int = 5,
     add_grid_bounds: bool = False,
-    coastlines: bool = True,
-    borders: bool = True,
-    states: bool = True,
-    ocean: bool = True,
-    land: bool = True,
-    lakes: bool = False,
-    rivers: bool = False,
+    add_coastlines: bool = True,
+    add_borders: bool = True,
+    add_states: bool = True,
+    add_ocean: bool = True,
+    add_land: bool = True,
+    add_lakes: bool = False,
+    add_rivers: bool = False,
     u_component: xr.DataArray | None = None,
     v_component: xr.DataArray | None = None,
-    colorbar_kwargs: Mapping[str, Any] | None = None,
+    cbar_kwargs: Mapping[str, Any] | None = None,
     quiver_kwargs: Mapping[str, Any] | None = None,
     clabel: bool = False,
     clabel_fmt: str | Mapping[float, str] = "%1.0f",
@@ -3009,15 +3018,15 @@ def animate(
         Per-frame scalar rendering options.
     title : str, optional
         Frame-title prefix.
-    orientation, add_colorbar, drawedges, cbar_label, colorbar_kwargs : optional
+    cbar_orientation, add_colorbar, cbar_drawedges, cbar_label, cbar_kwargs : optional
         Per-frame colorbar options.
-    global_extent, set_extent, coastlines, borders, states, ocean, land, lakes, rivers
+    map_global_extent, set_map_extent, add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers
         Per-frame map-feature options.
-    xy_ticks : bool, default False
+    map_ticks : bool, default False
         Draw longitude and latitude ticks.
-    xticks_bins : float, default 5
+    map_xtick_bins : float, default 5
         Maximum number of longitude tick intervals.
-    yticks_bins : float, default 5
+    map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
     add_grid_bounds:
         If True, draw an outline along the outer perimeter of the plotted grid domain.

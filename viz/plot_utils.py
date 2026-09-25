@@ -20,7 +20,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
@@ -33,6 +32,8 @@ from matplotlib.quiver import QuiverKey
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from matplotlib.transforms import Bbox
 from xarray.plot.facetgrid import FacetGrid
+
+import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -68,6 +69,7 @@ __all__ = [
     "add_contour_labels",
     "add_map_features",
     "add_xy_ticks",
+    "discrete_cmap_norm",
     "get_cax",
     "get_facet_figsize",
     "get_map_aspect",
@@ -153,6 +155,16 @@ def validate_data(data: xr.DataArray) -> xr.DataArray:
     return data
 
 
+def discrete_cmap_norm(
+    cmap: Colormap, levels: np.ndarray
+) -> tuple[Colormap, BoundaryNorm]:
+    """Resample a colormap to level intervals and create its BoundaryNorm."""
+    levels = np.asarray(levels)
+    cmap = cmap.resampled(len(levels) - 1)
+    norm = BoundaryNorm(levels, ncolors=cmap.N)
+    return cmap, norm
+
+
 class CmapParams(NamedTuple):
     vmin: float | None
     vmax: float | None
@@ -167,7 +179,7 @@ def resolve_cmap_params(
     vmax: float | None = None,
     levels: int | Sequence[float] | np.ndarray | None = None,
     cmap: Colormap | str | None = None,
-    data: xr.DataArray | None = None,
+    data: xr.DataArray | np.ndarray | None = None,
     robust: bool = False,
     extend: str | None = None,
     norm: Normalize | None = None,
@@ -221,14 +233,19 @@ def resolve_cmap_params(
     d_min, d_max = None, None
 
     if data is not None:
-        # Preserve absolute extrema for determining colorbar extensions.
-        d_min = float(data.min(skipna=True).compute().item())
-        d_max = float(data.max(skipna=True).compute().item())
-
-        # Use percentile-based limits to prevent isolated extrema from
-        # controlling the useful color range.
         quantiles = [0.02, 0.98] if robust else [0.001, 0.999]
-        q_vals = data.quantile(quantiles, skipna=True).compute().values
+        # Preserve absolute extrema for determining colorbar extensions.
+
+        if not isinstance(data, xr.DataArray):
+            d_min = float(np.nanmin(data))
+            d_max = float(np.nanmax(data))
+            q_vals = np.nanquantile(data, quantiles)
+
+        else:
+            d_min = float(data.min(skipna=True).compute().item())
+            d_max = float(data.max(skipna=True).compute().item())
+            q_vals = data.quantile(quantiles, skipna=True).compute().values
+
         plot_min = float(q_vals[0])
         plot_max = float(q_vals[1])
 
@@ -1342,7 +1359,7 @@ def add_colorbar(
     subplots: bool = False,
     adjust: bool = True,
     pad_bottom: bool | None = None,
-    drawedges: bool = False,
+    drawedges: bool = True,
     extend: Literal["neither", "both", "min", "max"] | None = None,
     label: str | None = None,
     ticks: Sequence[float] | np.ndarray | None = None,
@@ -1383,7 +1400,7 @@ def add_colorbar(
     pad_bottom : bool, optional
         Force additional space below a horizontal colorbar. When omitted,
         infer the requirement from the target axis labels.
-    drawedges : bool, default False
+    drawedges : bool, default True
         Draw edges between color intervals.
     extend : {"neither", "both", "min", "max"}, optional
         Out-of-range extension behavior.

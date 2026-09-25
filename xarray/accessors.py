@@ -416,29 +416,29 @@ class GeoDataArray(GeoBase):
         symmetrical: bool = False,
         rasterized: bool = False,
         title: str | dict[str, Any] | None = None,
-        orientation: Literal["vertical", "horizontal"] | None = None,
+        cbar_orientation: Literal["vertical", "horizontal"] | None = None,
         add_colorbar: bool = True,
-        drawedges: bool = False,
+        cbar_drawedges: bool = True,
         cbar_label: str | None = None,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] | None = None,
-        xy_ticks: bool = False,
-        xticks_bins: int = 5,
-        yticks_bins: int = 5,
+        map_global_extent: bool = False,
+        set_map_extent: tuple[float, float, float, float] | None = None,
+        map_ticks: bool = False,
+        map_xtick_bins: int = 5,
+        map_ytick_bins: int = 5,
         add_grid_bounds: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
+        add_coastlines: bool = True,
+        add_borders: bool = True,
+        add_states: bool = True,
+        add_ocean: bool = True,
+        add_land: bool = True,
+        add_lakes: bool = False,
+        add_rivers: bool = False,
         p_value: xr.DataArray | None = None,
         pvalue_kwargs: dict[str, Any] | None = None,
         u_component: xr.DataArray | None = None,
         v_component: xr.DataArray | None = None,
         quiver_kwargs: dict[str, Any] | None = None,
-        colorbar_kwargs: dict[str, Any] | None = None,
+        cbar_kwargs: dict[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
         clabel_fontsize: float = 8,
@@ -485,23 +485,23 @@ class GeoDataArray(GeoBase):
             Use symmetrical color limits around zero where supported.
         title : str or dict, optional
             Plot title specification.
-        orientation : {"vertical", "horizontal"}, optional
+        cbar_orientation : {"vertical", "horizontal"}, optional
             Colorbar orientation.
-        add_colorbar, drawedges : bool
+        add_colorbar, cbar_drawedges : bool
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent, add_grid_bounds : bool
+        map_global_extent, add_grid_bounds : bool
             Control geographic extent and grid-boundary annotations.
-        xy_ticks : bool, default False
+        map_ticks : bool, default False
             Draw longitude and latitude ticks.
-        xticks_bins : float, default 5
+        map_xtick_bins : float, default 5
             Maximum number of longitude tick intervals.
-        yticks_bins : float, default 5
+        map_ytick_bins : float, default 5
             Maximum number of latitude tick intervals.
-        set_extent : tuple[float, float, float, float], optional
+        set_map_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
-        coastlines, borders, states, ocean, land, lakes, rivers : bool
+        add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers : bool
             Toggle Cartopy geographic features.
         p_value : xarray.DataArray, optional
             Pointwise p-values for significance markers.
@@ -509,7 +509,7 @@ class GeoDataArray(GeoBase):
             Arguments passed to :meth:`significance`.
         u_component, v_component : xarray.DataArray, optional
             Vector components for a quiver overlay.
-        quiver_kwargs, colorbar_kwargs : dict, optional
+        quiver_kwargs, cbar_kwargs : dict, optional
             Quiver and colorbar options.
         clabel : bool, default False
             Label contour lines.
@@ -576,26 +576,26 @@ class GeoDataArray(GeoBase):
         symmetrical: bool = False,
         rasterized: bool = False,
         title: str | None = None,
-        orientation: Literal["vertical", "horizontal"] = "vertical",
+        cbar_orientation: Literal["vertical", "horizontal"] = "vertical",
         add_colorbar: bool = True,
-        drawedges: bool = False,
+        cbar_drawedges: bool = True,
         cbar_label: str | None = None,
-        global_extent: bool = False,
-        set_extent: tuple[float, float, float, float] | None = None,
-        xy_ticks: bool = False,
-        xticks_bins: int = 5,
-        yticks_bins: int = 5,
+        map_global_extent: bool = False,
+        set_map_extent: tuple[float, float, float, float] | None = None,
+        map_ticks: bool = False,
+        map_xtick_bins: int = 5,
+        map_ytick_bins: int = 5,
         add_grid_bounds: bool = False,
-        coastlines: bool = True,
-        borders: bool = True,
-        states: bool = True,
-        ocean: bool = True,
-        land: bool = True,
-        lakes: bool = False,
-        rivers: bool = False,
+        add_coastlines: bool = True,
+        add_borders: bool = True,
+        add_states: bool = True,
+        add_ocean: bool = True,
+        add_land: bool = True,
+        add_lakes: bool = False,
+        add_rivers: bool = False,
         u_component: xr.DataArray | None = None,
         v_component: xr.DataArray | None = None,
-        colorbar_kwargs: dict[str, Any] | None = None,
+        cbar_kwargs: dict[str, Any] | None = None,
         quiver_kwargs: dict[str, Any] | None = None,
         clabel: bool = False,
         clabel_fmt: str = "%1.0f",
@@ -649,27 +649,27 @@ class GeoDataArray(GeoBase):
             Use symmetrical color limits around zero where supported.
         title : str, optional
             Base frame title.
-        orientation : {"vertical", "horizontal"}, default "vertical"
+        cbar_orientation : {"vertical", "horizontal"}, default "vertical"
             Colorbar orientation.
-        add_colorbar, drawedges : bool
+        add_colorbar, cbar_drawedges : bool
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
-        global_extent, add_grid_bounds : bool
+        map_global_extent, add_grid_bounds : bool
             Control geographic extent and grid-boundary annotations.
-        xy_ticks : bool, default False
+        map_ticks : bool, default False
             Draw longitude and latitude ticks.
-        xticks_bins : int, default 5
+        map_xtick_bins : int, default 5
             Maximum number of longitude tick intervals.
-        yticks_bins : int, default 5
+        map_ytick_bins : int, default 5
             Maximum number of latitude tick intervals.
-        set_extent : tuple[float, float, float, float], optional
+        set_map_extent : tuple[float, float, float, float], optional
             ``(lon_min, lon_max, lat_min, lat_max)``.
-        coastlines, borders, states, ocean, land, lakes, rivers : bool
+        add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers : bool
             Toggle Cartopy geographic features.
         u_component, v_component : xarray.DataArray, optional
             Vector components for a quiver overlay.
-        colorbar_kwargs, quiver_kwargs, clabel_kwargs : dict, optional
+        cbar_kwargs, quiver_kwargs, clabel_kwargs : dict, optional
             Overlay and labeling options.
         clabel : bool, default False
             Label contour lines.
