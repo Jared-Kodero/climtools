@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from ..viz import plotting as plot
     from ..xarray.core import MPIXarray
     from ..xarray.io import (
+        SharedMemoryObject,
+        XNpyStore,
         create_distributed_dataarray,
         create_distributed_dataset,
         distribute_data,
@@ -17,11 +19,12 @@ if TYPE_CHECKING:
         is_distributed_empty,
         nc_append,
         open_distributed_dataset,
+        open_xnpy,
         to_netcdf,
+        to_xnpy,
     )
     from ..xarray.utils import (
         SetupDask,
-        XNpyStore,
         add_local_solar_time,
         fillgaps,
         mask,
@@ -31,7 +34,6 @@ if TYPE_CHECKING:
     )
     from . import preprocess, stats
     from .progress import DaskProgressBar, SerialProgressBar
-    from .shared_mem import SharedMemoryObject
     from .utils import N_CPUS
 
 __all__ = [
@@ -53,6 +55,7 @@ __all__ = [
     "mask",
     "nc_append",
     "open_distributed_dataset",
+    "open_xnpy",
     "plot",
     "preprocess",
     "regrid",
@@ -60,35 +63,38 @@ __all__ = [
     "stats",
     "to_lon180",
     "to_netcdf",
+    "to_xnpy",
 ]
 
 
 _LAZY_IMPORTS = {
-    "DaskProgressBar": (".progress", "DaskProgressBar"),
-    "SerialProgressBar": (".progress", "SerialProgressBar"),
-    "SetupDask": ("..xarray.utils", "SetupDask"),
-    "XNpyStore": ("..xarray.utils", "XNpyStore"),
     "add_local_solar_time": ("..xarray.utils", "add_local_solar_time"),
-    "nc_append": ("..xarray.io", "nc_append"),
-    "empty_distributed_dataset": ("..xarray.io", "empty_distributed_dataset"),
-    "is_distributed_empty": ("..xarray.io", "is_distributed_empty"),
-    "stats": (".stats", None),
     "cmaps": ("..viz.cmaps", None),
+    "create_distributed_dataarray": ("..xarray.io", "create_distributed_dataarray"),
+    "create_distributed_dataset": ("..xarray.io", "create_distributed_dataset"),
+    "DaskProgressBar": (".progress", "DaskProgressBar"),
+    "distribute_data": ("..xarray.io", "distribute_data"),
+    "empty_distributed_dataset": ("..xarray.io", "empty_distributed_dataset"),
+    "fillgaps": ("..xarray.utils", "fillgaps"),
+    "is_distributed_empty": ("..xarray.io", "is_distributed_empty"),
     "mask": ("..xarray.utils", "mask"),
+    "MPIXarray": ("..xarray.core", "MPIXarray"),
     "N_CPUS": (".utils", "N_CPUS"),
+    "nc_append": ("..xarray.io", "nc_append"),
+    "open_distributed_dataset": ("..xarray.io", "open_distributed_dataset"),
+    "open_xnpy": (".shared_mem", "open_xnpy"),
     "plot": ("..viz.plotting", None),
     "preprocess": (".preprocess", None),
     "regrid": ("..xarray.utils", "regrid"),
     "sel_transect": ("..xarray.utils", "sel_transect"),
-    "to_lon180": ("..xarray.utils", "to_lon180"),
-    "fillgaps": ("..xarray.utils", "fillgaps"),
-    "to_netcdf": ("..xarray.io", "to_netcdf"),
-    "open_distributed_dataset": ("..xarray.io", "open_distributed_dataset"),
-    "create_distributed_dataarray": ("..xarray.io", "create_distributed_dataarray"),
-    "create_distributed_dataset": ("..xarray.io", "create_distributed_dataset"),
-    "distribute_data": ("..xarray.io", "distribute_data"),
-    "MPIXarray": ("..xarray.core", "MPIXarray"),
+    "SerialProgressBar": (".progress", "SerialProgressBar"),
+    "SetupDask": ("..xarray.utils", "SetupDask"),
     "SharedMemoryObject": (".shared_mem", "SharedMemoryObject"),
+    "stats": (".stats", None),
+    "to_lon180": ("..xarray.utils", "to_lon180"),
+    "to_netcdf": ("..xarray.io", "to_netcdf"),
+    "to_xnpy": (".shared_mem", "to_xnpy"),
+    "XNpyStore": (".shared_mem", "XNpyStore"),
 }
 
 

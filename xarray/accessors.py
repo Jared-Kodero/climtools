@@ -324,6 +324,28 @@ class GeoBase:
         kwargs = exclude_key("self", dict(locals()))
         return xgeo.to_netcdf(self._obj, **kwargs)
 
+    def to_xnpy(
+        self,
+        path: str | Path,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Write the bound object to a memory-mappable XNpy store.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Store path. The ``.xnpy`` suffix is appended if absent.
+        overwrite : bool, default False
+            Remove an existing store before writing when True.
+
+        Returns
+        -------
+        pathlib.Path
+            Path to the completed store.
+        """
+        return xgeo.to_xnpy(self._obj, path, overwrite=overwrite)
+
     def shared_memory(self, *, readonly: bool = True) -> xgeo.SharedMemoryObject:
         """Create an interprocess shared-memory representation.
 
