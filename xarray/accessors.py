@@ -328,23 +328,34 @@ class GeoBase:
         self,
         path: str | Path,
         *,
-        overwrite: bool = False,
-    ):
+        mode: Literal["w", "w-", "a"] = "w-",
+        parallel: bool = False,
+    ) -> Path:
         """Write the bound object to a memory-mappable XNpy store.
 
         Parameters
         ----------
         path : str or pathlib.Path
-            Store path. The ``.xnpy`` suffix is appended if absent.
-        overwrite : bool, default False
-            Remove an existing store before writing when True.
+            Store path.
+        mode : {"w", "w-", "a"}, default "w-"
+            Write mode. ``"w"`` replaces an existing store, ``"w-"`` requires
+            a new store, and ``"a"`` adds or replaces complete Dataset
+            variables and coordinates.
+        parallel : bool, default False
+            Write Dataset variables and coordinates concurrently, using one
+            worker per data variable or coordinate being written.
 
         Returns
         -------
         pathlib.Path
             Path to the completed store.
         """
-        return xgeo.to_xnpy(self._obj, path, overwrite=overwrite)
+        return xgeo.to_xnpy(
+            self._obj,
+            path,
+            mode=mode,
+            parallel=parallel,
+        )
 
     def shared_memory(self, *, readonly: bool = True) -> xgeo.SharedMemoryObject:
         """Create an interprocess shared-memory representation.
