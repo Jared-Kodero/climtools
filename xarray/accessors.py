@@ -330,7 +330,7 @@ class GeoBase:
         *,
         mode: Literal["w", "w-", "a"] = "w-",
         parallel: bool = False,
-    ) -> Path:
+    ):
         """Write the bound object to a memory-mappable XNpy store.
 
         Parameters
@@ -345,10 +345,6 @@ class GeoBase:
             Write Dataset variables and coordinates concurrently, using one
             worker per data variable or coordinate being written.
 
-        Returns
-        -------
-        pathlib.Path
-            Path to the completed store.
         """
         return xgeo.to_xnpy(
             self._obj,

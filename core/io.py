@@ -22,7 +22,7 @@ def to_xnpy(
     *,
     mode: Literal["w", "w-", "a"] = "w-",
     parallel: bool = False,
-) -> Path:
+):
     """Write a NumPy or xarray object to a memory-mappable XNpy store.
 
     Parameters
@@ -95,7 +95,7 @@ class XNpyStore:
         *,
         mode: Literal["w", "w-", "a"] = "w-",
         parallel: bool = False,
-    ) -> Path:
+    ):
         """Save an array, DataArray, or Dataset."""
         if mode not in {"w", "w-", "a"}:
             raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
@@ -126,15 +126,12 @@ class XNpyStore:
                 metadata = self._save_ndarray(obj)
             else:
                 raise TypeError(
-                    "XNpy supports numpy.ndarray, xarray.DataArray, and "
-                    "xarray.Dataset only."
+                    "Only numpy.ndarray, xarray.DataArray, and xarray.Dataset are supported."
                 )
             self._write_metadata(metadata)
         except Exception:
             shutil.rmtree(self.path, ignore_errors=True)
             raise
-
-        return self.path
 
     def metadata(self) -> dict[str, Any]:
         """Read and validate the JSON manifest without opening payloads."""
@@ -356,10 +353,7 @@ class XNpyStore:
     ) -> dict[str, Any]:
         """Write one extensionless NPY payload."""
         if array.dtype.hasobject:
-            raise TypeError(
-                "object-dtype arrays are not supported because XNpy does not "
-                "use pickle."
-            )
+            raise TypeError("object-dtype arrays are not supported")
         target = path
         temporary = path.with_name(f".{path.name}.tmp") if atomic else path
         try:
