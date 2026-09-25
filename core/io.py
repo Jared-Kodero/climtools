@@ -74,17 +74,13 @@ class XNpyStore:
     are stored in a versioned JSON manifest. No pickle data are written.
     """
 
-    SUFFIX = ".xnpy"
     META_FILE = "metadata.json"
     COORD_DIR = "_coords"
     FORMAT = "xnpy"
     VERSION = 1
 
     def __init__(self, path: str | Path) -> None:
-        path = Path(path)
-        if path.suffix != self.SUFFIX:
-            path = Path(f"{path}{self.SUFFIX}")
-        self.path = path
+        self.path = Path(path)
         self.meta_path = self.path / self.META_FILE
 
     def save(

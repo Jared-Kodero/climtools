@@ -329,7 +329,7 @@ class GeoBase:
         path: str | Path,
         *,
         overwrite: bool = False,
-    ) -> Path:
+    ):
         """Write the bound object to a memory-mappable XNpy store.
 
         Parameters
