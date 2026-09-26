@@ -328,19 +328,18 @@ class GeoBase:
         self,
         path: str | Path,
         *,
-        mode: Literal["w", "w-", "a"] = "w-",
+        mode: Literal["w", "w-"] = "w-",
         parallel: bool = False,
     ):
-        """Write the bound object to a memory-mappable XNpy store.
+        """Write a NumPy or xarray object to a memory-mappable XNpy store using np.save.
 
         Parameters
         ----------
         path : str or pathlib.Path
             Store path.
-        mode : {"w", "w-", "a"}, default "w-"
+        mode : {"w", "w-"}, default "w-"
             Write mode. ``"w"`` replaces an existing store, ``"w-"`` requires
-            a new store, and ``"a"`` adds or replaces complete Dataset
-            variables and coordinates.
+            a new store.
         parallel : bool, default False
             Write Dataset variables and coordinates concurrently, using one
             worker per data variable or coordinate being written.

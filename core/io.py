@@ -20,10 +20,10 @@ def to_xnpy(
     obj: np.ndarray | xr.DataArray | xr.Dataset,
     path: str | Path,
     *,
-    mode: Literal["w", "w-", "a"] = "w-",
+    mode: Literal["w", "w-"] = "w-",
     parallel: bool = False,
 ):
-    """Write a NumPy or xarray object to a memory-mappable XNpy store.
+    """Write a NumPy or xarray object to a memory-mappable XNpy store using np.save.
 
     Parameters
     ----------
@@ -31,10 +31,9 @@ def to_xnpy(
         Object to store.
     path : str or pathlib.Path
         Store path.
-    mode : {"w", "w-", "a"}, default "w-"
-        Write mode. ``"w"`` replaces an existing store, ``"w-"`` requires
-        that the store does not already exist, and ``"a"`` adds or replaces
-        complete Dataset variables and coordinates in an existing store.
+    mode : {"w", "w-"}, default "w-"
+        Write mode. ``"w"`` replaces an existing store, and ``"w-"`` requires
+        that the store does not already exist.
     parallel : bool, default False
         Write Dataset variables and coordinates concurrently. The worker count
         is the number of data variables plus coordinates being written.
@@ -93,25 +92,15 @@ class XNpyStore:
         self,
         obj: np.ndarray | xr.DataArray | xr.Dataset,
         *,
-        mode: Literal["w", "w-", "a"] = "w-",
+        mode: Literal["w", "w-"] = "w-",
         parallel: bool = False,
     ):
         """Save an array, DataArray, or Dataset."""
-        if mode not in {"w", "w-", "a"}:
+        if mode not in {"w", "w-"}:
             raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
 
-        if mode == "a" and self.path.exists():
-            if not isinstance(obj, xr.Dataset):
-                raise TypeError("mode='a' is supported only for xarray.Dataset stores.")
-            metadata = self.metadata()
-            if metadata["kind"] != "dataset":
-                raise ValueError("mode='a' requires an existing Dataset store.")
-            metadata = self._update_dataset(obj, metadata, parallel=parallel)
-            self._write_metadata(metadata)
-            return self.path
-
         if self.path.exists():
-            if mode in {"w-", "a"}:
+            if mode == "w-":
                 raise FileExistsError(self.path)
             shutil.rmtree(self.path)
 
@@ -200,7 +189,6 @@ class XNpyStore:
             variable_jobs,
             coord_jobs,
             parallel=parallel,
-            atomic=False,
         )
         return {
             "kind": "dataset",
@@ -209,52 +197,12 @@ class XNpyStore:
             "coords": coords,
         }
 
-    def _update_dataset(
-        self,
-        dataset: xr.Dataset,
-        metadata: dict[str, Any],
-        *,
-        parallel: bool,
-    ) -> dict[str, Any]:
-        """Add or replace complete Dataset variables and coordinates."""
-        self.variable_path.mkdir(exist_ok=True)
-        self.coord_path.mkdir(exist_ok=True)
-
-        self._validate_replacements(dataset, metadata)
-        variable_jobs = [
-            (
-                name,
-                variable,
-                self._payload_path(self.variable_path, name),
-                list(dataset[name].coords),
-            )
-            for name, variable in dataset.data_vars.items()
-        ]
-        coord_jobs = [
-            (name, coord, self._payload_path(self.coord_path, name))
-            for name, coord in dataset.coords.items()
-        ]
-        variables, coords = self._write_dataset_jobs(
-            variable_jobs,
-            coord_jobs,
-            parallel=parallel,
-            atomic=True,
-        )
-        metadata["variables"].update(variables)
-        metadata["coords"].update(coords)
-
-        attrs = dict(metadata["attrs"])
-        attrs.update(self._json_value(dict(dataset.attrs)))
-        metadata["attrs"] = attrs
-        return metadata
-
     def _write_dataset_jobs(
         self,
         variable_jobs: list[tuple[str, xr.DataArray, Path, list[str]]],
         coord_jobs: list[tuple[str, xr.DataArray, Path]],
         *,
         parallel: bool,
-        atomic: bool,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Write Dataset payload jobs, optionally one worker per payload."""
 
@@ -262,7 +210,7 @@ class XNpyStore:
             job: tuple[str, xr.DataArray, Path, list[str]],
         ) -> tuple[str, dict[str, Any]]:
             name, variable, path, coords = job
-            info = self._save_xarray_variable(variable, path, atomic=atomic)
+            info = self._save_xarray_variable(variable, path)
             info["coords"] = coords
             return name, info
 
@@ -270,7 +218,7 @@ class XNpyStore:
             job: tuple[str, xr.DataArray, Path],
         ) -> tuple[str, dict[str, Any]]:
             name, coord, path = job
-            return name, self._save_xarray_variable(coord, path, atomic=atomic)
+            return name, self._save_xarray_variable(coord, path)
 
         jobs = len(variable_jobs) + len(coord_jobs)
         if parallel and jobs:
@@ -330,8 +278,6 @@ class XNpyStore:
         self,
         variable: xr.Variable | xr.DataArray,
         path: Path,
-        *,
-        atomic: bool = False,
     ) -> dict[str, Any]:
         """Save one variable payload and reconstruction metadata."""
         return {
@@ -340,7 +286,6 @@ class XNpyStore:
             "array": self._save_array(
                 path,
                 np.asarray(variable.data),
-                atomic=atomic,
             ),
         }
 
@@ -348,71 +293,17 @@ class XNpyStore:
         self,
         path: Path,
         array: np.ndarray,
-        *,
-        atomic: bool = False,
     ) -> dict[str, Any]:
         """Write one extensionless NPY payload."""
         if array.dtype.hasobject:
             raise TypeError("object-dtype arrays are not supported")
-        target = path
-        temporary = path.with_name(f".{path.name}.tmp") if atomic else path
-        try:
-            with temporary.open("wb") as file:
-                np.save(file, array, allow_pickle=False)
-            if atomic:
-                temporary.replace(target)
-        finally:
-            if atomic:
-                temporary.unlink(missing_ok=True)
+        with path.open("wb") as file:
+            np.save(file, array, allow_pickle=False)
         return {
-            "file": str(target.relative_to(self.path)),
+            "file": str(path.relative_to(self.path)),
             "dtype": array.dtype.str,
             "shape": list(array.shape),
         }
-
-    def _validate_replacements(
-        self,
-        dataset: xr.Dataset,
-        metadata: dict[str, Any],
-    ) -> None:
-        """Reject replacements that would make shared dimension sizes inconsistent."""
-        sizes: dict[str, int] = {}
-        incoming_vars = set(dataset.data_vars)
-        incoming_coords = set(dataset.coords)
-
-        for name, info in metadata["variables"].items():
-            if name not in incoming_vars:
-                self._merge_dimension_sizes(sizes, info)
-        for name, info in metadata["coords"].items():
-            if name not in incoming_coords:
-                self._merge_dimension_sizes(sizes, info)
-        for variable in dataset.data_vars.values():
-            self._merge_variable_sizes(sizes, variable)
-        for coord in dataset.coords.values():
-            self._merge_variable_sizes(sizes, coord)
-
-    @staticmethod
-    def _merge_dimension_sizes(sizes: dict[str, int], info: dict[str, Any]) -> None:
-        """Merge dimension sizes from stored variable metadata."""
-        for dim, size in zip(info["dims"], info["array"]["shape"], strict=True):
-            previous = sizes.setdefault(dim, size)
-            if previous != size:
-                raise ValueError(
-                    f"Dimension {dim!r} has conflicting sizes {previous} and {size}."
-                )
-
-    @staticmethod
-    def _merge_variable_sizes(
-        sizes: dict[str, int],
-        variable: xr.Variable | xr.DataArray,
-    ) -> None:
-        """Merge dimension sizes from an incoming xarray variable."""
-        for dim, size in zip(variable.dims, variable.shape, strict=True):
-            previous = sizes.setdefault(dim, size)
-            if previous != size:
-                raise ValueError(
-                    f"Dimension {dim!r} has conflicting sizes {previous} and {size}."
-                )
 
     def _load_dataset(
         self,
