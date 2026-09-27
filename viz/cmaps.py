@@ -424,16 +424,15 @@ def add_or_subtract(
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
+
+
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, str]:
     """
     Map each public function name to its canonical backend name.
 
-    The public name is the lowercased backend name and must be a valid Python
-    identifier so it can be exposed as an attribute and written into the stub.
-    The first occurrence of a name wins, matching the precedence text, then
-    matplotlib, then cmocean. Reversed (``_r``) and namespaced cmocean entries
-    are excluded.
+    The public name preserves the actual colormap name if it is a valid Python
+    identifier, otherwise it falls back to lowercase or a valid form.
     """
     text_names = [f.stem for f in _src_dir.glob("*.txt")]
     all_names = text_names + _plt_cmap_list + _cmocean_cmap_list
@@ -442,9 +441,12 @@ def _registry() -> dict[str, str]:
     for name in all_names:
         if name.endswith("_r") or "cmo" in name.lower():
             continue
-        key = name.lower()
+
+        # Use the actual name if it's a valid identifier, otherwise try lower()
+        key = name if name.isidentifier() else name.lower().replace("-", "_")
         if not key.isidentifier():
             continue
+
         mapping.setdefault(key, name)
     return dict(sorted(mapping.items()))
 
