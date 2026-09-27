@@ -330,26 +330,47 @@ class GeoBase:
         *,
         mode: Literal["w", "w-"] = "w-",
         parallel: bool = False,
+        max_workers: int | None = None,
     ):
-        """Write a NumPy or xarray object to a memory-mappable XNpy store using np.save.
+        """Write a NumPy or xarray object to a memory-mappable XNpy store.
+
+        Unchunked NumPy and xarray payloads are written directly with
+        :func:`numpy.save`. Chunked xarray variables are written incrementally to an
+        NPY memory map using :func:`numpy.lib.format.open_memmap`, avoiding
+        materialization of the complete variable in memory.
 
         Parameters
         ----------
         path : str or pathlib.Path
-            Store path.
+            Store directory path.
         mode : {"w", "w-"}, default "w-"
-            Write mode. ``"w"`` replaces an existing store, ``"w-"`` requires
-            a new store.
+            Write mode. ``"w"`` replaces an existing store, and ``"w-"`` requires
+            that the store does not already exist.
         parallel : bool, default False
-            Write Dataset variables and coordinates concurrently, using one
-            worker per data variable or coordinate being written.
+            Write Dataset variables and coordinates concurrently using a thread pool.
+        max_workers : int, optional
+            Maximum number of concurrent Dataset write workers when
+            ``parallel=True``. Defaults to 4.
 
+        Returns
+        -------
+        pathlib.Path
+            Resolved path to the completed XNpy store.
+
+        Notes
+        -----
+        For xarray objects, each variable is written according to its storage layout.
+        Variables with ``variable.chunks is not None`` are written chunk-by-chunk
+        through an NPY memory map. Unchunked variables are materialized and written
+        with :func:`numpy.save`. Bare NumPy arrays are always written with
+        :func:`numpy.save`.
         """
         return xgeo.to_xnpy(
             self._obj,
             path,
             mode=mode,
             parallel=parallel,
+            max_workers=max_workers,
         )
 
     def shared_memory(self, *, readonly: bool = True) -> xgeo.SharedMemoryObject:

@@ -360,6 +360,7 @@ def create(
             _registry.cache_clear()
             list_cmaps.cache_clear()
             cmap_index.cache_clear()
+            write_stub(force=True)
 
     if format == "hex":
         return get_colors(cmap, cmap.N)

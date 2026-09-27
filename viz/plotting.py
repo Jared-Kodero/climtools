@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -34,8 +35,6 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
-
-import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -1171,7 +1170,9 @@ class GeoPlot:
 
         elif cbar_drawedges and self.levels is not None and method != "contourf":
             if self.norm is None:
-                self.cmap, self.norm = discrete_cmap_norm(self.cmap, self.levels)
+                self.cmap, self.norm, self.extend = discrete_cmap_norm(
+                    self.cmap, self.levels, extend=self.extend
+                )
 
         if self.norm is not None:
             self.vmin = self.norm.vmin

@@ -154,14 +154,13 @@ def validate_data(data: xr.DataArray) -> xr.DataArray:
     return data
 
 
-def discrete_cmap_norm(
-    cmap: Colormap, levels: np.ndarray
-) -> tuple[Colormap, BoundaryNorm]:
-    """Resample a colormap to level intervals and create its BoundaryNorm."""
+def discrete_cmap_norm(cmap, levels, extend=None):
     levels = np.asarray(levels)
-    cmap = cmap.resampled(len(levels) - 1)
-    norm = BoundaryNorm(levels, ncolors=cmap.N)
-    return cmap, norm
+    extend = extend or "neither"
+    ext_opts = {"neither": 0, "min": 1, "max": 1, "both": 2}
+    cmap = cmap.resampled(len(levels) - 1 + ext_opts[extend])
+    norm = BoundaryNorm(levels, ncolors=cmap.N, extend=extend)
+    return cmap, norm, extend
 
 
 class CmapParams(NamedTuple):
