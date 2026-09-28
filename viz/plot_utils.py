@@ -316,20 +316,24 @@ def resolve_cmap_params(
 
     # 6. Infer colorbar extension if not explicitly provided
     if extend is None:
-        if symmetrical or divergent:
-            extend = "both"
-        elif not np.isnan(d_lo):
+        if not np.isnan(d_lo):
             ext_min = lower is not None and d_lo < lower
             ext_max = upper is not None and d_hi > upper
 
-            if ext_min and ext_max:
-                extend = "both"
-            elif ext_min:
-                extend = "min"
-            elif ext_max:
-                extend = "max"
+            if symmetrical or divergent:
+                # Retain visual symmetry: if either side needs extension, extend both
+                extend = "both" if (ext_min or ext_max) else "neither"
             else:
-                extend = "neither"
+                if ext_min and ext_max:
+                    extend = "both"
+                elif ext_min:
+                    extend = "min"
+                elif ext_max:
+                    extend = "max"
+                else:
+                    extend = "neither"
+        else:
+            extend = "both" if (symmetrical or divergent) else "neither"
 
     # 7. Fallback colormap selection
     cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
