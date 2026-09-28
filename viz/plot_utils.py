@@ -20,7 +20,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
@@ -33,6 +32,8 @@ from matplotlib.quiver import QuiverKey
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from matplotlib.transforms import Bbox
 from xarray.plot.facetgrid import FacetGrid
+
+import xarray as xr
 
 from ..core.utils import get_fsig
 from ..xarray.utils import (
@@ -154,15 +155,6 @@ def validate_data(data: xr.DataArray) -> xr.DataArray:
     return data
 
 
-def discrete_cmap_norm(cmap, levels, extend=None):
-    levels = np.asarray(levels)
-    extend = extend or "neither"
-    ext_opts = {"neither": 0, "min": 1, "max": 1, "both": 2}
-    cmap = cmap.resampled(len(levels) - 1 + ext_opts[extend])
-    norm = BoundaryNorm(levels, ncolors=cmap.N, extend=extend)
-    return cmap, norm, extend
-
-
 class CmapParams(NamedTuple):
     vmin: float | None
     vmax: float | None
@@ -182,14 +174,50 @@ def resolve_cmap_params(
     extend: str | None = None,
     norm: Normalize | None = None,
     symmetrical: bool = False,
+    discrete: bool = False,
 ) -> CmapParams:
-    """Normalize plotting limits and level boundaries."""
+    """Normalize plotting limits and level boundaries.
+
+    Parameters
+    ----------
+    vmin : float, optional
+        Minimum data value to map to the colormap.
+    vmax : float, optional
+        Maximum data value to map to the colormap.
+    levels : int, sequence of float, or np.ndarray, optional
+        The number of contour/bin levels (if an integer), or the explicit
+        array of boundary values.
+    cmap : Colormap or str, optional
+        The colormap instance or name to use.
+    data : xr.DataArray or np.ndarray, optional
+        Data array used to compute data statistics and quantiles when
+        limits or levels are not explicitly provided.
+    robust : bool, default False
+        If True, computes quantiles using the 2nd and 98th percentiles
+        instead of the 0.1st and 99.9th percentiles.
+    extend : str, optional
+        Controls the colorbar extension for out-of-bounds data
+        ('neither', 'min', 'max', or 'both').
+    norm : Normalize, optional
+        A pre-existing Matplotlib normalization instance to harmonize with.
+    symmetrical : bool, default False
+        If True, forces colormap limits and levels to be symmetric around zero.
+    discrete : bool, default False
+        If True, resamples the colormap to match the number of levels and
+        returns a configured `BoundaryNorm`.
+
+    Returns
+    -------
+    CmapParams
+        A named tuple containing the resolved `vmin`, `vmax`, `levels`,
+        `cmap`, `extend`, and `norm`.
+    """
 
     user_cmap = cmap
     vmin_was_none = vmin is None
     vmax_was_none = vmax is None
 
-    # Harmonize norm with vmin and vmax.
+    # 1. Harmonize norm with vmin and vmax
     if norm is not None:
         if norm.vmin is None:
             norm.vmin = vmin
@@ -205,145 +233,115 @@ def resolve_cmap_params(
                 raise ValueError("Cannot supply vmax and a norm with a different vmax.")
             vmax = norm.vmax
 
-    # BoundaryNorm defines the level boundaries.
     if isinstance(norm, BoundaryNorm):
         levels = norm.boundaries
+        if extend is None and norm.extend != "neither":
+            extend = norm.extend
 
-    if isinstance(levels, (list, tuple, np.ndarray)):
-        levels_arr = np.asarray(levels)
-        divergent = bool((levels_arr < 0).any()) and bool((levels_arr > 0).any())
-
-        if (
-            user_cmap is not None
-            and not divergent
-            and classify_cmap(user_cmap).lower() == "diverging"
-        ):
-            if np.all(levels_arr >= 0.0):
-                cmap = slice_cmap(user_cmap, split=(0.5, 1.0))
-            elif np.all(levels_arr <= 0.0):
-                cmap = slice_cmap(user_cmap, split=(0.0, 0.5))
-
-        cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
-        return CmapParams(vmin, vmax, levels_arr, cmap, extend=extend, norm=norm)
-
-    divergent = False
-    clip_extend = None
-    d_min, d_max = None, None
-
+    # 2. Extract data statistics/quantiles if data is provided
+    d_lo = q_lo = q_hi = d_hi = np.nan
     if data is not None:
-        quantiles = [0.02, 0.98] if robust else [0.001, 0.999]
-        # Preserve absolute extrema for determining colorbar extensions.
-
+        quantiles = [0.0, 0.02, 0.98, 1.0] if robust else [0.0, 0.001, 0.999, 1.0]
         if not isinstance(data, xr.DataArray):
-            d_min = float(np.nanmin(data))
-            d_max = float(np.nanmax(data))
             q_vals = np.nanquantile(data, quantiles)
-
         else:
-            d_min = float(data.min(skipna=True).compute().item())
-            d_max = float(data.max(skipna=True).compute().item())
             q_vals = data.quantile(quantiles, skipna=True).compute().values
+        d_lo, q_lo, q_hi, d_hi = (float(q) for q in q_vals)
 
-        plot_min = float(q_vals[0])
-        plot_max = float(q_vals[1])
+    # 3. Resolve levels, limits, and divergence
+    if isinstance(levels, (list, tuple, np.ndarray)):
+        resolved_levels = np.asarray(levels)
+        divergent = bool((resolved_levels < 0).any() and (resolved_levels > 0).any())
+    else:
+        divergent = False
 
-        if np.isfinite(plot_min) and np.isfinite(plot_max):
-            span = plot_max - plot_min
-            zero_fraction = -plot_min / span if span > 0.0 else 0.0
-
-            crosses_zero = plot_min < 0.0 < plot_max
+        if np.isfinite(q_lo) and np.isfinite(q_hi):
+            span = q_hi - q_lo
+            zero_fraction = -q_lo / span if span > 0.0 else 0.0
+            crosses_zero = q_lo < 0.0 < q_hi
             divergent = crosses_zero and 0.25 <= zero_fraction <= 0.75
 
             if divergent:
-                bound = max(abs(plot_min), abs(plot_max))
+                bound = max(abs(q_lo), abs(q_hi))
                 data_vmin, data_vmax = -bound, bound
-
             elif crosses_zero and zero_fraction < 0.25:
-                # Predominantly positive: clip the weak negative tail.
-                data_vmin, data_vmax = 0.0, plot_max
-                if vmin is None:
-                    clip_extend = "min"
-
+                data_vmin, data_vmax = 0.0, q_hi
             elif crosses_zero and zero_fraction > 0.75:
-                # Predominantly negative: clip the weak positive tail.
-                data_vmin, data_vmax = plot_min, 0.0
-                if vmax is None:
-                    clip_extend = "max"
-
+                data_vmin, data_vmax = q_lo, 0.0
             else:
-                data_vmin, data_vmax = plot_min, plot_max
+                data_vmin, data_vmax = q_lo, q_hi
 
             if vmin is None:
                 vmin = data_vmin
             if vmax is None:
                 vmax = data_vmax
 
-    # Enforce zero-centered limits if symmetrical is requested
-    if symmetrical:
-        divergent = True
-        if vmin is not None and vmax is not None:
-            bound = max(abs(vmin), abs(vmax))
-            vmin, vmax = -bound, bound
+        if symmetrical:
+            divergent = True
+            if vmin is not None and vmax is not None:
+                bound = max(abs(vmin), abs(vmax))
+                vmin, vmax = -bound, bound
 
-    if extend is None:
-        if clip_extend is not None:
-            extend = clip_extend
-        elif d_min is not None and d_max is not None:
-            extend_min = vmin is not None and d_min < vmin
-            extend_max = vmax is not None and d_max > vmax
+        if isinstance(levels, int):
+            resolved_levels = (
+                np.linspace(vmin, vmax, levels)
+                if (vmin is not None and vmax is not None)
+                else None
+            )
+        elif levels is None:
+            resolved_levels = (
+                MaxNLocator(nbins=10).tick_values(vmin, vmax)
+                if (vmin is not None and vmax is not None)
+                else None
+            )
+        else:
+            raise TypeError(f"unsupported levels type: {type(levels).__name__}")
 
-            if extend_min and extend_max:
-                extend = "both"
-            elif extend_min:
-                extend = "min"
-            elif extend_max:
-                extend = "max"
-            else:
-                extend = "neither"
+    # 4. Determine outermost plotted boundaries
+    if resolved_levels is not None:
+        lower, upper = resolved_levels.min(), resolved_levels.max()
+    else:
+        lower, upper = vmin, vmax
 
+    # 5. Slice diverging colormaps for single-signed ranges
     if (
         user_cmap is not None
         and not divergent
         and classify_cmap(user_cmap).lower() == "diverging"
     ):
-        if vmin is not None and vmin >= 0.0:
+        if lower is not None and lower >= 0.0:
             cmap = slice_cmap(user_cmap, split=(0.5, 1.0))
-        elif vmax is not None and vmax <= 0.0:
+        elif upper is not None and upper <= 0.0:
             cmap = slice_cmap(user_cmap, split=(0.0, 0.5))
 
+    # 6. Infer colorbar extension if not explicitly provided
+    if extend is None:
+        if symmetrical or divergent:
+            extend = "both"
+        elif not np.isnan(d_lo):
+            ext_min = lower is not None and d_lo < lower
+            ext_max = upper is not None and d_hi > upper
+
+            if ext_min and ext_max:
+                extend = "both"
+            elif ext_min:
+                extend = "min"
+            elif ext_max:
+                extend = "max"
+            else:
+                extend = "neither"
+
+    # 7. Fallback colormap selection
     cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
 
-    if isinstance(levels, int):
-        resolved_levels = (
-            np.linspace(vmin, vmax, levels)
-            if vmin is not None and vmax is not None
-            else None
-        )
-        return CmapParams(
-            vmin,
-            vmax,
-            resolved_levels,
-            cmap,
-            extend=extend,
-            norm=norm,
-        )
+    # 8. Handle discrete resampling and BoundaryNorm when requested
+    if discrete and resolved_levels is not None:
+        extend = extend or "neither"
+        ext_opts = {"neither": 0, "min": 1, "max": 1, "both": 2}
+        cmap = cmap.resampled(len(resolved_levels) - 1 + ext_opts[extend])
+        norm = BoundaryNorm(resolved_levels, ncolors=cmap.N, extend=extend)
 
-    if levels is None:
-        resolved_levels = (
-            MaxNLocator(nbins=10).tick_values(vmin, vmax)
-            if vmin is not None and vmax is not None
-            else None
-        )
-        return CmapParams(
-            vmin,
-            vmax,
-            resolved_levels,
-            cmap,
-            extend=extend,
-            norm=norm,
-        )
-
-    raise TypeError(f"unsupported levels type: {type(levels).__name__}")
+    return CmapParams(vmin, vmax, resolved_levels, cmap, extend=extend, norm=norm)
 
 
 def validate_facets(

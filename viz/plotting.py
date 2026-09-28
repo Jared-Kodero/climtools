@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -35,6 +34,8 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
+
+import xarray as xr
 
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from ..core.utils import N_CPUS, TMP
@@ -45,7 +46,6 @@ from .plot_utils import (
     add_grid_boundary,
     add_map_features,
     add_xy_ticks,
-    discrete_cmap_norm,
     enable_interactive_features,
     fmt_anim_title,
     get_facet_figsize,
@@ -1145,6 +1145,9 @@ class GeoPlot:
         self.grid: xr.Dataset = self.data.coords.to_dataset()[[self.x, self.y]]
         self.add = Adder(self)
 
+        if method == "contourf":
+            cbar_drawedges = True
+
         cmap_params = resolve_cmap_params(
             vmin,
             vmax,
@@ -1155,6 +1158,7 @@ class GeoPlot:
             extend=extend,
             norm=norm,
             symmetrical=symmetrical,
+            discrete=cbar_drawedges and method != "contourf",
         )
         self.vmin = cmap_params.vmin
         self.vmax = cmap_params.vmax
@@ -1164,15 +1168,6 @@ class GeoPlot:
         self.extend = cmap_params.extend
 
         # Makes everything better
-
-        if method == "contourf":
-            cbar_drawedges = True
-
-        elif cbar_drawedges and self.levels is not None and method != "contourf":
-            if self.norm is None:
-                self.cmap, self.norm, self.extend = discrete_cmap_norm(
-                    self.cmap, self.levels, extend=self.extend
-                )
 
         if self.norm is not None:
             self.vmin = self.norm.vmin
