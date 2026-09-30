@@ -355,6 +355,7 @@ def colorbar(
     ticks: Sequence[float] | np.ndarray | None = None,
     tick_labels: Sequence[str] | None = None,
     powerlimits: tuple[int, int] = (-3, 3),
+    minimal_ticks: bool | None = None,
     **kwargs,
 ) -> Colorbar:
     """Add a colorbar for a scalar plotting primitive.
@@ -394,6 +395,9 @@ def colorbar(
         Explicit tick labels.
     powerlimits : tuple of int, default (-3, 3)
         Scientific notation limits for automatic tick formatting.
+    minimal_ticks : bool, default True
+        If True, reduce the number of ticks skipping every other one when possible.
+
     **kwargs
         Additional keyword arguments passed directly to ``Figure.colorbar``.
 
@@ -977,6 +981,8 @@ class GeoPlot:
         Draw colorbar interval edges.
     cbar_label : str, optional
         Explicit base colorbar label.
+    cbar_minimal_ticks : bool, default True
+         If True, reduce the number of ticks skipping every other one when possible.
     map_global_extent : bool, default False
         Use a global map extent.
     set_map_extent : tuple of float, optional
@@ -1087,6 +1093,7 @@ class GeoPlot:
         add_colorbar: bool = True,
         cbar_drawedges: bool = True,
         cbar_label: str | None = None,
+        cbar_minimal_ticks: bool = True,
         map_global_extent: bool = False,
         set_map_extent: tuple[float, float, float, float] | None = None,
         map_ticks: bool = False,
@@ -1355,6 +1362,7 @@ class GeoPlot:
                 label=cbar_label,
                 ticks=ticks,
                 tick_labels=tick_labels,
+                minimal_ticks=cbar_minimal_ticks,
             )
 
         self.figure.canvas.draw()
@@ -2245,6 +2253,7 @@ class Adder:
         label: str | None = None,
         ticks: Sequence[float] | np.ndarray | None = None,
         tick_labels: Sequence[str] | None = None,
+        minimal_ticks: bool | None = True,
     ) -> GeoPlot:
         """Add a colorbar for an existing scalar primitive.
 
@@ -2255,7 +2264,7 @@ class Adder:
             omitted.
         orientation : {"vertical", "horizontal"}, default "vertical"
             Colorbar orientation.
-        drawedges : bool, default False
+        drawedges : bool, default True
             Draw interval edges.
         extend : {"neither", "both", "min", "max"}, optional
             Out-of-range extension behavior.
@@ -2265,6 +2274,8 @@ class Adder:
             Explicit tick positions.
         tick_labels : sequence of str, optional
             Explicit tick labels.
+        minimal_ticks : bool, default True
+             If True, reduce the number of ticks skipping every other one when possible.
 
         Returns
         -------
@@ -2283,6 +2294,7 @@ class Adder:
             label=label,
             ticks=ticks,
             tick_labels=tick_labels,
+            minimal_ticks=minimal_ticks,
         )
         self._plot.colorbar = colorbar
         self._plot.register_layer("colorbar", [colorbar])
@@ -2400,6 +2412,8 @@ class Animate:
         Draw colorbar interval edges.
     cbar_label : str, optional
         Base colorbar label.
+    cbar_minimal_ticks : bool, default True
+         If True, reduce the number of ticks skipping every other one when possible.
     map_global_extent : bool, default False
         Use a global map extent.
     map_ticks : bool, default False
@@ -2408,7 +2422,7 @@ class Animate:
         Maximum number of longitude tick intervals.
     map_ytick_bins : float, default 5
         Maximum number of latitude tick intervals.
-    add_grid_bounds:
+    add_grid_bounds : bool, default False
         If True, draw an outline along the outer perimeter of the plotted grid domain.
     set_map_extent : tuple of float, optional
         Explicit map extent.
@@ -2495,6 +2509,7 @@ class Animate:
         add_colorbar: bool = True,
         cbar_drawedges: bool = True,
         cbar_label: str | None = None,
+        cbar_minimal_ticks: bool = True,
         map_global_extent: bool = False,
         set_map_extent: tuple[float, float, float, float] | None = None,
         map_ticks: bool = False,
@@ -2590,6 +2605,7 @@ class Animate:
             "add_colorbar": add_colorbar,
             "cbar_drawedges": cbar_drawedges,
             "cbar_label": cbar_label,
+            "cbar_minimal_ticks": cbar_minimal_ticks,
             "map_global_extent": map_global_extent,
             "set_map_extent": set_map_extent,
             "map_ticks": map_ticks,
@@ -2812,6 +2828,7 @@ def geo(
     add_colorbar: bool = True,
     cbar_drawedges: bool = True,
     cbar_label: str | None = None,
+    cbar_minimal_ticks: bool = True,
     map_global_extent: bool = False,
     set_map_extent: tuple[float, float, float, float] | None = None,
     map_ticks: bool = False,
@@ -2875,6 +2892,8 @@ def geo(
         Base colorbar controls.
     cbar_label : str, optional
         Explicit base colorbar label.
+    cbar_minimal_ticks : bool, default True
+        If True, reduce the number of ticks skipping every other one when possible.
     map_global_extent : bool, default False
         Use a global map extent.
     map_ticks : bool, default False
@@ -2958,6 +2977,7 @@ def animate(
     add_colorbar: bool = True,
     cbar_drawedges: bool = True,
     cbar_label: str | None = None,
+    cbar_minimal_ticks: bool = True,
     map_global_extent: bool = False,
     set_map_extent: tuple[float, float, float, float] | None = None,
     map_ticks: bool = False,
@@ -3014,7 +3034,7 @@ def animate(
         Per-frame scalar rendering options.
     title : str, optional
         Frame-title prefix.
-    cbar_orientation, add_colorbar, cbar_drawedges, cbar_label, cbar_kwargs : optional
+    cbar_orientation, add_colorbar, cbar_drawedges, cbar_label, cbar_kwargs, cbar_minimal_ticks : optional
         Per-frame colorbar options.
     map_global_extent, set_map_extent, add_coastlines, add_borders, add_states, add_ocean, add_land, add_lakes, add_rivers
         Per-frame map-feature options.

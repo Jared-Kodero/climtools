@@ -4,7 +4,7 @@ Colormap toolkit for climtools.
 Each registered colormap is exposed as a module level callable, for example::
 
     from climtools import cmaps
-    cmaps.low_high(r=True)
+    cmaps.low_high(span=(0, 0.5)).reversed()
 
 Callables are produced on demand by ``__getattr__`` (PEP 562), so the user
 facing access is unchanged while no Python source is generated at import time.
@@ -56,32 +56,95 @@ _cmocean_cmap_list = list(cmocean.cm.cmapnames)
 __all__ = ["classify_cmap"]
 
 
-def classify_cmap(cmap: str | ColorMap) -> str:
-    """Classify a colormap as Sequential, Diverging, or Other."""
-    if isinstance(cmap, str):
-        cmap = build_cm(cmap)
+# fmt: off
+_PREDEFINED_SEQUENTIAL = [
+    "viridis", "plasma", "inferno", "magma", "cividis",
+    "Greys", "Purples", "Blues", "Greens", "Oranges", "Reds",
+    "YlOrBr", "YlOrRd", "OrRd", "PuRd", "RdPu", "BuPu", "GnBu",
+    "PuBu", "YlGnBu", "PuBuGn", "BuGn", "YlGn",
+    "gray", "bone", "pink", "spring", "summer", "autumn", "winter",
+    "cool", "Wistia", "hot", "afmhot", "gist_heat", "copper",
+]
 
-    rgb = cmap(np.linspace(0, 1, 256))[:, :3]
+_PREDEFINED_DIVERGING = [
+    "PiYG", "PRGn", "BrBG", "PuOr", "RdGy", "RdBu", "RdYlBu",
+    "RdYlGn", "Spectral", "coolwarm", "bwr", "seismic",
+    "berlin", "managua", "vanimo",
+]
+
+_PREDEFINED_QUALITATIVE = [
+    "Pastel1", "Pastel2", "Paired", "Accent", "okabe_ito",
+    "Dark2", "Set1", "Set2", "Set3", "tab10", "tab20",
+    "tab20b", "tab20c",
+]
+
+_PREDEFINED_CYCLIC = [
+    "twilight", "twilight_shifted", "hsv",
+]
+
+_PREDEFINED_MISCELLANEOUS = [
+    "flag", "prism", "ocean", "gist_earth", "terrain",
+    "gist_stern", "gnuplot", "gnuplot2", "CMRmap",
+    "cubehelix", "brg", "gist_rainbow", "rainbow", "jet",
+    "turbo", "nipy_spectral", "gist_ncar",
+]
+# fmt: on
+
+
+_CMAP_CLASSIFICATIONS = {
+    **{name: "sequential" for name in _PREDEFINED_SEQUENTIAL},
+    **{name: "diverging" for name in _PREDEFINED_DIVERGING},
+    **{name: "qualitative" for name in _PREDEFINED_QUALITATIVE},
+    **{name: "cyclic" for name in _PREDEFINED_CYCLIC},
+    **{name: "miscellaneous" for name in _PREDEFINED_MISCELLANEOUS},
+}
+
+
+_CMAP_CLASSIFICATIONS = {
+    **{name: "sequential" for name in _PREDEFINED_SEQUENTIAL},
+    **{name: "diverging" for name in _PREDEFINED_DIVERGING},
+    **{name: "qualitative" for name in _PREDEFINED_QUALITATIVE},
+    **{name: "cyclic" for name in _PREDEFINED_CYCLIC},
+    **{name: "miscellaneous" for name in _PREDEFINED_MISCELLANEOUS},
+}
+
+
+def classify_cmap(cmap: str | ColorMap) -> str:
+    """Return the colormap class.
+
+    Predefined colormaps use their known classification. Unknown colormaps
+    are classified perceptually from their CIELAB lightness profile.
+    """
+    if isinstance(cmap, str):
+        name = cmap.removesuffix("_r")
+        if name in _CMAP_CLASSIFICATIONS:
+            return _CMAP_CLASSIFICATIONS[name]
+        cmap = build_cm(cmap)
+    else:
+        name = getattr(cmap, "name", "").removesuffix("_r")
+        if name in _CMAP_CLASSIFICATIONS:
+            return _CMAP_CLASSIFICATIONS[name]
+
+    rgb = cmap(np.linspace(0.0, 1.0, 256))[:, :3]
     lab = rgb2lab(rgb.reshape(1, -1, 3))[0]
     lightness = lab[:, 0]
 
-    # Check monotonicity for sequential
     diffs = np.diff(lightness)
-    is_monotone = np.all(diffs >= -0.5) or np.all(
-        diffs <= 0.5
-    )  # small tolerance for noise
+    if np.all(diffs >= -0.5) or np.all(diffs <= 0.5):
+        return "sequential"
 
-    if is_monotone:
-        return "Sequential"
-
-    # Check for peak/trough (diverging)
     mid = len(lightness) // 2
-    if (lightness[0] < lightness[mid] and lightness[-1] < lightness[mid]) or (
-        lightness[0] > lightness[mid] and lightness[-1] > lightness[mid]
+    if lightness[mid] > max(lightness[0], lightness[-1]) or lightness[mid] < min(
+        lightness[0], lightness[-1]
     ):
-        return "Diverging"
+        return "diverging"
 
-    return "Other (Cyclic or Qualitative)"
+    # A cyclic map should return perceptually close to its starting color.
+    endpoint_distance = np.linalg.norm(lab[0] - lab[-1])
+    if endpoint_distance < 10.0:
+        return "cyclic"
+
+    return "unclassified"
 
 
 # ---------------------------------------------------------------------------
@@ -193,24 +256,24 @@ def add_colors_to_cmap(
 
 def slice_cmap(
     cmap: str | ColorMap,
-    split: tuple[float, float] = (0.0, 1.0),
+    span: tuple[float, float] = (0.0, 1.0),
     N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] | None = None,
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
     """
-    Extract a subset of colors from a colormap based on a split range and return in the specified format.
+    Extract a subset of colors from a colormap based on a span range and return in the specified format.
     """
-    if not isinstance(split, tuple) or len(split) != 2:
-        raise ValueError("`split` must be a tuple of two floats (start, end).")
+    if not isinstance(span, tuple) or len(span) != 2:
+        raise ValueError("`span` must be a tuple of two floats (start, end).")
 
     if isinstance(cmap, str):
         cmap = build_cm(cmap)
 
     n_colors = cmap.N if N is None else N
     cmap_name = cmap.name
-    colors = [cmap(value) for value in np.linspace(split[0], split[1], n_colors)]
+    colors = [cmap(value) for value in np.linspace(span[0], span[1], n_colors)]
 
     if format is None:
         format = "listed" if isinstance(cmap, ListedColormap) else "linear"
@@ -230,27 +293,20 @@ def adjust_cmap(
     cmap: str | ColorMap,
     N: int | None = None,
     *,
-    split: tuple[float, float] = (0.0, 1.0),
+    span: tuple[float, float] = (0.0, 1.0),
     add_colors: dict[int, str | list[str]] | None = None,
-    r: bool = False,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
     """
-    Modify a colormap by slicing, reversal, color insertion and output format.
+    Modify a colormap by slicing, color insertion and output format.
     """
     if format not in {"linear", "listed", "hex"}:
         raise ValueError("`format` must be 'linear', 'listed', or 'hex'.")
 
     cmap_name = cmap.name if not isinstance(cmap, str) else cmap
-    if r:
-        if isinstance(cmap, str):
-            cmap = build_cm(cmap)
-        cmap = cmap.reversed()
-        cmap_name = f"reversed_{cmap_name}"
-
     n_colors = cmap.N if N is None else N
-    res = slice_cmap(cmap, split=split, N=n_colors, format=format, gamma=gamma)
+    res = slice_cmap(cmap, span=span, N=n_colors, format=format, gamma=gamma)
 
     if add_colors:
         if not isinstance(add_colors, dict):
@@ -292,8 +348,7 @@ def adjust_cmap(
 def get_colormap(
     name: str,
     N: int | None,
-    r: bool,
-    split: tuple[float, float],
+    span: tuple[float, float],
     add_colors: dict[int, str | list[str]] | None,
     format: Literal["linear", "listed", "hex"],
     gamma: float = 1.0,
@@ -305,9 +360,8 @@ def get_colormap(
     return adjust_cmap(
         cmap=cmap,
         N=n_colors,
-        split=split,
+        span=span,
         add_colors=add_colors,
-        r=r,
         format=format,
         gamma=gamma,
     )
@@ -557,14 +611,13 @@ def subtract(
 def _make(public_name: str, source_name: str):
     def cmap(
         N: int | None = None,
-        r: bool = False,
         *,
-        split: tuple[float, float] = (0.0, 1.0),
+        span: tuple[float, float] = (0.0, 1.0),
         add_colors: dict[int, str | list[str]] | None = None,
         format: Literal["linear", "listed", "hex"] = "linear",
         gamma: float = 1.0,
     ):
-        return get_colormap(source_name, N, r, split, add_colors, format, gamma)
+        return get_colormap(source_name, N, span, add_colors, format, gamma)
 
     cmap.__name__ = public_name
     cmap.__qualname__ = public_name
@@ -592,7 +645,7 @@ _PUBLIC = {
 
 def _default_cmap(source_name: str):
     """Return the colormap for ``source_name`` built with default options."""
-    return get_colormap(source_name, None, False, (0.0, 1.0), None, "linear", 1.0)
+    return get_colormap(source_name, None, (0.0, 1.0), None, "linear", 1.0)
 
 
 def __getattr__(name: str):
@@ -606,35 +659,12 @@ def __dir__():
     return sorted(_PUBLIC | cmap_index())
 
 
-# Subscript access. Attribute access (cmaps.low_high) returns the factory to
-# call; subscript access (cmaps["low_high"]) returns the colormap directly,
-# matching matplotlib.colormaps["viridis"]. Modules do not support __getitem__
-# through a module level function, so the module object is promoted to a
-# ModuleType subclass that defines it. The existing __getattr__ is unaffected.
-import sys as _sys
-from types import ModuleType as _ModuleType
-
-
-class _CmapsModule(_ModuleType):
-    def __getitem__(self, name: str) -> LinearSegmentedColormap | ListedColormap:
-        registry = _registry()
-        if name not in registry:
-            raise KeyError(name)
-        return _default_cmap(registry[name])
-
-    def __contains__(self, name: str) -> bool:
-        return name in cmap_index()
-
-
-_sys.modules[__name__].__class__ = _CmapsModule
-
-
 # ---------------------------------------------------------------------------
 # Type stub generation (cmaps.pyi)
 # ---------------------------------------------------------------------------
 _CMAP_SIGNATURE = (
-    "(N: int | None = None, r: bool = False, *, "
-    "split: tuple[float, float] = ..., "
+    "(N: int | None = None, *, "
+    "span: tuple[float, float] = ..., "
     "add_colors: dict[int, str | list[str]] | None = None, "
     'format: Literal["linear", "listed", "hex"] = "linear", '
     "gamma: float = 1.0) -> ListedColormap | LinearSegmentedColormap | list[str]: ..."
@@ -654,7 +684,7 @@ def subtract(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: 
 def available(show: bool = True) -> list[str] | DisplayHandle: ...
 def write_stub(force: bool = False) -> bool: ...
 def classify_cmap(cmap: str | ColorMap) -> str: ...
-def slice_cmap(cmap: str | ColorMap,split: tuple[float, float] = (0.0, 1.0),N: int | None = None,*,format: Literal["linear", "listed", "hex"] | None = None,gamma: float = 1.0,) -> ColorMap | list[str]:...
+def slice_cmap(cmap: str | ColorMap, span: tuple[float, float] = (0.0, 1.0), N: int | None = None, *, format: Literal["linear", "listed", "hex"] | None = None, gamma: float = 1.0) -> ColorMap | list[str]: ...
 """
 
 
@@ -667,11 +697,15 @@ def build_stub_text() -> str:
 
 
 def _src_checksum() -> str:
-    """Checksum the text colormaps and the resolved name set."""
+    """Checksum the text colormaps, the resolved name set, and this source file."""
     h = hashlib.sha256()
     for f in sorted(_src_dir.glob("*.txt")):
         h.update(f.read_bytes())
     h.update(",".join(list_cmaps()).encode("utf-8"))
+    try:
+        h.update(Path(__file__).read_bytes())
+    except Exception:
+        pass
     return h.hexdigest()
 
 
@@ -697,8 +731,6 @@ def write_stub(force: bool = False) -> bool:
     return True
 
 
-# Best effort stub refresh for editor support. Silent if the package directory
-# is read only, as in a standard installed environment.
 try:  # pragma: no cover
     write_stub()
 except OSError:  # pragma: no cover

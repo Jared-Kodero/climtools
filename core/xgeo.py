@@ -29,7 +29,7 @@ if TYPE_CHECKING:
         to_lon180,
     )
     from . import preprocess, stats
-    from .io import SharedMemoryObject, XNpyStore, open_xnpy, to_xnpy
+    from .io import SharedMemoryObject, open_xnpy, to_xnpy, xNpy
     from .progress import DaskProgressBar, SerialProgressBar
     from .utils import N_CPUS
 
@@ -40,7 +40,6 @@ __all__ = [
     "SerialProgressBar",
     "SetupDask",
     "SharedMemoryObject",
-    "XNpyStore",
     "add_local_solar_time",
     "cmaps",
     "create_distributed_dataarray",
@@ -61,6 +60,7 @@ __all__ = [
     "to_lon180",
     "to_netcdf",
     "to_xnpy",
+    "xNpy",
 ]
 
 

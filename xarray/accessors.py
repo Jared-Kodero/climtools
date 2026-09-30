@@ -469,6 +469,7 @@ class GeoDataArray(GeoBase):
         add_colorbar: bool = True,
         cbar_drawedges: bool = True,
         cbar_label: str | None = None,
+        cbar_minimal_ticks: bool = True,
         map_global_extent: bool = False,
         set_map_extent: tuple[float, float, float, float] | None = None,
         map_ticks: bool = False,
@@ -540,6 +541,8 @@ class GeoDataArray(GeoBase):
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
+        cbar_minimal_ticks : bool, default True
+            If True, reduce the number of ticks skipping every other one when possible.
         map_global_extent, add_grid_bounds : bool
             Control geographic extent and grid-boundary annotations.
         map_ticks : bool, default False
@@ -629,6 +632,7 @@ class GeoDataArray(GeoBase):
         add_colorbar: bool = True,
         cbar_drawedges: bool = True,
         cbar_label: str | None = None,
+        cbar_minimal_ticks: bool = True,
         map_global_extent: bool = False,
         set_map_extent: tuple[float, float, float, float] | None = None,
         map_ticks: bool = False,
@@ -704,6 +708,8 @@ class GeoDataArray(GeoBase):
             Control colorbar creation and interval edges.
         cbar_label : str, optional
             Explicit colorbar label.
+        cbar_minimal_ticks : bool, default True
+            If True, reduce the number of ticks skipping every other one when possible.
         map_global_extent, add_grid_bounds : bool
             Control geographic extent and grid-boundary annotations.
         map_ticks : bool, default False

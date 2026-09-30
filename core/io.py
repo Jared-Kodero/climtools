@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import atexit
 import json
-import math
 import shutil
-from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+import pandas as pd
+
 import xarray as xr
 
 
@@ -50,7 +50,7 @@ def to_xnpy(
     None
         The store is written to ``path``.
     """
-    XNpyStore(path).to_disk(
+    xNpy(path).to_disk(
         obj,
         mode=mode,
         parallel=parallel,
@@ -88,17 +88,13 @@ def open_xnpy(
     Memory mapping defers physical reads until array pages are accessed, so stores
     larger than available RAM can be opened without materializing their payloads.
     """
-    return XNpyStore(path).open(variable=variable, mmap_mode=mmap_mode)
+    return xNpy(path).open(variable=variable, mmap_mode=mmap_mode)
 
 
-class XNpyStore:
-    """Directory store for memory-mappable NumPy and xarray objects."""
-
+class xNpy:
     META_FILE = "metadata.json"
     VARIABLE_DIR = "variables"
     COORD_DIR = "coords"
-    DEFAULT_MAX_WORKERS = 4
-    SLAB_BYTES = 256 * 1024**2
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -106,285 +102,239 @@ class XNpyStore:
         self.variable_path = self.path / self.VARIABLE_DIR
         self.coord_path = self.path / self.COORD_DIR
 
-    def to_disk(
-        self,
-        obj: np.ndarray | xr.DataArray | xr.Dataset,
-        *,
-        mode: Literal["w", "w-"] = "w-",
-        parallel: bool = False,
-        max_workers: int | None = None,
-    ) -> None:
-        """Write an ndarray, DataArray, or Dataset to the store."""
-        if mode not in {"w", "w-"}:
-            raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
-        if max_workers is not None and max_workers < 1:
-            raise ValueError("max_workers must be at least 1.")
-        if not isinstance(obj, np.ndarray | xr.DataArray | xr.Dataset):
-            raise TypeError(
-                "Only numpy.ndarray, xarray.DataArray, and xarray.Dataset are supported."
-            )
-
-        if self.path.exists():
-            if mode == "w-":
-                raise FileExistsError(self.path)
-            shutil.rmtree(self.path)
-
-        self.path.mkdir(parents=True)
-        try:
-            if isinstance(obj, xr.Dataset):
-                metadata = self._save_dataset(obj, parallel, max_workers)
-            elif isinstance(obj, xr.DataArray):
-                metadata = self._save_dataarray(obj)
-            else:
-                self.variable_path.mkdir()
-                metadata = {
-                    "kind": "ndarray",
-                    "array": self._save_array(self.variable_path / "array", obj),
-                }
-
-            with self.meta_path.open("w", encoding="utf-8") as file:
-                json.dump(
-                    metadata,
-                    file,
-                    default=self._json_default,
-                    ensure_ascii=False,
-                    allow_nan=True,
-                    separators=(",", ":"),
-                )
-        except Exception:
-            shutil.rmtree(self.path, ignore_errors=True)
-            raise
-
     def metadata(self) -> dict[str, Any]:
-        """Return the decoded JSON manifest without opening array payloads."""
-        with self.meta_path.open("r", encoding="utf-8") as file:
-            return json.load(file, object_hook=self._json_object_hook)
+        with self.meta_path.open() as file:
+            return json.load(file)
 
     def open(
         self,
         variable: str | None = None,
         *,
         mmap_mode: str | None = "r",
-    ) -> np.ndarray | xr.DataArray | xr.Dataset:
-        """Open the stored object or one Dataset variable."""
+    ):
         metadata = self.metadata()
+        kind = metadata["kind"]
 
-        def load_variable(info: dict[str, Any]) -> xr.Variable:
-            return xr.Variable(
+        if kind == "ndarray":
+            return self._load_array(metadata["array"], mmap_mode)
+
+        if kind == "dataframe":
+            index = pd.Index(
+                self._load_array(metadata["index"], mmap_mode),
+                name=metadata["index_name"],
+            )
+
+            if variable is not None:
+                return pd.Series(
+                    self._load_array(metadata["columns"][variable], mmap_mode),
+                    index=index,
+                    name=variable,
+                    copy=False,
+                )
+
+            return pd.DataFrame(
+                {
+                    name: self._load_array(info, mmap_mode)
+                    for name, info in metadata["columns"].items()
+                },
+                index=index,
+                copy=False,
+            )
+
+        coords = {
+            name: xr.Variable(
                 info["dims"],
                 self._load_array(info["array"], mmap_mode),
                 attrs=info.get("attrs", {}),
             )
-
-        def load_coords(names: list[str]) -> dict[str, xr.Variable]:
-            return {name: load_variable(metadata["coords"][name]) for name in names}
-
-        kind = metadata["kind"]
-        if kind == "ndarray":
-            if variable is not None:
-                raise ValueError("variable= is valid only for xarray stores.")
-            return self._load_array(metadata["array"], mmap_mode)
+            for name, info in metadata["coords"].items()
+        }
 
         if kind == "dataarray":
-            if variable is not None and variable != metadata["variable_name"]:
-                raise KeyError(variable)
             info = metadata["variable"]
+
             return xr.DataArray(
-                load_variable(info),
-                coords=load_coords(info["coords"]),
+                xr.Variable(
+                    info["dims"],
+                    self._load_array(info["array"], mmap_mode),
+                    attrs=info.get("attrs", {}),
+                ),
+                coords={name: coords[name] for name in info["coords"]},
                 name=metadata["name"],
             )
 
-        if kind != "dataset":
-            raise ValueError(f"Unknown store kind: {kind!r}.")
-
-        variables = metadata["variables"]
         if variable is not None:
-            if variable not in variables:
-                raise KeyError(
-                    f"{variable!r} not found; available variables: {tuple(variables)!r}"
-                )
-            info = variables[variable]
+            info = metadata["variables"][variable]
+
             return xr.DataArray(
-                load_variable(info),
-                coords=load_coords(info["coords"]),
+                xr.Variable(
+                    info["dims"],
+                    self._load_array(info["array"], mmap_mode),
+                    attrs=info.get("attrs", {}),
+                ),
+                coords={name: coords[name] for name in info["coords"]},
                 name=variable,
             )
 
         return xr.Dataset(
-            data_vars={name: load_variable(info) for name, info in variables.items()},
-            coords={
-                name: load_variable(info)
-                for name, info in metadata.get("coords", {}).items()
+            data_vars={
+                name: xr.Variable(
+                    info["dims"],
+                    self._load_array(info["array"], mmap_mode),
+                    attrs=info.get("attrs", {}),
+                )
+                for name, info in metadata["variables"].items()
             },
+            coords=coords,
             attrs=metadata.get("attrs", {}),
         )
 
-    def _save_dataset(
+    def to_disk(
         self,
-        dataset: xr.Dataset,
-        parallel: bool,
-        max_workers: int | None,
-    ) -> dict[str, Any]:
+        obj: np.ndarray | pd.DataFrame | xr.DataArray | xr.Dataset,
+    ) -> None:
+        if self.path.exists():
+            shutil.rmtree(self.path)
+
+        self.path.mkdir(parents=True)
+
+        if isinstance(obj, pd.DataFrame):
+            metadata = self._save_dataframe(obj)
+        elif isinstance(obj, xr.Dataset):
+            metadata = self._save_dataset(obj)
+        elif isinstance(obj, xr.DataArray):
+            metadata = self._save_dataarray(obj)
+        else:
+            self.variable_path.mkdir()
+            metadata = {
+                "kind": "ndarray",
+                "array": self._save_array(
+                    self.variable_path / "array",
+                    obj,
+                ),
+            }
+
+        with self.meta_path.open("w") as file:
+            json.dump(metadata, file, default=self._json_default)
+
+    def _save_dataframe(self, df: pd.DataFrame) -> dict[str, Any]:
         self.variable_path.mkdir()
         self.coord_path.mkdir()
 
-        jobs = [
-            (
-                "variables",
-                name,
-                variable,
-                self._payload_path(self.variable_path, name),
-                list(dataset[name].coords),
-            )
-            for name, variable in dataset.data_vars.items()
-        ] + [
-            (
-                "coords",
-                name,
+        index_name = str(df.index.name or "index")
+
+        return {
+            "kind": "dataframe",
+            "index_name": df.index.name,
+            "index": self._save_array(
+                self.coord_path / index_name,
+                df.index.to_numpy(),
+            ),
+            "columns": {
+                str(name): self._save_array(
+                    self.variable_path / str(name),
+                    values.to_numpy(),
+                )
+                for name, values in df.items()
+            },
+        }
+
+    def _save_dataset(self, ds: xr.Dataset) -> dict[str, Any]:
+        self.variable_path.mkdir()
+        self.coord_path.mkdir()
+
+        coords = {
+            name: self._save_variable(
                 coord,
-                self._payload_path(self.coord_path, name),
-                None,
+                self.coord_path / str(name),
             )
-            for name, coord in dataset.coords.items()
-        ]
+            for name, coord in ds.coords.items()
+        }
 
-        def save(job: tuple[Any, ...]) -> tuple[str, str, dict[str, Any]]:
-            role, name, source, path, coords = job
-            info = self._write_array(source, path)
-            if coords is not None:
-                info["coords"] = coords
-            return role, name, info
+        variables = {}
 
-        if parallel and jobs:
-            workers = min(max_workers or self.DEFAULT_MAX_WORKERS, len(jobs))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                saved = list(executor.map(save, jobs))
-        else:
-            saved = list(map(save, jobs))
+        for name, variable in ds.data_vars.items():
+            info = self._save_variable(
+                variable,
+                self.variable_path / str(name),
+            )
+            info["coords"] = list(ds[name].coords)
+            variables[name] = info
 
         return {
             "kind": "dataset",
-            "attrs": dict(dataset.attrs),
-            "variables": {
-                name: info for role, name, info in saved if role == "variables"
-            },
-            "coords": {name: info for role, name, info in saved if role == "coords"},
+            "attrs": dict(ds.attrs),
+            "variables": variables,
+            "coords": coords,
         }
 
     def _save_dataarray(self, array: xr.DataArray) -> dict[str, Any]:
         self.variable_path.mkdir()
-        self.coord_path.mkdir(exist_ok=True)
+        self.coord_path.mkdir()
 
-        name = str(array.name) if array.name is not None else "data"
-        variable = self._write_array(
+        name = str(array.name or "data")
+
+        variable = self._save_variable(
             array,
-            self._payload_path(self.variable_path, name),
+            self.variable_path / name,
         )
         variable["coords"] = list(array.coords)
 
         return {
             "kind": "dataarray",
             "name": array.name,
-            "variable_name": name,
             "variable": variable,
             "coords": {
-                coord_name: self._write_array(
+                coord_name: self._save_variable(
                     coord,
-                    self._payload_path(self.coord_path, coord_name),
+                    self.coord_path / str(coord_name),
                 )
                 for coord_name, coord in array.coords.items()
             },
         }
 
-    def _write_array(self, array: xr.DataArray, path: Path) -> dict[str, Any]:
+    def _save_variable(
+        self,
+        variable: xr.DataArray,
+        path: Path,
+    ) -> dict[str, Any]:
         return {
-            "dims": list(array.dims),
-            "attrs": dict(array.attrs),
-            "array": self._save_array(path, array),
+            "dims": list(variable.dims),
+            "attrs": dict(variable.attrs),
+            "array": self._save_array(path, variable.values),
         }
 
     def _save_array(
         self,
         path: Path,
-        source: np.ndarray | xr.DataArray,
-    ) -> dict[str, Any]:
-        dtype = np.dtype(source.dtype)
-        shape = tuple(source.shape)
+        array: np.ndarray,
+    ) -> str:
+        # Append .npy extension to the file path
+        path = Path(str(path) + ".npy")
 
-        if isinstance(source, xr.DataArray) and source.chunks is not None:
-            import dask.array as da
+        with path.open("wb") as file:
+            np.save(file, np.asarray(array), allow_pickle=False)
 
-            target = np.lib.format.open_memmap(path, "w+", dtype=dtype, shape=shape)
-            try:
-                da.store(source.data, target, lock=False, scheduler="threads")
-                target.flush()
-            finally:
-                del target
-        elif source.nbytes > self.SLAB_BYTES and source.ndim:
-            target = np.lib.format.open_memmap(path, "w+", dtype=dtype, shape=shape)
-            try:
-                row_bytes = max(math.prod(shape[1:]) * dtype.itemsize, 1)
-                step = max(self.SLAB_BYTES // row_bytes, 1)
-                for start in range(0, shape[0], step):
-                    stop = min(start + step, shape[0])
-                    target[start:stop] = np.asarray(source[start:stop])
-                target.flush()
-            finally:
-                del target
-        else:
-            with path.open("wb") as file:
-                np.save(file, np.asarray(source), allow_pickle=False)
-
-        return {
-            "file": str(path.relative_to(self.path)),
-            "dtype": dtype.str,
-            "shape": list(shape),
-        }
+        return str(path.relative_to(self.path))
 
     def _load_array(
         self,
-        info: dict[str, Any],
+        path: str,
         mmap_mode: str | None,
     ) -> np.ndarray:
-        path = self.path / info["file"]
-        array = np.load(path, mmap_mode=mmap_mode, allow_pickle=False)
-        if array.dtype != np.dtype(info["dtype"]):
-            raise TypeError(
-                f"{path}: dtype {array.dtype} != {np.dtype(info['dtype'])}."
-            )
-        if array.shape != tuple(info["shape"]):
-            raise ValueError(f"{path}: shape {array.shape} != {tuple(info['shape'])}.")
-        return array
+        return np.load(
+            self.path / path,
+            mmap_mode=mmap_mode,
+            allow_pickle=False,
+        )
 
     @staticmethod
     def _json_default(value: Any) -> Any:
-        if isinstance(value, np.dtype):
-            return str(value)
         if isinstance(value, np.generic):
             return value.item()
         if isinstance(value, np.ndarray):
             return value.tolist()
-        if isinstance(value, bytes):
-            return {"__bytes__": value.hex()}
-        if isinstance(value, set | frozenset):
-            return {"__set__": list(value)}
-        raise TypeError(f"Unsupported metadata type: {type(value).__name__}.")
-
-    @staticmethod
-    def _json_object_hook(value: dict[str, Any]) -> Any:
-        if set(value) == {"__bytes__"}:
-            return bytes.fromhex(value["__bytes__"])
-        if set(value) == {"__set__"}:
-            return set(value["__set__"])
-        return value
-
-    @staticmethod
-    def _payload_path(parent: Path, name: Any) -> Path:
-        value = str(name)
-        if not value or value in {".", ".."} or "/" in value or "\\" in value:
-            raise ValueError(f"Unsafe array name: {value!r}.")
-        return parent / value
+        raise TypeError
 
 
 class SharedMemoryObject:

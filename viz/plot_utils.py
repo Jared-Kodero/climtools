@@ -29,7 +29,7 @@ from matplotlib.colorbar import Colorbar
 from matplotlib.colors import BoundaryNorm, Colormap, Normalize
 from matplotlib.figure import Figure
 from matplotlib.quiver import QuiverKey
-from matplotlib.ticker import MaxNLocator, ScalarFormatter
+from matplotlib.ticker import FixedLocator, MaxNLocator, ScalarFormatter
 from matplotlib.transforms import Bbox
 from xarray.plot.facetgrid import FacetGrid
 
@@ -69,7 +69,6 @@ __all__ = [
     "add_contour_labels",
     "add_map_features",
     "add_xy_ticks",
-    "discrete_cmap_norm",
     "get_cax",
     "get_facet_figsize",
     "get_map_aspect",
@@ -202,6 +201,9 @@ def resolve_cmap_params(
         A pre-existing Matplotlib normalization instance to harmonize with.
     symmetrical : bool, default False
         If True, forces colormap limits and levels to be symmetric around zero.
+    sequential_center : float, default 0
+        The center value around which to symmetrize the colormap when `symmetrical` is True. ie
+        for sequential lets say val is 50. 50 tick must be shown and centered on the colormap.
     discrete : bool, default False
         If True, resamples the colormap to match the number of levels and
         returns a configured `BoundaryNorm`.
@@ -213,9 +215,9 @@ def resolve_cmap_params(
         `cmap`, `extend`, and `norm`.
     """
 
-    user_cmap = cmap
     vmin_was_none = vmin is None
     vmax_was_none = vmax is None
+    cmap = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
 
     # 1. Harmonize norm with vmin and vmax
     if norm is not None:
@@ -249,7 +251,9 @@ def resolve_cmap_params(
         d_lo, q_lo, q_hi, d_hi = (float(q) for q in q_vals)
 
     # 3. Resolve levels, limits, and divergence
-    if isinstance(levels, (list, tuple, np.ndarray)):
+    explicit_levels = isinstance(levels, (list, tuple, np.ndarray))
+
+    if explicit_levels:
         resolved_levels = np.asarray(levels)
         divergent = bool((resolved_levels < 0).any() and (resolved_levels > 0).any())
     else:
@@ -276,12 +280,15 @@ def resolve_cmap_params(
             if vmax is None:
                 vmax = data_vmax
 
-        if symmetrical:
-            divergent = True
-            if vmin is not None and vmax is not None:
-                bound = max(abs(vmin), abs(vmax))
-                vmin, vmax = -bound, bound
+        if symmetrical and vmin is not None and vmax is not None:
+            bound = max(abs(vmin), abs(vmax))
+            vmin, vmax = -bound, bound
 
+    # From here onward, one flag represents either explicit symmetry or
+    # automatically detected divergence.
+    divergent = symmetrical or divergent
+
+    if not explicit_levels:
         if isinstance(levels, int):
             resolved_levels = (
                 np.linspace(vmin, vmax, levels)
@@ -289,11 +296,8 @@ def resolve_cmap_params(
                 else None
             )
         elif levels is None:
-            resolved_levels = (
-                MaxNLocator(nbins=10).tick_values(vmin, vmax)
-                if (vmin is not None and vmax is not None)
-                else None
-            )
+            locator = MaxNLocator(nbins=10, symmetric=divergent)
+            resolved_levels = locator.tick_values(vmin, vmax)
         else:
             raise TypeError(f"unsupported levels type: {type(levels).__name__}")
 
@@ -304,36 +308,30 @@ def resolve_cmap_params(
         lower, upper = vmin, vmax
 
     # 5. Slice diverging colormaps for single-signed ranges
-    if (
-        user_cmap is not None
-        and not divergent
-        and classify_cmap(user_cmap).lower() == "diverging"
-    ):
+    if cmap is not None and not divergent and classify_cmap(cmap) == "diverging":
         if lower is not None and lower >= 0.0:
-            cmap = slice_cmap(user_cmap, split=(0.5, 1.0))
+            cmap = slice_cmap(cmap, span=(0.5, 1.0))
         elif upper is not None and upper <= 0.0:
-            cmap = slice_cmap(user_cmap, split=(0.0, 0.5))
+            cmap = slice_cmap(cmap, span=(0.0, 0.5))
 
     # 6. Infer colorbar extension if not explicitly provided
     if extend is None:
-        if not np.isnan(d_lo):
+        if divergent:
+            extend = "both"
+        elif not np.isnan(d_lo):
             ext_min = lower is not None and d_lo < lower
             ext_max = upper is not None and d_hi > upper
 
-            if symmetrical or divergent:
-                # Retain visual symmetry: if either side needs extension, extend both
-                extend = "both" if (ext_min or ext_max) else "neither"
+            if ext_min and ext_max:
+                extend = "both"
+            elif ext_min:
+                extend = "min"
+            elif ext_max:
+                extend = "max"
             else:
-                if ext_min and ext_max:
-                    extend = "both"
-                elif ext_min:
-                    extend = "min"
-                elif ext_max:
-                    extend = "max"
-                else:
-                    extend = "neither"
+                extend = "neither"
         else:
-            extend = "both" if (symmetrical or divergent) else "neither"
+            extend = "neither"
 
     # 7. Fallback colormap selection
     cmap = cmap or plt.get_cmap("RdBu_r" if divergent else "viridis")
@@ -1365,6 +1363,7 @@ def add_colorbar(
     ticks: Sequence[float] | np.ndarray | None = None,
     tick_labels: Sequence[str] | None = None,
     powerlimits: tuple[int, int] = (-3, 3),
+    minimal_ticks: bool | None = None,
     **kwargs,
 ) -> Colorbar:
     """Add a colorbar for a scalar mappable or xarray facet grid.
@@ -1407,11 +1406,14 @@ def add_colorbar(
     label : str, optional
         Colorbar label.
     ticks : sequence of float, optional
-        Explicit tick positions.
+        Explicit tick positions. Automatic discrete ticks are thinned so
+        adjacent color boundaries are not all labeled.
     tick_labels : sequence of str, optional
         Explicit tick labels.
     powerlimits : tuple of int, default (-3, 3)
         Scientific notation limits for automatic tick formatting.
+    minimal_ticks : bool, default False
+        If True, reduce the number of ticks skipping every other one when possible.
     **kwargs
         Additional keyword arguments passed directly to ``Figure.colorbar``.
 
@@ -1473,6 +1475,21 @@ def add_colorbar(
 
     if ticks is not None:
         colorbar.set_ticks(ticks)
+    elif tick_labels is None and minimal_ticks:
+        boundaries = getattr(mappable, "levels", None)
+
+        if boundaries is None and isinstance(mappable.norm, BoundaryNorm):
+            boundaries = mappable.norm.boundaries
+
+        if boundaries is not None:
+            boundaries = np.asarray(boundaries, dtype=float)
+
+            if boundaries.size > 6:
+                colorbar.locator = FixedLocator(
+                    boundaries,
+                    nbins=max(boundaries.size - 1, 1),
+                )
+                colorbar.update_ticks()
 
     if tick_labels is not None:
         if orientation == "horizontal":

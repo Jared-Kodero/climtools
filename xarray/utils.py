@@ -392,15 +392,16 @@ def regrid(
             raise ValueError(f"Input grid must contain {coord!r} dimension.")
 
     if grid_out is None:
-        lat_min, lat_max = float(grid_in["lat"].min()), float(grid_in["lat"].max())
-        lon_min, lon_max = float(grid_in["lon"].min()), float(grid_in["lon"].max())
+        lat_min = grid_in["lat"].min().item()
+        lat_max = grid_in["lat"].max().item()
+        lon_min = grid_in["lon"].min().item()
+        lon_max = grid_in["lon"].max().item()
 
-        lat_coords = np.arange(
-            lat_min, lat_max + grid_out_resolution, grid_out_resolution
-        )
-        lon_coords = np.arange(
-            lon_min, lon_max + grid_out_resolution, grid_out_resolution
-        )
+        nlat = round((lat_max - lat_min) / grid_out_resolution) + 1
+        nlon = round((lon_max - lon_min) / grid_out_resolution) + 1
+
+        lat_coords = np.linspace(lat_min, lat_max, nlat)
+        lon_coords = np.linspace(lon_min, lon_max, nlon)
 
         grid_out = xr.Dataset(
             coords={
