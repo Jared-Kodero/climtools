@@ -12,9 +12,10 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from climtools import MPIContext, xgeo
-from climtools.xarray.halo import mpp_halo_exchange
+import xgeo as xg
 from mpi4py import MPI
+from xgeo import MPIContext
+from xgeo.xarray.halo import mpp_halo_exchange
 
 import xarray as xr
 
@@ -38,7 +39,7 @@ if rank == 0:
 else:
     full = None
 
-ds = xgeo.distribute_data(full, mpi, dim="x", log_partitions=False)
+ds = xg.distribute_data(full, mpi, dim="x", log_partitions=False)
 
 mpi.comm.barrier()
 mpp_halo_exchange(mpi, ds._prepare(), "x", before=BEFORE, after=AFTER)  # warm up

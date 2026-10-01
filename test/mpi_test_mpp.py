@@ -1,4 +1,4 @@
-"""Direct checks of the FMS-adapted primitives in ``climtools.mpp``.
+"""Direct checks of the FMS-adapted primitives in ``xgeo.mpp``.
 
 Every other module in this suite exercises these through the xarray layer,
 which is the right way to test behaviour but a poor way to test the property
@@ -16,22 +16,22 @@ that drifts with rank count fails even when it is self-consistent.
 from __future__ import annotations
 
 import numpy as np
-from climtools.mpp.ext_collectives import partition_offsets
-from climtools.mpp.ext_domains import slice_compute_domain
-from climtools import xgeo
-from climtools.mpp.mpp_do_update import HaloWidthError
-from climtools.xarray.halo import mpp_halo_exchange
-from climtools.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
-from climtools.mpp.mpp import mpp_chksum
-from climtools.mpp.mpp_do_update import (
+from xgeo.mpp.ext_collectives import partition_offsets
+from xgeo.mpp.ext_domains import slice_compute_domain
+import xgeo as xg
+from xgeo.mpp.mpp_do_update import HaloWidthError
+from xgeo.xarray.halo import mpp_halo_exchange
+from xgeo.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
+from xgeo.mpp.mpp import mpp_chksum
+from xgeo.mpp.mpp_do_update import (
     mpp_complete_update_domains,
     mpp_start_update_domains,
 )
-from climtools.mpp.mpp_domains import Domain
-from climtools.mpp.mpp_domains_define import mpp_define_layout
-from climtools.mpp.mpp_domains_util import mpp_get_compute_domains
-from climtools.mpp.ext_efp import prod_decompose, prod_recombine, reproducing_prod
-from climtools.mpp.mpp_efp import (
+from xgeo.mpp.mpp_domains import Domain
+from xgeo.mpp.mpp_domains_define import mpp_define_layout
+from xgeo.mpp.mpp_domains_util import mpp_get_compute_domains
+from xgeo.mpp.ext_efp import prod_decompose, prod_recombine, reproducing_prod
+from xgeo.mpp.mpp_efp import (
     mpp_reproducing_sum,
 )
 from mpi4py import MPI
@@ -390,7 +390,7 @@ def run(fx: Fixtures) -> None:
         if nranks == 1:
             return None, "one rank owns everything, so no halo can be short"
         length = nranks  # one element per rank; any halo above 1 is too wide
-        distributed = xgeo.distribute_data(
+        distributed = xg.distribute_data(
             xr.DataArray(np.arange(length, dtype=np.float64), dims=("t",), name="v")
             if comm.rank == 0
             else None,

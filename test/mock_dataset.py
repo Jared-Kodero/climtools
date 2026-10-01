@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from climtools import MPIContext
+from xgeo import MPIContext
 
 import xarray as xr
 

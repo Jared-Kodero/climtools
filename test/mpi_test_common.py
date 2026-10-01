@@ -14,10 +14,11 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from climtools import MPIContext, xgeo
-from climtools.mpp.mpp_do_update import HaloWidthError
-from climtools.xarray.core import MPIXarray
+import xgeo as xg
 from mock_dataset import PATH, PATH2D, create_dataset
+from xgeo import MPIContext
+from xgeo.mpp.mpp_do_update import HaloWidthError
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 
@@ -103,7 +104,7 @@ def phase(label: str, timeout: float | None = None):
 #: Substring of the ValueError mpp_halo_exchange() raises when some rank's
 #: local partition along the requested dimension is shorter than the
 #: before/after halo width being asked of it (see
-#: climtools.xarray.arithmetic.mpp_halo_exchange's docstring). Every
+#: xgeo.xarray.arithmetic.mpp_halo_exchange's docstring). Every
 #: halo-based op -- rolling_reduce, coarsen_reduce, diff, shift,
 #: differentiate, ffill, bfill, roll, ... -- funnels through the same
 #: mpp_halo_exchange() and so can hit this identical, deliberate refusal
@@ -167,10 +168,10 @@ def build_fixtures() -> Fixtures:
     )
 
     native = xr.open_dataset(PATH).load()
-    dist = xgeo.open_distributed_dataset(
+    dist = xg.open_distributed_dataset(
         PATH, mpi, partition_dim="time", log_partitions=True
     )
-    dist2d = xgeo.open_distributed_dataset(
+    dist2d = xg.open_distributed_dataset(
         PATH2D, mpi, partition_dim=("lat", "lon"), log_partitions=True
     )
 
@@ -178,7 +179,7 @@ def build_fixtures() -> Fixtures:
         idx = np.arange(a, b, dtype=np.float64)
         return np.sin(idx) * (idx + 1.0)
 
-    dist_uneven = xgeo.create_distributed_dataarray(
+    dist_uneven = xg.create_distributed_dataarray(
         mpi,
         fill_uneven,
         dims=("x",),

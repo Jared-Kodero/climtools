@@ -1,36 +1,41 @@
-"""climtools: utilities for climate data analysis and plotting.
+"""xgeo: geospatial analysis, plotting, and distributed xarray for climate data.
 
-The package collects routines used repeatedly when exploring and publishing
-gridded climate data with xarray:
+The top level exposes the geospatial and plotting API:
 
-- ``plot``      Cartopy map plotting. Entry point :func:`climtools.plot.geo`.
-- ``xgeo``      Geospatial operations and NetCDF output: regridding, masking,
-  transects, and local solar time.
-- ``calc``      Trends, correlations, and difference-of-means testing.
+- ``plot``      Cartopy map plotting. Entry point :func:`xgeo.plot.geo`.
+- ``regrid``, ``mask``, ``fillgaps``, ``sel_transect``, ``to_lon180``,
+  ``add_local_solar_time``  Geospatial operations on xarray objects.
+- ``to_netcdf``, ``nc_append``, ``to_xnpy``, ``open_xnpy``  Array output.
+- ``stats``     Trends, correlations, and difference-of-means testing.
+- ``preprocess``  Dataset-specific preprocessing (ERA5, IMERG, CMORPH, GPCP).
 - ``cmaps``     Colormap registry spanning local IPCC tables, matplotlib,
   and cmocean.
-- ``cdo``       Thin xarray-aware wrapper over the CDO command-line tool.
-- ``MPIContext``  MPI context: ``MPIContext().comm`` for the raw
-  communicator and its reduce methods for collectives. Imported by name
-  rather than by star import, so analysis or plotting code never
-  initialises MPI by accident.
+- ``MPIXarray`` and the ``*_distributed_*`` constructors for MPI-parallel
+  xarray.
+
+and the shared utilities: ``LockedLogger``, ``LockFile``, ``RedirectStreams``,
+``locked_print``, ``exclude_key``, ``N_CPUS``, ``SerialProgressBar``,
+``DaskProgressBar``, ``operator`` and ``MPIContext``. The CDO wrapper is the
+module :mod:`xgeo.cdo.pycdo`.
 
 Two access patterns are supported and are equivalent::
 
-    from climtools import xgeo as xg
+    import xgeo as xg
     xg.plot.geo(da, method="contourf")
 
-    import climtools
+    import xgeo
     da.xgeo.plot.geo(method="contourf")
 
 Importing the package registers the ``.xgeo`` accessor on
 ``xarray.DataArray`` and ``xarray.Dataset``, replaces the dask progress bar
-with the styled one from :mod:`climtools.core.progress`, and, inside a
-Jupyter kernel, applies the widget CSS fix and switches inline figures to
-retina resolution.
+with the styled one from :mod:`xgeo.core.progress`, and, inside a Jupyter
+kernel, applies the widget CSS fix and switches inline figures to retina
+resolution.
 
-Regridding requires ``xesmf``, which is imported on first use. The rest of
-the package works without it.
+Public names are resolved on first attribute access through ``__getattr__``,
+so each implementation module loads when first used. Regridding requires
+``xesmf``, which is imported on first use. The rest of the package works
+without it.
 """
 
 from __future__ import annotations
@@ -46,35 +51,58 @@ from typing import TYPE_CHECKING, Any
 import dask.diagnostics
 
 from .core.progress import DaskProgressBar
-from .core.utils import N_CPUS, apply_widget_css
+from .core.utils import apply_widget_css
 from .xarray.accessors import fix_xarray
 
 if TYPE_CHECKING:
-    from .cdo import pycdo as cdo
-    from .core import operator, stats, xgeo
+    from .core import operator, preprocess, stats
+    from .core.io import SharedMemoryObject, XNpyStore, open_xnpy, to_xnpy
     from .core.progress import SerialProgressBar
     from .core.utils import (
+        N_CPUS,
         LockedLogger,
         LockFile,
         RedirectStreams,
         exclude_key,
         locked_print,
     )
-    from .mpi.context import MPIContext as MPIContext
-    from .viz import cmaps, plotting
+    from .mpi.context import MPIContext  # noqa: F401
+    from .viz import cmaps
+    from .viz import plotting as plot
+    from .xarray.core import MPIXarray  # noqa: F401
+    from .xarray.io import (
+        create_distributed_dataarray,  # noqa: F401
+        create_distributed_dataset,  # noqa: F401
+        distribute_data,  # noqa: F401
+        empty_distributed_dataset,  # noqa: F401
+        is_distributed_empty,  # noqa: F401
+        nc_append,  # noqa: F401
+        open_distributed_dataset,  # noqa: F401
+        to_netcdf,  # noqa: F401
+    )
+    from .xarray.utils import (
+        SetupDask,
+        add_local_solar_time,
+        fillgaps,
+        mask,
+        regrid,
+        sel_transect,
+        to_lon180,
+    )
 
 warnings.filterwarnings("ignore")
-warnings.filterwarnings("always", module=r"climtools\..*")
+warnings.filterwarnings("always", module=r"xgeo\..*")
 
-#: Star-import surface. ``MPIContext`` is deliberately absent. ``__all__`` is
-#: exactly what ``from climtools import *`` resolves, and resolving that name
-#: runs the lazy import of ``.mpi.context``, which imports mpi4py and so calls
-#: ``MPI_Init`` -- as a side effect of a star import, in code that may never
-#: touch MPI. Inside a Slurm allocation that enrols the process as a PMI
-#: client of the job step, after which COMM_WORLD's default
-#: ``MPI_ERRORS_ARE_FATAL`` handler ties an ordinary Python error to the fate
-#: of the whole step. ``from climtools import MPIContext`` still works, going
-#: through ``__getattr__`` exactly as before.
+#: Star-import surface. The names that import mpi4py on first access are
+#: deliberately absent: ``MPIContext``, ``MPIXarray``, ``to_netcdf``,
+#: ``nc_append``, ``distribute_data`` and the ``*_distributed_*`` functions.
+#: ``__all__`` is exactly what ``from xgeo import *`` resolves, and resolving
+#: one of them imports mpi4py and so calls ``MPI_Init`` as a side effect of a
+#: star import, in code that may never touch MPI. Inside a Slurm allocation
+#: that enrols the process as a PMI client of the job step, after which
+#: COMM_WORLD's default ``MPI_ERRORS_ARE_FATAL`` handler ties an ordinary
+#: Python error to the fate of the whole step. ``xgeo.<name>`` and
+#: ``from xgeo import <name>`` still work for every name.
 __all__ = [
     "N_CPUS",
     "DaskProgressBar",
@@ -82,36 +110,66 @@ __all__ = [
     "LockedLogger",
     "RedirectStreams",
     "SerialProgressBar",
-    "cdo",
+    "SetupDask",
+    "SharedMemoryObject",
+    "XNpyStore",
+    "add_local_solar_time",
     "cmaps",
     "exclude_key",
+    "fillgaps",
     "locked_print",
+    "mask",
+    "open_xnpy",
     "operator",
-    "plotting",
+    "plot",
+    "preprocess",
+    "regrid",
+    "sel_transect",
     "stats",
-    "xgeo",
+    "to_lon180",
+    "to_xnpy",
 ]
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "stats": (".core.stats", None),
-    "cdo": (".cdo.pycdo", None),
-    "cmaps": (".viz.cmaps", None),
-    "operator": (".core.operator", None),
-    "plotting": (".viz.plotting", None),
-    "xgeo": (".core.xgeo", None),
-    "MPIContext": (".mpi.context", "MPIContext"),
-    "LockedLogger": (".core.utils", "LockedLogger"),
     "LockFile": (".core.utils", "LockFile"),
+    "LockedLogger": (".core.utils", "LockedLogger"),
+    "MPIContext": (".mpi.context", "MPIContext"),
+    "MPIXarray": (".xarray.core", "MPIXarray"),
+    "N_CPUS": (".core.utils", "N_CPUS"),
     "RedirectStreams": (".core.utils", "RedirectStreams"),
     "SerialProgressBar": (".core.progress", "SerialProgressBar"),
-    "locked_print": (".core.utils", "locked_print"),
+    "SetupDask": (".xarray.utils", "SetupDask"),
+    "SharedMemoryObject": (".core.io", "SharedMemoryObject"),
+    "XNpyStore": (".core.io", "XNpyStore"),
+    "add_local_solar_time": (".xarray.utils", "add_local_solar_time"),
+    "cmaps": (".viz.cmaps", None),
+    "create_distributed_dataarray": (".xarray.io", "create_distributed_dataarray"),
+    "create_distributed_dataset": (".xarray.io", "create_distributed_dataset"),
+    "distribute_data": (".xarray.io", "distribute_data"),
+    "empty_distributed_dataset": (".xarray.io", "empty_distributed_dataset"),
     "exclude_key": (".core.utils", "exclude_key"),
+    "fillgaps": (".xarray.utils", "fillgaps"),
+    "is_distributed_empty": (".xarray.io", "is_distributed_empty"),
+    "locked_print": (".core.utils", "locked_print"),
+    "mask": (".xarray.utils", "mask"),
+    "nc_append": (".xarray.io", "nc_append"),
+    "open_distributed_dataset": (".xarray.io", "open_distributed_dataset"),
+    "open_xnpy": (".core.io", "open_xnpy"),
+    "operator": (".core.operator", None),
+    "plot": (".viz.plotting", None),
+    "preprocess": (".core.preprocess", None),
+    "regrid": (".xarray.utils", "regrid"),
+    "sel_transect": (".xarray.utils", "sel_transect"),
+    "stats": (".core.stats", None),
+    "to_lon180": (".xarray.utils", "to_lon180"),
+    "to_netcdf": (".xarray.io", "to_netcdf"),
+    "to_xnpy": (".core.io", "to_xnpy"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    """Import expensive public objects when they are first requested."""
+    """Import a public object when it is first requested."""
     try:
         module_name, attribute = _LAZY_IMPORTS[name]
     except KeyError:
@@ -125,7 +183,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     """Include lazily exported objects in interactive discovery."""
-    return sorted(set(globals()) | set(__all__))
+    return sorted(set(globals()) | set(_LAZY_IMPORTS))
 
 
 try:
@@ -135,3 +193,7 @@ except Exception:
 
 apply_widget_css()
 dask.diagnostics.ProgressBar = DaskProgressBar
+
+# from .update import _self_update
+
+# _self_update()

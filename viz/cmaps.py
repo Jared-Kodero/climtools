@@ -3,7 +3,7 @@ Colormap toolkit for climtools.
 
 Each registered colormap is exposed as a module level callable, for example::
 
-    from climtools import cmaps
+    from xgeo import cmaps
     cmaps.low_high(span=(0, 0.5)).reversed()
 
 Callables are produced on demand by ``__getattr__`` (PEP 562), so the user
@@ -12,7 +12,7 @@ Editor autocomplete and static type checking are served by the companion stub
 ``cmaps.pyi``, which contains only typed signatures and is therefore never
 executed. Regenerate the stub after the set of colormaps changes with::
 
-    python -m climtools.cmaps
+    python -m xgeo.viz.cmaps
 
 or by calling :func:`write_stub`.
 
@@ -44,19 +44,27 @@ if TYPE_CHECKING:
 
 type ColorMap = ListedColormap | LinearSegmentedColormap
 
-
-_file_dir = Path(__file__).resolve().parent
-_src_dir = _file_dir / "data" / "cmaps"
+# fmt: off
+_FILE_DIR = Path(__file__).resolve().parent
+_SRC_DIR = _FILE_DIR / "data" / "cmaps"
 
 # Backend colormap names resolved once at import. ``build_cm`` consults these.
-_plt_registry = mpl.colormaps  # public matplotlib ColormapRegistry
-_plt_cmap_list = list(_plt_registry)
-_cmocean_cmap_list = list(cmocean.cm.cmapnames)
+_PLT_CMAPS = mpl.colormaps  # public matplotlib ColormapRegistry
+_PLT_CMAP_LIST = list(_PLT_CMAPS)
+_CMOCEAN_CMAP_LIST = list(cmocean.cm.cmapnames)
+_PUBLIC = {
+    "new",
+    "concat",
+    "available",
+    "slice_cmap",
+    "get_cmap",
+    "get_colors",
+    "classify_cmap",
+    "write_stub",
+}
 
-__all__ = ["classify_cmap"]
+_EQ_ATOL = 1e-6  # tolerance consistent with the %.6f text colormap format
 
-
-# fmt: off
 _PREDEFINED_SEQUENTIAL = [
     "viridis", "plasma", "inferno", "magma", "cividis",
     "Greys", "Purples", "Blues", "Greens", "Oranges", "Reds",
@@ -108,6 +116,73 @@ _CMAP_CLASSIFICATIONS = {
     **{name: "miscellaneous" for name in _PREDEFINED_MISCELLANEOUS},
 }
 
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _registry() -> dict[str, str]:
+    """
+    Map each public function name to its canonical backend name.
+
+    The public name preserves the actual colormap name if it is a valid Python
+    identifier, otherwise it falls back to lowercase or a valid form.
+    """
+    text_names = [f.stem for f in _SRC_DIR.glob("*.txt")]
+    all_names = text_names + _PLT_CMAP_LIST + _CMOCEAN_CMAP_LIST
+    mapping: dict[str, str] = {}
+    for name in all_names:
+        if name.endswith("_r") or "cmo" in name.lower():
+            continue
+
+        # Use the actual name if it's a valid identifier, otherwise try lower()
+        key = name if name.isidentifier() else name.lower().replace("-", "_")
+        if not key.isidentifier():
+            continue
+
+        mapping.setdefault(key, name)
+    return dict(sorted(mapping.items()))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic per-colormap callables
+# ---------------------------------------------------------------------------
+@cache
+def create(public_name: str, source_name: str):
+    def cmap(
+        N: int | None = None,
+        *,
+        span: tuple[float, float] = (0.0, 1.0),
+        add_colors: dict[int, str | list[str]] | None = None,
+        format: Literal["linear", "listed", "hex"] = "linear",
+        gamma: float = 1.0,
+    ):
+        return get_cmap(source_name, N, span, add_colors, format, gamma)
+
+    cmap.__name__ = public_name
+    cmap.__qualname__ = public_name
+    cmap.__doc__ = f"Return the '{source_name}' colormap."
+    return cmap
+
+
+def __getattr__(name: str):
+    registry = _registry()
+    if name in registry:
+        return create(name, registry[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get(name: str) -> ColorMap:
+    """Return the colormap corresponding to the given name."""
+    if not name.endswith("_r"):
+        return load_cmap(name)
+    return load_cmap(name.replace("_r", "")).reversed()
+
+
+def __dir__():
+    return sorted(_PUBLIC | cmap_index())
+
 
 def classify_cmap(cmap: str | ColorMap) -> str:
     """Return the colormap class.
@@ -119,7 +194,7 @@ def classify_cmap(cmap: str | ColorMap) -> str:
         name = cmap.removesuffix("_r")
         if name in _CMAP_CLASSIFICATIONS:
             return _CMAP_CLASSIFICATIONS[name]
-        cmap = build_cm(cmap)
+        cmap = load_cmap(cmap)
     else:
         name = getattr(cmap, "name", "").removesuffix("_r")
         if name in _CMAP_CLASSIFICATIONS:
@@ -150,19 +225,6 @@ def classify_cmap(cmap: str | ColorMap) -> str:
 # ---------------------------------------------------------------------------
 # Colormap construction and modification
 # ---------------------------------------------------------------------------
-def build_cm(name: str) -> ColorMap:
-    """Resolve a colormap by name across the text, matplotlib and cmocean backends."""
-    for candidate in (name, name.lower(), name.capitalize(), name.upper()):
-        cmap_file = _src_dir / f"{candidate}.txt"
-        if cmap_file.exists():
-            data = np.loadtxt(cmap_file)
-            return LinearSegmentedColormap.from_list(candidate, data, N=data.shape[0])
-
-        if candidate in _plt_cmap_list:
-            return _plt_registry[candidate]
-        if candidate in _cmocean_cmap_list:
-            return getattr(cmocean.cm, candidate)
-    raise KeyError(f"Colormap '{name}' is not valid.")
 
 
 def get_colors(cmap: ColorMap, N: int | None = None) -> list[str]:
@@ -171,15 +233,62 @@ def get_colors(cmap: ColorMap, N: int | None = None) -> list[str]:
     return [to_hex(c) for c in cmap(np.linspace(0, 1, n_colors))]
 
 
-_EQ_ATOL = 1e-6  # tolerance consistent with the %.6f text colormap format
-
-
-def _signature(cmap: ColorMap) -> np.ndarray:
+def array_rep(cmap: ColorMap) -> np.ndarray:
     """Return the 256 point RGB sampling used for colormap equality tests."""
     return cmap(np.linspace(0.0, 1.0, 256))[:, :3]
 
 
-def add_colors_to_cmap(
+def load_cmap(name: str) -> ColorMap:
+    """Resolve a colormap by name across the text, matplotlib and cmocean backends."""
+    for candidate in (name, name.lower(), name.capitalize(), name.upper()):
+        cmap_file = _SRC_DIR / f"{candidate}.txt"
+        if cmap_file.exists():
+            data = np.loadtxt(cmap_file)
+            return LinearSegmentedColormap.from_list(candidate, data, N=data.shape[0])
+
+        if candidate in _PLT_CMAP_LIST:
+            return _PLT_CMAPS[candidate]
+        if candidate in _CMOCEAN_CMAP_LIST:
+            return getattr(cmocean.cm, candidate)
+    raise KeyError(f"Colormap '{name}' is not valid.")
+
+
+def slice_cmap(
+    cmap: str | ColorMap,
+    span: tuple[float, float] = (0.0, 1.0),
+    N: int | None = None,
+    *,
+    format: Literal["linear", "listed", "hex"] | None = None,
+    gamma: float = 1.0,
+) -> ColorMap | list[str]:
+    """
+    Extract a subset of colors from a colormap based on a span range and return in the specified format.
+    """
+    if not isinstance(span, tuple) or len(span) != 2:
+        raise ValueError("`span` must be a tuple of two floats (start, end).")
+
+    if isinstance(cmap, str):
+        cmap = load_cmap(cmap)
+
+    n_colors = cmap.N if N is None else N
+    cmap_name = cmap.name
+    colors = [cmap(value) for value in np.linspace(span[0], span[1], n_colors)]
+
+    if format is None:
+        format = "listed" if isinstance(cmap, ListedColormap) else "linear"
+
+    if format == "hex":
+        res = ListedColormap(colors, name=cmap_name)
+        return get_colors(res, res.N)
+    elif format == "listed":
+        return ListedColormap(colors, name=cmap_name)
+    else:
+        return LinearSegmentedColormap.from_list(
+            cmap_name, colors, N=n_colors, gamma=gamma
+        )
+
+
+def add_colors(
     obj: str | list[str],
     cmap: ColorMap,
     idx: int | None = None,
@@ -188,27 +297,7 @@ def add_colors_to_cmap(
     cmap_name: str | None = None,
     format: Literal["linear", "listed", "hex"] = "linear",
 ) -> ColorMap | list[str]:
-    """
-    Insert one or more colors into an existing colormap at a given index.
 
-    Parameters
-    ----------
-    obj : str or list of str
-        Hex codes or CSS4 color names to insert.
-    cmap : ListedColormap or LinearSegmentedColormap
-        Source colormap.
-    idx : int, optional
-        Insertion position, clamped to ``[0, cmap.N]``. Defaults to the end.
-    N : int, optional
-        Number of sampled colors. Defaults to native colormap length.
-    gamma : float, default 1.0
-        Gamma applied when rebuilding a linear segmented colormap.
-    cmap_name : str, optional
-        Name for the returned colormap.
-    format : {"linear", "listed", "hex"}, default "linear"
-        Output format. ``"hex"`` uses listed colors internally and returns
-        hexadecimal color strings.
-    """
     if format not in {"linear", "listed", "hex"}:
         raise ValueError("`format` must be 'linear', 'listed', or 'hex'.")
 
@@ -254,50 +343,18 @@ def add_colors_to_cmap(
     return res
 
 
-def slice_cmap(
-    cmap: str | ColorMap,
-    span: tuple[float, float] = (0.0, 1.0),
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] | None = None,
+def get_cmap(
+    name: str,
+    N: int | None,
+    span: tuple[float, float],
+    add_colors: dict[int, str | list[str]] | None,
+    format: Literal["linear", "listed", "hex"],
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
-    """
-    Extract a subset of colors from a colormap based on a span range and return in the specified format.
-    """
-    if not isinstance(span, tuple) or len(span) != 2:
-        raise ValueError("`span` must be a tuple of two floats (start, end).")
-
-    if isinstance(cmap, str):
-        cmap = build_cm(cmap)
-
+    """Resolve ``name`` to a colormap and apply the requested adjustments."""
+    cmap = load_cmap(name)
     n_colors = cmap.N if N is None else N
-    cmap_name = cmap.name
-    colors = [cmap(value) for value in np.linspace(span[0], span[1], n_colors)]
 
-    if format is None:
-        format = "listed" if isinstance(cmap, ListedColormap) else "linear"
-
-    if format == "hex":
-        res = ListedColormap(colors, name=cmap_name)
-        return get_colors(res, res.N)
-    elif format == "listed":
-        return ListedColormap(colors, name=cmap_name)
-    else:
-        return LinearSegmentedColormap.from_list(
-            cmap_name, colors, N=n_colors, gamma=gamma
-        )
-
-
-def adjust_cmap(
-    cmap: str | ColorMap,
-    N: int | None = None,
-    *,
-    span: tuple[float, float] = (0.0, 1.0),
-    add_colors: dict[int, str | list[str]] | None = None,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
     """
     Modify a colormap by slicing, color insertion and output format.
     """
@@ -327,7 +384,7 @@ def adjust_cmap(
                 raise TypeError("Keys in `add_colors` must be integers.")
             if not isinstance(v, (list, tuple, str)):
                 raise TypeError("Values in `add_colors` must be str or list[str].")
-            adjusted = add_colors_to_cmap(
+            adjusted = add_colors(
                 obj=v,
                 idx=k,
                 cmap=res,
@@ -345,29 +402,7 @@ def adjust_cmap(
     return res
 
 
-def get_colormap(
-    name: str,
-    N: int | None,
-    span: tuple[float, float],
-    add_colors: dict[int, str | list[str]] | None,
-    format: Literal["linear", "listed", "hex"],
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
-    """Resolve ``name`` to a colormap and apply the requested adjustments."""
-    cmap = build_cm(name)
-    n_colors = cmap.N if N is None else N
-
-    return adjust_cmap(
-        cmap=cmap,
-        N=n_colors,
-        span=span,
-        add_colors=add_colors,
-        format=format,
-        gamma=gamma,
-    )
-
-
-def create(
+def new(
     colors: list[str],
     N: int | None = None,
     *,
@@ -403,16 +438,15 @@ def create(
             match_name, is_reversed = dup
             kind = "reversed " if is_reversed else ""
             print(
-                f"Creation skipped: identical to existing {kind}colormap {match_name!r}'."
+                f"Creation skipped: identical to existing {kind} colormap {match_name!r}'."
             )
-            existing = build_cm(match_name)
+            existing = load_cmap(match_name)
             cmap = existing.reversed() if is_reversed else existing
         else:
             rgb = cmap(range(cmap.N))[:, :3]
-            _src_dir.mkdir(parents=True, exist_ok=True)
-            np.savetxt(Path(_src_dir / name).with_suffix(".txt"), rgb, fmt="%.6f")
+            _SRC_DIR.mkdir(parents=True, exist_ok=True)
+            np.savetxt(Path(_SRC_DIR / name).with_suffix(".txt"), rgb, fmt="%.6f")
             _registry.cache_clear()
-            list_cmaps.cache_clear()
             cmap_index.cache_clear()
             write_stub(force=True)
 
@@ -421,94 +455,28 @@ def create(
     return cmap
 
 
-def _concat_cmaps(
-    cmap1: ColorMap,
-    cmap2: ColorMap,
+def concat(
+    cmap1: ColorMap | str,
+    cmap2: ColorMap | str,
     N: int | None = None,
     *,
     format: Literal["linear", "listed", "hex"] = "linear",
     gamma: float = 1.0,
 ) -> ColorMap | list[str]:
-    """Concatenate two colormaps into a single colormap."""
-    n_colors = (cmap1.N + cmap2.N) if N is None else N
+    """Concatenate two colormaps."""
 
-    def _colors(cmap, count):
-        return [to_hex(cmap(v)) for v in np.linspace(0, 1, count)]
+    if isinstance(cmap1, str):
+        cmap1 = load_cmap(cmap1)
+    if isinstance(cmap2, str):
+        cmap2 = load_cmap(cmap2)
 
-    half = n_colors // 2
-    return create(
-        _colors(cmap1, half) + _colors(cmap2, n_colors - half),
-        N=n_colors,
+    return new(
+        [to_hex(cmap1(v)) for v in np.linspace(0, 1, cmap1.N)]
+        + [to_hex(cmap2(v)) for v in np.linspace(0, 1, cmap2.N)],
+        N=N or 256,
         format=format,
         gamma=gamma,
     )
-
-
-def add_or_subtract(
-    cmap1: ColorMap,
-    cmap2: ColorMap,
-    operator: str,
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
-    """Add or subtract two colormaps channel wise in RGBA space."""
-    n_colors = cmap1.N if N is None else N
-
-    def _colors(cmap):
-        return np.asarray([cmap(v) for v in np.linspace(0, 1, n_colors)], dtype=float)
-
-    c1, c2 = _colors(cmap1), _colors(cmap2)
-    if operator == "+":
-        c = np.clip(c1 + c2, 0.0, 1.0)
-    elif operator == "-":
-        c = np.clip(c1 - c2, 0.0, 1.0)
-    else:
-        raise ValueError("`operator` must be '+' or '-'.")
-
-    return create(
-        [to_hex(tuple(row)) for row in c],
-        N=n_colors,
-        format=format,
-        gamma=gamma,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=1)
-def _registry() -> dict[str, str]:
-    """
-    Map each public function name to its canonical backend name.
-
-    The public name preserves the actual colormap name if it is a valid Python
-    identifier, otherwise it falls back to lowercase or a valid form.
-    """
-    text_names = [f.stem for f in _src_dir.glob("*.txt")]
-    all_names = text_names + _plt_cmap_list + _cmocean_cmap_list
-
-    mapping: dict[str, str] = {}
-    for name in all_names:
-        if name.endswith("_r") or "cmo" in name.lower():
-            continue
-
-        # Use the actual name if it's a valid identifier, otherwise try lower()
-        key = name if name.isidentifier() else name.lower().replace("-", "_")
-        if not key.isidentifier():
-            continue
-
-        mapping.setdefault(key, name)
-    return dict(sorted(mapping.items()))
-
-
-@lru_cache(maxsize=1)
-def list_cmaps() -> tuple[str, ...]:
-    """Return the sorted tuple of public colormap names."""
-    return tuple(_registry().keys())
 
 
 @lru_cache(maxsize=1)
@@ -524,9 +492,9 @@ def find_duplicate(cmap: ColorMap) -> tuple[str, bool] | None:
     Matching is evaluated on the 256 point RGB sampling. ``reversed`` is True
     when the match is against the reversed form. Returns ``None`` otherwise.
     """
-    target = _signature(cmap)
+    target = array_rep(cmap)
     for public_name, source_name in _registry().items():
-        existing = _signature(build_cm(source_name))
+        existing = array_rep(load_cmap(source_name))
         if np.allclose(target, existing, atol=_EQ_ATOL):
             return public_name, False
         if np.allclose(target, existing[::-1], atol=_EQ_ATOL):
@@ -538,125 +506,11 @@ def available(show: bool = True) -> list[str] | DisplayHandle:
     """List or show available colormaps"""
     if "ipykernel" in sys.modules and show:
         for source_name in _registry().values():
-            display(_default_cmap(source_name))
+            display(get_cmap(source_name))
 
         return
 
-    return list(list_cmaps())
-
-
-# ---------------------------------------------------------------------------
-# Public combination helpers (documented, importable, no recursion)
-# ---------------------------------------------------------------------------
-def new(
-    colors: list[str],
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-    name: str | None = None,
-    save: bool = False,
-) -> ColorMap | list[str]:
-    """Create a colormap from a list of colors."""
-    return create(
-        colors,
-        N=N,
-        format=format,
-        gamma=gamma,
-        name=name,
-        save=save,
-    )
-
-
-def concat(
-    cmap1: ColorMap,
-    cmap2: ColorMap,
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
-    """Concatenate two colormaps."""
-    return _concat_cmaps(cmap1, cmap2, N=N, format=format, gamma=gamma)
-
-
-def add(
-    cmap1: ColorMap,
-    cmap2: ColorMap,
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
-    """Add two colormaps channel wise."""
-    return add_or_subtract(cmap1, cmap2, "+", N=N, format=format, gamma=gamma)
-
-
-def subtract(
-    cmap1: ColorMap,
-    cmap2: ColorMap,
-    N: int | None = None,
-    *,
-    format: Literal["linear", "listed", "hex"] = "linear",
-    gamma: float = 1.0,
-) -> ColorMap | list[str]:
-    """Subtract two colormaps channel wise."""
-    return add_or_subtract(cmap1, cmap2, "-", N=N, format=format, gamma=gamma)
-
-
-# ---------------------------------------------------------------------------
-# Dynamic per-colormap callables
-# ---------------------------------------------------------------------------
-@cache
-def _make(public_name: str, source_name: str):
-    def cmap(
-        N: int | None = None,
-        *,
-        span: tuple[float, float] = (0.0, 1.0),
-        add_colors: dict[int, str | list[str]] | None = None,
-        format: Literal["linear", "listed", "hex"] = "linear",
-        gamma: float = 1.0,
-    ):
-        return get_colormap(source_name, N, span, add_colors, format, gamma)
-
-    cmap.__name__ = public_name
-    cmap.__qualname__ = public_name
-    cmap.__doc__ = f"Return the '{source_name}' colormap."
-    return cmap
-
-
-_PUBLIC = {
-    "new",
-    "concat",
-    "add",
-    "subtract",
-    "create",
-    "available",
-    "write_stub",
-    "build_cm",
-    "get_colormap",
-    "adjust_cmap",
-    "get_colors",
-    "add_colors_to_cmap",
-    "add_or_subtract",
-    "list_cmaps",
-}
-
-
-def _default_cmap(source_name: str):
-    """Return the colormap for ``source_name`` built with default options."""
-    return get_colormap(source_name, None, (0.0, 1.0), None, "linear", 1.0)
-
-
-def __getattr__(name: str):
-    registry = _registry()
-    if name in registry:
-        return _make(name, registry[name])
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__():
-    return sorted(_PUBLIC | cmap_index())
+    return list(_registry().keys())
 
 
 # ---------------------------------------------------------------------------
@@ -675,23 +529,17 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from IPython.display import DisplayHandle
 type ColorMap = ListedColormap | LinearSegmentedColormap
 
-
+def get(name: str) -> ColorMap: ...
 def new(colors: list[str], N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0, name: str | None = None, save: bool = False) -> ColorMap | list[str]: ...
-def create(colors: list[str], N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0, name: str | None = None, save: bool = False) -> ColorMap | list[str]: ...
 def concat(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
-def add(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
-def subtract(cmap1: ColorMap, cmap2: ColorMap, N: int | None = None, *, format: Literal["linear", "listed", "hex"] = "linear", gamma: float = 1.0) -> ColorMap | list[str]: ...
 def available(show: bool = True) -> list[str] | DisplayHandle: ...
-def write_stub(force: bool = False) -> bool: ...
-def classify_cmap(cmap: str | ColorMap) -> str: ...
-def slice_cmap(cmap: str | ColorMap, span: tuple[float, float] = (0.0, 1.0), N: int | None = None, *, format: Literal["linear", "listed", "hex"] | None = None, gamma: float = 1.0) -> ColorMap | list[str]: ...
 """
 
 
 def build_stub_text() -> str:
     """Return the full text of the ``cmaps.pyi`` type stub."""
     lines = [_STUB_HEADER]
-    for name in list_cmaps():
+    for name in list(_registry().keys()):
         lines.append(f"def {name}{_CMAP_SIGNATURE}")
     return "\n".join(lines) + "\n"
 
@@ -699,9 +547,9 @@ def build_stub_text() -> str:
 def _src_checksum() -> str:
     """Checksum the text colormaps, the resolved name set, and this source file."""
     h = hashlib.sha256()
-    for f in sorted(_src_dir.glob("*.txt")):
+    for f in sorted(_SRC_DIR.glob("*.txt")):
         h.update(f.read_bytes())
-    h.update(",".join(list_cmaps()).encode("utf-8"))
+    h.update(",".join(list(_registry().keys())).encode("utf-8"))
     try:
         h.update(Path(__file__).read_bytes())
     except Exception:
@@ -717,7 +565,7 @@ def write_stub(force: bool = False) -> bool:
     first line so a stale stub is detected without an external sidecar. The file
     is replaced atomically, which removes the need for lock files.
     """
-    pyi = _file_dir / "cmaps.pyi"
+    pyi = _FILE_DIR / "cmaps.pyi"
     marker = f"# checksum: {_src_checksum()}\n"
     if not force and pyi.exists():
         try:

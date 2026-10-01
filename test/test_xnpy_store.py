@@ -1,8 +1,8 @@
 """XNpyStore round trips and refusals.\n\nSerial, not MPI: ``python test/test_xnpy_store.py``\n"""
 
 import shutil, numpy as np, xarray as xr
-from climtools import xgeo
-from climtools.xarray.utils import XNpyStore
+import xgeo as xg
+from xgeo.xarray.utils import XNpyStore
 
 base = "/tmp/xnpy_probe"
 shutil.rmtree(base, ignore_errors=True)
@@ -93,7 +93,7 @@ def nonfinite():
 
 
 chk("refuses non-finite attr", nonfinite)
-chk("exported on xgeo", lambda: xgeo.XNpyStore is XNpyStore)
+chk("exported on xgeo", lambda: xg.XNpyStore is XNpyStore)
 
 for n, r in out:
     print(f"{'OK  ' if r is True else 'BUG '} {n}: {'' if r is True else r}")

@@ -8,11 +8,11 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from climtools import MPIContext
-from climtools.xarray.core import MPIXarray
-from climtools.mpp.ext_efp import reproducing_prod
 from mpi4py import MPI
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
+from xgeo import MPIContext
+from xgeo.mpp.ext_efp import reproducing_prod
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 

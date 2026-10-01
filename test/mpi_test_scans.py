@@ -7,9 +7,10 @@ single-dim and, where supported, multi-dim, with explicit no-duplication
 from __future__ import annotations
 
 import numpy as np
-from climtools import MPIContext, xgeo
-from climtools.xarray.core import MPIXarray
+import xgeo as xg
 from mpi_test_common import Fixtures, local_of, record
+from xgeo import MPIContext
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 
@@ -285,8 +286,8 @@ def run(fx: Fixtures) -> None:
 
     # interp -- Allgather-based; not halo-bounded, checked under the
     # partition dimension it interpolates along.
-    from climtools.mpp.ext_domains import dim_comm as _dim_comm_check
-    from climtools.mpp.mpp_domains_define import mpp_compute_extent as _gbb_check
+    from xgeo.mpp.ext_domains import dim_comm as _dim_comm_check
+    from xgeo.mpp.mpp_domains_define import mpp_compute_extent as _gbb_check
 
     new_lat_fine = np.linspace(native.lat.values.min(), native.lat.values.max(), 37)
     sub = _dim_comm_check(dist2d.meta, "lat", mpi)
@@ -306,7 +307,7 @@ def run(fx: Fixtures) -> None:
     def fill_left(a, b):
         return np.arange(a, b, dtype=np.float64)[:, None] * np.ones((1, GYM))
 
-    left_1d = xgeo.create_distributed_dataarray(
+    left_1d = xg.create_distributed_dataarray(
         mpi,
         fill_left,
         dims=("x", "y"),

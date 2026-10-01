@@ -5,11 +5,11 @@ Run standalone: ``mpirun -n 4 python test/mpi_test_mpp_edges.py``
 """
 
 import numpy as np
-from climtools import MPIContext
-from climtools.mpp.mpp_domains import Domain
-from climtools.mpp.mpp_domains_define import mpp_compute_extent
-from climtools.mpp.mpp_do_update import HaloWidthError, mpp_update_domains
-from climtools.mpp.mpp_global_reduce import (
+from xgeo import MPIContext
+from xgeo.mpp.mpp_do_update import HaloWidthError, mpp_update_domains
+from xgeo.mpp.mpp_domains import Domain
+from xgeo.mpp.mpp_domains_define import mpp_compute_extent
+from xgeo.mpp.mpp_global_reduce import (
     mpp_global_max,
     mpp_global_min,
     mpp_global_sum,

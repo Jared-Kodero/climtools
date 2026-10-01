@@ -10,10 +10,11 @@ import math
 import shutil
 
 import numpy as np
-from climtools import MPIContext, xgeo
-from climtools.xarray.core import MPIXarray
+import xgeo as xg
 from mock_dataset import PATH
 from mpi_test_common import Fixtures, local_of, record
+from xgeo import MPIContext
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 
@@ -40,7 +41,7 @@ def run(fx: Fixtures) -> None:
             idx = np.arange(a, b)
             return (idx[:, None] * 100 + np.arange(3)[None, :]).astype(np.float64)
 
-        da = xgeo.create_distributed_dataarray(
+        da = xg.create_distributed_dataarray(
             mpi,
             fill,
             dims=("x", "y"),
@@ -98,7 +99,7 @@ def run(fx: Fixtures) -> None:
         return (xs[:, None] * 10 + ys[None, :]).astype(np.float64)
 
     DGX, DGY = 1, 1
-    da_deg = xgeo.create_distributed_dataarray(
+    da_deg = xg.create_distributed_dataarray(
         mpi,
         fill_degenerate,
         dims=("x", "y"),
@@ -153,7 +154,7 @@ def run(fx: Fixtures) -> None:
         ).astype(np.float64)
 
     GLOBAL = 21  # uneven for any rank count in {2,3,4,5,6} except divisors
-    da_uneven = xgeo.create_distributed_dataarray(
+    da_uneven = xg.create_distributed_dataarray(
         mpi,
         fill_uneven,
         dims=("x", "y"),
@@ -216,7 +217,7 @@ def run(fx: Fixtures) -> None:
         ys = np.arange(y_start, y_stop)
         return (xs[:, None] * 1000 + ys[None, :]).astype(np.float64)
 
-    da2d = xgeo.create_distributed_dataarray(
+    da2d = xg.create_distributed_dataarray(
         mpi,
         fill2d,
         dims=("x", "y"),
@@ -254,7 +255,7 @@ def run(fx: Fixtures) -> None:
     def fill_const():
         return np.full((3,), 42.0)
 
-    ds2d = xgeo.create_distributed_dataset(
+    ds2d = xg.create_distributed_dataset(
         mpi,
         data_vars={
             "full2d": (("x", "y"), fill2d),
@@ -285,7 +286,7 @@ def run(fx: Fixtures) -> None:
 
     correct_da = xr.DataArray(np.zeros((xe - xs, ye - ys)), dims=("x", "y"))
     try:
-        check_ds = xgeo.create_distributed_dataset(
+        check_ds = xg.create_distributed_dataset(
             mpi,
             data_vars={"pre_built": correct_da, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -299,7 +300,7 @@ def run(fx: Fixtures) -> None:
 
     wrong_y = xr.DataArray(np.zeros((xe - xs, (ye - ys) + 1)), dims=("x", "y"))
     try:
-        xgeo.create_distributed_dataset(
+        xg.create_distributed_dataset(
             mpi,
             data_vars={"wrong_y": wrong_y, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -314,7 +315,7 @@ def run(fx: Fixtures) -> None:
 
     wrong_x = xr.DataArray(np.zeros(((xe - xs) + 1, ye - ys)), dims=("x", "y"))
     try:
-        xgeo.create_distributed_dataset(
+        xg.create_distributed_dataset(
             mpi,
             data_vars={"wrong_x": wrong_x, "other": (("x", "y"), fill2d)},
             sizes={"x": GX, "y": GY},
@@ -386,7 +387,7 @@ def run(fx: Fixtures) -> None:
         check_parallel_write(
             "1d(time)",
             out_1d,
-            lambda: xgeo.to_netcdf(
+            lambda: xg.to_netcdf(
                 dist._prepare(),
                 out_1d,
                 mpi,
@@ -421,7 +422,7 @@ def run(fx: Fixtures) -> None:
         check_parallel_write(
             "2d(lat,lon), explicit chunks",
             out_2d,
-            lambda: xgeo.to_netcdf(
+            lambda: xg.to_netcdf(
                 dist2d._prepare(),
                 out_2d,
                 mpi,
@@ -435,7 +436,7 @@ def run(fx: Fixtures) -> None:
         check_parallel_write(
             "2d(lat,lon), auto chunks",
             out_2d_auto,
-            lambda: xgeo.to_netcdf(
+            lambda: xg.to_netcdf(
                 dist2d._prepare(),
                 out_2d_auto,
                 mpi,

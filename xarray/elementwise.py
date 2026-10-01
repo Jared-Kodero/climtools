@@ -959,7 +959,7 @@ def _realign_distributed(
     decomposition before they can be combined. Reassembling each one globally
     to do that would make every rank hold the whole field; this sends each
     rank only the elements it will own, which is what
-    :func:`~climtools.xarray.halo.mpp_redistribute` is for.
+    :func:`~xgeo.xarray.halo.mpp_redistribute` is for.
 
     Parameters
     ----------

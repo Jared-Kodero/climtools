@@ -48,9 +48,10 @@ import resource
 import time
 
 import numpy as np
-from climtools import MPIContext, xgeo
-from climtools.xarray.core import MPIXarray
+import xgeo as xg
 from mpi4py import MPI
+from xgeo import MPIContext
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 
@@ -362,7 +363,7 @@ t_setup0 = time.perf_counter()
 # built once, below) that never does. Both sides now pay the fill cost
 # exactly once, outside every timed loop, which is the only comparison
 # that actually measures what this benchmark claims to measure.
-dist = xgeo.create_distributed_dataarray(
+dist = xg.create_distributed_dataarray(
     mpi,
     fill,
     dims=("x",),
@@ -371,7 +372,7 @@ dist = xgeo.create_distributed_dataarray(
     log_partitions=False,
     name="v",
 ).load()
-dist_check = xgeo.create_distributed_dataarray(
+dist_check = xg.create_distributed_dataarray(
     mpi,
     fill,
     dims=("x",),
@@ -489,7 +490,7 @@ replicated_full = native_full(N) if mpi.comm.rank == 0 else None
 bench(
     "distribute_data",
     lambda: local_of(
-        xgeo.distribute_data(replicated_full, mpi, dim="x", log_partitions=False)
+        xg.distribute_data(replicated_full, mpi, dim="x", log_partitions=False)
     ),
     lambda: None,
     no_native_counterpart=True,

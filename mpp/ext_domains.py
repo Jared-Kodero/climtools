@@ -1,4 +1,4 @@
-"""Cartesian process grids, extending :mod:`~climtools.mpp.mpp_domains`.
+"""Cartesian process grids, extending :mod:`~xgeo.mpp.mpp_domains`.
 
 FMS reaches the ranks of a domain through pelists. Here the process grid is
 an MPI Cartesian communicator instead, which gives the same neighbour and

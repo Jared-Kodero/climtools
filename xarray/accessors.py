@@ -1,4 +1,4 @@
-"""Expose geographic, plotting, calculation, and preprocessing xarray accessors."""
+"""Expose geographic, plotting, xgeo_core_calculation, and preprocessing xarray accessors."""
 
 from __future__ import annotations
 
@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
-from ..core import stats as calc
-from ..core import xgeo
-from ..core.utils import exclude_key
+from ..core import io as core_io
+from ..core import preprocess as xgeo_core_preprocess
+from ..core import stats as xgeo_core_calc
+from ..core import utils as xgeo_core_utils
 from ..viz import plotting
+from . import io as xgeo_xarray_io
+from . import utils as xgeo_xarray_utils
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -78,8 +81,8 @@ class GeoBase:
             The object on the target grid.
         """
 
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.regrid(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_utils.regrid(self._obj, **kwargs)
 
     def mask(
         self,
@@ -114,8 +117,8 @@ class GeoBase:
             If ``mask`` cannot be resolved to an xarray.DataArray.
 
         """
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.mask(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_utils.mask(self._obj, **kwargs)
 
     # -- coordinate helpers ----------------------------------------------
     def add_local_solar_time(
@@ -142,7 +145,9 @@ class GeoBase:
             The object with the local solar time coordinate attached.
 
         """
-        return xgeo.add_local_solar_time(self._obj, lon=lon, time=time, name=name)
+        return xgeo_xarray_utils.add_local_solar_time(
+            self._obj, lon=lon, time=time, name=name
+        )
 
     def to_lon180(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
         """Wrap the longitude coordinate to the interval [-180, 180).
@@ -158,7 +163,7 @@ class GeoBase:
             The object with wrapped and sorted longitudes.
 
         """
-        return xgeo.to_lon180(self._obj, lon=lon)
+        return xgeo_xarray_utils.to_lon180(self._obj, lon=lon)
 
     def add_cyclic_point(self, lon: str = "lon") -> xr.Dataset | xr.DataArray:
         """Append a cyclic longitude point, closing the seam at the date line.
@@ -217,8 +222,8 @@ class GeoBase:
             Selected transect subset.
 
         """
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.sel_transect(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_utils.sel_transect(self._obj, **kwargs)
 
     # -- NetCDF output -----------------------------------------------------
     def append(
@@ -255,8 +260,8 @@ class GeoBase:
         None
 
         """
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.nc_append(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_io.nc_append(self._obj, **kwargs)
 
     def to_netcdf(
         self,
@@ -321,8 +326,8 @@ class GeoBase:
 
         """
 
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.to_netcdf(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_io.to_netcdf(self._obj, **kwargs)
 
     def to_xnpy(
         self,
@@ -365,7 +370,7 @@ class GeoBase:
         with :func:`numpy.save`. Bare NumPy arrays are always written with
         :func:`numpy.save`.
         """
-        return xgeo.to_xnpy(
+        return core_io.to_xnpy(
             self._obj,
             path,
             mode=mode,
@@ -373,7 +378,7 @@ class GeoBase:
             max_workers=max_workers,
         )
 
-    def shared_memory(self, *, readonly: bool = True) -> xgeo.SharedMemoryObject:
+    def shared_memory(self, *, readonly: bool = True) -> core_io.SharedMemoryObject:
         """Create an interprocess shared-memory representation.
 
         The numerical buffers backing the xarray object are copied into
@@ -418,12 +423,12 @@ class GeoBase:
         multiprocessing.shared_memory.SharedMemory
             Python interface to operating-system shared memory.
         """
-        return xgeo.SharedMemoryObject(self._obj, readonly=readonly)
+        return core_io.SharedMemoryObject(self._obj, readonly=readonly)
 
 
 @xr.register_dataarray_accessor("xgeo")
 class GeoDataArray(GeoBase):
-    """DataArray ``.xgeo`` accessor for geospatial, plotting, and calculation operations."""
+    """DataArray ``.xgeo`` accessor for geospatial, plotting, and xgeo_core_calculation operations."""
 
     __slots__ = ()
 
@@ -584,7 +589,7 @@ class GeoDataArray(GeoBase):
             Composable map object.
         """
 
-        opts = exclude_key("self", dict(locals()))
+        opts = xgeo_core_utils.exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
 
         return plotting.geo(self._obj, **opts, **kwargs)
@@ -757,7 +762,7 @@ class GeoDataArray(GeoBase):
             Notebook display handle when available.
         """
 
-        opts = exclude_key("self", dict(locals()))
+        opts = xgeo_core_utils.exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
 
         return plotting.animate(self._obj, **opts, **kwargs)
@@ -778,7 +783,7 @@ class GeoDataArray(GeoBase):
         """Draw quiver arrows, using the bound array as the zonal component.
 
         The reference key is placed automatically below the axis decorations
-        (see :class:`climtools.viz.plot_utils.AutoQuiverKey`).
+        (see :class:`xgeo.viz.plot_utils.AutoQuiverKey`).
 
         Parameters
         ----------
@@ -869,7 +874,7 @@ class GeoDataArray(GeoBase):
 
         """
 
-        kwargs = exclude_key("self", dict(locals()))
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
 
         return plotting.plot_significance(self._obj, **kwargs)
 
@@ -904,9 +909,9 @@ class GeoDataArray(GeoBase):
 
         """
 
-        kwargs = exclude_key("self", dict(locals()))
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
         kwargs["y"] = kwargs.pop("other")
-        return calc.corr(self._obj, kwargs)
+        return xgeo_core_calc.corr(self._obj, kwargs)
 
     def pvalues(self, other: xr.DataArray, dim: str = "time") -> xr.DataArray:
         """Test the difference in mean between the bound array and ``other``.
@@ -925,7 +930,7 @@ class GeoDataArray(GeoBase):
 
         """
 
-        return calc.pvalues(self._obj, other, dim=dim)
+        return xgeo_core_calc.pvalues(self._obj, other, dim=dim)
 
     def trends(
         self,
@@ -955,8 +960,8 @@ class GeoDataArray(GeoBase):
 
         """
 
-        kwargs = exclude_key("self", dict(locals()))
-        return calc.trends(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_core_calc.trends(self._obj, **kwargs)
 
     def fillgaps(
         self,
@@ -1003,8 +1008,8 @@ class GeoDataArray(GeoBase):
             coordinates, name, and attributes are preserved.
 
         """
-        kwargs = exclude_key("self", dict(locals()))
-        return xgeo.fillgaps(self._obj, **kwargs)
+        kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
+        return xgeo_xarray_utils.fillgaps(self._obj, **kwargs)
 
 
 class PreprocessAccessor:
@@ -1025,7 +1030,7 @@ class PreprocessAccessor:
             Preprocessed ERA5 dataset.
 
         """
-        return xgeo.preprocess.era5(self._obj)
+        return xgeo_core_preprocess.era5(self._obj)
 
     def era5_land(self) -> xr.Dataset:
         """Preprocess an ERA5-Land dataset.
@@ -1036,7 +1041,7 @@ class PreprocessAccessor:
             Preprocessed ERA5-Land dataset.
 
         """
-        return xgeo.preprocess.era5_land(self._obj)
+        return xgeo_core_preprocess.era5_land(self._obj)
 
     def imerg(self) -> xr.Dataset:
         """Preprocess a GPM IMERG dataset.
@@ -1047,7 +1052,7 @@ class PreprocessAccessor:
             Preprocessed IMERG dataset.
 
         """
-        return xgeo.preprocess.imerg(self._obj)
+        return xgeo_core_preprocess.imerg(self._obj)
 
     def cmorph(self) -> xr.Dataset:
         """Preprocess a CMORPH dataset.
@@ -1058,7 +1063,7 @@ class PreprocessAccessor:
             Preprocessed CMORPH dataset.
 
         """
-        return xgeo.preprocess.cmorph(self._obj)
+        return xgeo_core_preprocess.cmorph(self._obj)
 
     def gpcp(self) -> xr.Dataset:
         """Preprocess a GPCP dataset.
@@ -1069,7 +1074,7 @@ class PreprocessAccessor:
             Preprocessed GPCP dataset.
 
         """
-        return xgeo.preprocess.gpcp(self._obj)
+        return xgeo_core_preprocess.gpcp(self._obj)
 
 
 @xr.register_dataset_accessor("xgeo")

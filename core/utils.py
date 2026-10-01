@@ -260,6 +260,11 @@ class LockedLogger:
         with self._lock_file:
             self._logger.error(*args, **kwargs)
 
+    @wraps(logging.Logger.exception)
+    def exception(self, *args, **kwargs) -> None:
+        with self._lock_file:
+            self._logger.exception(*args, **kwargs)
+
 
 def locked_print(
     *values: Any,
@@ -297,7 +302,7 @@ def locked_print(
     """
     if lockfile is None:
         raise ValueError(
-            "We need a lockfile obj:\n(e.g., climtools.LockFile, threading.Lock...)"
+            "We need a lockfile obj:\n(e.g., xgeo.LockFile, threading.Lock...)"
         )
 
     with lockfile:

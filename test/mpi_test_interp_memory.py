@@ -1,8 +1,11 @@
 """Interpolation must not make every rank hold the global field.\n\nRun standalone: ``mpirun -n 8 python test/mpi_test_interp_memory.py``\n"""
 
-import numpy as np, tracemalloc
-from climtools import MPIContext, xgeo
-import climtools.xarray.elementwise as ew
+import tracemalloc
+
+import numpy as np
+import xgeo as xg
+import xgeo.xarray.elementwise as ew
+from xgeo import MPIContext
 
 mpi = MPIContext()
 comm = mpi.comm
@@ -14,7 +17,7 @@ def fill(a, b):
     return np.random.default_rng(0).random((b - a, NX))
 
 
-d = xgeo.create_distributed_dataarray(
+d = xg.create_distributed_dataarray(
     mpi,
     fill,
     dims=("t", "x"),

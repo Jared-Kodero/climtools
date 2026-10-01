@@ -6,9 +6,9 @@ deliberately-uneven single-dimension partition (see mpi_test_common).
 
 from __future__ import annotations
 
-from climtools import MPIContext
-from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, is_declared_halo_refusal, local_of, record
+from xgeo import MPIContext
+from xgeo.xarray.core import MPIXarray
 
 import xarray as xr
 

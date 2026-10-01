@@ -10,13 +10,13 @@ assuming either way).
 from __future__ import annotations
 
 import numpy as np
-from climtools import MPIContext
+from xgeo import MPIContext
 
 import xarray as xr
 
 mpi = MPIContext()
-from climtools.xarray.core import MPIXarray
 from mpi_test_common import Fixtures, local_of, record
+from xgeo.xarray.core import MPIXarray
 
 
 def run(fx: Fixtures) -> None:
