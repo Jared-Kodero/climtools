@@ -36,8 +36,8 @@ from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
 
+from ..core.climtools import TMP, nproc
 from ..core.progress import DaskProgressBar, SerialProgressBar
-from ..core.utils import TMP, nproc
 from .plot_utils import add_colorbar as _add_colorbar
 from .plot_utils import (
     add_contour_labels,

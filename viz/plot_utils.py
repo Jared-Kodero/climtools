@@ -20,6 +20,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cf_xarray import *
 from IPython.display import clear_output
@@ -33,9 +34,7 @@ from matplotlib.ticker import FixedLocator, MaxNLocator, ScalarFormatter
 from matplotlib.transforms import Bbox
 from xarray.plot.facetgrid import FacetGrid
 
-import xarray as xr
-
-from ..core.utils import get_fsig
+from ..core.climtools import get_fsig
 from ..xarray.utils import (
     add_cyclic_point,
     get_spatial_dims,

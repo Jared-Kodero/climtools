@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
-from ..core import io as core_io
+from ..core import climtools as core_io
+from ..core import climtools as xgeo_core_utils
 from ..core import preprocess as xgeo_core_preprocess
 from ..core import stats as xgeo_core_calc
-from ..core import utils as xgeo_core_utils
 from ..viz import plotting
 from . import io as xgeo_xarray_io
 from . import utils as xgeo_xarray_utils

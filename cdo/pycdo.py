@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Literal
 
 import xarray as xr
 
-from ..core.utils import nproc
+from ..core.climtools import nproc
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable

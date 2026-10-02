@@ -15,7 +15,7 @@ import xarray as xr
 from cf_xarray import *
 from scipy.interpolate import griddata
 
-from ..core.utils import TMP, nproc
+from ..core.climtools import TMP, nproc
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

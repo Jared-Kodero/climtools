@@ -50,28 +50,26 @@ from typing import TYPE_CHECKING, Any
 
 import dask.diagnostics
 
+from .core.climtools import apply_widget_css
 from .core.progress import DaskProgressBar
-from .core.utils import apply_widget_css
 from .xarray.accessors import fix_xarray
 
 if TYPE_CHECKING:
     from .core import operator, preprocess, stats
-    from .core.io import (
+    from .core.climtools import (
+        LockedLogger,
+        LockFile,
+        RedirectStreams,
         SharedMemoryObject,
+        exclude_key,
+        locked_print,
+        nproc,
         open_xnpy_dataframe,
         open_xnpy_dataset,
         open_xnpy_ndarray,
         to_xnpy,
     )
     from .core.progress import SerialProgressBar
-    from .core.utils import (
-        LockedLogger,
-        LockFile,
-        RedirectStreams,
-        exclude_key,
-        locked_print,
-        nproc,
-    )
     from .mpi.context import MPIContext  # noqa: F401
     from .viz import cmaps
     from .viz import plotting as plot

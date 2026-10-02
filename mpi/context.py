@@ -16,7 +16,7 @@ from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
-from ..core.utils import TMP, LockFile
+from ..core.climtools import TMP, LockFile
 from .diagnostics import MPIDiagnostics, MPIError, get_tmpdir, tmp_cleanup
 from .mpi_init import MPI, require_mpi, world_size
 

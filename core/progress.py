@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from dask.diagnostics import ProgressBar
 
-from .utils import TMP, LockFile, RedirectStreams
+from .climtools import TMP, LockFile, RedirectStreams
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator

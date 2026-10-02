@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from ..core.utils import ipykernel
+from ..core.climtools import ipykernel
 
 #: Launcher variables reporting the world *size*. Rank variables are useless
 #: for this: Slurm exports ``SLURM_PROCID`` into every task of every step and

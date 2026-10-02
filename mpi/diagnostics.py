@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from ..core.utils import LockFile
+from ..core.climtools import LockFile
 from .mpi_init import MPI
 
 
