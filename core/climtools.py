@@ -183,7 +183,7 @@ class LockFile:
                 try:
                     fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return self
-                except (OSError, BlockingIOError):
+                except OSError, BlockingIOError:
                     if (
                         self.timeout is not None
                         and (time.time() - start_time) >= self.timeout
@@ -405,7 +405,7 @@ class RedirectStreams:
         if self.fd_level:
             try:
                 return self._start_fd()
-            except (AttributeError, OSError, ValueError):
+            except AttributeError, OSError, ValueError:
                 self._close_targets()
                 self._prepare_targets()
 
@@ -627,6 +627,11 @@ def to_xnpy(
     """
     if mode not in {"w", "w-"}:
         raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
+
+    if not isinstance(
+        obj, (np.ndarray, pd.Series, pd.DataFrame, xr.DataArray, xr.Dataset)
+    ):
+        raise TypeError(f"Unsupported XNpy object type: {type(obj)!r}.")
     # Process workers would write Dask chunks into pickled copies of the memmap
     # target, silently leaving zeros in the store.
     if scheduler not in {"threads", "synchronous"}:
@@ -1494,7 +1499,7 @@ class SharedMemoryObject:
             try:
                 shm.close()
 
-            except (BufferError, OSError):
+            except BufferError, OSError:
                 continue
 
             del cls._attachments[name]
