@@ -7,12 +7,12 @@ single-dim and, where supported, multi-dim, with explicit no-duplication
 from __future__ import annotations
 
 import numpy as np
-import xgeo as xg
+import xarray as xr
 from mpi_test_common import Fixtures, local_of, record
+
+import xgeo as xg
 from xgeo import MPIContext
 from xgeo.xarray.core import MPIXarray
-
-import xarray as xr
 
 mpi = MPIContext()
 

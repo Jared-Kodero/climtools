@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from logging import Handler, Logger
 
-N_CPUS: int = len(os.sched_getaffinity(0))
+nproc: int = len(os.sched_getaffinity(0))
 HOST: str = socket.gethostname()
 USER: str = getpass.getuser()
 HOME: str = Path.home()

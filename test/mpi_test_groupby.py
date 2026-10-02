@@ -10,12 +10,13 @@ assuming either way).
 from __future__ import annotations
 
 import numpy as np
-from xgeo import MPIContext
-
 import xarray as xr
+
+from xgeo import MPIContext
 
 mpi = MPIContext()
 from mpi_test_common import Fixtures, local_of, record
+
 from xgeo.xarray.core import MPIXarray
 
 

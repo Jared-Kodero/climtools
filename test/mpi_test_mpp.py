@@ -16,28 +16,28 @@ that drifts with rank count fails even when it is self-consistent.
 from __future__ import annotations
 
 import numpy as np
+import xarray as xr
+from mpi4py import MPI
+from mpi_test_common import Fixtures, mpi, record
+
+import xgeo as xg
 from xgeo.mpp.ext_collectives import partition_offsets
 from xgeo.mpp.ext_domains import slice_compute_domain
-import xgeo as xg
-from xgeo.mpp.mpp_do_update import HaloWidthError
-from xgeo.xarray.halo import mpp_halo_exchange
-from xgeo.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
+from xgeo.mpp.ext_efp import prod_decompose, prod_recombine, reproducing_prod
 from xgeo.mpp.mpp import mpp_chksum
 from xgeo.mpp.mpp_do_update import (
+    HaloWidthError,
     mpp_complete_update_domains,
     mpp_start_update_domains,
 )
 from xgeo.mpp.mpp_domains import Domain
+from xgeo.mpp.mpp_domains_define import mpp_compute_extent as get_balanced_bounds
 from xgeo.mpp.mpp_domains_define import mpp_define_layout
 from xgeo.mpp.mpp_domains_util import mpp_get_compute_domains
-from xgeo.mpp.ext_efp import prod_decompose, prod_recombine, reproducing_prod
 from xgeo.mpp.mpp_efp import (
     mpp_reproducing_sum,
 )
-from mpi4py import MPI
-from mpi_test_common import Fixtures, mpi, record
-
-import xarray as xr
+from xgeo.xarray.halo import mpp_halo_exchange
 
 
 def _local_slice(global_length: int) -> tuple[int, int]:

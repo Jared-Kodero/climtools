@@ -14,13 +14,13 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-import xgeo as xg
+import xarray as xr
 from mock_dataset import PATH, PATH2D, create_dataset
+
+import xgeo as xg
 from xgeo import MPIContext
 from xgeo.mpp.mpp_do_update import HaloWidthError
 from xgeo.xarray.core import MPIXarray
-
-import xarray as xr
 
 mpi = MPIContext()
 

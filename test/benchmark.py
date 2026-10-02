@@ -48,12 +48,12 @@ import resource
 import time
 
 import numpy as np
-import xgeo as xg
+import xarray as xr
 from mpi4py import MPI
+
+import xgeo as xg
 from xgeo import MPIContext
 from xgeo.xarray.core import MPIXarray
-
-import xarray as xr
 
 mpi = MPIContext()
 

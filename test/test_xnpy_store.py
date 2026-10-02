@@ -1,6 +1,10 @@
 """XNpyStore round trips and refusals.\n\nSerial, not MPI: ``python test/test_xnpy_store.py``\n"""
 
-import shutil, numpy as np, xarray as xr
+import shutil
+
+import numpy as np
+import xarray as xr
+
 import xgeo as xg
 from xgeo.xarray.utils import XNpyStore
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import shutil
+from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -12,7 +13,6 @@ from typing import Any, ClassVar, Literal
 
 import numpy as np
 import pandas as pd
-
 import xarray as xr
 
 
@@ -33,7 +33,8 @@ def to_xnpy(
     Parameters
     ----------
     obj : numpy.ndarray or pandas.DataFrame or xarray.DataArray or xarray.Dataset
-        Object to store.
+        Object to store. DataFrame column labels must be JSON serializable
+        (str, int, float, bool, None, or tuples of these).
     path : str or pathlib.Path
         Destination store directory.
     mode : {"w", "w-"}, default="w-"
@@ -51,228 +52,79 @@ def to_xnpy(
     None
         The store is written to ``path``.
     """
-    XNpyStore(path).to_disk(
-        obj,
-        mode=mode,
-        parallel=parallel,
-        max_workers=max_workers,
-    )
+    if mode not in {"w", "w-"}:
+        raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
 
+    root = Path(path)
+    if root.exists():
+        if mode == "w-":
+            raise FileExistsError(root)
+        shutil.rmtree(root)
 
-def open_xnpy(
-    path: str | Path,
-    variable: str | None = None,
-    *,
-    mmap_mode: str | None = "r",
-) -> np.ndarray | pd.DataFrame | pd.Series | xr.DataArray | xr.Dataset:
-    """Open a NumPy, pandas, or xarray object from a memory-mappable XNpy store.
+    jobs: list[tuple[Any, str]] = []
 
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        XNpy store directory.
-    variable : str, optional
-        Dataset variable or DataFrame column to return. If omitted, return the
-        complete stored object.
-    mmap_mode : {"r", "r+", "c"} or None, default="r"
-        Memory-map mode passed to :func:`numpy.load`. Use ``None`` to load payloads
-        into ordinary in-memory NumPy arrays.
-
-    Returns
-    -------
-    numpy.ndarray or pandas.DataFrame or pandas.Series or xarray.DataArray or
-    xarray.Dataset
-        Reconstructed object. Array payloads are memory-mapped unless
-        ``mmap_mode=None``.
-
-    Notes
-    -----
-    Memory mapping defers physical reads until array pages are accessed, so stores
-    larger than available RAM can be opened without materializing their payloads.
-    """
-    return XNpyStore(path).open(variable=variable, mmap_mode=mmap_mode)
-
-
-class XNpyStore:
-    """Directory store for memory-mappable NumPy, pandas, and xarray objects."""
-
-    META_FILE = "metadata.json"
-    DEFAULT_MAX_WORKERS = 4
-    SLAB_BYTES = 256 * 1024**2
-
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.meta_path = self.path / self.META_FILE
-        self._jobs: list[tuple[Any, Path]] = []
-
-    def metadata(self) -> dict[str, Any]:
-        """Return the JSON manifest without opening array payloads."""
-        return json.loads(self.meta_path.read_text())
-
-    def open(
-        self,
-        variable: str | None = None,
-        *,
-        mmap_mode: str | None = "r",
-    ) -> np.ndarray | pd.DataFrame | pd.Series | xr.DataArray | xr.Dataset:
-        """Open the stored object, one Dataset variable, or one DataFrame column."""
-        metadata = self.metadata()
-        kind = metadata["kind"]
-
-        if kind == "ndarray":
-            return np.load(
-                self.path / metadata["file"],
-                mmap_mode=mmap_mode,
-                allow_pickle=False,
-            )
-
-        if kind == "dataframe":
-            frame = pd.DataFrame(
-                {
-                    name: np.load(
-                        self.path / file,
-                        mmap_mode=mmap_mode,
-                        allow_pickle=False,
-                    )
-                    for name, file in metadata["columns"].items()
-                },
-                index=pd.Index(
-                    np.load(
-                        self.path / metadata["index"],
-                        mmap_mode=mmap_mode,
-                        allow_pickle=False,
-                    ),
-                    name=metadata["index_name"],
-                ),
-                copy=False,
-            )
-            return frame if variable is None else frame[variable]
-
-        coords = {
-            name: self._load_variable(info, mmap_mode)
-            for name, info in metadata["coords"].items()
-        }
-
-        if kind == "dataarray":
-            return xr.DataArray(
-                self._load_variable(metadata["variable"], mmap_mode),
-                coords=coords,
-                name=metadata["name"],
-            )
-
-        dataset = xr.Dataset(
-            {
-                name: self._load_variable(info, mmap_mode)
-                for name, info in metadata["variables"].items()
-            },
-            coords=coords,
-            attrs=metadata["attrs"],
-        )
-        return dataset if variable is None else dataset[variable]
-
-    def to_disk(
-        self,
-        obj: np.ndarray | pd.DataFrame | xr.DataArray | xr.Dataset,
-        *,
-        mode: Literal["w", "w-"] = "w-",
-        parallel: bool = False,
-        max_workers: int | None = None,
-    ) -> None:
-        """Write an ndarray, DataFrame, DataArray, or Dataset to the store."""
-        if mode not in {"w", "w-"}:
-            raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
-
-        if self.path.exists():
-            if mode == "w-":
-                raise FileExistsError(self.path)
-            shutil.rmtree(self.path)
-
-        self._jobs = []
-
-        if isinstance(obj, xr.Dataset):
-            metadata = {
-                "kind": "dataset",
-                "attrs": dict(obj.attrs),
-                "variables": {
-                    name: self._add_variable(var, "variables", name)
-                    for name, var in obj.data_vars.items()
-                },
-                "coords": {
-                    name: self._add_variable(coord, "coords", name)
-                    for name, coord in obj.coords.items()
-                },
-            }
-        elif isinstance(obj, xr.DataArray):
-            metadata = {
-                "kind": "dataarray",
-                "name": obj.name,
-                "variable": self._add_variable(
-                    obj,
-                    "variables",
-                    "data" if obj.name is None else obj.name,
-                ),
-                "coords": {
-                    name: self._add_variable(coord, "coords", name)
-                    for name, coord in obj.coords.items()
-                },
-            }
-        elif isinstance(obj, pd.DataFrame):
-            metadata = {
-                "kind": "dataframe",
-                "index_name": obj.index.name,
-                "index": self._add(obj.index.to_numpy(), "coords", "index"),
-                "columns": {
-                    str(name): self._add(column.to_numpy(), "variables", name)
-                    for name, column in obj.items()
-                },
-            }
-        else:
-            metadata = {"kind": "ndarray", "file": self._add(obj, "variables", "array")}
-
-        try:
-            self.path.mkdir(parents=True)
-            for folder in {path.parent for _, path in self._jobs}:
-                folder.mkdir(exist_ok=True)
-
-            workers = (max_workers or self.DEFAULT_MAX_WORKERS) if parallel else 1
-            with ThreadPoolExecutor(workers) as executor:
-                list(executor.map(self._save, *zip(*self._jobs)))
-
-            with self.meta_path.open("w") as file:
-                json.dump(metadata, file, default=self._json_default)
-        except Exception:
-            shutil.rmtree(self.path, ignore_errors=True)
-            raise
-
-    def _load_variable(
-        self,
-        info: dict[str, Any],
-        mmap_mode: str | None,
-    ) -> xr.Variable:
-        return xr.Variable(
-            info["dims"],
-            np.load(self.path / info["file"], mmap_mode=mmap_mode, allow_pickle=False),
-            attrs=info["attrs"],
-        )
-
-    def _add(self, source: Any, folder: str, name: Any) -> str:
+    def add(source: Any, folder: str, name: Any) -> str:
         file = f"{folder}/{name}.npy"
-        self._jobs.append((source, self.path / file))
+        jobs.append((source, file))
         return file
 
-    def _add_variable(
-        self,
-        source: xr.DataArray,
-        folder: str,
-        name: Any,
-    ) -> dict[str, Any]:
+    def add_variable(source: xr.DataArray, folder: str, name: Any) -> dict[str, Any]:
         return {
             "dims": list(source.dims),
             "attrs": dict(source.attrs),
-            "file": self._add(source, folder, name),
+            "file": add(source, folder, name),
         }
 
-    def _save(self, source: Any, path: Path) -> None:
+    if isinstance(obj, xr.Dataset):
+        metadata: dict[str, Any] = {
+            "kind": "dataset",
+            "attrs": dict(obj.attrs),
+            "variables": {
+                name: add_variable(var, "variables", name)
+                for name, var in obj.data_vars.items()
+            },
+            "coords": {
+                name: add_variable(coord, "coords", name)
+                for name, coord in obj.coords.items()
+            },
+        }
+    elif isinstance(obj, xr.DataArray):
+        metadata = {
+            "kind": "dataarray",
+            "name": obj.name,
+            "variable": add_variable(
+                obj,
+                "variables",
+                "data" if obj.name is None else obj.name,
+            ),
+            "coords": {
+                name: add_variable(coord, "coords", name)
+                for name, coord in obj.coords.items()
+            },
+        }
+    elif isinstance(obj, pd.DataFrame):
+        metadata = {
+            "kind": "dataframe",
+            "index_name": obj.index.name,
+            "index": add(obj.index.to_numpy(), "coords", "index"),
+            "columns": [
+                {"label": label, "file": add(column.to_numpy(), "columns", position)}
+                for position, (label, column) in enumerate(obj.items())
+            ],
+        }
+    else:
+        metadata = {"kind": "ndarray", "file": add(obj, "variables", "array")}
+
+    def json_default(value: Any) -> Any:
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        raise TypeError(f"Unsupported metadata type: {type(value).__name__}.")
+
+    def write_array(source: Any, path: Path) -> None:
+        slab_bytes = 256 * 1024**2
+
         # Object arrays (e.g. strings) cannot be memory-mapped or saved without pickle.
         if source.dtype == object:
             source = np.asarray(source).astype(str)
@@ -286,25 +138,183 @@ class XNpyStore:
             data = source.data if isinstance(source, xr.DataArray) else source
             da.store(data, target, lock=False, scheduler="threads")
             target.flush()
-        elif source.nbytes > self.SLAB_BYTES and source.ndim:
+        elif source.nbytes > slab_bytes and source.ndim:
             # Stream large or lazily indexed arrays in bounded first-axis slabs.
             target = np.lib.format.open_memmap(
                 path, "w+", dtype=source.dtype, shape=source.shape
             )
-            step = max(self.SLAB_BYTES * source.shape[0] // source.nbytes, 1)
+            step = max(slab_bytes * source.shape[0] // source.nbytes, 1)
             for start in range(0, source.shape[0], step):
                 target[start : start + step] = np.asarray(source[start : start + step])
             target.flush()
         else:
             np.save(path, np.asarray(source), allow_pickle=False)
 
-    @staticmethod
-    def _json_default(value: Any) -> Any:
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, np.ndarray):
-            return value.tolist()
-        raise TypeError(f"Unsupported metadata type: {type(value).__name__}.")
+    try:
+        root.mkdir(parents=True)
+        for folder in {(root / file).parent for _, file in jobs}:
+            folder.mkdir(exist_ok=True)
+
+        workers = (max_workers or 4) if parallel else 1
+        with ThreadPoolExecutor(workers) as executor:
+            list(executor.map(lambda job: write_array(job[0], root / job[1]), jobs))
+
+        with (root / "metadata.json").open("w") as file:
+            json.dump(metadata, file, default=json_default)
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+def open_xnpy(
+    path: str | Path,
+    variable: Hashable | None = None,
+    *,
+    mmap_mode: Literal["r", "r+", "c"] | None = "r",
+) -> np.ndarray | pd.DataFrame | xr.DataArray | xr.Dataset:
+    """Open a NumPy, pandas, or xarray object from a memory-mappable XNpy store.
+
+    The return type is determined at runtime from the store manifest. Use
+    :func:`open_xnpy_dataframe` or :func:`open_xnpy_dataset` for static typing.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        XNpy store directory.
+    variable : hashable, optional
+        Dataset variable or DataFrame column label to return. Ignored for
+        ndarray and DataArray stores. For a DataFrame, only the selected
+        column payloads are opened and a one-column DataFrame is returned. If
+        omitted, return the complete stored object.
+    mmap_mode : {"r", "r+", "c"} or None, default="r"
+        Memory-map mode passed to :func:`numpy.load`. Use ``None`` to load payloads
+        into ordinary in-memory NumPy arrays.
+
+    Returns
+    -------
+    numpy.ndarray or pandas.DataFrame or xarray.DataArray or xarray.Dataset
+        Reconstructed object. A Dataset store with ``variable`` returns a
+        DataArray. Array payloads are memory-mapped unless ``mmap_mode=None``.
+
+    Notes
+    -----
+    Memory mapping defers physical reads until array pages are accessed, so stores
+    larger than available RAM can be opened without materializing their payloads.
+    """
+    root = Path(path)
+    metadata = json.loads((root / "metadata.json").read_text())
+    kind = metadata["kind"]
+
+    def load(file: str) -> np.ndarray:
+        return np.load(root / file, mmap_mode=mmap_mode, allow_pickle=False)
+
+    def load_variable(info: dict[str, Any]) -> xr.Variable:
+        return xr.Variable(info["dims"], load(info["file"]), attrs=info["attrs"])
+
+    def restore_label(value: Any) -> Hashable:
+        """Restore tuple labels that JSON serialized as lists."""
+        return (
+            tuple(restore_label(item) for item in value)
+            if isinstance(value, list)
+            else value
+        )
+
+    if kind == "ndarray":
+        return load(metadata["file"])
+    elif kind == "dataframe":
+        columns = [(restore_label(c["label"]), c["file"]) for c in metadata["columns"]]
+        if variable is not None:
+            columns = [column for column in columns if column[0] == variable]
+            if not columns:
+                raise KeyError(variable)
+
+        frame = pd.DataFrame(
+            {position: load(file) for position, (_, file) in enumerate(columns)},
+            index=pd.Index(
+                load(metadata["index"]),
+                name=restore_label(metadata["index_name"]),
+            ),
+            copy=False,
+        )
+        frame.columns = pd.Index([label for label, _ in columns], tupleize_cols=False)
+        return frame
+    elif kind in {"dataarray", "dataset"}:
+        coords = {
+            name: load_variable(info) for name, info in metadata["coords"].items()
+        }
+        if kind == "dataarray":
+            return xr.DataArray(
+                load_variable(metadata["variable"]),
+                coords=coords,
+                name=metadata["name"],
+            )
+
+        dataset = xr.Dataset(
+            {name: load_variable(info) for name, info in metadata["variables"].items()},
+            coords=coords,
+            attrs=metadata["attrs"],
+        )
+        return dataset if variable is None else dataset[variable]
+    else:
+        raise ValueError(f"Unknown XNpy kind: {kind!r}.")
+
+
+def open_xnpy_ndarray(
+    path: str | Path,
+    *,
+    mmap_mode: Literal["r", "r+", "c"] | None = "r",
+) -> np.ndarray:
+    """Open an ndarray store.
+
+    Raises
+    ------
+    TypeError
+        If the store does not hold an ndarray.
+    """
+    obj = open_xnpy(path, mmap_mode=mmap_mode)
+    if not isinstance(obj, np.ndarray):
+        raise TypeError(f"Store {path} does not hold an ndarray.")
+    return obj
+
+
+def open_xnpy_dataframe(
+    path: str | Path,
+    variable: Hashable | None = None,
+    *,
+    mmap_mode: Literal["r", "r+", "c"] | None = "r",
+) -> pd.DataFrame:
+    """Open a DataFrame store, optionally restricted to one column label.
+
+    Only the payloads of the selected column are opened. The result is always
+    a DataFrame carrying the stored index.
+
+    Raises
+    ------
+    TypeError
+        If the store does not hold a DataFrame.
+    """
+    obj = open_xnpy(path, variable, mmap_mode=mmap_mode)
+    if not isinstance(obj, pd.DataFrame):
+        raise TypeError(f"Store {path} does not hold a DataFrame.")
+    return obj
+
+
+def open_xnpy_dataset(
+    path: str | Path,
+    *,
+    mmap_mode: Literal["r", "r+", "c"] | None = "r",
+) -> xr.Dataset:
+    """Open a Dataset store.
+
+    Raises
+    ------
+    TypeError
+        If the store does not hold a Dataset.
+    """
+    obj = open_xnpy(path, mmap_mode=mmap_mode)
+    if not isinstance(obj, xr.Dataset):
+        raise TypeError(f"Store {path} does not hold a Dataset.")
+    return obj
 
 
 class SharedMemoryObject:

@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from xgeo import MPIContext
-
 import xarray as xr
+
+from xgeo import MPIContext
 
 mpi = MPIContext()
 

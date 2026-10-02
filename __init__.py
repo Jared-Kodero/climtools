@@ -14,7 +14,7 @@ The top level exposes the geospatial and plotting API:
   xarray.
 
 and the shared utilities: ``LockedLogger``, ``LockFile``, ``RedirectStreams``,
-``locked_print``, ``exclude_key``, ``N_CPUS``, ``SerialProgressBar``,
+``locked_print``, ``exclude_key``, ``nproc``, ``SerialProgressBar``,
 ``DaskProgressBar``, ``operator`` and ``MPIContext``. The CDO wrapper is the
 module :mod:`xgeo.cdo.pycdo`.
 
@@ -56,15 +56,21 @@ from .xarray.accessors import fix_xarray
 
 if TYPE_CHECKING:
     from .core import operator, preprocess, stats
-    from .core.io import SharedMemoryObject, XNpyStore, open_xnpy, to_xnpy
+    from .core.io import (
+        SharedMemoryObject,
+        open_xnpy_dataframe,
+        open_xnpy_dataset,
+        open_xnpy_ndarray,
+        to_xnpy,
+    )
     from .core.progress import SerialProgressBar
     from .core.utils import (
-        N_CPUS,
         LockedLogger,
         LockFile,
         RedirectStreams,
         exclude_key,
         locked_print,
+        nproc,
     )
     from .mpi.context import MPIContext  # noqa: F401
     from .viz import cmaps
@@ -104,7 +110,6 @@ warnings.filterwarnings("always", module=r"xgeo\..*")
 #: Python error to the fate of the whole step. ``xgeo.<name>`` and
 #: ``from xgeo import <name>`` still work for every name.
 __all__ = [
-    "N_CPUS",
     "DaskProgressBar",
     "LockFile",
     "LockedLogger",
@@ -112,14 +117,17 @@ __all__ = [
     "SerialProgressBar",
     "SetupDask",
     "SharedMemoryObject",
-    "XNpyStore",
     "add_local_solar_time",
     "cmaps",
     "exclude_key",
     "fillgaps",
     "locked_print",
     "mask",
+    "nproc",
     "open_xnpy",
+    "open_xnpy_dataframe",
+    "open_xnpy_dataset",
+    "open_xnpy_ndarray",
     "operator",
     "plot",
     "preprocess",
@@ -136,12 +144,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "LockedLogger": (".core.utils", "LockedLogger"),
     "MPIContext": (".mpi.context", "MPIContext"),
     "MPIXarray": (".xarray.core", "MPIXarray"),
-    "N_CPUS": (".core.utils", "N_CPUS"),
+    "nproc": (".core.utils", "nproc"),
     "RedirectStreams": (".core.utils", "RedirectStreams"),
     "SerialProgressBar": (".core.progress", "SerialProgressBar"),
     "SetupDask": (".xarray.utils", "SetupDask"),
     "SharedMemoryObject": (".core.io", "SharedMemoryObject"),
-    "XNpyStore": (".core.io", "XNpyStore"),
     "add_local_solar_time": (".xarray.utils", "add_local_solar_time"),
     "cmaps": (".viz.cmaps", None),
     "create_distributed_dataarray": (".xarray.io", "create_distributed_dataarray"),
@@ -155,7 +162,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "mask": (".xarray.utils", "mask"),
     "nc_append": (".xarray.io", "nc_append"),
     "open_distributed_dataset": (".xarray.io", "open_distributed_dataset"),
-    "open_xnpy": (".core.io", "open_xnpy"),
+    "open_xnpy_ndarray": (".core.io", "open_xnpy_ndarray"),
+    "open_xnpy_dataframe": (".core.io", "open_xnpy_dataframe"),
+    "open_xnpy_dataset": (".core.io", "open_xnpy_dataset"),
     "operator": (".core.operator", None),
     "plot": (".viz.plotting", None),
     "preprocess": (".core.preprocess", None),

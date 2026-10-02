@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING
 import cartopy.util
 import numpy as np
 import pandas as pd
+import xarray as xr
 from cf_xarray import *
 from scipy.interpolate import griddata
 
-import xarray as xr
-
-from ..core.utils import N_CPUS, TMP
+from ..core.utils import TMP, nproc
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -774,7 +773,7 @@ class SetupDask:
     def __init__(
         self,
         workers: int = 1,
-        threads_per_worker: int = N_CPUS,
+        threads_per_worker: int = nproc,
         processes: bool = False,
         filter_warnings: bool = True,
         memory_limit: str | int = "auto",

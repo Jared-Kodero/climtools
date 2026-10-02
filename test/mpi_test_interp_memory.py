@@ -3,6 +3,7 @@
 import tracemalloc
 
 import numpy as np
+
 import xgeo as xg
 import xgeo.xarray.elementwise as ew
 from xgeo import MPIContext
