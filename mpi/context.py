@@ -454,24 +454,26 @@ class MPIContext(MPIDiagnostics):
 
     def receive(
         self,
-        source: int = MPI.ANY_SOURCE,
+        source: int | None = None,
         *,
-        tag: int = MPI.ANY_TAG,
+        tag: int | None = None,
     ) -> T:
         """Receive a Python object from a rank.
 
         Parameters
         ----------
         source : int, optional
-            Source rank.
+            Source rank. Defaults to ``MPI.ANY_SOURCE``.
         tag : int, optional
-            MPI message tag.
+            MPI message tag. Defaults to ``MPI.ANY_TAG``.
 
         Returns
         -------
         T
             Received object.
         """
+        source = MPI.ANY_SOURCE if source is None else source
+        tag = MPI.ANY_TAG if tag is None else tag
         return cast("T", self.comm.recv(source=source, tag=tag))
 
     def broadcast(self, value: T | None, *, root: int = 0) -> T:

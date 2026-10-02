@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 
@@ -26,7 +27,10 @@ if TYPE_CHECKING:
     from ..mpi.context import MPIContext
 
 
-_TOPOLOGY_KEYVAL = MPI.Comm.Create_keyval()
+@cache
+def _topology_keyval() -> int:
+    """Create the topology-cache keyval on first use, after ``MPI_Init``."""
+    return MPI.Comm.Create_keyval()
 
 
 def _define_layout_nd(extents: Sequence[int], ndivs: int) -> tuple[int, ...]:
@@ -210,10 +214,10 @@ def get_cartesian_domain(
     # Include sizes in the cache key so same-named dimensions with different extents
     # cannot collide.
     cache_key = (dims, tuple(int(sizes[d]) for d in dims))
-    cache = comm.Get_attr(_TOPOLOGY_KEYVAL)
+    cache = comm.Get_attr(_topology_keyval())
     if cache is None:
         cache = {}
-        comm.Set_attr(_TOPOLOGY_KEYVAL, cache)
+        comm.Set_attr(_topology_keyval(), cache)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached

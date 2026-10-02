@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import numpy as np
 import xarray as xr
-from mpi4py.util import dtlib as _dtlib
 
 from ..mpp.ext_collectives import reduce_scatter
 from ..mpp.ext_domains import get_cartesian_domain
@@ -26,14 +25,7 @@ from ..mpp.mpp import _mpp_reduce
 from .chunks import get_chunk_bounds, get_effective_chunk_size, prune_chunk_info
 from .meta import choose_partition_dim, mpp_get_meta, mpp_update_meta, strip_mpi_meta
 
-_OP_LIST: tuple[tuple[Any, str], ...] = (
-    (MPI.SUM, "SUM"),
-    (MPI.PROD, "PROD"),
-    (MPI.MIN, "MIN"),
-    (MPI.MAX, "MAX"),
-    (MPI.LAND, "LAND"),
-    (MPI.LOR, "LOR"),
-)
+_OP_NAMES: tuple[str, ...] = ("SUM", "PROD", "MIN", "MAX", "LAND", "LOR")
 
 MPI_REDUCIBLE_KINDS = "biufc"
 
@@ -44,8 +36,8 @@ CHECK_COLLECTIVE_AGREEMENT = True
 
 def op_name(op: MPI.Op) -> str:
     """Return a rank-stable label for an MPI reduction operation."""
-    for candidate, name in _OP_LIST:
-        if op == candidate:
+    for name in _OP_NAMES:
+        if op == getattr(MPI, name):
             return name
     return "OP"
 
@@ -53,9 +45,12 @@ def op_name(op: MPI.Op) -> str:
 @cache
 def mpi_representable(dtype_string: str) -> bool:
     """Return whether a NumPy dtype has a usable predefined MPI datatype."""
+    # Imported here: ``mpi4py.util.dtlib`` imports ``mpi4py.MPI`` (MPI_Init).
+    from mpi4py.util import dtlib
+
     dtype = np.dtype(dtype_string)
     try:
-        datatype = _dtlib.from_numpy_dtype(dtype)
+        datatype = dtlib.from_numpy_dtype(dtype)
     except BaseException:
         return False
     try:
