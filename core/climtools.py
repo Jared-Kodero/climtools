@@ -23,21 +23,21 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO
 import dask
 import numpy as np
 import pandas as pd
+
 import xarray as xr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from logging import Handler, Logger
 
-nproc: int = len(os.sched_getaffinity(0))
+
 HOST: str = socket.gethostname()
 USER: str = getpass.getuser()
 HOME: str = Path.home()
 
-
-TMP = Path(f"/tmp/{USER}/xgeo/{uuid.uuid4().hex}")
-TMP.mkdir(parents=True, exist_ok=True)
-
+nproc: int = len(os.sched_getaffinity(0))
+tmp = Path(f"/tmp/{USER}/xgeo/{uuid.uuid4().hex}")
+tmp.mkdir(parents=True, exist_ok=True)
 
 script_dir = Path(__file__).resolve().parent
 ipykernel = "ipykernel" in sys.modules
@@ -541,7 +541,7 @@ class RedirectStreams:
 
 
 def _cleanup(*_):
-    shutil.rmtree(TMP, ignore_errors=True)
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 _previous_handlers: dict[int, Any] = {}

@@ -50,6 +50,8 @@ from typing import TYPE_CHECKING, Any
 
 import dask.diagnostics
 
+import xarray  # noqa: F401  must load before core.climtools (circular import)
+
 from .core.climtools import apply_widget_css
 from .core.progress import DaskProgressBar
 from .xarray.accessors import fix_xarray

@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import xarray as xr
 from dask.callbacks import Callback
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
@@ -36,7 +35,9 @@ from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.contour import QuadContourSet
 from matplotlib.image import AxesImage
 
-from ..core.climtools import TMP, nproc
+import xarray as xr
+
+from ..core.climtools import nproc, tmp
 from ..core.progress import DaskProgressBar, SerialProgressBar
 from .plot_utils import add_colorbar as _add_colorbar
 from .plot_utils import (
@@ -2567,7 +2568,7 @@ class Animate:
                 )
         if outfile is None:
             self.outfile = (
-                TMP / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
+                tmp / "animations" / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
             )
 
             self.user_outfile = False

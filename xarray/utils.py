@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING
 import cartopy.util
 import numpy as np
 import pandas as pd
-import xarray as xr
 from cf_xarray import *
 from scipy.interpolate import griddata
 
-from ..core.climtools import TMP, nproc
+import xarray as xr
+
+from ..core.climtools import nproc, tmp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -462,7 +463,7 @@ def regrid(
             },
         ).chunk(chunks)
 
-    weight_file = TMP / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
+    weight_file = tmp / f"{method}_{grid_id(in_coords)}_{grid_id(out_coords)}"
     reuse = weight_file.exists()
 
     regridder = xe.Regridder(
