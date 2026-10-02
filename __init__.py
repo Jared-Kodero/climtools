@@ -71,8 +71,7 @@ if TYPE_CHECKING:
     )
     from .core.progress import SerialProgressBar
     from .mpi.context import MPIContext  # noqa: F401
-    from .viz import cmaps
-    from .viz import plotting as plot
+    from .viz import cmaps, plot
     from .xarray.core import MPIXarray  # noqa: F401
     from .xarray.io import (
         create_distributed_dataarray,  # noqa: F401
@@ -122,7 +121,6 @@ __all__ = [
     "locked_print",
     "mask",
     "nproc",
-    "open_xnpy",
     "open_xnpy_dataframe",
     "open_xnpy_dataset",
     "open_xnpy_ndarray",
@@ -164,7 +162,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "open_xnpy_dataframe": (".core.climtools", "open_xnpy_dataframe"),
     "open_xnpy_dataset": (".core.climtools", "open_xnpy_dataset"),
     "operator": (".core.operator", None),
-    "plot": (".viz.plotting", None),
+    "plot": (".viz.plot", None),
     "preprocess": (".core.preprocess", None),
     "regrid": (".xarray.utils", "regrid"),
     "sel_transect": (".xarray.utils", "sel_transect"),

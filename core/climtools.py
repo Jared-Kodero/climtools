@@ -585,7 +585,8 @@ def to_xnpy(
 ) -> None:
     """Write a NumPy, pandas, or xarray object to a memory-mappable XNpy store.
 
-    Large arrays are streamed in bounded slabs. All array writes (variables,
+    In-memory arrays are written with :func:`numpy.save`. Large lazily indexed
+    arrays are streamed in bounded, chunk-aligned slabs. All array writes (variables,
     coordinates, columns, masks) are built as :func:`dask.delayed` tasks and
     Dask-backed variables as :func:`dask.array.store` tasks. They execute in a
     single :func:`dask.compute` call, so columns, variables, and chunks run
@@ -593,9 +594,12 @@ def to_xnpy(
 
     Metadata (``attrs``, labels, names) is encoded with type tags so that tuples,
     dicts with non-string keys, and nested pandas or xarray objects (stored as
-    sub-stores under ``attrs/``) round-trip. Text and categorical columns keep a
-    missing-value mask and their categories. MultiIndex rows and columns are
-    supported.
+    sub-stores under ``attrs/``) round-trip. Object and ``boolean`` bool columns
+    are stored as int8 codes (1 true, 0 false, -1 missing) with their dtype.
+    Text, nullable ``Int64``/``Float64``, and object numeric columns keep a
+    missing-value mask; categorical columns keep their categories. Every column
+    and index level stores its pandas dtype, which the reader restores.
+    MultiIndex rows and columns are supported.
 
     Parameters
     ----------
@@ -623,6 +627,10 @@ def to_xnpy(
     """
     if mode not in {"w", "w-"}:
         raise ValueError(f"Unsupported XNpy mode: {mode!r}.")
+    # Process workers would write Dask chunks into pickled copies of the memmap
+    # target, silently leaving zeros in the store.
+    if scheduler not in {"threads", "synchronous"}:
+        raise ValueError(f"Unsupported XNpy scheduler: {scheduler!r}.")
 
     root = Path(path)
     if root.exists():
@@ -646,22 +654,63 @@ def to_xnpy(
         }
 
     def add_column(values: Any, folder: str, name: Any) -> dict[str, Any]:
+        # Every column records its pandas dtype so the reader restores it exactly.
         series = pd.Series(values)
+        dtype = str(series.dtype)
         if isinstance(series.dtype, pd.CategoricalDtype):
             return {
                 "encoding": "categorical",
+                "dtype": dtype,
                 "file": add(series.cat.codes.to_numpy(), folder, name),
                 "categories": series.cat.categories.tolist(),
                 "ordered": bool(series.cat.ordered),
             }
+        inferred = pd.api.types.infer_dtype(series) if series.dtype == object else None
+        if isinstance(series.dtype, pd.BooleanDtype) or inferred == "boolean":
+            # Bools with missing values are stored as int8 codes 1/0 (-1 missing)
+            # with the column dtype, so "False" text can never read back as True.
+            mask = series.isna().to_numpy()
+            values = series.fillna(False).to_numpy(dtype=bool)
+            return {
+                "encoding": "bool",
+                "dtype": dtype,
+                "file": add(np.where(mask, -1, values).astype(np.int8), folder, name),
+            }
+        if isinstance(series.array, pd.arrays.IntegerArray | pd.arrays.FloatingArray):
+            # Nullable int and float keep their dtype instead of float or text.
+            numpy_dtype = series.dtype.numpy_dtype
+            values = series.to_numpy(numpy_dtype, na_value=numpy_dtype.type(0))
+            return {
+                "encoding": "masked",
+                "dtype": dtype,
+                "file": add(values, folder, name),
+                "mask": add(series.isna().to_numpy(), folder, f"{name}.mask"),
+            }
+        if inferred in {"integer", "floating", "mixed-integer-float"}:
+            # Object numeric columns with missing values: store typed values and a mask.
+            mask = series.isna().to_numpy()
+            valid = np.asarray(series[~mask].tolist())
+            if valid.dtype != object:
+                values = np.zeros(len(series), dtype=valid.dtype)
+                values[~mask] = valid
+                return {
+                    "encoding": "masked",
+                    "dtype": dtype,
+                    "file": add(values, folder, name),
+                    "mask": add(mask, folder, f"{name}.mask"),
+                }
         if series.dtype == object or isinstance(series.dtype, pd.StringDtype):
             return {
                 "encoding": "string",
+                "dtype": dtype,
                 "file": add(series.fillna("").to_numpy().astype(str), folder, name),
                 "mask": add(series.isna().to_numpy(), folder, f"{name}.mask"),
-                "extension": isinstance(series.dtype, pd.StringDtype),
             }
-        return {"encoding": "array", "file": add(series.to_numpy(), folder, name)}
+        return {
+            "encoding": "array",
+            "dtype": dtype,
+            "file": add(series.to_numpy(), folder, name),
+        }
 
     def add_index(index: pd.Index) -> list[dict[str, Any]]:
         return [
@@ -739,25 +788,21 @@ def to_xnpy(
             return {"__dict__": [[encode(k), encode(v)] for k, v in value.items()]}
         raise TypeError(f"Unsupported metadata type: {type(value).__name__}.")
 
-    def write_array(source: Any, path: Path) -> None:
-        slab_bytes = 256 * 1024**2
+    slab_bytes = 64 * 1024**2
 
-        if source.nbytes > slab_bytes and source.ndim:
-            # Stream large or lazily indexed arrays in bounded first-axis slabs.
-            target = np.lib.format.open_memmap(
-                path, "w+", dtype=source.dtype, shape=source.shape
-            )
-            step = max(slab_bytes * source.shape[0] // source.nbytes, 1)
-            for start in range(0, source.shape[0], step):
-                target[start : start + step] = np.asarray(source[start : start + step])
-            target.flush()
-        else:
-            np.save(path, np.asarray(source), allow_pickle=False)
+    def write_array(source: Any, path: Path) -> None:
+        np.save(path, np.asarray(source), allow_pickle=False)
+
+    def write_slab(source: xr.Variable, path: Path, offset: int) -> None:
+        slab = np.ascontiguousarray(source)
+        with path.open("r+b") as file:
+            file.seek(offset)
+            file.write(slab)
 
     def flush(target: np.ndarray, *_: Any) -> None:
         target.flush()
 
-    def make_task(source: Any, path: Path) -> Any:
+    def make_task(source: Any, path: Path) -> list[Any]:
         # Object arrays (e.g. strings) cannot be memory-mapped or saved without pickle.
         if source.dtype == object:
             source = np.asarray(source).astype(str)
@@ -770,8 +815,43 @@ def to_xnpy(
             )
             data = source.data if isinstance(source, xr.DataArray) else source
             stored = da.store(data, target, lock=False, compute=False)
-            return dask.delayed(flush, pure=False)(target, stored)
-        return dask.delayed(write_array, pure=False)(source, path)
+            return [dask.delayed(flush, pure=False)(target, stored)]
+
+        if (
+            isinstance(source, np.ndarray)
+            or source.nbytes <= slab_bytes
+            or not source.ndim
+        ):
+            # np.save writes in-memory arrays sequentially without a full copy.
+            return [dask.delayed(write_array, pure=False)(source, path)]
+
+        # Lazily indexed arrays (e.g. netCDF, HDF5, or larger than RAM) are written
+        # in contiguous C-order blocks of about slab_bytes. Blocks split the first
+        # axis whose single index fits in slab_bytes, iterating any leading axes,
+        # so no task loads more than one block regardless of the array shape.
+        # Blocks are aligned to on-disk chunks so no chunk is decompressed twice.
+        offset = np.lib.format.open_memmap(
+            path, "w+", dtype=source.dtype, shape=source.shape
+        ).offset
+        strides = [
+            source.dtype.itemsize * int(np.prod(source.shape[axis + 1 :]))
+            for axis in range(source.ndim)
+        ]
+        axis = next(axis for axis, size in enumerate(strides) if size <= slab_bytes)
+        chunk = source.encoding.get("preferred_chunks", {}).get(source.dims[axis], 1)
+        step = max(slab_bytes // strides[axis] // chunk, 1) * chunk
+        return [
+            # Each task gets only its lazy slice; nothing is read until it runs.
+            dask.delayed(write_slab, pure=False)(
+                source.variable[(*lead, slice(start, start + step))],
+                path,
+                offset
+                + sum(i * size for i, size in zip(lead, strides, strict=False))
+                + start * strides[axis],
+            )
+            for lead in np.ndindex(*source.shape[:axis])
+            for start in range(0, source.shape[axis], step)
+        ]
 
     try:
         metadata = encode(metadata)
@@ -779,7 +859,9 @@ def to_xnpy(
         for folder in {(root / file).parent for _, file in jobs}:
             folder.mkdir(exist_ok=True)
 
-        tasks = [make_task(source, root / file) for source, file in jobs]
+        tasks = [
+            task for source, file in jobs for task in make_task(source, root / file)
+        ]
         dask.compute(*tasks, scheduler=scheduler, num_workers=num_workers)
 
         for position, value in enumerate(nested):
@@ -866,10 +948,33 @@ def open_xnpy(
             return pd.Categorical.from_codes(
                 values, spec["categories"], ordered=spec["ordered"]
             )
+        if spec["encoding"] == "bool":
+            codes = np.asarray(values)
+            if spec["dtype"] == "boolean":
+                return pd.arrays.BooleanArray(codes == 1, codes < 0)
+            out = (codes == 1).astype(object)
+            out[codes < 0] = np.nan
+            # An object Index keeps object dtype in Series, DataFrame, and indexes; a
+            # bare object ndarray of strings would be inferred as str by pandas >= 3.
+            return pd.Index(out, dtype=object, copy=False)
+        if spec["encoding"] == "masked":
+            mask = np.asarray(load(spec["mask"]))
+            if spec["dtype"] == "object":
+                out = values.astype(object)
+                out[mask] = np.nan
+                return pd.Index(out, dtype=object, copy=False)
+            array_type = pd.api.types.pandas_dtype(spec["dtype"]).construct_array_type()
+            return array_type(np.asarray(values), mask)
         if spec["encoding"] == "string":
             out = values.astype(object)
-            out[np.asarray(load(spec["mask"]))] = pd.NA if spec["extension"] else np.nan
-            return pd.array(out, dtype="string") if spec["extension"] else out
+            # Stores written before dtypes were saved carry an "extension" flag.
+            dtype = spec.get("dtype", "string" if spec.get("extension") else "object")
+            if dtype == "object":
+                out[np.asarray(load(spec["mask"]))] = np.nan
+                return pd.Index(out, dtype=object, copy=False)
+            dtype = pd.api.types.pandas_dtype(dtype)
+            out[np.asarray(load(spec["mask"]))] = dtype.na_value
+            return pd.array(out, dtype=dtype)
         return values
 
     def load_index() -> pd.Index:

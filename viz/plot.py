@@ -87,7 +87,7 @@ __all__ = [
     "GeoPlot",
     "animate",
     "create_figure",
-    "geo",
+    "geoplot",
     "theme",
 ]
 
@@ -2785,7 +2785,7 @@ class Animate:
         )
 
 
-def geo(
+def geoplot(
     da: xr.DataArray,
     *,
     x: str | None = None,
