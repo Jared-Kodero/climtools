@@ -1,4 +1,4 @@
-"""Expose geographic, plotting, xgeo_core_calculation, and preprocessing xarray accessors."""
+"""Expose geographic, plot, xgeo_core_calculation, and preprocessing xarray accessors."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from ..core import climtools as core_io
 from ..core import climtools as xgeo_core_utils
 from ..core import preprocess as xgeo_core_preprocess
 from ..core import stats as xgeo_core_calc
-from ..viz import plotting
+from ..viz import plot
 from . import io as xgeo_xarray_io
 from . import utils as xgeo_xarray_utils
 
@@ -430,7 +430,7 @@ class GeoBase:
 
 @xr.register_dataarray_accessor("xgeo")
 class GeoDataArray(GeoBase):
-    """DataArray ``.xgeo`` accessor for geospatial, plotting, and xgeo_core_calculation operations."""
+    """DataArray ``.xgeo`` accessor for geospatial, plot, and xgeo_core_calculation operations."""
 
     __slots__ = ()
 
@@ -510,7 +510,7 @@ class GeoDataArray(GeoBase):
         Parameters
         ----------
         x, y, col, row : str, optional
-            Coordinate names used for plotting and faceting.
+            Coordinate names used for plot and faceting.
         col_wrap : int, optional
             Number of columns for wrapped facets.
         figsize : tuple[float, float], optional
@@ -521,7 +521,7 @@ class GeoDataArray(GeoBase):
         interactive : bool, default False
             Configure Matplotlib for interactive notebook use.
         method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
-            Xarray plotting method.
+            Xarray plot method.
         projection : str, optional
             Cartopy projection name.
         cmap : str or matplotlib colormap, optional
@@ -581,20 +581,20 @@ class GeoDataArray(GeoBase):
         clabel_kwargs : dict, optional
             Additional ``Axes.clabel`` arguments.
         cyclic : bool, default False
-            Append a cyclic longitude point before plotting.
+            Append a cyclic longitude point before plot.
         **kwargs : Any
-            Additional xarray plotting arguments.
+            Additional xarray plot arguments.
 
         Returns
         -------
         GeoPlot
-            Composable map object.
+            Composable map object for geographic plots.
         """
 
         opts = xgeo_core_utils.exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
 
-        return plotting.geo(self._obj, **opts, **kwargs)
+        return plot.geoplot(self._obj, **opts, **kwargs)
 
     def animate(
         self,
@@ -679,7 +679,7 @@ class GeoDataArray(GeoBase):
         dim : str, default "time"
             Animation dimension.
         x, y, col, row : str, optional
-            Coordinate names used for plotting and faceting.
+            Coordinate names used for plot and faceting.
         col_wrap : int, optional
             Number of columns for wrapped facets.
         figsize : tuple[float, float], optional
@@ -688,7 +688,7 @@ class GeoDataArray(GeoBase):
             Share horizontal and vertical axis limits across facet panels in each
             frame. Ignored for non-faceted plots.
         method : {"default", "pcolormesh", "contourf", "contour", "imshow", "scatter"}
-            Xarray plotting method.
+            Xarray plot method.
         projection : str, optional
             Cartopy projection name.
         cmap : str or matplotlib colormap, optional
@@ -756,7 +756,7 @@ class GeoDataArray(GeoBase):
         frame_id : bool, default True
             Include the frame identifier in titles.
         **kwargs : Any
-            Additional xarray plotting arguments.
+            Additional xarray plot arguments.
 
         Returns
         -------
@@ -767,7 +767,7 @@ class GeoDataArray(GeoBase):
         opts = xgeo_core_utils.exclude_key("self", dict(locals()))
         kwargs = opts.pop("kwargs")
 
-        return plotting.animate(self._obj, **opts, **kwargs)
+        return plot.animate(self._obj, **opts, **kwargs)
 
     def quiver(
         self,
@@ -878,7 +878,7 @@ class GeoDataArray(GeoBase):
 
         kwargs = xgeo_core_utils.exclude_key("self", dict(locals()))
 
-        return plotting.plot_significance(self._obj, **kwargs)
+        return plot.plot_significance(self._obj, **kwargs)
 
     def corr(
         self,
