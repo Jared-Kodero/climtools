@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO
 import dask
 import numpy as np
 import pandas as pd
-
 import xarray as xr
 
 if TYPE_CHECKING:
@@ -878,7 +877,7 @@ def to_xnpy(
             )
 
         with (root / "metadata.json").open("w") as file:
-            json.dump(metadata, file)
+            json.dump(metadata, file, indent=2)
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
         raise
