@@ -334,15 +334,19 @@ class GeoBase:
         path: str | Path,
         *,
         mode: Literal["w", "w-"] = "w-",
-        parallel: bool = False,
-        max_workers: int | None = None,
+        scheduler: Literal["threads", "synchronous"] = "threads",
+        num_workers: int | None = None,
     ):
         """Write a NumPy or xarray object to a memory-mappable XNpy store.
 
-        Unchunked NumPy and xarray payloads are written directly with
-        :func:`numpy.save`. Chunked xarray variables are written incrementally to an
-        NPY memory map using :func:`numpy.lib.format.open_memmap`, avoiding
-        materialization of the complete variable in memory.
+        All array writes (variables, coordinates, columns, masks) are built as
+        :func:`dask.delayed` tasks and executed in a single :func:`dask.compute`
+        call. Chunked xarray variables are written incrementally to an NPY memory
+        map using :func:`numpy.lib.format.open_memmap` through
+        :func:`dask.array.store`, avoiding materialization of the complete variable
+        in memory. Unchunked payloads smaller than the slab size are written with
+        :func:`numpy.save`, and larger ones are streamed in bounded first-axis
+        slabs.
 
         Parameters
         ----------
@@ -351,31 +355,29 @@ class GeoBase:
         mode : {"w", "w-"}, default "w-"
             Write mode. ``"w"`` replaces an existing store, and ``"w-"`` requires
             that the store does not already exist.
-        parallel : bool, default False
-            Write Dataset variables and coordinates concurrently using a thread pool.
-        max_workers : int, optional
-            Maximum number of concurrent Dataset write workers when
-            ``parallel=True``. Defaults to 4.
+        scheduler : {"threads", "synchronous"}, default "threads"
+            Dask scheduler used to execute all write tasks. ``"threads"`` writes
+            concurrently and ``"synchronous"`` writes serially in the calling
+            thread.
+        num_workers : int, optional
+            Number of workers passed to :func:`dask.compute`. If omitted, the Dask
+            default is used.
 
-        Returns
-        -------
-        pathlib.Path
-            Resolved path to the completed XNpy store.
 
         Notes
         -----
         For xarray objects, each variable is written according to its storage layout.
         Variables with ``variable.chunks is not None`` are written chunk-by-chunk
         through an NPY memory map. Unchunked variables are materialized and written
-        with :func:`numpy.save`. Bare NumPy arrays are always written with
-        :func:`numpy.save`.
+        with :func:`numpy.save`, or streamed in slabs when large. Bare NumPy arrays
+        are written the same way.
         """
         return core_io.to_xnpy(
             self._obj,
             path,
             mode=mode,
-            parallel=parallel,
-            max_workers=max_workers,
+            scheduler=scheduler,
+            num_workers=num_workers,
         )
 
     def shared_memory(self, *, readonly: bool = True) -> core_io.SharedMemoryObject:

@@ -15,12 +15,12 @@ import sys
 import time
 import uuid
 from collections.abc import Hashable
-from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO
 
+import dask
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -580,14 +580,16 @@ def to_xnpy(
     path: str | Path,
     *,
     mode: Literal["w", "w-"] = "w-",
-    parallel: bool = False,
-    max_workers: int | None = None,
+    scheduler: Literal["threads", "synchronous"] = "threads",
+    num_workers: int | None = None,
 ) -> None:
     """Write a NumPy, pandas, or xarray object to a memory-mappable XNpy store.
 
-    Large arrays are streamed in bounded slabs. Dask-backed variables are written
-    with :func:`dask.array.store`, allowing all chunks to execute in one task
-    graph without serial chunk scheduling.
+    Large arrays are streamed in bounded slabs. All array writes (variables,
+    coordinates, columns, masks) are built as :func:`dask.delayed` tasks and
+    Dask-backed variables as :func:`dask.array.store` tasks. They execute in a
+    single :func:`dask.compute` call, so columns, variables, and chunks run
+    concurrently under the selected scheduler.
 
     Metadata (``attrs``, labels, names) is encoded with type tags so that tuples,
     dicts with non-string keys, and nested pandas or xarray objects (stored as
@@ -606,12 +608,13 @@ def to_xnpy(
     mode : {"w", "w-"}, default="w-"
         Write mode. ``"w"`` replaces an existing store. ``"w-"`` requires that
         the destination not exist.
-    parallel : bool, default=False
-        Write arrays concurrently using a thread pool. Dask chunk parallelism is
-        independent of this option.
-    max_workers : int, optional
-        Maximum number of write workers when ``parallel=True``. If omitted, at
-        most four workers are used.
+    scheduler : {"threads", "synchronous"}, default="threads"
+        Dask scheduler used to execute all write tasks. ``"threads"`` writes
+        concurrently and ``"synchronous"`` writes serially in the calling
+        thread.
+    num_workers : int, optional
+        Number of workers passed to :func:`dask.compute`. If omitted, the Dask
+        default is used.
 
     Returns
     -------
@@ -739,20 +742,7 @@ def to_xnpy(
     def write_array(source: Any, path: Path) -> None:
         slab_bytes = 256 * 1024**2
 
-        # Object arrays (e.g. strings) cannot be memory-mapped or saved without pickle.
-        if source.dtype == object:
-            source = np.asarray(source).astype(str)
-
-        if getattr(source, "chunks", None) is not None:
-            import dask.array as da
-
-            target = np.lib.format.open_memmap(
-                path, "w+", dtype=source.dtype, shape=source.shape
-            )
-            data = source.data if isinstance(source, xr.DataArray) else source
-            da.store(data, target, lock=False, scheduler="threads")
-            target.flush()
-        elif source.nbytes > slab_bytes and source.ndim:
+        if source.nbytes > slab_bytes and source.ndim:
             # Stream large or lazily indexed arrays in bounded first-axis slabs.
             target = np.lib.format.open_memmap(
                 path, "w+", dtype=source.dtype, shape=source.shape
@@ -764,22 +754,40 @@ def to_xnpy(
         else:
             np.save(path, np.asarray(source), allow_pickle=False)
 
+    def flush(target: np.ndarray, *_: Any) -> None:
+        target.flush()
+
+    def make_task(source: Any, path: Path) -> Any:
+        # Object arrays (e.g. strings) cannot be memory-mapped or saved without pickle.
+        if source.dtype == object:
+            source = np.asarray(source).astype(str)
+
+        if getattr(source, "chunks", None) is not None:
+            import dask.array as da
+
+            target = np.lib.format.open_memmap(
+                path, "w+", dtype=source.dtype, shape=source.shape
+            )
+            data = source.data if isinstance(source, xr.DataArray) else source
+            stored = da.store(data, target, lock=False, compute=False)
+            return dask.delayed(flush, pure=False)(target, stored)
+        return dask.delayed(write_array, pure=False)(source, path)
+
     try:
         metadata = encode(metadata)
         root.mkdir(parents=True)
         for folder in {(root / file).parent for _, file in jobs}:
             folder.mkdir(exist_ok=True)
 
-        workers = (max_workers or 4) if parallel else 1
-        with ThreadPoolExecutor(workers) as executor:
-            list(executor.map(lambda job: write_array(job[0], root / job[1]), jobs))
+        tasks = [make_task(source, root / file) for source, file in jobs]
+        dask.compute(*tasks, scheduler=scheduler, num_workers=num_workers)
 
         for position, value in enumerate(nested):
             to_xnpy(
                 value,
                 root / "attrs" / str(position),
-                parallel=parallel,
-                max_workers=max_workers,
+                scheduler=scheduler,
+                num_workers=num_workers,
             )
 
         with (root / "metadata.json").open("w") as file:
