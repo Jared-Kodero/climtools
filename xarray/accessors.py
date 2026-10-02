@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mpi4py import MPI
 
     from ..mpi.context import MPIContext
-    from ..viz.plotting import GeoPlot
+    from ..viz.plot import GeoPlot
 
 
 class GeoBase:
