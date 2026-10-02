@@ -2,7 +2,7 @@
 
 The top level exposes the geospatial and plotting API:
 
-- ``plot``      Cartopy map plotting. Entry point :func:`xgeo.plot.geo`.
+- ``plot``      Cartopy map plotting. Entry point :func:`xgeo.plot.geoplot`.
 - ``regrid``, ``mask``, ``fillgaps``, ``sel_transect``, ``to_lon180``,
   ``add_local_solar_time``  Geospatial operations on xarray objects.
 - ``to_netcdf``, ``nc_append``, ``to_xnpy``, ``open_xnpy``  Array output.
@@ -21,10 +21,10 @@ module :mod:`xgeo.cdo.pycdo`.
 Two access patterns are supported and are equivalent::
 
     import xgeo as xg
-    xg.plot.geo(da, method="contourf")
+    xg.plot.geoplot(da, method="contourf")
 
     import xgeo
-    da.xgeo.plot.geo(method="contourf")
+    da.xgeo.plot.geoplot(method="contourf")
 
 Importing the package registers the ``.xgeo`` accessor on
 ``xarray.DataArray`` and ``xarray.Dataset``, replaces the dask progress bar
