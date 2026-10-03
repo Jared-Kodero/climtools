@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import os
 
+from core.xnpy import to_xnpy
+
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import warnings
@@ -66,12 +68,14 @@ if TYPE_CHECKING:
         exclude_key,
         locked_print,
         nproc,
+    )
+    from .core.progress import SerialProgressBar
+    from .core.xnpy import (
         open_xnpy_dataframe,
         open_xnpy_dataset,
         open_xnpy_ndarray,
         to_xnpy,
     )
-    from .core.progress import SerialProgressBar
     from .mpi.context import MPIContext  # noqa: F401
     from .viz import cmaps, plot
     from .xarray.core import MPIXarray  # noqa: F401
@@ -138,11 +142,11 @@ __all__ = [
 
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    "DaskProgressBar": (".core.progress", "DaskProgressBar"),
     "LockFile": (".core.climtools", "LockFile"),
     "LockedLogger": (".core.climtools", "LockedLogger"),
     "MPIContext": (".mpi.context", "MPIContext"),
     "MPIXarray": (".xarray.core", "MPIXarray"),
-    "nproc": (".core.climtools", "nproc"),
     "RedirectStreams": (".core.climtools", "RedirectStreams"),
     "SerialProgressBar": (".core.progress", "SerialProgressBar"),
     "SetupDask": (".xarray.utils", "SetupDask"),
@@ -159,10 +163,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "locked_print": (".core.climtools", "locked_print"),
     "mask": (".xarray.utils", "mask"),
     "nc_append": (".xarray.io", "nc_append"),
+    "nproc": (".core.climtools", "nproc"),
     "open_distributed_dataset": (".xarray.io", "open_distributed_dataset"),
-    "open_xnpy_ndarray": (".core.climtools", "open_xnpy_ndarray"),
-    "open_xnpy_dataframe": (".core.climtools", "open_xnpy_dataframe"),
-    "open_xnpy_dataset": (".core.climtools", "open_xnpy_dataset"),
+    "open_xnpy_dataframe": (".core.xnpy", "open_xnpy_dataframe"),
+    "open_xnpy_dataset": (".core.xnpy", "open_xnpy_dataset"),
+    "open_xnpy_ndarray": (".core.xnpy", "open_xnpy_ndarray"),
     "operator": (".core.operator", None),
     "plot": (".viz.plot", None),
     "preprocess": (".core.preprocess", None),
@@ -171,7 +176,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "stats": (".core.stats", None),
     "to_lon180": (".xarray.utils", "to_lon180"),
     "to_netcdf": (".xarray.io", "to_netcdf"),
-    "to_xnpy": (".core.climtools", "to_xnpy"),
+    "to_xnpy": (".core.xnpy", "to_xnpy"),
 }
 
 

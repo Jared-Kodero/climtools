@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
-from ..core import climtools as core_io
+from ..core import climtools, xnpy
 from ..core import climtools as xgeo_core_utils
 from ..core import preprocess as xgeo_core_preprocess
 from ..core import stats as xgeo_core_calc
@@ -372,7 +372,7 @@ class GeoBase:
         with :func:`numpy.save`, or streamed in slabs when large. Bare NumPy arrays
         are written the same way.
         """
-        return core_io.to_xnpy(
+        return xnpy.to_xnpy(
             self._obj,
             path,
             mode=mode,
@@ -380,7 +380,7 @@ class GeoBase:
             num_workers=num_workers,
         )
 
-    def shared_memory(self, *, readonly: bool = True) -> core_io.SharedMemoryObject:
+    def shared_memory(self, *, readonly: bool = True) -> climtools.SharedMemoryObject:
         """Create an interprocess shared-memory representation.
 
         The numerical buffers backing the xarray object are copied into
@@ -425,7 +425,7 @@ class GeoBase:
         multiprocessing.shared_memory.SharedMemory
             Python interface to operating-system shared memory.
         """
-        return core_io.SharedMemoryObject(self._obj, readonly=readonly)
+        return climtools.SharedMemoryObject(self._obj, readonly=readonly)
 
 
 @xr.register_dataarray_accessor("xgeo")
@@ -1217,7 +1217,7 @@ def fix_xarray(*, force: bool = False) -> tuple[Path, ...]:
         for name in integration_names:
             try:
                 spec = find_spec(name)
-            except (ImportError, ValueError):
+            except ImportError, ValueError:
                 spec = None
 
             if spec is None:
